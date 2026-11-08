@@ -55,6 +55,10 @@ mod fit_content_width_tests;
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
+mod element_scroll_helper_tests;
+#[cfg(test)]
+mod relative_offset_unit_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
@@ -6685,16 +6689,19 @@ impl LayoutBox {
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
-                let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
                 // Out-of-flow boxes do not participate in margin collapsing
-                // (CSS 2.1 §8.3.1). The static position must still land where
-                // the box would have been in flow — including the pending
-                // sibling margin — so the child gets a CLONE of the context to
-                // resolve against; the live context stays intact for the next
-                // in-flow sibling (an abspos box between two blocks must not
-                // swallow the margin between them).
-                let mut oof_margin_context = margin_context.clone();
+                // (CSS 2.1 §8.3.1). The static position is past the pending
+                // sibling margin, materialized here; the box's own top margin
+                // goes on top of it rather than collapsing with it (Chromium:
+                // `<p>` then `margin-top:50px` abspos sits 16 + 50 below the
+                // text, WPT clip-path-rectangle-ref; CH2.B24). A replaced box
+                // never reads a margin context, so it needs the cursor to
+                // carry the margin as well. The live context stays intact for
+                // the next in-flow sibling (an abspos box between two blocks
+                // must not swallow the margin between them).
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y + margin_context.resolve();
+                let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
             }
@@ -10821,9 +10828,12 @@ impl DisplayList {
     }
 
     fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        // A non-replaced inline is one box at its first line fragment here,
+        // and Chrome clips a wrapped inline to that first fragment too (WPT
+        // clip-path-reference-box-004), so its own boxes are the reference.
         if !matches!(
             layout_box.box_type,
-            BoxType::Block | BoxType::Image { .. } | BoxType::FormControl(_)
+            BoxType::Block | BoxType::Inline | BoxType::Image { .. } | BoxType::FormControl(_)
         ) {
             return None;
         }
@@ -10840,6 +10850,24 @@ impl DisplayList {
                 "" | "border-box" | "stroke-box" | "view-box" => d.border_box(),
                 "padding-box" => d.padding_box(),
                 "content-box" | "fill-box" => d.content,
+                // An inline's vertical margins take no space in the line,
+                // so layout leaves them at zero, but its margin box still
+                // has them (WPT clip-path-inline-004). A percentage, of the
+                // containing block's width, is not known here and reads 0.
+                "margin-box" if matches!(layout_box.box_type, BoxType::Inline) => {
+                    let s = &layout_box.style;
+                    let font = match s.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    let v = |l: &Length| match l {
+                        Length::Percent(_) => 0.0,
+                        l => l.to_px(font, self.root_font_size, 0.0),
+                    };
+                    let m = d.margin_box();
+                    let (top, bottom) = (v(&s.margin_top), v(&s.margin_bottom));
+                    Rect::new(m.x, m.y - top, m.width, m.height + top + bottom)
+                }
                 "margin-box" => d.margin_box(),
                 _ => return None,
             })
@@ -11012,8 +11040,11 @@ impl DisplayList {
                                 _ => return None,
                             })
                         };
-                        let hr = four(hs, rect.width)?;
-                        let vr = four(vs, rect.height)?;
+                        // A percentage is of the reference box, like the
+                        // offsets, not of the inset rectangle (css-shapes-1
+                        // §3.1; WPT clip-path-inset-round-percent).
+                        let hr = four(hs, w)?;
+                        let vr = four(vs, h)?;
                         let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
                         BorderRadius {
                             top_left: c(0),

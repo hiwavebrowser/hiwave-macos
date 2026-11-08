@@ -4680,6 +4680,9 @@ mod tests {
     /// The JS copy of the declaration-list rule (`splitDecls`) on the case
     /// list `rustkit_cssparser`'s own copy runs, read back through
     /// `CSSStyleDeclaration` (#972 R1 nit 3: the two copies must not drift).
+    /// A declaration whose value is a bad url is split the same way but is
+    /// not in the block (CH2.E29: Chromium's `el.style` leaves it out), so
+    /// the read-back leaves those out of the split.
     #[test]
     fn style_splits_the_shared_declaration_list_cases() {
         let doc: serde_json::Value = serde_json::from_str(include_str!(
@@ -4694,6 +4697,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
+                .filter(|d| {
+                    let v = d[1].as_str().unwrap();
+                    let is_url = v.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url("));
+                    // A url left open at the end of the text is still a url
+                    // token (CSS Syntax 3 §4.3.6, EOF): close it to ask.
+                    let closed = if v.ends_with(')') { v.to_string() } else { format!("{v})") };
+                    !is_url || rustkit_css::mask::parse_css_url(&closed).is_some()
+                })
                 .map(|d| format!("{}={}", d[0].as_str().unwrap(), d[1].as_str().unwrap()))
                 .collect();
             let script = format!(

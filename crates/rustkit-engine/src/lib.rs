@@ -494,6 +494,10 @@ mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
+mod display_inherit_apply_tests;
+#[cfg(test)]
+mod border_medium_apply_tests;
+#[cfg(test)]
 mod transform_parse_pure_tests;
 #[cfg(test)]
 mod individual_translate_parse_tests;
@@ -550,6 +554,8 @@ mod waapi_layer_tests;
 mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
+#[cfg(test)]
+mod attribute_flag_tests;
 #[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
@@ -637,6 +643,8 @@ mod unitless_zero_tests;
 mod border_medium_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod abspos_static_margin_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -679,7 +687,7 @@ mod sticky_scroll_tests;
 mod sticky_flex_grid_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sticky_table_paint_tests;
-#[cfg(all(test, feature = "headless"))]
+#[cfg(test)]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
@@ -2797,12 +2805,13 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
 impl Drop for Engine {
     /// The last visit's hold summary (LAT1): the entries since the last
     /// line, which no navigation or hundredth entry ended. The summary is
-    /// the dropping thread's (`wgate` keeps one per thread): an engine
-    /// dropped off the thread that ran its entries leaves that thread's
-    /// partial line unlogged, and two engines on one thread share one
-    /// summary, which the first drop flushes.
+    /// the dropping thread's (`wgate` keeps one per thread, and only the
+    /// content thread's entries are summarised): an engine dropped off the
+    /// thread that ran its entries leaves that thread's partial line
+    /// unlogged, and two engines on one thread share one summary, which
+    /// the first drop flushes.
     fn drop(&mut self) {
-        wgate::flush_hold_summary("drop");
+        wgate::end_visits();
     }
 }
 
@@ -8047,6 +8056,7 @@ impl Engine {
     }
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, false, None)
             .await
@@ -8071,6 +8081,7 @@ impl Engine {
         id: EngineViewId,
         url: Url,
     ) -> Result<LoadYield, EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, None)
             .await
@@ -8085,6 +8096,7 @@ impl Engine {
         url: Url,
         nav_id: u64,
     ) -> Result<LoadYield, EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, Some(nav_id))
             .await
@@ -8819,6 +8831,7 @@ impl Engine {
         html: &str,
         preset_nav: Option<u64>,
     ) -> Result<(), EngineError> {
+        wgate::begin_visit(id.raw(), None);
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
@@ -14407,7 +14420,19 @@ impl layout_ctx::LayoutCtx {
                         // Already applied to `vars` above.
                         continue;
                     }
-                    let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                    // A `var()` with no value and no fallback: the declaration
+                    // still wins, as `unset` (CSS Variables 1 §3), so an
+                    // earlier `width: 50px` does not survive it (CH2.E14b).
+                    let Some(resolved_value) =
+                        self.resolve_css_variables_or_invalid(&value_str, css_vars)
+                    else {
+                        self.apply_invalid_at_computed_value_time(
+                            &mut style,
+                            parent_style,
+                            &decl.property,
+                        );
+                        continue;
+                    };
                     if value_str != resolved_value {
                         trace!(
                             property = decl.property.as_str(),
@@ -14615,11 +14640,17 @@ impl layout_ctx::LayoutCtx {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
-                if important != important_pass {
+                if important != important_pass || property.starts_with("--") {
+                    // `--*` are already in `css_vars` (the cascade's first pass).
                     continue;
                 }
-                // Resolve CSS variables in the value
-                let resolved_value = self.resolve_css_variables(value, css_vars);
+                // Resolve CSS variables in the value; an unresolvable `var()`
+                // makes the declaration `unset` (CSS Variables 1 §3).
+                let Some(resolved_value) = self.resolve_css_variables_or_invalid(value, css_vars)
+                else {
+                    self.apply_invalid_at_computed_value_time(style, parent_style, &property);
+                    continue;
+                };
                 ch_pending.note(&property, &resolved_value);
                 self.apply_cascaded(style, parent_style, &property, &resolved_value);
             }
@@ -14920,7 +14951,20 @@ impl layout_ctx::LayoutCtx {
                         }
                         layer
                     } else {
-                        parse_background_layer(layer_str)
+                        match parse_background_layer(layer_str) {
+                            // A bad url (`url(a(b.png)`) is an invalid value:
+                            // the declaration is dropped and the image the
+                            // cascade had stays, as in Chromium (CH2.E29). It
+                            // used to clear the layers, so a bad inline url
+                            // wiped a stylesheet's image.
+                            None if layer_str
+                                .get(..4)
+                                .is_some_and(|h| h.eq_ignore_ascii_case("url(")) =>
+                            {
+                                return;
+                            }
+                            layer => layer,
+                        }
                     };
                     layers.extend(layer);
                 }
@@ -16434,23 +16478,28 @@ impl layout_ctx::LayoutCtx {
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
             "line-height" => style.line_height = rustkit_css::LineHeight::Normal,
-            "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
+            // A shorthand resets all four sides (it reset only the top, so
+            // `padding: 5px; padding: var(--missing)` kept 5px on three).
+            "margin" | "padding" | "border-width" => {
+                for side in ["top", "right", "bottom", "left"] {
+                    let (prefix, suffix) = match property.split_once('-') {
+                        Some((p, s)) => (p, format!("-{s}")),
+                        None => (property, String::new()),
+                    };
+                    self.apply_initial_value(style, &format!("{prefix}-{side}{suffix}"));
+                }
+            }
+            "margin-top" => style.margin_top = rustkit_css::Length::Zero,
             "margin-right" => style.margin_right = rustkit_css::Length::Zero,
             "margin-bottom" => style.margin_bottom = rustkit_css::Length::Zero,
             "margin-left" => style.margin_left = rustkit_css::Length::Zero,
-            "padding" | "padding-top" => style.padding_top = rustkit_css::Length::Zero,
+            "padding-top" => style.padding_top = rustkit_css::Length::Zero,
             "padding-right" => style.padding_right = rustkit_css::Length::Zero,
             "padding-bottom" => style.padding_bottom = rustkit_css::Length::Zero,
             "padding-left" => style.padding_left = rustkit_css::Length::Zero,
-            // The initial width is `medium` on every side; a side with no
-            // style is zeroed after the cascade (zero_width_of_styleless_sides).
-            "border-width" => {
-                let medium = rustkit_css::Length::Px(3.0);
-                style.border_top_width = medium.clone();
-                style.border_right_width = medium.clone();
-                style.border_bottom_width = medium.clone();
-                style.border_left_width = medium;
-            }
+            // The initial width is `medium` on every side (the `border-width`
+            // shorthand reaches these through the four-side loop above); a side
+            // with no style is zeroed after the cascade (zero_width_of_styleless_sides).
             "border-top-width" => style.border_top_width = rustkit_css::Length::Px(3.0),
             "border-right-width" => style.border_right_width = rustkit_css::Length::Px(3.0),
             "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Px(3.0),
@@ -16471,10 +16520,13 @@ impl layout_ctx::LayoutCtx {
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "cursor" => style.cursor = rustkit_css::Cursor::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
+            // The initial `display` is `inline` (CSS Display 3 §2); it read
+            // `block`, so `div { display: unset }` stayed a block.
             "display" => {
-                style.display = rustkit_css::Display::Block;
+                style.display = rustkit_css::Display::Inline;
                 style.display_modifier = rustkit_css::DisplayModifier::None;
                 style.webkit_box = None;
+                style.display_contents_declared = false;
             }
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
@@ -19860,26 +19912,65 @@ impl SelectorMatcher {
         }
     }
 
-    /// Checked in this order; the first one found splits name from value.
+    /// The operators, and the same with the `i` case flag (Selectors 4
+    /// §6.3: `[a="v" i]` compares ASCII case-insensitively).
     const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+    const ATTR_OPERATORS_I: [&'static str; 6] = ["~=i", "|=i", "^=i", "$=i", "*=i", "=i"];
+    /// The operator of a test with a flag other than `i`. Chromium 143 takes
+    /// no other (not even `s`): the selector is invalid, and this never passes.
+    const ATTR_INVALID_FLAG: &'static str = "!";
+
+    /// Where the operator of an `[...]` selector starts and which it is:
+    /// the first `=` and the one character before it. A name holds no `=`,
+    /// so an operator inside a quoted value (`[a="x~=y"]`) is not taken.
+    fn attr_operator(attr_selector: &str) -> Option<(usize, usize)> {
+        let eq = attr_selector.find('=')?;
+        match attr_selector[..eq].chars().next_back() {
+            Some('~' | '|' | '^' | '$' | '*') => Some((eq - 1, eq + 1)),
+            _ => Some((eq, eq + 1)),
+        }
+    }
 
     /// The operator of an `[...]` selector and the value it compares with
-    /// (trimmed, quotes removed). None for a bare `[name]`.
+    /// (trimmed, quotes removed); with an `i` flag after the value, the
+    /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
     fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
-        Self::ATTR_OPERATORS.iter().find_map(|op| {
-            let pos = attr_selector.find(op)?;
-            let mut attr_value = attr_selector[pos + op.len()..].trim();
-            if (attr_value.starts_with('"') && attr_value.ends_with('"'))
-                || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
-            {
-                attr_value = &attr_value[1..attr_value.len() - 1];
-            }
-            Some((*op, attr_value))
-        })
+        let (start, end) = Self::attr_operator(attr_selector)?;
+        let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
+        let rest = attr_selector[end..].trim();
+        let (attr_value, flag) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
+                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+                // CSS Syntax: EOF closes a string.
+                None => (&rest[1..], ""),
+            },
+            _ => match rest.find(char::is_whitespace) {
+                Some(space) => (&rest[..space], rest[space..].trim()),
+                None => (rest, ""),
+            },
+        };
+        let op = match flag {
+            "" => Self::ATTR_OPERATORS[at],
+            "i" | "I" => Self::ATTR_OPERATORS_I[at],
+            _ => Self::ATTR_INVALID_FLAG,
+        };
+        Some((op, attr_value))
+    }
+
+    /// Whether an `[...]` selector's flag is one the engine takes.
+    fn attr_selector_is_valid(attr_selector: &str) -> bool {
+        Self::attr_selector_test(attr_selector).is_none_or(|(op, _)| op != Self::ATTR_INVALID_FLAG)
     }
 
     /// Whether the element's value `el_attr` passes `op` against `attr_value`.
     fn attr_test_passes(op: &str, attr_value: &str, el_attr: &str) -> bool {
+        if let Some(op) = op.strip_suffix('i') {
+            return Self::attr_test_passes(
+                op,
+                &attr_value.to_ascii_lowercase(),
+                &el_attr.to_ascii_lowercase(),
+            );
+        }
         match op {
             "=" => el_attr == attr_value,
             "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
@@ -19900,10 +19991,8 @@ impl SelectorMatcher {
     /// without an operator, fails on an element that lacks it, which is
     /// what lets the rule index file attribute-first rules under it.
     fn attr_selector_name(attr_selector: &str) -> &str {
-        Self::ATTR_OPERATORS
-            .iter()
-            .find_map(|op| attr_selector.find(op))
-            .map_or(attr_selector, |pos| &attr_selector[..pos])
+        Self::attr_operator(attr_selector)
+            .map_or(attr_selector, |(start, _)| &attr_selector[..start])
             .trim()
     }
 
@@ -20059,6 +20148,7 @@ impl SelectorMatcher {
         let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
         // Parallel to `paren_depth`: true = this paren is a `:has(`.
         let mut has_parens: Vec<bool> = Vec::new();
+        let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
             if let Some(q) = quote {
@@ -20070,8 +20160,22 @@ impl SelectorMatcher {
             }
             match c {
                 '"' | '\'' => quote = Some(c),
-                '[' => in_brackets = true,
-                ']' => in_brackets = false,
+                '[' => {
+                    in_brackets = true;
+                    bracket_start = i + 1;
+                }
+                ']' => {
+                    // `[a="v" s]`: Chromium 143 takes no case flag but `i`.
+                    if in_brackets
+                        && forgiving_depth == 0
+                        && !Self::attr_selector_is_valid(
+                            &chars[bracket_start..i].iter().collect::<String>(),
+                        )
+                    {
+                        return false;
+                    }
+                    in_brackets = false;
+                }
                 '(' => {
                     paren_depth.push(false);
                     has_parens.push(false);
@@ -49435,6 +49539,151 @@ mod clip_path_pins {
             let lines = page(style);
             assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
         }
+    }
+
+    /// `round <percent>` in `inset()` / `rect()` / `xywh()` resolves against
+    /// the reference box, like the offsets, not against the inset rectangle
+    /// (css-shapes-1 §3.1; WPT clip-path-inset-round-percent, 66 px off).
+    /// The radii were taken of the inset rect, so `inset(80% 0 0 round 8%)`
+    /// on a 100px box rounded 8px by 1.6px. Chrome for Testing 148 paints
+    /// `inset(80% 0 0 round 8%)` on 100x100 exactly as `inset(80px 0 0
+    /// round 8px)`, and `inset(50% 0 0 round 10%)` on 200x100 exactly as
+    /// `inset(50px 0 0 round 20px / 10px)` (172 px away from `20px / 5px`);
+    /// the `/ 20%` and `xywh()` rows match their px forms there too (0 px).
+    #[test]
+    fn clip_path_inset_round_percent_resolves_against_the_reference_box() {
+        let e = engine();
+        let page = |size: &str, style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="{size};background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases = [
+            ("width:100px;height:100px", "clip-path:inset(80% 0 0 round 8%)", "x: 0.0, y: 80.0, width: 100.0, height: 20.0", "CornerRadius { h: 8.0, v: 8.0 }"),
+            ("width:200px;height:100px", "clip-path:inset(50% 0 0 round 10%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 10.0 }"),
+            ("width:200px;height:100px", "clip-path:inset(50% 0 0 round 10% / 20%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 20.0 }"),
+            ("width:200px;height:100px", "clip-path:xywh(0 50% 100% 50% round 10%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 10.0 }"),
+        ];
+        for (size, style, rect, corner) in cases {
+            let lines = page(size, style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClipRounded"))
+                .unwrap_or_else(|| panic!("`{style}` opened no rounded clip:\n{all}"));
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+        }
+    }
+
+    /// `clip-path` on a non-replaced inline (WPT clip-path-reference-box-004,
+    /// clip-path-inline-006). Only block, image and form-control boxes read
+    /// it, so an inline painted unclipped. RustKit's inline is one box at its
+    /// first line fragment; Chrome for Testing 148 clips a wrapped inline to
+    /// that first fragment too: `<span style="clip-path:inset(0)">XXX XXX</span>`
+    /// in a 50px `font:20px/40px monospace` block paints 36x23 at (0,8), the
+    /// first line only (1656 px green without the clip, 828 with it), and
+    /// `inset(0 10px)` on a one-line inline with 10px side padding paints the
+    /// 36px text and none of the padding.
+    #[test]
+    fn clip_path_clips_an_inline_box_and_its_text() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:50px;font:20px/40px monospace"><span style="background:green;color:green;clip-path:inset(0)">XXX XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        // Font-independent: the clip is read against the inline's own
+        // background rect, not against one platform's monospace metrics.
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        let clip = &lines[push];
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        // `inset(0)` is the inline's border box at its first fragment: one
+        // line tall, so the second line's text is outside it.
+        for key in ["x", "y", "width", "height"] {
+            assert!(near(num(clip, key), num(bg, key)), "{key}: {clip}\n{bg}");
+        }
+        let height = num(clip, "height");
+        assert!(height > 0.0 && height <= 40.0, "first fragment only: {clip}");
+        let texts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("Text"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!texts.is_empty(), "no text:\n{all}");
+        for i in texts {
+            assert!(depth_at(&lines, i) >= 1, "text paints unclipped:\n{all}");
+        }
+
+        // A one-line inline: `inset(0 10px)` takes the side padding away.
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace">ab <span style="background:green;padding:0 10px;clip-path:inset(0 10px)">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        let bg = lines
+            .iter()
+            .position(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let (clip, bg_line) = (&lines[push], &lines[bg]);
+        assert!(near(num(clip, "x"), num(bg_line, "x") + 10.0), "{clip}\n{bg_line}");
+        assert!(near(num(clip, "width"), num(bg_line, "width") - 20.0), "{clip}\n{bg_line}");
+        assert!(bg > push && depth_at(&lines, bg) >= 1, "background unclipped:\n{all}");
+    }
+
+    /// `margin-box` on an inline includes its vertical margins, which take
+    /// no space in the line (WPT clip-path-inline-004: `circle(25%)
+    /// margin-box` on a 100px Ahem `X` with `margin: 50px` is the 50px
+    /// circle `circle(50%)` cuts from the border box; Chrome for Testing
+    /// 148 paints the two pages the same, 7716 green px each). RustKit
+    /// lays an inline out with its vertical margins at zero, so its margin
+    /// box was only the horizontal margins wider than the border box.
+    #[test]
+    fn clip_path_margin_box_on_an_inline_includes_its_vertical_margins() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace;padding:50px">ab <span style="background:green;margin:20px 10px;clip-path:inset(0) margin-box">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let clip = lines
+            .iter()
+            .find(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("no clip:\n{all}"));
+        assert!((num(clip, "x") - (num(bg, "x") - 10.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "width") - (num(bg, "width") + 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "y") - (num(bg, "y") - 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "height") - (num(bg, "height") + 40.0)).abs() < 0.01, "{clip}\n{bg}");
     }
 
     /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
