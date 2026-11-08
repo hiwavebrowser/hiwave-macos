@@ -14464,6 +14464,14 @@ impl layout_ctx::LayoutCtx {
                         );
                     }
                     ch_pending.note(&decl.property, &resolved_value);
+                    // What the author's `!important` rules set of the border:
+                    // an important `revert-layer` in the style attribute
+                    // rolls back to these (`revert_border`).
+                    if important_pass {
+                        if let Some((sides, parts)) = border_property_parts(&decl.property) {
+                            AUTHOR_IMPORTANT_BORDER_MASK.with(|m| m.set(m.get() | border_longhand_mask(sides, parts)));
+                        }
+                    }
                     self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
                     if recording {
                         records.push(DeclarationRecord {
@@ -14659,14 +14667,19 @@ impl layout_ctx::LayoutCtx {
         important_pass: bool,
     ) {
         // The author stylesheets have applied: `revert-layer` in the
-        // attribute rolls a border back to this (`revert_border`). The
-        // normal pass comes first; the `!important` pass keeps its snapshot.
-        if !important_pass {
+        // attribute rolls a border back to this (`revert_border`): the
+        // normal rules' state before the normal pass, the important rules'
+        // before the `!important` pass.
+        if important_pass {
+            AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        } else {
             AUTHOR_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
         }
         let was_inline = INLINE_STYLE_PASS.with(|c| c.replace(true));
+        let was_important = INLINE_IMPORTANT_PASS.with(|c| c.replace(important_pass));
         self.apply_inline_declarations(style, parent_style, style_attr, css_vars, ch_pending, important_pass);
         INLINE_STYLE_PASS.with(|c| c.set(was_inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(was_important));
     }
 
     /// [`Self::apply_inline_style`]'s declarations, one importance level.
@@ -23896,6 +23909,32 @@ thread_local! {
     static AUTHOR_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
     /// Whether the declarations being applied are the `style` attribute's.
     static INLINE_STYLE_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether they are its `!important` ones (the second inline pass).
+    static INLINE_IMPORTANT_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The border longhands as the author stylesheets' `!important` rules
+    /// left them, taken before the attribute's `!important` pass, and the
+    /// longhands those rules wrote (`border_longhand_mask`). A `border:
+    /// revert-layer !important` in the attribute rolls each longhand back
+    /// to this where an important rule set it, else to `AUTHOR_BORDER`:
+    /// the attribute's normal declarations are the same layer and go
+    /// too (CSS Cascade 5 §7.3; #987 second HOLD: the normal pass's
+    /// snapshot was reused and an important stylesheet border was lost).
+    static AUTHOR_IMPORTANT_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_IMPORTANT_BORDER_MASK: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// The bits of a longhand mask (`AUTHOR_IMPORTANT_BORDER_MASK`) for the
+/// `BORDER_SIDE_*` sides and `BORDER_PART_*` parts a property covers: side
+/// bits in the low nibble for widths, the next for styles, the next for
+/// colours.
+fn border_longhand_mask(sides: u8, parts: u8) -> u16 {
+    let mut mask = 0u16;
+    for (part, shift) in [(BORDER_PART_WIDTH, 0), (BORDER_PART_STYLE, 4), (BORDER_PART_COLOR, 8)] {
+        if parts & part != 0 {
+            mask |= (sides as u16) << shift;
+        }
+    }
+    mask
 }
 
 /// One element's border longhands (top, right, bottom, left) and which
@@ -23945,27 +23984,41 @@ const BORDER_PARTS_ALL: u8 = 7;
 /// on drop. A form control starts with every side declared: Chromium's UA
 /// sheet gives input, textarea, button and select a border style, so
 /// `border-width` alone applies there.
-struct BorderStyleDeclaredScope(u8, Option<BorderSnapshot>, Option<BorderSnapshot>, bool);
+struct BorderStyleDeclaredScope {
+    declared: u8,
+    ua: Option<BorderSnapshot>,
+    author: Option<BorderSnapshot>,
+    author_important: Option<BorderSnapshot>,
+    author_important_mask: u16,
+    inline: bool,
+    inline_important: bool,
+}
 
 impl BorderStyleDeclaredScope {
     fn enter(tag_name: &str) -> Self {
         let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
         let start = if control { BORDER_SIDES_ALL } else { 0 };
-        Self(
-            BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
-            UA_BORDER.with(|c| c.replace(None)),
-            AUTHOR_BORDER.with(|c| c.replace(None)),
-            INLINE_STYLE_PASS.with(|c| c.replace(false)),
-        )
+        Self {
+            declared: BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
+            ua: UA_BORDER.with(|c| c.replace(None)),
+            author: AUTHOR_BORDER.with(|c| c.replace(None)),
+            author_important: AUTHOR_IMPORTANT_BORDER.with(|c| c.replace(None)),
+            author_important_mask: AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.replace(0)),
+            inline: INLINE_STYLE_PASS.with(|c| c.replace(false)),
+            inline_important: INLINE_IMPORTANT_PASS.with(|c| c.replace(false)),
+        }
     }
 }
 
 impl Drop for BorderStyleDeclaredScope {
     fn drop(&mut self) {
-        BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
-        UA_BORDER.with(|c| *c.borrow_mut() = self.1.take());
-        AUTHOR_BORDER.with(|c| *c.borrow_mut() = self.2.take());
-        INLINE_STYLE_PASS.with(|c| c.set(self.3));
+        BORDER_STYLE_DECLARED.with(|c| c.set(self.declared));
+        UA_BORDER.with(|c| *c.borrow_mut() = self.ua.take());
+        AUTHOR_BORDER.with(|c| *c.borrow_mut() = self.author.take());
+        AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = self.author_important.take());
+        AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.set(self.author_important_mask));
+        INLINE_STYLE_PASS.with(|c| c.set(self.inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(self.inline_important));
     }
 }
 
@@ -24022,7 +24075,37 @@ fn side_property(side: &str) -> &'static str {
 /// author's frame stayed.
 fn revert_border(style: &mut ComputedStyle, sides: u8, parts: u8, layer: bool) {
     let from = if layer && INLINE_STYLE_PASS.with(std::cell::Cell::get) {
-        AUTHOR_BORDER.with(|c| c.borrow().clone())
+        let author = AUTHOR_BORDER.with(|c| c.borrow().clone());
+        if INLINE_IMPORTANT_PASS.with(std::cell::Cell::get) {
+            // The attribute's `!important` pass: the author stylesheets'
+            // important rules are the layers below; where they set a
+            // longhand, their value, else the normal rules' (the
+            // attribute's own normal declarations are the same layer and
+            // roll back with it).
+            let important = AUTHOR_IMPORTANT_BORDER.with(|c| c.borrow().clone());
+            let mask = AUTHOR_IMPORTANT_BORDER_MASK.with(std::cell::Cell::get);
+            match (author, important) {
+                (Some(mut merged), Some(important)) => {
+                    for i in 0..4 {
+                        let bit = 1u8 << i;
+                        if mask & border_longhand_mask(bit, BORDER_PART_WIDTH) != 0 {
+                            merged.widths[i] = important.widths[i].clone();
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_STYLE) != 0 {
+                            merged.styles[i] = important.styles[i];
+                            merged.declared = (merged.declared & !bit) | (important.declared & bit);
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_COLOR) != 0 {
+                            merged.colors[i] = important.colors[i];
+                        }
+                    }
+                    Some(merged)
+                }
+                (author, important) => important.or(author),
+            }
+        } else {
+            author
+        }
     } else {
         UA_BORDER.with(|c| c.borrow().clone())
     };
