@@ -13660,47 +13660,51 @@ impl layout_ctx::LayoutCtx {
             // on a <p> kept 16px margins where Chromium has 14.4px: settings
             // and report shifted 1.6px below their header (chrome board
             // re-rank 2026-11-07, ua_em_margin_tests). The 40px inline
-            // margins/paddings are px in html.css and stay px. Heading
-            // FONT-SIZES are still px here (2em/1.5em/… of the parent in
-            // Chromium) — a separate change.
+            // margins/paddings are px in html.css and stay px. The heading
+            // FONT-SIZES are em of the PARENT's font-size too (CH2.B31): Em
+            // here is absolutized against the parent after the cascade, like
+            // an author em, so a heading under a 10px parent is 20/15/11.7/
+            // 10/8.3/6.7px as in Chromium (ua_heading_font_size_tests). They
+            // were px at 16px. Chromium 148 has no sectioning-h1 rule (an h1
+            // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(32.0); // 2em
+                style.font_size = rustkit_css::Length::Em(2.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.67);
                 style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(24.0); // 1.5em
+                style.font_size = rustkit_css::Length::Em(1.5);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.83);
                 style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(18.72); // 1.17em
+                style.font_size = rustkit_css::Length::Em(1.17);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.0);
                 style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(16.0); // 1em
+                style.font_size = rustkit_css::Length::Em(1.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
                 style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(13.28); // 0.83em
+                style.font_size = rustkit_css::Length::Em(0.83);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
                 style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(10.72); // 0.67em
+                style.font_size = rustkit_css::Length::Em(0.67);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
                 style.margin_bottom = rustkit_css::Length::Em(2.33);
