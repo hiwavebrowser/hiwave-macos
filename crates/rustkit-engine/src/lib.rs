@@ -565,6 +565,8 @@ mod container_query_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
+mod img_empty_src_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
