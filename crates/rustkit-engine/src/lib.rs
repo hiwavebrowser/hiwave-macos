@@ -38814,14 +38814,25 @@ document.currentScript.remove();
             ("/slow.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
+        let budget_ms = 500;
         let config = EngineConfig {
-            subresource_budget_ms: 500,
+            subresource_budget_ms: budget_ms,
             ..EngineConfig::default()
         };
         let (engine, view, took) = load_timed(config, port);
+        // The budget is per phase, not per load: each phase that fetches
+        // takes a fresh deadline (`subresource_deadline`) — the stylesheets,
+        // the web fonts, the parser image pass (its raster and SVG lanes
+        // share one), the script-added image pass. A bound of exactly five
+        // budgets (the old 2_500 ms) left no room for the load's own work
+        // and failed on slow builders (Linux debug 2.50–2.99 s). Five
+        // budgets plus one second still proves the point: the old 30 s
+        // network timeout is gone, and the stalled sheet (3 s) and images
+        // (3 s more) are not waited out.
+        let bound = std::time::Duration::from_millis(5 * budget_ms + 1_000);
         assert!(
-            took < std::time::Duration::from_millis(2_500),
-            "waited for the stalled subresources: {took:?}"
+            took < bound,
+            "waited for the stalled subresources: {took:?} (bound {bound:?})"
         );
         // The sheet that did arrive still applies — and it must be the fast
         // one. A count-only assertion would still pass if the stalled red
