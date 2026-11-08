@@ -518,6 +518,10 @@ pub struct Renderer {
     /// compared against.
     #[cfg(test)]
     legacy_layers: bool,
+    /// This frame is drawn a pass per layer with each pass submitted as it
+    /// is recorded, as before LAT13: the path for a frame whose glyphs do
+    /// not fit the glyph atlas (see `execute`).
+    per_pass: bool,
 
     // Caches
     texture_cache: TextureCache,
@@ -822,6 +826,7 @@ impl Renderer {
             opacity_layer_size: (0, 0),
             #[cfg(test)]
             legacy_layers: false,
+            per_pass: false,
             texture_cache,
             glyph_cache,
             texture_bind_group_layout,
@@ -1297,9 +1302,14 @@ impl Renderer {
         lock_arena(&self.arena).clear();
     }
 
-    /// A pass was recorded into the frame encoder; tests can have it
-    /// submitted at once (`immediate_submits`).
+    /// A pass was recorded into the frame encoder; a frame drawn a pass at
+    /// a time (`per_pass`) submits it at once, as tests can have every
+    /// frame do (`immediate_submits`).
     fn recorded(&self) {
+        if self.per_pass {
+            self.submit_frame();
+            return;
+        }
         #[cfg(test)]
         if self.immediate_submits {
             self.submit_frame();
@@ -1350,41 +1360,75 @@ impl Renderer {
         {
             self.glyph_grid.scan_only = self.reference;
         }
-        self.stats = FrameStats {
+        let fresh_stats = |rebuilds: u64, per_pass: bool| FrameStats {
             commands: commands.len() as u64,
+            rebuilds,
+            per_pass,
             ..FrameStats::default()
         };
+        self.stats = fresh_stats(0, false);
         self.submits.take();
-        let resets = self.glyph_cache.resets();
+        let before = self.glyph_cache.resets();
         let drawn = self.execute_once(commands, target);
-        self.submit_frame();
-        self.stats.submits = self.submits.take();
-        drawn?;
-        if self.glyph_cache.resets() == resets {
-            return Ok(());
+        let resets = self.glyph_cache.resets() - before;
+        if drawn.is_err() || resets == 0 {
+            return self.finish_frame(drawn);
         }
         // The glyph atlas filled up and started over while this frame was
-        // being built. Text batched before that samples the glyphs written
-        // over its own since: "static" over a page opened after others.
-        // Build the frame again: every glyph it needs is now placed after
-        // the reset, as long as one frame's glyphs fit in the atlas.
-        // The stats describe the frame that is shown: the second pass.
-        self.stats = FrameStats {
-            commands: commands.len() as u64,
-            ..FrameStats::default()
-        };
-        let resets = self.glyph_cache.resets();
+        // recorded. Its passes are not submitted yet, so each would sample
+        // the atlas as it stands at the end of the frame: text recorded
+        // before the reset drawn from the glyphs written over its own
+        // ("static" over a page opened after others; #992 R1: every pass of
+        // the frame, where a submit per pass left only the text after the
+        // reset wrong). Drop the recording and record the frame again:
+        // every glyph it needs is placed after the reset now, as long as
+        // one frame's glyphs fit in the atlas. Once at most, and not when
+        // the atlas started over twice in one walk: then the frame alone
+        // holds more than one atlas and a second walk could not fit either.
+        // The stats describe the walk that is shown.
+        self.discard_frame();
+        if resets == 1 {
+            self.stats = fresh_stats(1, false);
+            self.submits.take();
+            let before = self.glyph_cache.resets();
+            let drawn = self.execute_once(commands, target);
+            if drawn.is_err() || self.glyph_cache.resets() == before {
+                return self.finish_frame(drawn);
+            }
+            self.discard_frame();
+        }
+        // The frame's glyphs do not fit in the atlas. Draw it as before
+        // LAT13, a pass at a time with each submitted as it is recorded, so
+        // a pass samples the atlas as it was when it was recorded and only
+        // the text batched together with glyphs from after a reset is
+        // wrong. From an empty atlas, so the frame is the same every time.
+        tracing::warn!(
+            commands = commands.len(),
+            "One frame's glyphs do not fit in the glyph atlas: drawn a pass at a time, some of its text may be wrong"
+        );
+        self.stats = fresh_stats(self.stats.rebuilds + 1, true);
+        self.submits.take();
+        self.glyph_cache.start_over(&self.queue);
+        self.per_pass = true;
         let drawn = self.execute_once(commands, target);
+        self.per_pass = false;
+        self.finish_frame(drawn)
+    }
+
+    /// Submit the frame, close its stats, and let idle layer textures go.
+    fn finish_frame(&mut self, drawn: Result<(), RendererError>) -> Result<(), RendererError> {
         self.submit_frame();
         self.stats.submits = self.submits.take();
-        drawn?;
-        if self.glyph_cache.resets() != resets {
-            tracing::warn!(
-                commands = commands.len(),
-                "One frame's glyphs do not fit in the glyph atlas: some of its text is drawn wrong"
-            );
-        }
-        Ok(())
+        self.trim_layer_slots();
+        drawn
+    }
+
+    /// Drop what this frame recorded and has not submitted: the encoder,
+    /// its draw buffers, and what the layer slots were given.
+    fn discard_frame(&mut self) {
+        drop(lock_slot(&self.frame_encoder).take());
+        lock_arena(&self.arena).clear();
+        self.abandon_deferred_frame();
     }
 
     /// Empty batches and state stacks, and the page translate a scrolled
@@ -1488,6 +1532,8 @@ impl Renderer {
                 // this frame started in.
                 self.stats = FrameStats {
                     commands: self.stats.commands,
+                    rebuilds: self.stats.rebuilds,
+                    per_pass: self.stats.per_pass,
                     ..FrameStats::default()
                 };
                 (self.window_sticky, self.window_sticky_outer, self.window_sticky_outside_fixed) = sticky;
@@ -2074,7 +2120,26 @@ impl Renderer {
             let slot = self.new_layer_slot();
             self.layer_slots[depth].push(slot);
         }
+        self.layer_slots[depth][0].used = true;
         self.layer_slots[depth][0].view.clone()
+    }
+
+    /// Age the layer slots by this frame's use and drop those no group was
+    /// drawn into for `LAYER_SLOT_IDLE_FRAMES` frames, all but the first at
+    /// depth 0 (kept as before, for the next page with a group).
+    fn trim_layer_slots(&mut self) {
+        for (depth, slots) in self.layer_slots.iter_mut().enumerate() {
+            let mut k = 0;
+            slots.retain_mut(|slot| {
+                slot.idle = if std::mem::take(&mut slot.used) { 0 } else { slot.idle + 1 };
+                let keep = (depth == 0 && k == 0) || slot.idle <= LAYER_SLOT_IDLE_FRAMES;
+                k += 1;
+                keep
+            });
+        }
+        while self.layer_slots.last().is_some_and(|slots| slots.is_empty()) {
+            self.layer_slots.pop();
+        }
     }
 
     /// Layer textures follow the viewport: all are dropped when it changes.
@@ -2112,11 +2177,16 @@ impl Renderer {
             regions: Vec::new(),
             exclusive: false,
             draws: Vec::new(),
+            used: true,
+            idle: 0,
         }
     }
 
     /// Whether lists with groups take the deferred layer path.
     fn defer_layers(&self) -> bool {
+        if self.per_pass {
+            return false;
+        }
         #[cfg(test)]
         if self.legacy_layers {
             return false;
@@ -2310,6 +2380,7 @@ impl Renderer {
             None => return None,
         };
         let slot = &mut self.layer_slots[depth][k];
+        slot.used = true;
         slot.regions.push(rect);
         slot.exclusive |= exclusive;
         slot.draws.extend(layer.draws);
@@ -7040,7 +7111,18 @@ struct LayerSlot {
     /// Holds a filter group, composited over the whole viewport.
     exclusive: bool,
     draws: Vec<Draw>,
+    /// A group was drawn into it this frame.
+    used: bool,
+    /// Frames in a row no group was drawn into it (`trim_layer_slots`).
+    idle: u32,
 }
+
+/// Frames a layer texture other than the first at depth 0 may go unused
+/// before it is dropped (#992 R1: 4x4x4 overlapping groups left six
+/// viewport textures, 23 MB at 1280x800, kept after the page stopped
+/// needing them). A slot is cleared before a group is drawn into it, so
+/// dropping one and making it again changes no pixel.
+const LAYER_SLOT_IDLE_FRAMES: u32 = 16;
 
 /// A group open on the deferred path.
 struct OpenLayer {

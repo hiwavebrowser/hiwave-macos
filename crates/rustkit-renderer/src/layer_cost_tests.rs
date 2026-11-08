@@ -451,21 +451,27 @@ fn glyph_walls(layers: usize, sizes: &[f32], first: u32) -> Vec<DisplayCommand> 
     let mut next = first;
     for k in 0..layers {
         let size = sizes[k % sizes.len()];
-        let (cols, rows) = ((w / size) as usize, (h / size) as usize);
         list.push(PushOpacity(0.9));
-        for row in 0..rows {
-            let s: String = (0..cols)
-                .map(|_| {
-                    let ch = char::from_u32(next).expect("an ideograph");
-                    next += 1;
-                    ch
-                })
-                .collect();
-            list.push(text_sized(&s, 0.0, row as f32 * size, size, c(20, 20, 20 + (k * 40) as u8, 1.0)));
-        }
+        glyph_rows(&mut list, (h / size) as usize, size, &mut next, c(20, 20, 20 + (k * 40) as u8, 1.0));
         list.push(PopOpacity);
     }
     list
+}
+
+/// `rows` rows of ideographs at `size` px across the view, from `*next`
+/// on, each glyph new.
+fn glyph_rows(list: &mut Vec<DisplayCommand>, rows: usize, size: f32, next: &mut u32, color: Color) {
+    let cols = (WALL.0 as f32 / size) as usize;
+    for row in 0..rows {
+        let s: String = (0..cols)
+            .map(|_| {
+                let ch = char::from_u32(*next).expect("an ideograph");
+                *next += 1;
+                ch
+            })
+            .collect();
+        list.push(text_sized(&s, 0.0, row as f32 * size, size, color));
+    }
 }
 
 /// #992 R1: a frame whose glyphs do not fit the glyph atlas. Recorded into
@@ -497,5 +503,90 @@ fn a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path() {
         let got = draw_frame(&gpu, &mut r, WALL, &list);
         let diff = differing_bytes(&want, &got);
         assert_eq!(diff, 0, "{what}: the one-submit frame differs from the submit-per-pass frame in {diff} bytes");
+        // One retry at most: a walk that reset the atlas twice goes straight
+        // to the pass-at-a-time walk (six walls); one that reset it once is
+        // recorded again, and falls back when that walk resets it too
+        // (three walls: the second walk starts with the glyphs after the
+        // reset and adds those before it).
+        let stats = r.last_frame_stats();
+        assert!(stats.per_pass, "{what}: drawn a pass at a time ({stats:?})");
+        assert!(stats.submits > 1, "{what}: a submit per pass ({stats:?})");
+        assert_eq!(stats.rebuilds, if layers == 6 { 1 } else { 2 }, "{what}: walks after the first ({stats:?})");
     }
+}
+
+/// An atlas reset mid-frame when the frame's own glyphs fit: the frame is
+/// recorded again, once, in one submit, and is the frame a fresh renderer
+/// draws; the next frame of the same list is not rebuilt.
+#[test]
+fn an_atlas_reset_mid_frame_is_one_rebuild_and_one_submit() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP an_atlas_reset_mid_frame_is_one_rebuild_and_one_submit: no GPU adapter");
+        return;
+    };
+    let page = glyph_walls(1, &[72.0], 0x4E00);
+    let mut fresh = case_renderer(&gpu, WALL, Way::Deferred, false, (0.0, 0.0));
+    let want = draw_frame(&gpu, &mut fresh, WALL, &page);
+    let page_fill = fresh.glyph_cache.atlas_fill();
+    let stats = fresh.last_frame_stats();
+    assert!(
+        stats.rebuilds == 0 && page_fill < 0.8,
+        "the page must fit the atlas on its own (fill {page_fill}, {stats:?})"
+    );
+
+    // A renderer that showed other text first, enough that this page's
+    // glyphs do not fit after it.
+    let mut r = case_renderer(&gpu, WALL, Way::Deferred, false, (0.0, 0.0));
+    let mut next = 0x6000u32;
+    let mut fillers = 0;
+    while r.glyph_cache.atlas_fill() + page_fill <= 1.05 {
+        let mut other = vec![fill(0.0, 0.0, WALL.0 as f32, WALL.1 as f32, c(255, 255, 255, 1.0))];
+        glyph_rows(&mut other, 4, 40.0, &mut next, c(0, 0, 0, 1.0));
+        draw_frame(&gpu, &mut r, WALL, &other);
+        fillers += 1;
+        assert!(fillers < 40 && r.glyph_cache.resets() == 0, "filling the atlas: {fillers} frames");
+    }
+
+    let got = draw_frame(&gpu, &mut r, WALL, &page);
+    let stats = r.last_frame_stats();
+    assert_eq!(r.glyph_cache.resets(), 1, "the page's glyphs did not fit after the others ({stats:?})");
+    assert_eq!((stats.rebuilds, stats.per_pass, stats.submits), (1, false, 1), "{stats:?}");
+    let diff = differing_bytes(&want, &got);
+    assert_eq!(diff, 0, "the rebuilt frame differs from a fresh renderer's in {diff} bytes");
+
+    let again = draw_frame(&gpu, &mut r, WALL, &page);
+    let stats = r.last_frame_stats();
+    assert_eq!((stats.rebuilds, stats.submits, r.glyph_cache.resets()), (0, 1, 1), "{stats:?}");
+    assert_eq!(differing_bytes(&want, &again), 0);
+}
+
+/// #992 R1 nit 2: layer textures other than the first at depth 0 that no
+/// frame used for `LAYER_SLOT_IDLE_FRAMES` frames are dropped, and come
+/// back with the same pixels when a frame needs them again.
+#[test]
+fn idle_layer_slots_are_dropped_and_come_back_alike() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP idle_layer_slots_are_dropped_and_come_back_alike: no GPU adapter");
+        return;
+    };
+    let cases = layer_cases();
+    let list = |name: &str| cases.iter().find(|(w, _)| *w == name).unwrap().1.clone();
+    let size = (VIEW_W, VIEW_H);
+    let mut r = case_renderer(&gpu, size, Way::Deferred, false, (0.0, 0.0));
+    let first = draw_frame(&gpu, &mut r, size, &list("4 overlapping"));
+    assert_eq!(r.layer_slots[0].len(), LAYER_SLOTS_PER_DEPTH);
+    draw_frame(&gpu, &mut r, size, &list("nested three deep, overlapping their parents"));
+    assert_eq!(r.layer_slots.len(), 3, "a slot at each depth");
+    // The depth-0 extras have been idle since before the nested frame, the
+    // deeper slots since after it: one more frame drops the lot.
+    for frame in 1..=LAYER_SLOT_IDLE_FRAMES + 1 {
+        draw_frame(&gpu, &mut r, size, &list("fifty separate"));
+        if frame < LAYER_SLOT_IDLE_FRAMES {
+            assert_eq!((r.layer_slots.len(), r.layer_slots[0].len()), (3, LAYER_SLOTS_PER_DEPTH), "kept through idle frame {frame}");
+        }
+    }
+    assert_eq!((r.layer_slots.len(), r.layer_slots[0].len()), (1, 1), "idle slots dropped, the first at depth 0 kept");
+    let back = draw_frame(&gpu, &mut r, size, &list("4 overlapping"));
+    assert_eq!(r.layer_slots[0].len(), LAYER_SLOTS_PER_DEPTH, "made again when needed");
+    assert_eq!(differing_bytes(&first, &back), 0, "the same frame after the slots came back");
 }
