@@ -3990,8 +3990,21 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
+        // Blink's FontMetrics are whole pixels (SimpleFontData rounds ascent
+        // and descent) and the leading above the text is floored
+        // (FontHeight::AddLeading) — the same seat `text_line_box_extents`
+        // sizes the line from and `blink_baseline_offset` paints on. The
+        // rect is round(a) + round(d) tall and starts that floored leading
+        // below the slot: report's 12px `.time-format` in a 32px/1 line is
+        // 15 tall at baseline - 12 in Chrome 148, not 14.13 at baseline -
+        // 11.6; a 16px `<a>` in a 24px line is 18 tall 3 below the top, not
+        // 18.84 at 2.58. SIGNED: a line-height smaller than the content
+        // area puts the rect above its slot (CSS2 §10.8.1), and the align
+        // pass reads the slot as rect - half-leading, so the shift must be
+        // applied for a negative value too or the line's baseline moves.
+        let (ascent, descent) = (ascent.round(), descent.round());
         let content = ascent + descent;
-        let half_leading = half_leading(line_height, ascent, descent);
+        let half_leading = half_leading(line_height, ascent, descent).floor();
         (content, half_leading)
     }
 
@@ -5990,7 +6003,9 @@ impl LayoutBox {
                 // report are different quantities.
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
-                    if half_leading > 0.0 {
+                    // Negative too: the rect sits above its slot when the
+                    // line-height is smaller than the content area.
+                    if half_leading != 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
@@ -7045,7 +7060,9 @@ impl LayoutBox {
                 // report are different quantities.
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
-                    if half_leading > 0.0 {
+                    // Negative too: the rect sits above its slot when the
+                    // line-height is smaller than the content area.
+                    if half_leading != 0.0 {
                         child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
