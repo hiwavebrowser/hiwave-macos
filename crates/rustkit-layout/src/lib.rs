@@ -3588,6 +3588,14 @@ impl LayoutBox {
         if self.style.box_sizing == BoxSizing::BorderBox {
             return (0.0, 0.0);
         }
+        self.control_edge_extent(control, cb_width)
+    }
+
+    /// The horizontal and vertical extent of a text control's padding and
+    /// border (the author's where set, Chrome's UA values where not),
+    /// whatever its `box-sizing`: the least its border box can be.
+    /// `(0, 0)` for every other control.
+    pub(crate) fn control_edge_extent(&self, control: &FormControlType, cb_width: f32) -> (f32, f32) {
         let (ua_pad_v, ua_pad_h, ua_border) = match control {
             FormControlType::TextInput { input_type, .. } => {
                 let t = input_type.to_ascii_lowercase();
@@ -3744,6 +3752,16 @@ impl LayoutBox {
         };
         let width = clamp(width, &self.style.min_width, &self.style.max_width, Some(width_base), extra_w);
         let height = clamp(height, &self.style.min_height, &self.style.max_height, percent_height_base, extra_h);
+
+        // CSS Sizing 3 §3: the content box is floored at zero, so the
+        // border box is never smaller than the control's padding plus
+        // border, whichever box the author's lengths name. A content-box
+        // control gets that from `extra` above; a `box-sizing: border-box`
+        // one has `extra` 0, and `max-width: 10px` on 20px padding and 3px
+        // borders made a 10px box where Chromium builds 46 (#985 R1 HOLD).
+        let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
+        let width = width.max(edges_w);
+        let height = height.max(edges_h);
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
