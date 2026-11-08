@@ -125,6 +125,23 @@ fn normal_line_height_unites_the_used_faces_like_chrome() {
     let gear = measure("\u{2699}", 14.0).width;
     assert!((gear - 8.4375).abs() < 0.05, "gear is Menlo's advance (Chrome 8.4375), got {gear}");
 
+    // A variation selector decides for the primary face too (Chrome for
+    // Testing 148, presentation-matrix probe 2026-11-08): `©` + U+FE0F is
+    // the emoji face though the system font has `©` (its advance, a 23px
+    // line), while `▾` U+25BE + U+FE0F stays the primary (no Emoji
+    // property: 17, `▾`'s own advance). `⚙` + U+FE0E keeps Menlo.
+    let emoji_advance = measure("\u{1F6AB}", 14.0).width;
+    assert_eq!(line14("\u{A9}\u{FE0F}"), 23.0, "copyright + VS16");
+    assert_eq!(measure("\u{A9}\u{FE0F}", 14.0).width, emoji_advance, "copyright + VS16 advance");
+    assert_eq!(line14("\u{25BE}\u{FE0F}"), 17.0, "small down triangle + VS16");
+    assert_eq!(
+        measure("\u{25BE}\u{FE0F}", 14.0).width,
+        measure("\u{25BE}", 14.0).width,
+        "small down triangle + VS16 advance"
+    );
+    assert_eq!(line14("\u{2699}\u{FE0E}"), 17.0, "gear + VS15");
+    assert_eq!(measure("\u{2699}\u{FE0E}", 14.0).width, gear, "gear + VS15 advance");
+
     // An explicit line-height ignores the used faces (Chrome: 24 stays 24).
     let fixed = style(16.0, LineHeight::Px(24.0));
     assert_eq!(
@@ -140,6 +157,62 @@ fn normal_line_height_unites_the_used_faces_like_chrome() {
         |t: &str| measure_text_advanced(t, "Arial", 16.0, FontWeight::NORMAL, FontStyle::Normal);
     assert_eq!(run_line_height(&arial, 16.0, &m("plain arial")), 18.0);
     assert_eq!(run_line_height(&arial, 16.0, &m("☕ arial coffee")), 26.0);
+}
+
+/// The face is ONE decision shared by layout and paint: for every symbol ×
+/// {plain, U+FE0E, U+FE0F} under a primary that has or lacks its glyph, the
+/// advance the shaper measured is the advance the rasterizer's glyph carries
+/// (Chrome for Testing 148 presentation-matrix probe, 2026-11-08; the face
+/// names are pinned in rustkit-text).
+#[test]
+fn layout_advance_is_the_painted_advance_for_every_presentation() {
+    use rustkit_css::FontStretch;
+    use rustkit_layout::{FontFamilyChain, TextShaper};
+    use rustkit_text::macos::GlyphRasterizer;
+
+    let shaper = TextShaper::new();
+    let mut wrong = Vec::new();
+    for family in ["-apple-system, BlinkMacSystemFont, sans-serif", "Helvetica", "Menlo"] {
+        let paint = GlyphRasterizer::with_style(family, 14.0, 400, false);
+        for ch in ['\u{A9}', '\u{2699}', '\u{1F6E1}', '\u{25BE}', '\u{2328}', '\u{263A}', '\u{2764}'] {
+            for (next, variant) in [(None, "plain"), (Some('\u{FE0E}'), "VS15"), (Some('\u{FE0F}'), "VS16")] {
+                let mut text = ch.to_string();
+                if let Some(vs) = next {
+                    text.push(vs);
+                }
+                let run = shaper
+                    .shape(
+                        &text,
+                        &FontFamilyChain::from_css_value(family),
+                        FontWeight::NORMAL,
+                        FontStyle::Normal,
+                        FontStretch::Normal,
+                        14.0,
+                    )
+                    .expect("shapes");
+                let layout_advance = run.glyphs[0].advance;
+                // Paint's side, as rustkit-renderer draws today.
+                let emoji = rustkit_text::macos::emoji_presented(ch, next);
+                let paint_advance = if emoji || rustkit_text::is_emoji(ch) {
+                    paint.rasterize_char_color_presented(ch, emoji).map(|r| r.3)
+                } else {
+                    None
+                }
+                .or_else(|| paint.rasterize_char(ch, 0.0).map(|r| r.3))
+                .expect("paints");
+                if (layout_advance - paint_advance).abs() > 0.01 {
+                    wrong.push(format!("{family} {ch:?} {variant}: layout {layout_advance} vs paint {paint_advance}"));
+                }
+                // The selector itself is zero-width wherever it lands.
+                if let Some(vs) = run.glyphs.get(1) {
+                    if vs.advance != 0.0 {
+                        wrong.push(format!("{family} {ch:?} {variant}: the selector advances {}", vs.advance));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[test]

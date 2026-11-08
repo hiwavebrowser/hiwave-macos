@@ -579,6 +579,27 @@ pub fn is_color_face(font: &CTFont) -> bool {
     font.symbolic_traits() & K_CT_FONT_COLOR_GLYPHS_TRAIT != 0
 }
 
+/// The horizontal advance of `glyph` in `font`, in CSS px at the font's
+/// size: what layout measures a character at and what paint owes for it.
+pub fn glyph_advance(font: &CTFont, glyph: u16) -> f32 {
+    extern "C" {
+        fn CTFontGetAdvancesForGlyphs(
+            font: core_text::font::CTFontRef,
+            orientation: u32,
+            glyphs: *const u16,
+            advances: *mut CGSize,
+            count: isize,
+        ) -> f64;
+    }
+    let mut advance = CGSize::new(0.0, 0.0);
+    // SAFETY: `font` is a live CTFont; one glyph id is read and one
+    // advance written.
+    unsafe {
+        CTFontGetAdvancesForGlyphs(font.as_concrete_TypeRef(), 0, &glyph, &mut advance, 1);
+    }
+    advance.width as f32
+}
+
 /// The face a character is drawn from when `primary` has no glyph for it,
 /// and its glyph id there. ONE function for layout (which takes the advance
 /// and the face's extents) and paint (which draws the glyph), so both use
@@ -2131,6 +2152,115 @@ mod tests {
         assert_eq!(ps(&helvetica, '\u{1F6E1}'), "AppleColorEmoji", "shield under Helvetica");
         assert_eq!(ps(&helvetica, '\u{2764}'), "ZapfDingbatsITC", "heart under Helvetica");
         assert_eq!(ps(&helvetica, '\u{2328}'), "Menlo-Regular", "keyboard under Helvetica");
+    }
+
+    /// Chrome for Testing 148 (CSS.getPlatformFontsForNode, 14px, the
+    /// presentation-matrix probe of 2026-11-08) for a symbol × {plain, U+FE0E,
+    /// U+FE0F} under a primary that has or lacks its glyph. The face is ONE
+    /// decision for layout and paint, and these are its outcomes:
+    ///
+    /// * U+FE0F after a character with the Emoji property goes to Apple Color
+    ///   Emoji whether or not the primary has the glyph (`©️` in Helvetica,
+    ///   Menlo or the system font is the emoji face, 18px wide, a 23px line);
+    ///   after a character without it (`▾` U+25BE) it changes nothing.
+    /// * U+FE0E asks for a text face: the primary when it has the glyph,
+    ///   else the cascade's.
+    /// * Plain: the primary when it has the glyph; else Apple Color Emoji
+    ///   for an Emoji_Presentation character and the cascade face for any
+    ///   other (`🛡` under the system font is `.AppleColorEmojiUI`, `⚙` and
+    ///   `⌨` Menlo, `☺` Helvetica, `❤` Zapf Dingbats, `▾` under Helvetica
+    ///   Lucida Grande).
+    ///
+    /// For every cell the advance layout measures and the advance paint's
+    /// glyph carries are the same number: a line never wraps on one face
+    /// and paints with another.
+    #[test]
+    fn layout_and_paint_take_one_face_per_presentation_like_chrome() {
+        const ACE: &str = "AppleColorEmoji";
+        // "" is the primary's own PostScript name.
+        const P: &str = "";
+        let system = create_font("-apple-system", 14.0).expect("system font");
+        let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
+        let menlo = named_font("Menlo", 14.0).expect("Menlo is installed");
+        type Row = (char, [&'static str; 3]);
+        let matrix: [(&CTFont, &str, [Row; 7]); 3] = [
+            (
+                &system,
+                "system",
+                [
+                    ('\u{A9}', [P, P, ACE]),
+                    ('\u{2699}', ["Menlo-Regular", "Menlo-Regular", ACE]),
+                    ('\u{1F6E1}', [".AppleColorEmojiUI", ".AppleColorEmojiUI", ACE]),
+                    ('\u{25BE}', [P, P, P]),
+                    ('\u{2328}', ["Menlo-Regular", "Menlo-Regular", ACE]),
+                    ('\u{263A}', ["Helvetica", "Helvetica", ACE]),
+                    ('\u{2764}', ["ZapfDingbatsITC", "ZapfDingbatsITC", ACE]),
+                ],
+            ),
+            (
+                &helvetica,
+                "Helvetica",
+                [
+                    ('\u{A9}', [P, P, ACE]),
+                    ('\u{2699}', ["Menlo-Regular", "Menlo-Regular", ACE]),
+                    ('\u{1F6E1}', [ACE, ACE, ACE]),
+                    ('\u{25BE}', ["LucidaGrande", "LucidaGrande", "LucidaGrande"]),
+                    ('\u{2328}', ["Menlo-Regular", "Menlo-Regular", ACE]),
+                    ('\u{263A}', [P, P, ACE]),
+                    ('\u{2764}', ["ZapfDingbatsITC", "ZapfDingbatsITC", ACE]),
+                ],
+            ),
+            (
+                &menlo,
+                "Menlo",
+                [
+                    ('\u{A9}', [P, P, ACE]),
+                    ('\u{2699}', [P, P, ACE]),
+                    ('\u{1F6E1}', [ACE, ACE, ACE]),
+                    ('\u{25BE}', [P, P, P]),
+                    ('\u{2328}', [P, P, ACE]),
+                    ('\u{263A}', [P, P, ACE]),
+                    ('\u{2764}', [P, P, ACE]),
+                ],
+            ),
+        ];
+        let variants: [(Option<char>, &str); 3] =
+            [(None, "plain"), (Some('\u{FE0E}'), "VS15"), (Some('\u{FE0F}'), "VS16")];
+        let mut wrong = Vec::new();
+        for (primary, primary_name, rows) in &matrix {
+            let primary_ps = primary.postscript_name();
+            let paint = GlyphRasterizer::for_face((*primary).clone(), 14.0);
+            for (ch, want_faces) in rows {
+                for ((next, variant), want) in variants.iter().zip(want_faces) {
+                    let want = if want.is_empty() { primary_ps.as_str() } else { want };
+                    // Layout's side, as rustkit-layout shapes today: the
+                    // primary's glyph when it has one, else the fallback
+                    // face for the presentation.
+                    let (face, glyph) = match color_glyph_id(primary, *ch) {
+                        Some(glyph) => ((*primary).clone(), glyph),
+                        None => fallback_face_for_presentation(primary, *ch, emoji_presented(*ch, *next))
+                            .expect("a face"),
+                    };
+                    let layout_advance = glyph_advance(&face, glyph);
+                    // Paint's side, as rustkit-renderer draws today.
+                    let emoji = emoji_presented(*ch, *next);
+                    let paint_advance = if emoji || is_emoji(*ch) {
+                        paint.rasterize_char_color_presented(*ch, emoji).map(|r| r.3)
+                    } else {
+                        None
+                    }
+                    .or_else(|| paint.rasterize_char(*ch, 0.0).map(|r| r.3))
+                    .expect("paints");
+                    let got = face.postscript_name();
+                    if got != want || (layout_advance - paint_advance).abs() > 0.01 {
+                        wrong.push(format!(
+                            "{primary_name} {ch:?} {variant}: face {got} (Chrome {want}), layout {layout_advance} vs paint {paint_advance}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]

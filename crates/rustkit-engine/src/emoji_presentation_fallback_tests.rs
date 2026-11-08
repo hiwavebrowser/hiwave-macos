@@ -28,8 +28,19 @@ const ROWS: &str = "<!doctype html><body style=\"font-family:-apple-system,Blink
     <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#128683;</span><span style=\"font-size:13px\">Block</span></div>\
     <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#128200;</span><span style=\"font-size:13px\">Report</span></div>\
     <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#9881;</span><span style=\"font-size:13px\">Settings</span></div>\
-    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#128737;&#65039;</span><span style=\"font-size:13px\">ShieldVS16</span></div>";
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#128737;&#65039;</span><span style=\"font-size:13px\">ShieldVS16</span></div>\
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#169;&#65039;</span><span style=\"font-size:13px\">CopyrightVS16</span></div>\
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#9662;&#65039;</span><span style=\"font-size:13px\">DownVS16</span></div>\
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#169;</span><span style=\"font-size:13px\">Copyright</span></div>\
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#9881;&#65038;</span><span style=\"font-size:13px\">GearVS15</span></div>\
+    <div class=row style=\"display:flex;align-items:center;gap:8px;padding:8px\"><span class=i style=\"font-size:14px\">&#9749;&#65038;</span><span style=\"font-size:13px\">CoffeeVS15</span></div>";
 
+/// Rows 6-10 (CfT 148, the same probe re-run 2026-11-08 with the variation
+/// selectors): `©` + U+FE0F is Apple Color Emoji though the system font has
+/// `©` (39 / 23); `▾` U+25BE + U+FE0F has no Emoji property and stays the
+/// system font (33 / 17, 6.45 wide); `©` alone is the system font (33 / 17);
+/// `⚙` + U+FE0E keeps Menlo (33 / 17); `☕` + U+FE0E asks for text and the
+/// system font's cascade answers `.AppleColorEmojiUI` (33 / 17, 18 wide).
 #[test]
 fn text_default_emoji_rows_match_chromium() {
     let rows = eval(
@@ -37,13 +48,25 @@ fn text_default_emoji_rows_match_chromium() {
         "Array.prototype.map.call(document.querySelectorAll('.row'), function (e) { \
          var r = e.getBoundingClientRect(); return r.y + '/' + r.height; }).join(' ')",
     );
-    assert_eq!(rows, "0/33 33/39 72/39 111/33 144/39", "Chromium 148 row y/height");
+    assert_eq!(
+        rows,
+        "0/33 33/39 72/39 111/33 144/39 183/39 222/33 255/33 288/33 321/33",
+        "Chromium 148 row y/height"
+    );
     let heights = eval(
         ROWS,
         "Array.prototype.map.call(document.querySelectorAll('.i'), function (e) { \
          return e.getBoundingClientRect().height; }).join(' ')",
     );
-    assert_eq!(heights, "17 23 23 17 23", "Chromium 148 icon heights");
+    assert_eq!(heights, "17 23 23 17 23 23 17 17 17 17", "Chromium 148 icon heights");
+    // A selector is zero-width: `▾` + U+FE0F is as wide as `▾` (Chrome
+    // 6.453125), `⚙` + U+FE0E as wide as `⚙`.
+    let widths = eval(
+        ROWS,
+        "Array.prototype.map.call(document.querySelectorAll('.i'), function (e) { \
+         return e.getBoundingClientRect().width; }).slice(6, 9).join(' ')",
+    );
+    assert_eq!(widths, "6.453125 12.375 8.4375", "Chromium 148 icon widths (rows 7-9)");
     // The gear is Menlo's advance (Chrome 8.4375), not the emoji face's.
     // (The colour faces' advances are 1-2px wider than Chrome's 18 here:
     // Core Text's sbix advance, a separate, older difference.)
