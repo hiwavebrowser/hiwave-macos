@@ -11467,14 +11467,20 @@ impl Engine {
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
-    /// and stops the walk at `body`, so the body element reports `html > body`.
+    /// and stops the walk at `body`, so the body element reports `html > body`
+    /// (`html > body.<class>` when body is classed: its own segment is built
+    /// before the walk reaches `html`).
     /// Neither affects descendant paths — a child of an id'd element still
     /// reports the full tag/class path — which is why the reported selector and
     /// the path used to build children are computed separately.
     fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
         match attributes.get("id") {
             Some(id) if !id.is_empty() => format!("#{}", id),
-            _ if selector_path == "body" => "html > body".to_string(),
+            // Body's own segment carries its class (`html > body.focus-mode`);
+            // only its descendants hang off a bare `body`.
+            _ if selector_path == "body" => {
+                format!("html > {}", Self::selector_segment("body", attributes, 1, 1, false))
+            }
             _ => selector_path.to_string(),
         }
     }
