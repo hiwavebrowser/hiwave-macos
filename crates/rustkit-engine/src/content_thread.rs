@@ -1210,6 +1210,58 @@ mod tests {
         last
     }
 
+    /// The newest published frame's value in the page's (only) text field.
+    fn published_field_value(commit: &crate::FrameCommit) -> Option<String> {
+        commit.list.as_ref()?.commands.iter().rev().find_map(|cmd| match cmd {
+            rustkit_layout::DisplayCommand::TextInput { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_typed_key_publishes_a_frame_without_a_relayout_from_the_window() {
+        // CH2.E34 (Athena, from hiwave-windows #123): TextKey edited the
+        // field but the page neither laid out nor published, so every shell
+        // sent PageCmd::Relayout after a key or the text never appeared.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        let _ = poll_until(&page, Duration::from_millis(300), |_| false);
+        for (key, then) in [("q", "q"), ("z", "qz")] {
+            let (reply, _rx) = oneshot::channel();
+            page.input(PageInput::TextKey {
+                key_code: 0,
+                key: key.to_string(),
+                ctrl: false,
+                shift: false,
+                alt: false,
+                reply,
+            });
+            let events = poll_until(&page, Duration::from_secs(3), |events| {
+                events.iter().any(|event| {
+                    matches!(event, PageEvent::Commit(commit) if published_field_value(commit).as_deref() == Some(then))
+                })
+            });
+            let values: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    PageEvent::Commit(commit) => Some(published_field_value(commit)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                values.iter().any(|v| v.as_deref() == Some(then)),
+                "typing {key:?} published no frame showing {then:?}: {values:?}"
+            );
+        }
+        // The model agrees with what was drawn.
+        let mut value = page.eval("document.getElementById('i').value");
+        let value = wait_recv(&mut value, Duration::from_secs(5)).unwrap().unwrap();
+        assert!(value.contains("qz"), "{value}");
+    }
+
     #[test]
     fn the_window_hears_focus_a_script_moved_and_a_new_document_has_none() {
         // #730 delta R1 NIT: the window answers "is a field focused" from
