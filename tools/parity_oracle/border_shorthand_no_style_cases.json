@@ -235,6 +235,56 @@
    "name": "fieldset-author-10px-solid-then-border-revert",
    "html": "<!doctype html><html><head><style>body{margin:0}fieldset{border:10px solid red;padding:0;margin:0;height:10px}</style></head><body><fieldset id=a style=\"border:revert\"></fieldset><fieldset id=b></fieldset></body></html>",
    "chrome_boxes": "a:0:0:400:14 b:0:14:400:30"
+  },
+  {
+   "name": "div-important-7px-green-then-border-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:7px solid green !important}</style></head><body><div id=a style=\"border:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:24:24 b:0:24:24:24"
+  },
+  {
+   "name": "div-important-7px-green-then-border-revert-layer-normal",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:7px solid green !important}</style></head><body><div id=a style=\"border:revert-layer\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:24:24 b:0:24:24:24"
+  },
+  {
+   "name": "div-normal-7px-green-then-border-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:7px solid green}</style></head><body><div id=a style=\"border:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:24:24 b:0:24:24:24"
+  },
+  {
+   "name": "div-important-7px-green-then-border-revert-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:7px solid green !important}</style></head><body><div id=a style=\"border:revert !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:24:24"
+  },
+  {
+   "name": "div-important-7px-green-top-then-border-top-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border-top:7px solid green !important}</style></head><body><div id=a style=\"border-top:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:17 b:0:17:10:17"
+  },
+  {
+   "name": "div-important-7px-width-then-border-width-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:3px solid green;border-width:7px !important}</style></head><body><div id=a style=\"border-width:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:24:24 b:0:24:24:24"
+  },
+  {
+   "name": "div-mixed-importance-then-border-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:7px solid green !important;border-width:2px}</style></head><body><div id=a style=\"border:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:24:24 b:0:24:24:24"
+  },
+  {
+   "name": "div-normal-5px-and-inline-normal-9px-then-border-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}div{border:5px solid green}</style></head><body><div id=a style=\"border:9px solid red;border:revert-layer !important\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:20:20"
+  },
+  {
+   "name": "input-important-40px-red-then-border-revert-layer-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red !important}</style></head><body><input id=a style=\"border:revert-layer !important\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:100:90 b:0:90:100:90"
+  },
+  {
+   "name": "input-important-40px-red-then-border-revert-important",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red !important}</style></head><body><input id=a style=\"border:revert !important\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:24:14 b:0:14:100:90"
   }
  ],
  "chrome": "143.0.7499.4"
