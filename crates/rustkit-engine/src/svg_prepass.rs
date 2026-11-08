@@ -339,3 +339,84 @@ impl SvgPrepass {
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! LAT4b pure helpers: id index referability and `<use>` part collection.
+    //! The headless cost/correctness suite is `inline_svg_prepass_tests`.
+
+    use super::{id_index, svg_parts, tree_root, REFERABLE};
+    use rustkit_dom::Document;
+    use std::rc::Rc;
+
+    fn doc(html: &str) -> rustkit_dom::Document {
+        Document::parse_html(html).unwrap()
+    }
+
+    #[test]
+    fn the_id_index_keeps_only_referable_elements_and_the_first_of_each_id() {
+        let document = doc(
+            r##"<html><body>
+              <div id="skip">no</div>
+              <svg xmlns="http://www.w3.org/2000/svg">
+                <symbol id="a"><path d="M0 0"/></symbol>
+                <g id="a"><circle/></g>
+                <path id="ok" d="M1 1"/>
+              </svg>
+            </body></html>"##,
+        );
+        let root = tree_root(&document.root());
+        let index = id_index(&root);
+        assert!(index.get("skip").is_none(), "HTML containers are not <use> targets");
+        let a = index.get("a").and_then(|w| w.upgrade()).expect("symbol a");
+        assert_eq!(a.tag_name().map(|t| t.to_ascii_lowercase()).as_deref(), Some("symbol"));
+        let ok = index.get("ok").and_then(|w| w.upgrade()).expect("path ok");
+        assert!(REFERABLE.iter().any(|r| ok.tag_name().unwrap().eq_ignore_ascii_case(r)));
+    }
+
+    #[test]
+    fn svg_parts_follows_nested_use_and_xlink_href_into_defs() {
+        let document = doc(
+            r##"<html><body>
+              <svg id="icon" xmlns="http://www.w3.org/2000/svg"><use href="#outer"/></svg>
+              <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+                <symbol id="outer"><use xlink:href="#inner"/></symbol>
+                <symbol id="inner"><path id="leaf" d="M0 0h1v1H0z"/></symbol>
+              </svg>
+            </body></html>"##,
+        );
+        let icon = document.get_element_by_id("icon").expect("icon");
+        let index = id_index(&tree_root(&icon));
+        let parts = svg_parts(&icon, &mut |id| index.get(id).and_then(|w| w.upgrade()));
+        assert!(parts.defs, "external references wrap in a trailing <defs>");
+        assert_eq!(parts.roots.len(), 3, "svg + outer + inner");
+        let tags: Vec<String> = parts
+            .roots
+            .iter()
+            .map(|n| n.tag_name().unwrap().to_ascii_lowercase())
+            .collect();
+        assert_eq!(tags, vec!["svg", "symbol", "symbol"]);
+        assert!(
+            parts.nodes.iter().any(|n| n.get_attribute("id").as_deref() == Some("leaf")),
+            "nested target body is part of the markup walk"
+        );
+    }
+
+    #[test]
+    fn a_self_contained_svg_needs_no_defs() {
+        let document = doc(
+            r##"<html><body>
+              <svg id="icon" xmlns="http://www.w3.org/2000/svg">
+                <symbol id="local"><path d="M0 0"/></symbol>
+                <use href="#local"/>
+              </svg>
+            </body></html>"##,
+        );
+        let icon = document.get_element_by_id("icon").expect("icon");
+        let index = id_index(&tree_root(&icon));
+        let parts = svg_parts(&icon, &mut |id| index.get(id).and_then(|w| w.upgrade()));
+        assert!(!parts.defs);
+        assert_eq!(parts.roots.len(), 1);
+        assert!(Rc::ptr_eq(&parts.roots[0], &icon));
+    }
+}
