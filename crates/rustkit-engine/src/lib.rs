@@ -13814,6 +13814,22 @@ impl layout_ctx::LayoutCtx {
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }
+                // html.css: `input[type=checkbox] { margin: 3px 3px 3px 4px }`,
+                // `input[type=radio] { margin: 3px 3px 0px 5px }` (Chromium
+                // 148 computes exactly these; ua_control_margin_tests).
+                if tag_name == "input" {
+                    let margins = match attributes.get("type").map(|t| t.to_ascii_lowercase()) {
+                        Some(t) if t == "checkbox" => Some((3.0, 3.0, 3.0, 4.0)),
+                        Some(t) if t == "radio" => Some((3.0, 3.0, 0.0, 5.0)),
+                        _ => None,
+                    };
+                    if let Some((t, r, b, l)) = margins {
+                        style.margin_top = rustkit_css::Length::Px(t);
+                        style.margin_right = rustkit_css::Length::Px(r);
+                        style.margin_bottom = rustkit_css::Length::Px(b);
+                        style.margin_left = rustkit_css::Length::Px(l);
+                    }
+                }
             }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
