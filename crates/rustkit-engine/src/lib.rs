@@ -35186,10 +35186,13 @@ mod node_identity_tests {
             js(&mut engine, id, "log.join(' ') + ' | ' + JSON.stringify(document.getElementById('t').value)"),
             js_string("Enter:t:S Enter:t: | \"\\n\"")
         );
-        // Ctrl+Alt+Enter: both flags reach the page. (What the chord types
-        // is the edit model's; not pinned here.)
+        // Ctrl+Alt+Enter: both flags reach the page, and the chord types
+        // nothing (Chromium 148, tools/parity_oracle/enter_modifiers_log.mjs).
         assert_eq!(press_enter(&mut engine, id, true, false, true), None);
-        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("Enter:t:S Enter:t: Enter:t:CA"));
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + JSON.stringify(document.getElementById('t').value)"),
+            js_string("Enter:t:S Enter:t: Enter:t:CA | \"\\n\"")
+        );
 
         // Shift+Enter in a form field still submits, and the keydown says
         // Shift was down.
