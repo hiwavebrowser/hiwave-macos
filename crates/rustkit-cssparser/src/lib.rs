@@ -1633,6 +1633,40 @@ mod tests {
         );
     }
 
+    /// Z CH2.E31: a `{`, `}` or `;` inside a string (a declaration value,
+    /// a quoted `url()`, an attribute selector's value) is text. Chrome for
+    /// Testing 148 on each sheet below keeps the rule whole (the `a`
+    /// element gets the colour and the string) and styles the following
+    /// `b`; `document.styleSheets[0].cssRules.length` is 2 for each.
+    #[test]
+    fn braces_and_semicolons_in_strings_do_not_end_the_rule() {
+        let b = sd("b", &["color:blue"]);
+        for (css, a) in [
+            (r#"a{content:"}";color:red} b{color:blue}"#, sd("a", &[r#"content:"}""#, "color:red"])),
+            (r#"a{content:"{;";color:red} b{color:blue}"#, sd("a", &[r#"content:"{;""#, "color:red"])),
+            ("a{content:'}';color:red} b{color:blue}", sd("a", &["content:'}'", "color:red"])),
+            (
+                r#"a{background-image:url("x}.png");color:red} b{color:blue}"#,
+                sd("a", &[r#"background-image:url("x}.png")"#, "color:red"]),
+            ),
+            (r#"a[title="}"]{color:red} b{color:blue}"#, sd(r#"a[title="}"]"#, &["color:red"])),
+            (r#"a[title="{"]{color:red} b{color:blue}"#, sd(r#"a[title="{"]"#, &["color:red"])),
+            (r#"a[title=";"]{color:red} b{color:blue}"#, sd(r#"a[title=";"]"#, &["color:red"])),
+            (r#"i{& a{content:"}";color:red}} b{color:blue}"#, sd("i a", &[r#"content:"}""#, "color:red"])),
+        ] {
+            assert_eq!(selectors_and_decls(css), vec![a, b.clone()], "{css}");
+        }
+        // The same inside a group rule (CfT 148: one @media rule, both apply).
+        assert_eq!(
+            summary(r#"@media all{a{content:"}";color:red} b{color:blue}}"#),
+            vec![rule("a", &["all"]), rule("b", &["all"])]
+        );
+        assert_eq!(
+            selectors_and_decls(r#"@media all{a{content:"}";color:red} b{color:blue}}"#),
+            vec![sd("a", &[r#"content:"}""#, "color:red"]), sd("b", &["color:blue"])]
+        );
+    }
+
     #[test]
     fn eof_closes_an_unclosed_media_block_like_an_unclosed_rule() {
         assert_eq!(
