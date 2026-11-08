@@ -427,6 +427,8 @@ mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_margin_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ua_em_margin_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
