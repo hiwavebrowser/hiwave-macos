@@ -337,7 +337,15 @@ enum Way {
 }
 
 fn draw_case(gpu: &Gpu, list: &[DisplayCommand], way: Way, transparent: bool, scroll: (f32, f32)) -> Vec<u8> {
+    let mut r = case_renderer(gpu, (VIEW_W, VIEW_H), way, transparent, scroll);
+    draw_frame(gpu, &mut r, (VIEW_W, VIEW_H), list)
+}
+
+/// A renderer for one case: a `size` viewport, two test images, drawn
+/// `way`.
+fn case_renderer(gpu: &Gpu, size: (u32, u32), way: Way, transparent: bool, scroll: (f32, f32)) -> Renderer {
     let mut r = renderer(gpu);
+    r.set_viewport_size(size.0, size.1);
     let px: Vec<u8> = [30u8, 120, 200, 255].repeat(16 * 16);
     let half: Vec<u8> = [200u8, 50, 20, 128].repeat(16 * 16);
     r.upload_image("a.png", 16, 16, &px).unwrap();
@@ -347,13 +355,23 @@ fn draw_case(gpu: &Gpu, list: &[DisplayCommand], way: Way, transparent: bool, sc
     r.legacy_layers = !matches!(way, Way::Deferred);
     r.immediate_submits = matches!(way, Way::SubmitPerPass);
     r.set_scroll_offset(scroll);
-    let (texture, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
+    r
+}
+
+/// One frame of `list` on `r`, read back.
+fn draw_frame(gpu: &Gpu, r: &mut Renderer, size: (u32, u32), list: &[DisplayCommand]) -> Vec<u8> {
+    let (texture, view) = screenshot::create_offscreen_target(&gpu.device, size.0, size.1, FORMAT);
     r.execute(list, &view).expect("execute");
-    let readback = screenshot::GpuReadbackBuffer::new(&gpu.device, VIEW_W, VIEW_H);
+    let readback = screenshot::GpuReadbackBuffer::new(&gpu.device, size.0, size.1);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     readback.copy_from_texture(&mut encoder, &texture);
     gpu.queue.submit(std::iter::once(encoder.finish()));
     readback.read_data_sync(&gpu.device).expect("readback")
+}
+
+fn differing_bytes(a: &[u8], b: &[u8]) -> usize {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).filter(|(a, b)| a != b).count()
 }
 
 /// LAT13: the deferred path draws the pixels the pass-per-layer path drew,
@@ -398,4 +416,86 @@ fn overlapping_groups_share_no_slot_and_fall_back_past_the_slots() {
     r.execute(&list("5 overlapping"), &view).unwrap();
     assert_eq!(r.layer_slots[0].len(), LAYER_SLOTS_PER_DEPTH, "no more than that");
     assert_eq!(r.last_frame_stats().submits, 1, "the fallback frame is still one submit");
+}
+
+/// The reviewer's view for the glyph-atlas cases (#992 R1).
+const WALL: (u32, u32) = (1600, 1200);
+
+/// A run of `s` at `size` px, advances and ascent as layout would ship
+/// them.
+fn text_sized(s: &str, x: f32, y: f32, size: f32, color: Color) -> DisplayCommand {
+    DisplayCommand::Text {
+        text: s.to_string(),
+        x,
+        y,
+        color,
+        font_size: size,
+        font_family: "sans-serif".to_string(),
+        font_weight: 400,
+        font_style: 0,
+        advances: Some(vec![size; s.chars().count()]),
+        ascent: Some((size * 0.88).round()),
+        run: None,
+    }
+}
+
+/// A white 1600x1200 page and `layers` opacity groups over it, each a wall
+/// of ideographs no other wall uses (from `first` on), `sizes` px in turn,
+/// filling the view. Every glyph is new to the atlas, so one wall at 64px
+/// is about 450 glyphs and a 2048² atlas holds about 1,000 of them: three
+/// walls need more than one atlas, six more than two (the reviewer's case
+/// on #992: five layers of 1,300 CJK glyphs at 40-56px).
+fn glyph_walls(layers: usize, sizes: &[f32], first: u32) -> Vec<DisplayCommand> {
+    let (w, h) = (WALL.0 as f32, WALL.1 as f32);
+    let mut list = vec![fill(0.0, 0.0, w, h, c(255, 255, 255, 1.0))];
+    let mut next = first;
+    for k in 0..layers {
+        let size = sizes[k % sizes.len()];
+        let (cols, rows) = ((w / size) as usize, (h / size) as usize);
+        list.push(PushOpacity(0.9));
+        for row in 0..rows {
+            let s: String = (0..cols)
+                .map(|_| {
+                    let ch = char::from_u32(next).expect("an ideograph");
+                    next += 1;
+                    ch
+                })
+                .collect();
+            list.push(text_sized(&s, 0.0, row as f32 * size, size, c(20, 20, 20 + (k * 40) as u8, 1.0)));
+        }
+        list.push(PopOpacity);
+    }
+    list
+}
+
+/// #992 R1: a frame whose glyphs do not fit the glyph atlas. Recorded into
+/// one encoder and submitted once, every pass samples the atlas as it is at
+/// the end of the frame, so all text recorded before the atlas last started
+/// over is drawn from the glyphs written over its own (1.7 M of 1.9 M
+/// pixels differed at 1600x1200). With a submit per pass, as develop drew
+/// it, a pass drew the atlas as it was when it was recorded. Such a frame
+/// is drawn as that path draws it, from the same (empty) atlas.
+#[test]
+fn a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP a_frame_past_the_glyph_atlas_matches_the_submit_per_pass_path: no GPU adapter");
+        return;
+    };
+    for (what, layers, sizes) in [
+        ("six walls, past two atlases", 6usize, &[56.0f32, 64.0, 72.0][..]),
+        ("three walls, past one atlas", 3, &[64.0][..]),
+    ] {
+        let list = glyph_walls(layers, sizes, 0x4E00);
+        let mut reference = case_renderer(&gpu, WALL, Way::SubmitPerPass, false, (0.0, 0.0));
+        let want = draw_frame(&gpu, &mut reference, WALL, &list);
+        assert!(
+            reference.glyph_cache.resets() >= 1,
+            "{what}: the case must fill the atlas (resets {})",
+            reference.glyph_cache.resets()
+        );
+        let mut r = case_renderer(&gpu, WALL, Way::Deferred, false, (0.0, 0.0));
+        let got = draw_frame(&gpu, &mut r, WALL, &list);
+        let diff = differing_bytes(&want, &got);
+        assert_eq!(diff, 0, "{what}: the one-submit frame differs from the submit-per-pass frame in {diff} bytes");
+    }
 }
