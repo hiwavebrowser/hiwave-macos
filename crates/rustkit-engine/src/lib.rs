@@ -739,6 +739,8 @@ mod snapshot_stage_tests;
 mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clip_path_shape_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
