@@ -413,6 +413,8 @@ pub struct Renderer {
     color_glyph_pipeline: wgpu::RenderPipeline,
     // CSS `filter` colour-matrix layer composite
     filter_matrix_pipeline: pipeline::FilterMatrixPipeline,
+    // `clip-path` outline layer composite (C8b)
+    clip_mask_pipeline: pipeline::ClipMaskPipeline,
     // Image pipeline: the blit shader composited source-over (straight alpha)
     image_pipeline: wgpu::RenderPipeline,
 
@@ -514,6 +516,13 @@ pub struct Renderer {
     /// between frames and dropped when the size changes. The pass-per-layer
     /// path uses the first at each depth.
     layer_slots: Vec<Vec<LayerSlot>>,
+    /// The coverage masks of the `PushClipPath` layers of the list being
+    /// drawn, indexed by `LayerEffect::ClipMask`.
+    clip_masks: Vec<ClipMask>,
+    /// Rasterised outlines by shape (see `CachedClipMask`), and the count
+    /// of layered lists drawn, which ages them.
+    clip_mask_cache: HashMap<u64, CachedClipMask>,
+    clip_mask_frame: u64,
     opacity_layer_size: (u32, u32),
     /// Tests: draw every list with layers a pass per layer (the path lists
     /// with a `backdrop-filter` take), the reference the deferred path is
@@ -718,6 +727,13 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        let clip_mask_pipeline = pipeline::create_clip_mask_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Image pipeline: blit shader + source-over blend for straight alpha.
         let image_pipeline = pipeline::create_image_pipeline(
             &device,
@@ -783,6 +799,7 @@ impl Renderer {
             blit_pipeline,
             color_glyph_pipeline,
             filter_matrix_pipeline,
+            clip_mask_pipeline,
             image_pipeline,
             backdrop_filter_pipelines,
             gradient_pipeline,
@@ -825,6 +842,9 @@ impl Renderer {
             reference: false,
             opacity_scopes: OpacityScopes::default(),
             layer_slots: Vec::new(),
+            clip_masks: Vec::new(),
+            clip_mask_cache: HashMap::new(),
+            clip_mask_frame: 0,
             opacity_layer_size: (0, 0),
             #[cfg(test)]
             legacy_layers: false,
@@ -1131,6 +1151,10 @@ impl Renderer {
                     DrawKind::Filter(matrix) => {
                         pass.set_pipeline(&self.filter_matrix_pipeline.pipeline);
                         pass.set_bind_group(2, matrix, &[]);
+                    }
+                    DrawKind::ClipMask(mask) => {
+                        pass.set_pipeline(&self.clip_mask_pipeline.pipeline);
+                        pass.set_bind_group(2, mask, &[]);
                     }
                 }
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
@@ -1519,7 +1543,14 @@ impl Renderer {
                 <= MAX_OPACITY_LAYERS;
             let grouped = commands
                 .iter()
-                .any(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_) | DisplayCommand::PushFilter(_)));
+                .any(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_) | DisplayCommand::PushFilter(_) | DisplayCommand::PushClipPath { .. }));
+            // Outlines neither this list nor the last one used are dropped.
+            self.clip_mask_frame += 1;
+            let frame = self.clip_mask_frame;
+            if self.clip_mask_cache.len() > MAX_CACHED_CLIP_MASKS {
+                self.clip_mask_cache.clear();
+            }
+            self.clip_mask_cache.retain(|_, mask| mask.used + 1 >= frame);
             if layered && grouped && !has_backdrop && self.defer_layers() {
                 let sticky = (
                     self.window_sticky,
@@ -1541,11 +1572,52 @@ impl Renderer {
                 (self.window_sticky, self.window_sticky_outer, self.window_sticky_outside_fixed) = sticky;
                 self.begin_frame_state();
             }
+            // Outline clips drawn as layers so far; past the budget the
+            // rest clip to their bounding boxes.
+            let mut clip_path_layers = 0usize;
             let mut cleared = false;
             let mut layers: Vec<(wgpu::TextureView, LayerEffect)> = Vec::new();
+            // One entry per open clip: whether its `PopClip` closes a
+            // `PushClipPath` layer.
+            let mut clip_layers: Vec<bool> = Vec::new();
+            self.clip_masks.clear();
             for (i, cmd) in commands.iter().enumerate() {
                 if layered {
                     match cmd {
+                        // An outline clip is a layer composited through the
+                        // outline's coverage. Its bounding box is pushed as a
+                        // rect clip as well, so what is drawn into the layer
+                        // stays inside it (and outer clips still cut it).
+                        DisplayCommand::PushClipPath { rect, contours, even_odd }
+                            if clip_path_layers < MAX_CLIP_PATH_LAYERS =>
+                        {
+                            let mask = self.clip_mask(contours, *even_odd);
+                            if mask.key.is_none() {
+                                // Off screen: nothing inside can show.
+                                self.push_clip(Rect::new(0.0, 0.0, 0.0, 0.0));
+                                clip_layers.push(false);
+                                continue;
+                            }
+                            clip_path_layers += 1;
+                            self.clip_masks.push(mask);
+                            let effect = LayerEffect::ClipMask(self.clip_masks.len() - 1);
+                            self.begin_opacity_layer(target, &mut layers, effect, &mut cleared)?;
+                            self.push_clip(*rect);
+                            clip_layers.push(true);
+                            continue;
+                        }
+                        DisplayCommand::PushClip(_)
+                        | DisplayCommand::PushClipRounded { .. }
+                        | DisplayCommand::PushClipPath { .. } => {
+                            clip_layers.push(false);
+                        }
+                        DisplayCommand::PopClip => {
+                            if clip_layers.pop() == Some(true) {
+                                self.pop_clip();
+                                self.end_opacity_layer(target, &mut layers, &mut cleared)?;
+                                continue;
+                            }
+                        }
                         DisplayCommand::PushOpacity(alpha) => {
                             let fade = LayerEffect::Fade(alpha.clamp(0.0, 1.0));
                             self.begin_opacity_layer(target, &mut layers, fade, &mut cleared)?;
@@ -2229,9 +2301,44 @@ impl Renderer {
         target: &wgpu::TextureView,
     ) -> Result<bool, RendererError> {
         self.size_layer_slots();
+        self.clip_masks.clear();
         let mut frame = DeferredFrame::default();
+        let mut clip_path_layers = 0usize;
+        let mut clip_layers: Vec<bool> = Vec::new();
         for (i, cmd) in commands.iter().enumerate() {
             match cmd {
+                DisplayCommand::PushClipPath { rect, contours, even_odd }
+                    if clip_path_layers < MAX_CLIP_PATH_LAYERS =>
+                {
+                    let mask = self.clip_mask(contours, *even_odd);
+                    if mask.key.is_none() {
+                        self.push_clip(Rect::new(0.0, 0.0, 0.0, 0.0));
+                        clip_layers.push(false);
+                        continue;
+                    }
+                    clip_path_layers += 1;
+                    self.clip_masks.push(mask);
+                    self.defer_flush(&mut frame);
+                    frame.open.push(OpenLayer::new(LayerEffect::ClipMask(self.clip_masks.len() - 1)));
+                    self.push_clip(*rect);
+                    clip_layers.push(true);
+                    continue;
+                }
+                DisplayCommand::PushClip(_)
+                | DisplayCommand::PushClipRounded { .. }
+                | DisplayCommand::PushClipPath { .. } => {
+                    clip_layers.push(false);
+                }
+                DisplayCommand::PopClip => {
+                    if clip_layers.pop() == Some(true) {
+                        self.pop_clip();
+                        if !self.close_deferred_layer(&mut frame) {
+                            self.abandon_deferred_frame();
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                }
                 DisplayCommand::PushOpacity(alpha) => {
                     self.defer_flush(&mut frame);
                     frame.open.push(OpenLayer::new(LayerEffect::Fade(alpha.clamp(0.0, 1.0))));
@@ -2354,7 +2461,7 @@ impl Renderer {
     fn place_layer(&mut self, depth: usize, layer: OpenLayer) -> Option<Option<(Draw, [u32; 4])>> {
         let (vw, vh) = self.viewport_size;
         let exclusive = matches!(layer.effect, LayerEffect::ColorMatrix(_));
-        let rect = if exclusive {
+        let mut rect = if exclusive {
             [0, 0, vw, vh]
         } else {
             match layer.bounds.and_then(|b| pixel_rect(b, vw, vh)) {
@@ -2362,6 +2469,14 @@ impl Renderer {
                 _ => return Some(None),
             }
         };
+        // A clip-path layer is read over its mask's rect: the slot keeps
+        // that too, so no other group's pixels are under it.
+        let mut composite_rect = rect;
+        if let LayerEffect::ClipMask(index) = layer.effect {
+            let [x, y, w, h] = self.clip_masks[index].rect;
+            composite_rect = [x, y, x + w, y + h];
+            rect = [rect[0].min(x), rect[1].min(y), rect[2].max(x + w), rect[3].max(y + h)];
+        }
         while self.layer_slots.len() <= depth {
             self.layer_slots.push(Vec::new());
         }
@@ -2387,6 +2502,9 @@ impl Renderer {
         slot.exclusive |= exclusive;
         slot.draws.extend(layer.draws);
         let group = slot.group.clone();
+        if let LayerEffect::ClipMask(index) = layer.effect {
+            return Some(self.clip_mask_draw(&group, index).map(|draw| (draw, composite_rect)));
+        }
         Some(Some((self.layer_draw(&group, rect, layer.effect), rect)))
     }
 
@@ -2764,6 +2882,10 @@ impl Renderer {
         effect: LayerEffect,
         clear: bool,
     ) {
+        if let LayerEffect::ClipMask(index) = effect {
+            self.composite_clip_mask_layer(layer, target, index, clear);
+            return;
+        }
         let (vw, vh) = self.viewport_size;
         let group = self.layer_bind_group(layer);
         let draw = self.layer_draw(&group, [0, 0, vw, vh], effect);
@@ -2798,6 +2920,7 @@ impl Renderer {
     /// pass-per-layer path), each texel onto the pixel it came from.
     fn layer_draw(&self, group: &wgpu::BindGroup, rect: [u32; 4], effect: LayerEffect) -> Draw {
         let (alpha, kind) = match effect {
+            LayerEffect::ClipMask(_) => unreachable!("clip_mask_draw"),
             LayerEffect::Fade(alpha) => (alpha, DrawKind::Layer),
             LayerEffect::ColorMatrix(m) => {
                 // Rows of the first four columns, then the offsets column.
@@ -2840,6 +2963,180 @@ impl Renderer {
             indices: self.arena_push(bytemuck::cast_slice(&indices)),
             range: 0..6,
         }
+    }
+
+    /// The coverage mask of an outline clip pushed now: the contours mapped
+    /// through the transform in force (so a rotated or scaled box clips to
+    /// its outline where it lands) and rasterised over their bounding box,
+    /// cut to the viewport.
+    fn clip_mask(&mut self, contours: &[Vec<(f32, f32)>], even_odd: bool) -> ClipMask {
+        use std::hash::{Hash, Hasher};
+        let m = self.current_transform();
+        let screen: Vec<Vec<(f32, f32)>> = contours
+            .iter()
+            .map(|c| c.iter().map(|&(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])).collect())
+            .collect();
+        let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+        let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for &(x, y) in screen.iter().flatten() {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        let (vw, vh) = self.viewport_size;
+        let empty = ClipMask { key: None, rect: [0, 0, 0, 0] };
+        if !(x0 < x1 && y0 < y1) {
+            return empty;
+        }
+        let left = x0.floor().max(0.0) as i64;
+        let top = y0.floor().max(0.0) as i64;
+        let right = (x1.ceil() as i64).min(vw as i64);
+        let bottom = (y1.ceil() as i64).min(vh as i64);
+        if right <= left || bottom <= top {
+            return empty;
+        }
+        let (w, h) = ((right - left) as u32, (bottom - top) as u32);
+        let rect = [left as u32, top as u32, w, h];
+        // The same outline at the same place in the mask is the same mask.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (w, h, even_odd, screen.len()).hash(&mut hasher);
+        for contour in &screen {
+            contour.len().hash(&mut hasher);
+            for &(x, y) in contour {
+                ((x - left as f32).to_bits(), (y - top as f32).to_bits()).hash(&mut hasher);
+            }
+        }
+        let key = hasher.finish();
+        let frame = self.clip_mask_frame;
+        if let Some(cached) = self.clip_mask_cache.get_mut(&key) {
+            cached.used = frame;
+            return ClipMask { key: Some(key), rect };
+        }
+        let coverage = clip_mask_coverage(&screen, even_odd, left as i32, top as i32, w, h);
+        let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Clip Mask Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &coverage,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Clip Mask Bind Group"),
+            layout: &self.clip_mask_pipeline.mask_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+        });
+        self.clip_mask_cache.insert(key, CachedClipMask { _texture: texture, bind_group, used: frame });
+        ClipMask { key: Some(key), rect }
+    }
+
+    /// The draw that lays the layer `layer_group` samples over its target
+    /// through clip mask `index`, over the mask's rect; `None` when the mask
+    /// is not cached.
+    fn clip_mask_draw(&self, layer_group: &wgpu::BindGroup, index: usize) -> Option<Draw> {
+        let mask = &self.clip_masks[index];
+        let mask_group = mask.key.and_then(|key| self.clip_mask_cache.get(&key)).map(|m| m.bind_group.clone())?;
+        let [x, y, w, h] = mask.rect;
+        let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+        let (mw, mh) = (w as f32, h as f32);
+        let color = [1.0; 4];
+        let vertices = [
+            TextureVertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
+            TextureVertex { position: [x1, y0], tex_coords: [mw, 0.0], color },
+            TextureVertex { position: [x1, y1], tex_coords: [mw, mh], color },
+            TextureVertex { position: [x0, y1], tex_coords: [0.0, mh], color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+        Some(Draw {
+            kind: DrawKind::ClipMask(mask_group),
+            group: Some(layer_group.clone()),
+            vertices: self.arena_push(bytemuck::cast_slice(&vertices)),
+            indices: self.arena_push(bytemuck::cast_slice(&indices)),
+            range: 0..6,
+        })
+    }
+
+    /// `PopClip` of a `PushClipPath`: lay the layer over `target` through
+    /// the mask, drawing only the mask's rect (`shaders/clip_mask.wgsl`).
+    fn composite_clip_mask_layer(&self, layer: &wgpu::TextureView, target: &wgpu::TextureView, index: usize, clear: bool) {
+        let mask = &self.clip_masks[index];
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Clip Mask Composite Encoder"),
+        });
+        {
+            let load = if clear {
+                wgpu::LoadOp::Clear(self.first_clear())
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Clip Mask Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if let Some(mask_group) = mask.key.and_then(|key| self.clip_mask_cache.get(&key)).map(|m| &m.bind_group) {
+                let [x, y, w, h] = mask.rect;
+                let layer_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Clip Mask Layer Bind Group"),
+                    layout: &self.texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(layer) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.filter_sampler) },
+                    ],
+                });
+                let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+                // Texture coordinates: the mask's own pixels.
+                let (mw, mh) = (w as f32, h as f32);
+                let color = [1.0; 4];
+                let vertices = [
+                    TextureVertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
+                    TextureVertex { position: [x1, y0], tex_coords: [mw, 0.0], color },
+                    TextureVertex { position: [x1, y1], tex_coords: [mw, mh], color },
+                    TextureVertex { position: [x0, y1], tex_coords: [0.0, mh], color },
+                ];
+                let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Clip Mask Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Clip Mask Index Buffer"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                render_pass.set_pipeline(&self.clip_mask_pipeline.pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, &layer_group, &[]);
+                render_pass.set_bind_group(2, mask_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..6, 0, 0..1);
+            }
+        }
+        self.submit(encoder);
     }
 
     /// Process a single display command.
@@ -3182,6 +3479,13 @@ impl Renderer {
 
             DisplayCommand::PushClipRounded { rect, radius } => {
                 self.push_clip_rounded(*rect, *radius);
+            }
+
+            // Off the layered path (past `MAX_OPACITY_LAYERS` opacity scopes,
+            // past `MAX_CLIP_PATH_LAYERS` outline clips, or the GPU-gradient
+            // path) an outline clips to its bounding box.
+            DisplayCommand::PushClipPath { rect, .. } => {
+                self.push_clip(*rect);
             }
 
             DisplayCommand::PopClip => {
@@ -6754,6 +7058,9 @@ impl Renderer {
                 fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], gain);
                 fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], gain);
             }
+            // Never an opacity scope: off the layered path an outline clip
+            // is its bounding-box rect clip.
+            LayerEffect::ClipMask(_) => {}
         }
     }
 
@@ -7225,6 +7532,8 @@ enum DrawKind {
     Layer,
     /// A filtered layer; the colour matrix's bind group (group 2).
     Filter(wgpu::BindGroup),
+    /// A clip-path layer through its coverage mask (group 2).
+    ClipMask(wgpu::BindGroup),
 }
 
 /// Most layer textures kept at one depth: overlapping groups at one depth
@@ -7319,6 +7628,107 @@ enum LayerEffect {
     /// `PushFilter`: a 4x5 row-major colour matrix on unpremultiplied
     /// colour, clamped (Filter Effects 1 §13).
     ColorMatrix([f32; 20]),
+    /// `PushClipPath`: every pixel scaled by the outline's coverage, the
+    /// mask at this index of `Renderer::clip_masks`.
+    ClipMask(usize),
+}
+
+/// A `PushClipPath` outline's coverage in the list being drawn: its entry
+/// in `Renderer::clip_mask_cache` (`None` when it covers no pixel of the
+/// target) and `[x, y, width, height]` in the target.
+struct ClipMask {
+    key: Option<u64>,
+    rect: [u32; 4],
+}
+
+/// A rasterised outline, kept between frames: a list drawn again (a
+/// repaint, a scroll by whole pixels) finds its masks here instead of
+/// rasterising and uploading them again.
+struct CachedClipMask {
+    _texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    /// The `clip_mask_frame` that last used it.
+    used: u64,
+}
+
+/// The most `PushClipPath` scopes one list draws as layers; the rest clip
+/// to their bounding boxes. Each costs a layer like an opacity scope's.
+const MAX_CLIP_PATH_LAYERS: usize = 256;
+
+/// The most rasterised outlines kept between frames.
+const MAX_CACHED_CLIP_MASKS: usize = 1024;
+
+/// Where a pixel's coverage samples sit (Chromium paints a clip path's
+/// edge with 4x multisampling at the standard D3D/Metal/Vulkan positions:
+/// its edge pixels come out in quarters, and these positions reproduce
+/// them; a 2:1 edge reads 0.5 on its left side and 0.25 on its right).
+const CLIP_SAMPLES: [(f32, f32); 4] = [(0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875)];
+
+/// The coverage (0-255) of the closed `contours` (target pixels) over the
+/// `w` x `h` pixels from `(x0, y0)`, row-major: four samples a pixel
+/// (`CLIP_SAMPLES`), each inside by the nonzero rule, or the even-odd rule
+/// when `even_odd`.
+///
+/// Pure so it can be tested without a device.
+fn clip_mask_coverage(contours: &[Vec<(f32, f32)>], even_odd: bool, x0: i32, y0: i32, w: u32, h: u32) -> Vec<u8> {
+    let (w, h) = (w as usize, h as usize);
+    let mut counts = vec![0u8; w * h];
+    // Edges as (top, bottom, x at top, dx/dy, winding).
+    let mut edges: Vec<(f32, f32, f32, f32, i32)> = Vec::new();
+    for contour in contours {
+        let n = contour.len();
+        for i in 0..n {
+            let (a, b) = (contour[i], contour[(i + 1) % n]);
+            if a.1 == b.1 || !(a.1.is_finite() && b.1.is_finite() && a.0.is_finite() && b.0.is_finite()) {
+                continue;
+            }
+            let (top, bottom, dir) = if a.1 < b.1 { (a, b, 1) } else { (b, a, -1) };
+            edges.push((top.1, bottom.1, top.0, (bottom.0 - top.0) / (bottom.1 - top.1), dir));
+        }
+    }
+    if edges.is_empty() || w == 0 || h == 0 {
+        return counts;
+    }
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut crossings: Vec<(f32, i32)> = Vec::new();
+    for row in 0..h {
+        for &(sx, sy) in &CLIP_SAMPLES {
+            let y = (y0 + row as i32) as f32 + sy;
+            crossings.clear();
+            for &(top, bottom, x, slope, dir) in &edges {
+                if top > y {
+                    break;
+                }
+                if y < bottom {
+                    crossings.push((x + (y - top) * slope, dir));
+                }
+            }
+            if crossings.len() < 2 {
+                continue;
+            }
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut winding = 0;
+            for pair in 0..crossings.len() - 1 {
+                winding += crossings[pair].1;
+                let inside = if even_odd { (pair + 1) % 2 == 1 } else { winding != 0 };
+                if !inside {
+                    continue;
+                }
+                // Pixels whose sample `px + sx` lies in [left, right).
+                let (left, right) = (crossings[pair].0, crossings[pair + 1].0);
+                let first = ((left - sx).ceil() as i64 - x0 as i64).max(0);
+                let end = ((right - sx).ceil() as i64 - x0 as i64).min(w as i64);
+                let line = &mut counts[row * w..(row + 1) * w];
+                for count in line.iter_mut().take(end.max(0) as usize).skip(first as usize) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+    for c in counts.iter_mut() {
+        *c = ((*c as u32 * 255 + 2) / 4) as u8;
+    }
+    counts
 }
 
 /// The open `PushOpacity` and `PushFilter` scopes, innermost last, when
@@ -10673,6 +11083,7 @@ mod opacity_scope_tests {
         match effect {
             LayerEffect::Fade(alpha) => fade_straight(batch.iter_mut(), start, alpha),
             LayerEffect::ColorMatrix(m) => filter_straight(batch.iter_mut(), start, &m),
+            LayerEffect::ClipMask(_) => {}
         }
     }
 
@@ -10807,5 +11218,44 @@ mod opacity_scope_tests {
         let mut batch = vec![OPAQUE, [0.8, 0.4, 0.2, 0.8]];
         fade_premultiplied(batch.iter_mut(), 1, 0.5);
         assert_eq!(batch, vec![OPAQUE, [0.4, 0.2, 0.1, 0.4]]);
+    }
+}
+
+/// C8b: the outline coverage `PushClipPath` composites through.
+#[cfg(test)]
+mod clip_mask_coverage_tests {
+    use super::clip_mask_coverage;
+
+    /// The triangle of `clip_path_shape_tests` (apex (150, 50), base
+    /// (50, 250)-(250, 250)): row 52 from x 147, as Chromium 148 paints it
+    /// (4x multisampled: 0.5 on the left edge, 0.25 on the right).
+    #[test]
+    fn a_triangle_edge_comes_out_in_chromium_quarters() {
+        let tri = vec![vec![(150.0, 50.0), (250.0, 250.0), (50.0, 250.0)]];
+        let row = clip_mask_coverage(&tri, false, 147, 52, 6, 1);
+        assert_eq!(row, vec![0, 128, 255, 255, 64, 0]);
+    }
+
+    /// A five-point star: its centre pentagon is wound twice, so even-odd
+    /// leaves it open and nonzero fills it; a tip is inside under both.
+    #[test]
+    fn evenodd_opens_a_twice_wound_centre_and_nonzero_fills_it() {
+        let star = vec![vec![(150.0, 50.0), (208.0, 230.0), (54.0, 120.0), (246.0, 120.0), (92.0, 230.0)]];
+        let at = |even_odd: bool, x: i32, y: i32| clip_mask_coverage(&star, even_odd, x, y, 1, 1)[0];
+        assert_eq!(at(true, 150, 140), 0);
+        assert_eq!(at(false, 150, 140), 255);
+        assert_eq!(at(true, 150, 80), 255);
+        assert_eq!(at(false, 150, 80), 255);
+        assert_eq!(at(false, 60, 60), 0);
+    }
+
+    /// Nothing to fill, or no pixels asked for: an empty mask, no panic.
+    #[test]
+    fn degenerate_input_is_an_empty_mask() {
+        assert_eq!(clip_mask_coverage(&[], false, 0, 0, 3, 2), vec![0; 6]);
+        let flat = vec![vec![(0.0, 5.0), (10.0, 5.0), (20.0, 5.0)]];
+        assert_eq!(clip_mask_coverage(&flat, false, 0, 0, 4, 8), vec![0; 32]);
+        let tri = vec![vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]];
+        assert!(clip_mask_coverage(&tri, false, 0, 0, 0, 0).is_empty());
     }
 }
