@@ -56,6 +56,8 @@ mod glyph_grid;
 mod scroll_cost_tests;
 #[cfg(test)]
 mod layer_cost_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod face_cache_tests;
 pub use frame_stats::FrameStats;
 mod glyph;
 mod pipeline;

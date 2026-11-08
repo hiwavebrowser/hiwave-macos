@@ -859,6 +859,13 @@ impl GlyphCache {
         Some((x, y))
     }
 
+    /// Every key an atlas entry is filed under (the FACE CONTRACT pins
+    /// read them: no entry may be keyed by an undecided face).
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &GlyphKey> {
+        self.entries.keys().chain(self.color_entries.keys())
+    }
+
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.entries.clear();
