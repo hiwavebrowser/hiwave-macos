@@ -31278,6 +31278,27 @@ mod element_identity_tests {
         assert_eq!(b.identity().map(|i| i.element_id), Some(42));
     }
 
+    /// Chrome's `getSelector()` builds body's OWN segment (tag + class) before it
+    /// reaches `html`, so a classed body reports `html > body.focus-mode`
+    /// (chrome board, focus_mode rows: Chrome `html > body.focus-mode`, RustKit
+    /// `html > body`, one missing_box + one phantom_box on every size). Its
+    /// descendants still hang off a bare `body`.
+    #[test]
+    fn reported_selector_keeps_the_class_of_a_classed_body() {
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "focus-mode")])),
+            "html > body.focus-mode"
+        );
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "  a  b ")])),
+            "html > body.a b"
+        );
+        assert_eq!(
+            Engine::reported_selector("body > div.x", &attrs(&[("class", "x")])),
+            "body > div.x"
+        );
+    }
+
     /// The join key is only worth anything if it actually JOINS. This walks the
     /// real fixture DOMs with the same three helpers the layout builder uses
     /// (`child_selector_segments`, `child_selector_path`, `reported_selector`)
