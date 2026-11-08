@@ -14358,7 +14358,19 @@ impl layout_ctx::LayoutCtx {
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
-                hints: hints.clone(),
+                // The UA defaults above read an <input>'s `type` (checkbox
+                // and radio margins, the button-like background), so two
+                // inputs of different types never share a style.
+                hints: {
+                    let mut h = hints.clone();
+                    if lower_tag(tag_name) == "input" {
+                        h.push((
+                            "ua-input-type",
+                            attributes.get("type").map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
+                        ));
+                    }
+                    h
+                },
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -44955,9 +44967,12 @@ mod windows_engine_pins {
             .iter()
             .map(|t| {
                 let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                // The UA heading sizes are em of the parent (CH2.B31); the
+                // cascade absolutizes them, here against the 16px default.
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
-                    other => panic!("<{t}> font-size is {other:?}, expected Px"),
+                    rustkit_css::Length::Em(em) => em * 16.0,
+                    other => panic!("<{t}> font-size is {other:?}, expected Px or Em"),
                 }
             })
             .collect();
