@@ -1365,6 +1365,15 @@ impl ViewState {
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
         self.lay.animations.borrow_mut().reset();
+        // LAT14: and the animated-style layer the page's Web Animations
+        // wrote, with the CSS animations published to script and script's
+        // controls of them: per raw NodeId as well, and shared with every
+        // document's bindings. Until 2026-11-08 it survived the swap: the
+        // next document's animation frames found a layer entry for a node
+        // the new page never captured and every one was laid out in full
+        // (`LayoutCtx::animation_frame`), and a new element that took the
+        // old node's id painted the old page's animated values.
+        *self.lay.animated.borrow_mut() = rustkit_bindings::AnimatedStyles::default();
         self.wheel_gesture = None;
         self.scrollbar_drag = None;
         self.scrollbar_hover = None;
@@ -9303,7 +9312,15 @@ impl Engine {
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
-        let dirty = dirty.unwrap_or_else(|| restyle_invalidation::DirtySet::full("no_dom_record"));
+        // No script-write set: an animation frame that needed a layout says
+        // so (LAT14); anything else nobody computed a set for.
+        let dirty = dirty.unwrap_or_else(|| {
+            restyle_invalidation::DirtySet::full(if causes.counts.get("animation") > 0 {
+                "animation"
+            } else {
+                "no_dom_record"
+            })
+        });
         let mut would = format!("dirty_nodes={} would_path={}", dirty.nodes.len(), dirty.would_path());
         if let Some(reason) = dirty.full {
             would.push_str(&format!(" full_reason={reason}"));

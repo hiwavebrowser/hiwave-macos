@@ -641,6 +641,14 @@ impl Animations {
         self.seen.retain(|_, s| *s == serial);
     }
 
+    /// Whether a build of this document has handed `node` to `on_style`:
+    /// it has a computed style and may have a box. A node no build visited
+    /// (detached, or under a `display: none` ancestor) paints nothing, so
+    /// an animation on it changes nothing a frame has to place (LAT14).
+    pub(crate) fn visited(&self, node: usize) -> bool {
+        self.seen.contains_key(&node)
+    }
+
     /// Whether `node` has a transition or a CSS animation record.
     pub(crate) fn has_records(&self, node: usize) -> bool {
         self.transitions.iter().any(|t| t.node == node) || self.css.iter().any(|a| a.node == node)
