@@ -6309,6 +6309,11 @@ impl Engine {
     /// form, a listener cancelled, or the form is not a GET to this view.
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
+        self.submit_focused_form_with(id, false, false, false)
+    }
+
+    /// CH2.E37 red stub: the modifiers are still dropped.
+    pub fn submit_focused_form_with(&mut self, id: EngineViewId, _ctrl: bool, _shift: bool, _alt: bool) -> Option<String> {
         let _hold = wgate::hold("submit");
         // Enter in an open `<select>` drop-down picks an option
         // (`handle_text_key`); it submits nothing.
@@ -6344,6 +6349,11 @@ impl Engine {
         self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
             .map(|sub| sub.url)
+    }
+
+    /// CH2.E37 red stub: nothing records the submit step's keydown.
+    pub(crate) fn enter_keydown_pending(&self, _id: EngineViewId) -> bool {
+        false
     }
 
     /// Fire `keydown` or `keyup` for a key at `node` (`None`: the page's
@@ -35079,6 +35089,112 @@ mod node_identity_tests {
         js(&mut engine, id, "log.length = 0; window.stay = false; window.block = 'Enter'");
         assert_eq!(engine.submit_focused_form(id), None);
         assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("keydown:Enter:q:true"));
+    }
+
+    // CH2.E37 (hiwave-macos#990): Enter's keydown is fired by the submit
+    // step, which hardcoded every modifier to false, so a page could not
+    // tell Shift+Enter from Enter. The usual chat box (Enter sends and
+    // cancels; Shift+Enter is a newline) also needs a cancelled Enter
+    // keydown to type nothing, and the key step after the submit step did
+    // not know the submit step's keydown was cancelled.
+    const ENTER_MODS_PAGE: &str = concat!(
+        r#"<html><body style="margin:0">"#,
+        r#"<textarea id="t" style="display:block;width:200px;height:40px"></textarea>"#,
+        r#"<form id="f" action="/search"><input id="q" name="q" style="display:block;width:200px;height:30px"></form>"#,
+        r#"</body></html>"#,
+    );
+
+    fn enter_mods_page() -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine.load_html(id, ENTER_MODS_PAGE).expect("load_html");
+        engine.views.get_mut(&id).expect("view").url = Some(Url::parse("https://example.com/page").unwrap());
+        js(
+            &mut engine,
+            id,
+            "window.log = []; \
+             document.addEventListener('keydown', function (e) { \
+             log.push(e.key + ':' + e.target.id + ':' + (e.shiftKey ? 'S' : '') + (e.ctrlKey ? 'C' : '') + (e.altKey ? 'A' : '')); \
+             if (e.key === 'Enter' && e.target.id === 't' && !e.shiftKey) e.preventDefault(); }); \
+             document.getElementById('f').addEventListener('submit', function (e) { log.push('submit'); });",
+        );
+        (engine, id)
+    }
+
+    /// Enter as the shells deliver it: the submit step, then the key step
+    /// when nothing was submitted.
+    fn press_enter(engine: &mut Engine, id: EngineViewId, ctrl: bool, shift: bool, alt: bool) -> Option<String> {
+        if let Some(url) = engine.submit_focused_form_with(id, ctrl, shift, alt) {
+            return Some(url);
+        }
+        engine.handle_text_key(id, 0x0D, "", ctrl, shift, alt);
+        None
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn enter_keydown_carries_its_modifiers_and_a_cancel_types_nothing() {
+        let (mut engine, id) = enter_mods_page();
+        engine.click_at_point(id, 20.0, 20.0);
+        js(&mut engine, id, "log.length = 0");
+
+        // Shift+Enter in the chat box: the page sees shiftKey and lets it
+        // through, so the textarea takes a newline.
+        assert_eq!(press_enter(&mut engine, id, false, true, false), None);
+        // Enter alone: the page cancels it, so nothing is typed.
+        assert_eq!(press_enter(&mut engine, id, false, false, false), None);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + JSON.stringify(document.getElementById('t').value)"),
+            js_string("Enter:t:S Enter:t: | \"\\n\"")
+        );
+        // Ctrl+Alt+Enter: both flags reach the page. (What the chord types
+        // is the edit model's; not pinned here.)
+        assert_eq!(press_enter(&mut engine, id, true, false, true), None);
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("Enter:t:S Enter:t: Enter:t:CA"));
+
+        // Shift+Enter in a form field still submits, and the keydown says
+        // Shift was down.
+        engine.click_at_point(id, 20.0, 60.0);
+        js(&mut engine, id, "log.length = 0");
+        assert_eq!(
+            press_enter(&mut engine, id, false, true, false).as_deref(),
+            Some("https://example.com/search?q=")
+        );
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("Enter:q:S submit"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn enter_in_a_textarea_types_a_newline_and_fires_one_keydown() {
+        let (mut engine, id) = enter_mods_page();
+        engine.click_at_point(id, 20.0, 20.0);
+        js(&mut engine, id, "log.length = 0");
+
+        // The key step alone (no submit step first) still fires Enter's
+        // keydown, once, and the textarea takes the line break.
+        engine.handle_text_key(id, 0, "a", false, false, false);
+        assert!(engine.handle_text_key(id, 0x0D, "", false, true, false));
+        engine.handle_text_key(id, 0, "b", false, false, false);
+        assert_eq!(
+            js(&mut engine, id, "log.join(' ') + ' | ' + JSON.stringify(document.getElementById('t').value)"),
+            js_string("a:t: Enter:t:S b:t: | \"a\\nb\"")
+        );
+
+        // The submit step leaves its keydown for the key step, which takes
+        // it once: a second key step fires its own.
+        js(&mut engine, id, "log.length = 0");
+        assert_eq!(engine.submit_focused_form_with(id, false, true, false), None);
+        assert!(engine.enter_keydown_pending(id));
+        assert!(engine.handle_text_key(id, 0x0D, "", false, true, false));
+        assert!(!engine.enter_keydown_pending(id));
+        assert!(engine.handle_text_key(id, 0x0D, "", false, true, false));
+        assert_eq!(js(&mut engine, id, "log.join(' ')"), js_string("Enter:t:S Enter:t:S"));
+        assert_eq!(
+            js(&mut engine, id, "JSON.stringify(document.getElementById('t').value)"),
+            js_string("\"a\\nb\\n\\n\"")
+        );
     }
 
     // Pete's live testing, continued: a page's own keyboard shortcuts were
