@@ -49541,6 +49541,41 @@ mod clip_path_pins {
         }
     }
 
+    /// `round <percent>` in `inset()` / `rect()` / `xywh()` resolves against
+    /// the reference box, like the offsets, not against the inset rectangle
+    /// (css-shapes-1 §3.1; WPT clip-path-inset-round-percent, 66 px off).
+    /// The radii were taken of the inset rect, so `inset(80% 0 0 round 8%)`
+    /// on a 100px box rounded 8px by 1.6px. Chrome for Testing 148 paints
+    /// `inset(80% 0 0 round 8%)` on 100x100 exactly as `inset(80px 0 0
+    /// round 8px)`, and `inset(50% 0 0 round 10%)` on 200x100 exactly as
+    /// `inset(50px 0 0 round 20px / 10px)` (172 px away from `20px / 5px`);
+    /// the `/ 20%` and `xywh()` rows match their px forms there too (0 px).
+    #[test]
+    fn clip_path_inset_round_percent_resolves_against_the_reference_box() {
+        let e = engine();
+        let page = |size: &str, style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="{size};background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases = [
+            ("width:100px;height:100px", "clip-path:inset(80% 0 0 round 8%)", "x: 0.0, y: 80.0, width: 100.0, height: 20.0", "CornerRadius { h: 8.0, v: 8.0 }"),
+            ("width:200px;height:100px", "clip-path:inset(50% 0 0 round 10%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 10.0 }"),
+            ("width:200px;height:100px", "clip-path:inset(50% 0 0 round 10% / 20%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 20.0 }"),
+            ("width:200px;height:100px", "clip-path:xywh(0 50% 100% 50% round 10%)", "x: 0.0, y: 50.0, width: 200.0, height: 50.0", "CornerRadius { h: 20.0, v: 10.0 }"),
+        ];
+        for (size, style, rect, corner) in cases {
+            let lines = page(size, style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClipRounded"))
+                .unwrap_or_else(|| panic!("`{style}` opened no rounded clip:\n{all}"));
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+        }
+    }
+
     /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
     /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
     /// box. A `<geometry-box>` alone clips to that box. All of them were
