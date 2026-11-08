@@ -47,6 +47,31 @@ pub struct GlyphKey {
     /// that declares the same family name with another file reuse the first
     /// document's glyphs.
     pub web_face: u64,
+    /// Which face draws this character (FACE CONTRACT): layout's recorded
+    /// decision when the command carries one, else what the rasterizer's own
+    /// `select_face` decides from the selector after the character. The
+    /// same character takes different bitmaps under different faces (`©` in
+    /// Helvetica, `©️` in Apple Color Emoji), so the face is in the key.
+    pub face: FaceKey,
+}
+
+/// How a [`GlyphKey`] names its face (see [`GlyphKey::face`]).
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub enum FaceKey {
+    /// No record from layout (a legacy command without advances): the
+    /// rasterizer decides with `rustkit_text::macos::select_face` on its
+    /// own font, given the variation selector after the character.
+    Auto(rustkit_text::Variation),
+    /// The face layout measured the character in
+    /// (`DisplayCommand::Text::faces`); the rasterizer draws from it and
+    /// decides nothing.
+    Recorded(rustkit_text::GlyphFace),
+}
+
+impl Default for FaceKey {
+    fn default() -> Self {
+        FaceKey::Auto(rustkit_text::Variation::None)
+    }
 }
 
 impl GlyphKey {
@@ -164,10 +189,10 @@ pub struct GlyphCache {
     color_atlas: wgpu::Texture,
     _color_atlas_view: wgpu::TextureView,
     color_bind_group: wgpu::BindGroup,
-    /// Colour-path entries by key and presentation (`emoji_presented`);
-    /// `None` remembers a character whose face is a text face, so the
-    /// caller paints it on the coverage-mask path without re-asking.
-    color_entries: HashMap<(GlyphKey, bool), Option<GlyphEntry>>,
+    /// Colour-path entries by key (the key carries the face, see
+    /// `GlyphKey::face`); `None` remembers a character no face draws, so the
+    /// caller owes its advance without re-asking.
+    color_entries: HashMap<GlyphKey, Option<GlyphEntry>>,
     color_next_x: u32,
     color_next_y: u32,
     color_row_height: u32,
@@ -349,23 +374,28 @@ impl GlyphCache {
         &self.color_bind_group
     }
 
-    /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
-    /// atlas entry (tex_coords into the color atlas), or None if the platform
-    /// or font can't produce a color glyph for this codepoint.
-    #[allow(unused_variables)]
-    pub fn get_or_rasterize_color(
+    /// FACE CONTRACT (macOS): the glyph for `key` from the face its `face`
+    /// names — layout's recorded decision, or for a legacy caller the
+    /// rasterizer's own `select_face` on the same font — on the path that
+    /// face takes. Returns the atlas entry and whether it is in the colour
+    /// atlas (`true`: the blit pipeline; `false`: the coverage mask the
+    /// text pipeline tints). `None` for a character no face draws (an
+    /// `Ignorable` selector, or no face has it); the caller still owes its
+    /// advance. Nothing here decides a face: `rasterize_with_face` resolves
+    /// a `Fallback` through the lookup layout measured with.
+    #[cfg(target_os = "macos")]
+    pub fn get_or_rasterize_faced(
         &mut self,
-        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         key: &GlyphKey,
-        emoji: bool,
-    ) -> Option<GlyphEntry> {
-        let cache_key = (key.clone(), emoji);
-        if let Some(entry) = self.color_entries.get(&cache_key) {
-            return entry.clone();
+    ) -> Option<(GlyphEntry, bool)> {
+        if let Some(entry) = self.entries.get(key) {
+            return Some((entry.clone(), false));
+        }
+        if let Some(entry) = self.color_entries.get(key) {
+            return entry.clone().map(|entry| (entry, true));
         }
 
-        #[cfg(target_os = "macos")]
         let raster = {
             let italic = key.font_style == 1;
             let family = if key.font_family.is_empty() {
@@ -379,19 +409,63 @@ impl GlyphCache {
                 key.font_weight,
                 italic,
             );
-            rasterizer.rasterize_char_color_presented(key.codepoint, emoji)
+            let face = match key.face {
+                FaceKey::Recorded(face) => face,
+                FaceKey::Auto(variation) => rasterizer.select_face(key.codepoint, variation),
+            };
+            rasterizer.rasterize_with_face(key.codepoint, face)
         };
+        match raster {
+            Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => {
+                self.insert_mask(queue, key, raster).map(|entry| (entry, false))
+            }
+            Some(rustkit_text::macos::GlyphRaster::Color(raster)) => {
+                self.insert_color(queue, key, raster).map(|entry| (entry, true))
+            }
+            None => {
+                self.color_entries.insert(key.clone(), None);
+                None
+            }
+        }
+    }
+
+    /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
+    /// atlas entry (tex_coords into the color atlas), or None if the platform
+    /// or font can't produce a color glyph for this codepoint. (On macOS the
+    /// face decides the path instead: `get_or_rasterize_faced`.)
+    #[cfg(not(target_os = "macos"))]
+    #[allow(unused_variables)]
+    pub fn get_or_rasterize_color(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+    ) -> Option<GlyphEntry> {
+        if let Some(entry) = self.color_entries.get(key) {
+            return entry.clone();
+        }
+
         #[cfg(windows)]
         let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
         #[cfg(not(any(target_os = "macos", windows)))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
-        #[cfg(not(target_os = "macos"))]
-        let _ = emoji;
-        let Some((rgba, gw, gh, advance, bearing_x, bearing_y)) = raster else {
-            self.color_entries.insert(cache_key, None);
+        let Some(raster) = raster else {
+            self.color_entries.insert(key.clone(), None);
             return None;
         };
+        self.insert_color(queue, key, raster)
+    }
+
+    /// Upload a colour-path raster for `key` into the RGBA atlas and
+    /// remember its entry.
+    fn insert_color(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+        raster: (Vec<u8>, u32, u32, f32, f32, f32),
+    ) -> Option<GlyphEntry> {
+        let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster;
         let gw = gw.max(1).min(256);
         let gh = gh.max(1).min(256);
 
@@ -431,7 +505,7 @@ impl GlyphCache {
             offset: [bearing_x, -bearing_y],
             advance,
         };
-        self.color_entries.insert(cache_key, Some(entry.clone()));
+        self.color_entries.insert(key.clone(), Some(entry.clone()));
         Some(entry)
     }
 
@@ -568,7 +642,18 @@ impl GlyphCache {
             ))
         };
 
-        let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster_result?;
+        self.insert_mask(queue, key, raster_result?)
+    }
+
+    /// Upload a coverage-mask raster for `key` into the grayscale atlas and
+    /// remember its entry.
+    fn insert_mask(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+        raster: (Vec<u8>, u32, u32, f32, f32, f32),
+    ) -> Option<GlyphEntry> {
+        let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster;
 
         let glyph_width = glyph_width.max(1).min(256);
         let glyph_height = glyph_height.max(1).min(256);
@@ -914,6 +999,7 @@ pub(crate) fn rasterize_char_for_test(
         font_style: 0,
         subpixel_phase: 0,
         web_face: 0,
+        face: FaceKey::default(),
     };
     rasterize_glyph_directwrite(&key, size)
 }
@@ -1214,6 +1300,7 @@ mod tests {
             font_style: 0,
             subpixel_phase: phase,
             web_face: 0,
+            face: FaceKey::default(),
         }
     }
 
@@ -1361,6 +1448,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            face: FaceKey::default(),
         };
 
         let key2 = GlyphKey {
@@ -1371,6 +1459,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            face: FaceKey::default(),
         };
 
         assert_eq!(key1, key2);
@@ -1386,6 +1475,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            face: FaceKey::default(),
         };
 
         let key2 = GlyphKey {
@@ -1396,6 +1486,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            face: FaceKey::default(),
         };
 
         assert_ne!(key1, key2);

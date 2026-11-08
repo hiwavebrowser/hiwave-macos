@@ -2511,11 +2511,13 @@ impl Renderer {
                 advances,
                 ascent,
                 run,
+                faces,
             } => {
                 // SHAPED-RUN CONTRACT (S0): a command that carries its run
                 // is painted from the run. The family-list path below is
                 // for commands without one, and for a run whose face the
-                // rasterizer no longer holds.
+                // rasterizer no longer holds; it reads the FACE CONTRACT's
+                // record (`faces`) for which face draws each character.
                 let painted_from_run = run
                     .as_deref()
                     .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
@@ -2531,6 +2533,7 @@ impl Renderer {
                         *font_style,
                         advances.as_deref(),
                         *ascent,
+                        faces.as_deref(),
                     );
                 }
             }
@@ -5140,6 +5143,7 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
             );
         }
 
@@ -5234,6 +5238,7 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
             );
         }
         self.pop_clip();
@@ -5311,6 +5316,7 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
             );
         }
         
@@ -5464,6 +5470,7 @@ impl Renderer {
                 font_weight,
                 font_style,
                 web_face,
+                face: FaceKey::default(),
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
@@ -5704,6 +5711,7 @@ impl Renderer {
         font_style: u8,
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
+        layout_faces: Option<&[rustkit_text::GlyphFace]>,
     ) {
         let mut cursor_x = x;
         let c = [
@@ -5748,8 +5756,18 @@ impl Renderer {
         let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
         let chars: Vec<char> = text.chars().collect();
+        // FACE CONTRACT: layout's record of the face each character was
+        // measured in, when the command carries one for this text. Paint
+        // draws from it and decides nothing; a legacy command without one
+        // gets the same decision (`select_face`) made in the rasterizer on
+        // its own font, from the selector after the character.
+        let faces = layout_faces.filter(|faces| faces.len() == chars.len());
         for (char_idx, &ch) in chars.iter().enumerate() {
             let next = chars.get(char_idx + 1).copied();
+            let face = match faces {
+                Some(faces) => FaceKey::Recorded(faces[char_idx]),
+                None => FaceKey::Auto(rustkit_text::Variation::after(next)),
+            };
             let key = GlyphKey {
                 // FROZEN AT 0 until the rasterizer can draw at a phase --
                 // see GlyphKey::subpixel_phase. Pixels are bit-identical to
@@ -5761,145 +5779,143 @@ impl Renderer {
                 font_weight,
                 font_style,
                 web_face,
+                face,
             };
+            // ADVANCE CONTRACT: layout's advance wins when present so
+            // painted ink tracks measured width 1:1; the atlas advance is
+            // the fallback for legacy callers.
+            let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
-            // Color-glyph (emoji) path: paint the real color-bitmap artwork via
-            // the RGBA atlas + blit pipeline, not the grayscale coverage mask
-            // the normal path would tint into a flat blob. Falls through to the
-            // grayscale path if the char isn't a color glyph or has no color
-            // artwork (e.g. non-macOS).
-            // On macOS the face decides (`rasterize_char_color_presented`):
-            // an emoji-presented character (Emoji_Presentation, or U+FE0F
-            // next) is colour; a text-default one is colour only when its
-            // fallback face is (`🛡` under the system font), and `⚙`'s
-            // Menlo comes back as None and takes the mask path below.
+            // The glyph, and whether it is colour artwork (the RGBA atlas +
+            // blit pipeline, untinted) or a coverage mask (the grayscale
+            // atlas the text pipeline tints). On macOS the face in the key
+            // decides the path (`get_or_rasterize_faced`): a colour face's
+            // glyph is colour, any other a mask, whatever the character.
             #[cfg(target_os = "macos")]
-            let emoji = rustkit_text::macos::emoji_presented(ch, next);
-            #[cfg(not(target_os = "macos"))]
-            let emoji = {
-                let _ = next;
-                true
-            };
-            #[cfg(target_os = "macos")]
-            let is_color = emoji || rustkit_text::is_emoji(ch);
+            let drawn = self.glyph_cache.get_or_rasterize_faced(&self.queue, &key);
             #[cfg(windows)]
-            let is_color = rustkit_text::is_emoji(ch);
+            let drawn = {
+                let _ = &face;
+                let colour = if rustkit_text::is_emoji(ch) {
+                    self.glyph_cache
+                        .get_or_rasterize_color(&self.device, &self.queue, &key)
+                        .map(|entry| (entry, true))
+                } else {
+                    None
+                };
+                colour.or_else(|| {
+                    self.glyph_cache
+                        .get_or_rasterize(&self.device, &self.queue, &key)
+                        .map(|entry| (entry, false))
+                })
+            };
             #[cfg(not(any(target_os = "macos", windows)))]
-            let is_color = false;
-            if is_color {
-                if let Some(entry) =
-                    self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key, emoji)
-                {
-                    let glyph_x = cursor_x + entry.offset[0];
-                    let glyph_y = baseline + entry.offset[1];
-                    let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
-                    let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+            let drawn = {
+                let _ = &face;
+                self.glyph_cache
+                    .get_or_rasterize(&self.device, &self.queue, &key)
+                    .map(|entry| (entry, false))
+            };
 
-                    // The advance is owed whether or not the glyph survives
-                    // the clip — a clipped-away glyph still occupies its run.
-                    cursor_x += layout_advances
-                        .and_then(|a| a.get(char_idx).copied())
-                        .unwrap_or(entry.advance);
+            let Some((entry, colour)) = drawn else {
+                // Nothing to draw (a selector, or a character no face has):
+                // the advance is still owed — layout's, else nothing for a
+                // selector and an estimate for anything else.
+                cursor_x += layout_advance.unwrap_or(if rustkit_text::is_default_ignorable(ch) {
+                    0.0
+                } else {
+                    font_size * 0.6
+                });
+                continue;
+            };
 
-                    for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
-                        .textured_pieces(
-                            Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                            entry.tex_coords,
-                        )
-                    {
-                        // White vertex color: the blit pipeline multiplies, so this
-                        // passes the emoji's own colors through untinted. Preserve
-                        // the run's alpha for opacity/fade. The emoji is
-                        // premultiplied, so a rounded clip's partial coverage
-                        // scales every channel.
-                        let cw = [coverage, coverage, coverage, color.a * coverage];
-                        let base = self.color_glyph_vertices.len() as u32;
-                        self.color_glyph_vertices.extend_from_slice(&[
-                            TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
-                            TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
-                            TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
-                            TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
-                        ]);
-                        self.color_glyph_indices.extend_from_slice(&[
-                            base, base + 1, base + 2,
-                            base, base + 2, base + 3,
-                        ]);
-                    }
-                    continue;
-                }
-            }
+            let glyph_x = cursor_x + entry.offset[0];
+            let glyph_y = baseline + entry.offset[1];
+            let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+            let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
-            // Clone the entry to avoid borrow issues
-            if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
-                let glyph_y = baseline + entry.offset[1];
+            // The advance is owed whether or not the glyph survives the
+            // clip — a clipped-away glyph still occupies its run.
+            cursor_x += layout_advance.unwrap_or(entry.advance);
 
-                // PAINT-0: sample chars only — x (ex-height), H (cap), g
-                // (descender) cover the three seating regimes.
-                if matches!(ch, 'x' | 'H' | 'g') && crate::paint0_probe() {
-                    eprintln!(
-                        "PAINT0 glyph ch={:?} fs={} baseline={} bearing_y={} glyph_y={}",
-                        ch,
-                        font_size,
-                        baseline,
-                        -entry.offset[1],
-                        glyph_y
-                    );
-                }
-                let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
-                let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
-
-                // ADVANCE CONTRACT: layout's advance wins when present so
-                // painted ink tracks measured width 1:1; the atlas advance
-                // is the fallback for legacy callers. Owed before the clip
-                // check — a clipped-away glyph still occupies its run.
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
-
-                // `overflow: hidden` clips glyphs like everything else.
+            if colour {
                 for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
                     .textured_pieces(
                         Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                         entry.tex_coords,
                     )
                 {
-                    let c = [c[0], c[1], c[2], c[3] * coverage];
-                    let base = self.texture_vertices.len() as u32;
-
-                    self.texture_vertices.extend_from_slice(&[
-                        TextureVertex {
-                            position: [x0, y0],
-                            tex_coords: [tex[0], tex[1]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x1, y1],
-                            tex_coords: [tex[2], tex[1]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x2, y2],
-                            tex_coords: [tex[2], tex[3]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x3, y3],
-                            tex_coords: [tex[0], tex[3]],
-                            color: c,
-                        },
+                    // White vertex color: the blit pipeline multiplies, so this
+                    // passes the emoji's own colors through untinted. Preserve
+                    // the run's alpha for opacity/fade. The emoji is
+                    // premultiplied, so a rounded clip's partial coverage
+                    // scales every channel.
+                    let cw = [coverage, coverage, coverage, color.a * coverage];
+                    let base = self.color_glyph_vertices.len() as u32;
+                    self.color_glyph_vertices.extend_from_slice(&[
+                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
                     ]);
-
-                    self.texture_indices.extend_from_slice(&[
+                    self.color_glyph_indices.extend_from_slice(&[
                         base, base + 1, base + 2,
                         base, base + 2, base + 3,
                     ]);
                 }
-            } else {
-                // Fallback: advance by estimated width (or layout's, if given)
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(font_size * 0.6);
+                continue;
+            }
+
+            // PAINT-0: sample chars only — x (ex-height), H (cap), g
+            // (descender) cover the three seating regimes.
+            if matches!(ch, 'x' | 'H' | 'g') && crate::paint0_probe() {
+                eprintln!(
+                    "PAINT0 glyph ch={:?} fs={} baseline={} bearing_y={} glyph_y={}",
+                    ch,
+                    font_size,
+                    baseline,
+                    -entry.offset[1],
+                    glyph_y
+                );
+            }
+
+            // `overflow: hidden` clips glyphs like everything else.
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                .textured_pieces(
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                )
+            {
+                let c = [c[0], c[1], c[2], c[3] * coverage];
+                let base = self.texture_vertices.len() as u32;
+
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color: c,
+                    },
+                ]);
+
+                self.texture_indices.extend_from_slice(&[
+                    base, base + 1, base + 2,
+                    base, base + 2, base + 3,
+                ]);
             }
         }
     }

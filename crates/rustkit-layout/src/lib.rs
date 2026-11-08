@@ -8736,6 +8736,14 @@ pub enum DisplayCommand {
         /// not name its face) and on the legacy callers; paint then walks
         /// `text` as before. A lane that edits the emitter keeps this field.
         run: Option<std::sync::Arc<GlyphRun>>,
+        /// FACE CONTRACT: the face each character was measured in
+        /// (`rustkit_text::macos::select_face`, ONE decision per character,
+        /// parallel to `advances`). Paint draws every character from the
+        /// recorded face, colour or mask, and never decides a face itself,
+        /// so the advance it owes and the glyph it draws are layout's. `None`
+        /// on the legacy callers (paint then decides with the same function
+        /// on its own font) and wherever `advances` is `None`.
+        faces: Option<Vec<rustkit_text::GlyphFace>>,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -12048,6 +12056,10 @@ impl DisplayList {
                 // text path.)
                 let shaped = shape_line(&text, style, font_size);
                 let mut advances = shaped.as_ref().and_then(char_advances_of);
+                // FACE CONTRACT: the face each character was measured in
+                // rides with its advance; paint draws from it (see
+                // `DisplayCommand::Text::faces`).
+                let faces = shaped.as_ref().and_then(char_faces_of);
                 // SHAPED-RUN CONTRACT (S0): the same shape call, frozen with
                 // the justification slack in it. `advances` above is its
                 // projection onto characters and stays for the old path.
@@ -12120,7 +12132,7 @@ impl DisplayList {
                 // edge and paint `…` in the run's own font. Without per-char
                 // advances there is nothing to cut against — the run paints
                 // as laid out and the clip alone applies.
-                let (text, advances, text_width, line_run) = match (self.ellipsis.as_mut(), &advances) {
+                let (text, advances, faces, text_width, line_run) = match (self.ellipsis.as_mut(), &advances) {
                     (Some(scope), Some(adv)) => {
                         let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
                             .and_then(|a| a.first().copied())
@@ -12137,7 +12149,7 @@ impl DisplayList {
                                 .width
                             });
                         match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
-                            TextOverflowCut::Keep => (text, advances, text_width, line_run),
+                            TextOverflowCut::Keep => (text, advances, faces, text_width, line_run),
                             TextOverflowCut::Hide => continue,
                             TextOverflowCut::Cut {
                                 text,
@@ -12148,16 +12160,30 @@ impl DisplayList {
                                 // the kept glyphs, then the ellipsis shaped
                                 // alone in the same face (as its advance was).
                                 let kept = advances.len().saturating_sub(1);
+                                let ellipsis = shape_line("\u{2026}", style, font_size);
+                                // The faces are cut the same way; the
+                                // ellipsis carries the face it was shaped in.
+                                let faces = faces.map(|f| {
+                                    let mut cut: Vec<_> = f.into_iter().take(kept).collect();
+                                    cut.push(
+                                        ellipsis
+                                            .as_ref()
+                                            .and_then(|e| e.glyphs.first().map(|g| g.face))
+                                            .unwrap_or(rustkit_text::GlyphFace::Primary),
+                                    );
+                                    cut
+                                });
                                 let line_run = line_run.and_then(|run| {
-                                    shape_line("\u{2026}", style, font_size)
-                                        .and_then(|tail| GlyphRun::freeze(&tail, 0.0))
+                                    ellipsis
+                                        .as_ref()
+                                        .and_then(|tail| GlyphRun::freeze(tail, 0.0))
                                         .and_then(|tail| run.cut_with_tail(kept, &tail))
                                 });
-                                (text, Some(advances), width, line_run)
+                                (text, Some(advances), faces, width, line_run)
                             }
                         }
                     }
-                    _ => (text, advances, text_width, line_run),
+                    _ => (text, advances, faces, text_width, line_run),
                 };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
@@ -12205,6 +12231,7 @@ impl DisplayList {
                     advances,
                     ascent: Some(seat_ascent),
                     run: line_run.map(std::sync::Arc::new),
+                    faces,
                 });
 
                 // Draw text decorations
@@ -12899,6 +12926,15 @@ fn char_advances_of(run: &ShapedRun) -> Option<Vec<f32>> {
         return None;
     }
     Some(run.glyphs.iter().map(|g| g.advance).collect())
+}
+
+/// Per-CHAR faces from the layout shaper (FACE CONTRACT), parallel to
+/// `char_advances_of` and `None` in the same cases.
+fn char_faces_of(run: &ShapedRun) -> Option<Vec<rustkit_text::GlyphFace>> {
+    if run.glyphs.len() != run.text.chars().count() {
+        return None;
+    }
+    Some(run.glyphs.iter().map(|g| g.face).collect())
 }
 
 /// Per-CHAR advances from the layout shaper, letter/word-spacing applied

@@ -60,13 +60,18 @@ fn text_default_emoji_rows_match_chromium() {
     );
     assert_eq!(heights, "17 23 23 17 23 23 17 17 17 17", "Chromium 148 icon heights");
     // A selector is zero-width: `▾` + U+FE0F is as wide as `▾` (Chrome
-    // 6.453125), `⚙` + U+FE0E as wide as `⚙`.
+    // 6.453125), `©` is the system font's (12.375), `⚙` + U+FE0E as wide
+    // as `⚙` (Menlo, 8.4375). Core Text's advances differ from Skia's
+    // rounding in the third decimal, as the gear above.
     let widths = eval(
         ROWS,
         "Array.prototype.map.call(document.querySelectorAll('.i'), function (e) { \
          return e.getBoundingClientRect().width; }).slice(6, 9).join(' ')",
     );
-    assert_eq!(widths, "6.453125 12.375 8.4375", "Chromium 148 icon widths (rows 7-9)");
+    let got: Vec<f64> = widths.split(' ').map(|w| w.parse().expect("a width")).collect();
+    for (got, want) in got.iter().zip([6.453125, 12.375, 8.4375]) {
+        assert!((got - want).abs() < 0.05, "icon widths (rows 7-9) {widths}, Chromium 148 6.453125 12.375 8.4375");
+    }
     // The gear is Menlo's advance (Chrome 8.4375), not the emoji face's.
     // (The colour faces' advances are 1-2px wider than Chrome's 18 here:
     // Core Text's sbix advance, a separate, older difference.)

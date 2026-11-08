@@ -21284,6 +21284,7 @@ impl Engine {
                     advances,
                     ascent,
                     run,
+                    faces: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint

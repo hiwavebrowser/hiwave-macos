@@ -191,17 +191,20 @@ fn layout_advance_is_the_painted_advance_for_every_presentation() {
                     )
                     .expect("shapes");
                 let layout_advance = run.glyphs[0].advance;
-                // Paint's side, as rustkit-renderer draws today.
-                let emoji = rustkit_text::macos::emoji_presented(ch, next);
-                let paint_advance = if emoji || rustkit_text::is_emoji(ch) {
-                    paint.rasterize_char_color_presented(ch, emoji).map(|r| r.3)
-                } else {
-                    None
-                }
-                .or_else(|| paint.rasterize_char(ch, 0.0).map(|r| r.3))
-                .expect("paints");
+                // Paint's side: the face the shaper recorded on the glyph
+                // (the display list carries it), nothing re-decided.
+                let face = run.glyphs[0].face;
+                let paint_advance = paint.rasterize_with_face(ch, face).expect("paints").advance();
                 if (layout_advance - paint_advance).abs() > 0.01 {
-                    wrong.push(format!("{family} {ch:?} {variant}: layout {layout_advance} vs paint {paint_advance}"));
+                    wrong.push(format!(
+                        "{family} {ch:?} {variant}: {face:?} layout {layout_advance} vs paint {paint_advance}"
+                    ));
+                }
+                // A rasterizer without the record decides the same face
+                // from the same font.
+                let auto = paint.select_face(ch, rustkit_text::Variation::after(next));
+                if auto != face {
+                    wrong.push(format!("{family} {ch:?} {variant}: layout {face:?} vs paint's own {auto:?}"));
                 }
                 // The selector itself is zero-width wherever it lands.
                 if let Some(vs) = run.glyphs.get(1) {
