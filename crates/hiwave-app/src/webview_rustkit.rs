@@ -697,13 +697,14 @@ impl RustKitView {
     /// and this is the URL to navigate to when its form submits. `None`
     /// when there is no form, a listener cancelled, or the form is not a
     /// GET.
-    pub fn form_submit_url(&self) -> Option<String> {
+    /// The modifiers are the key's; the page's keydown carries them.
+    pub fn form_submit_url(&self, ctrl: bool, shift: bool, alt: bool) -> Option<String> {
         if self.content.is_some() {
             // Enter is a key. The page submits the focused form and emits
             // NavigateRequested; this does not wait for that URL.
             return None;
         }
-        self.ask(|reply| PageCmd::Input(PageInput::FormSubmit { reply }))
+        self.ask(|reply| PageCmd::Input(PageInput::FormSubmit { ctrl, shift, alt, reply }))
             .flatten()
     }
 

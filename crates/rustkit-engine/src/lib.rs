@@ -1177,6 +1177,10 @@ struct ViewState {
     /// CH2.E22: the focused button a Space keydown went to; its keyup
     /// clicks it.
     space_armed: Option<usize>,
+    /// CH2.E37: the Enter keydown the submit step fired and submitted
+    /// nothing for — `Some(true)` when the page let it through. The key
+    /// step that follows takes it instead of firing a second keydown.
+    enter_keydown: Option<bool>,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -2983,6 +2987,7 @@ impl Engine {
             pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
+            enter_keydown: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3098,6 +3103,7 @@ impl Engine {
             pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
+            enter_keydown: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3230,6 +3236,7 @@ impl Engine {
             pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
+            enter_keydown: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -6124,11 +6131,19 @@ impl Engine {
             return !not_cancelled;
         };
         // The page hears the key first; a cancelled keydown types nothing.
-        // Enter's keydown is `submit_focused_form`'s, which the caller
-        // tries before this.
-        if key_code != 0x0D
-            && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
+        // Enter's keydown is `submit_focused_form`'s when the caller tried
+        // that first (it records whether the page let it through); without
+        // it, Enter's keydown is fired here like any key's.
+        let not_cancelled = match self
+            .views
+            .get_mut(&id)
+            .and_then(|v| v.enter_keydown.take())
+            .filter(|_| key_code == 0x0D)
         {
+            Some(seen) => seen,
+            None => self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt),
+        };
+        if !not_cancelled {
             return false;
         }
         self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
@@ -6312,18 +6327,45 @@ impl Engine {
         self.submit_focused_form_with(id, false, false, false)
     }
 
-    /// CH2.E37 red stub: the modifiers are still dropped.
-    pub fn submit_focused_form_with(&mut self, id: EngineViewId, _ctrl: bool, _shift: bool, _alt: bool) -> Option<String> {
+    /// [`Self::submit_focused_form`] for an Enter pressed with modifiers:
+    /// the keydown carries them (CH2.E37). When this submits nothing the
+    /// caller hands the same key to [`Self::handle_text_key`], which then
+    /// fires no second keydown and, if this one was cancelled, types
+    /// nothing (a chat box's Enter-sends, Shift+Enter-is-a-newline).
+    pub fn submit_focused_form_with(&mut self, id: EngineViewId, ctrl: bool, shift: bool, alt: bool) -> Option<String> {
         let _hold = wgate::hold("submit");
+        self.views.get_mut(&id)?.enter_keydown = None;
         // Enter in an open `<select>` drop-down picks an option
         // (`handle_text_key`); it submits nothing.
         if self.select_popup_open(id) {
             return None;
         }
         let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
-        if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
+        let not_cancelled = self.fire_key(id, Some(focused), "keydown", 0x0D, "", ctrl, shift, alt);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.enter_keydown = Some(not_cancelled);
+        }
+        if !not_cancelled {
             return None;
         }
+        let url = self.submit_after_enter_keydown(id, focused);
+        if url.is_some() {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.enter_keydown = None;
+            }
+        }
+        url
+    }
+
+    /// Whether the submit step fired an Enter keydown that the key step has
+    /// not taken yet.
+    pub(crate) fn enter_keydown_pending(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|v| v.enter_keydown.is_some())
+    }
+
+    /// Implicit submission for the focused field `focused` once its Enter
+    /// keydown was let through.
+    fn submit_after_enter_keydown(&mut self, id: EngineViewId, focused: usize) -> Option<String> {
         let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
             return self
                 .form_submission_for_focus(id)
@@ -6349,11 +6391,6 @@ impl Engine {
         self.form_submission(id, &form, submitter)
             .filter(|sub| sub.is_self_target())
             .map(|sub| sub.url)
-    }
-
-    /// CH2.E37 red stub: nothing records the submit step's keydown.
-    pub(crate) fn enter_keydown_pending(&self, _id: EngineViewId) -> bool {
-        false
     }
 
     /// Fire `keydown` or `keyup` for a key at `node` (`None`: the page's

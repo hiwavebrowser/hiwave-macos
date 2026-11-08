@@ -2198,7 +2198,7 @@ fn dispatch_view_input(
                 return;
             }
             if vk == 0x0D && target == InputTarget::Page {
-                if let Some(url) = view.form_submit_url() {
+                if let Some(url) = view.form_submit_url(key.ctrl || key.cmd, key.shift, key.alt) {
                     info!(url = %crate::page_url_for_log(&url), "Form submitted");
                     let _ = click_proxy.send_event(UserEvent::Navigate(url));
                     return;
@@ -3868,7 +3868,11 @@ fn main() {
                                     // navigate, and swallowing Enter into a
                                     // single-line field would do nothing
                                     // visible at all.
-                                    if let Some(url) = view.form_submit_url() {
+                                    if let Some(url) = view.form_submit_url(
+                                        mods.control_key() || mods.super_key(),
+                                        mods.shift_key(),
+                                        mods.alt_key(),
+                                    ) {
                                         info!(url = %crate::page_url_for_log(&url), "Form submitted");
                                         let _ = click_proxy.send_event(UserEvent::Navigate(url));
                                         return;

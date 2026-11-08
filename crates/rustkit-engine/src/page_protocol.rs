@@ -267,7 +267,11 @@ pub enum PageInput {
         dx: f32,
         dy: f32,
     },
+    /// Enter's submit step, with the key's modifiers (CH2.E37).
     FormSubmit {
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
         reply: oneshot::Sender<Option<String>>,
     },
     TakeNavigation {
@@ -703,8 +707,10 @@ impl PageEndpoint {
                 alt,
                 reply,
             } => {
-                let submitted = if key_code == 0x0D {
-                    self.engine.submit_focused_form(view)
+                // A `FormSubmit` for this Enter already fired its keydown
+                // (the synchronous path); the key step reuses its verdict.
+                let submitted = if key_code == 0x0D && !self.engine.enter_keydown_pending(view) {
+                    self.engine.submit_focused_form_with(view, ctrl, shift, alt)
                 } else {
                     None
                 };
@@ -804,8 +810,8 @@ impl PageEndpoint {
                 }
                 self.publish_commit();
             }
-            PageInput::FormSubmit { reply } => {
-                let url = self.engine.submit_focused_form(view);
+            PageInput::FormSubmit { ctrl, shift, alt, reply } => {
+                let url = self.engine.submit_focused_form_with(view, ctrl, shift, alt);
                 if let Some(url) = url.clone() {
                     let nav_id = self.engine.nav_id(view).unwrap_or(0);
                     self.emit(PageEvent::NavigateRequested {

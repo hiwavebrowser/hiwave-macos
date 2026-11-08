@@ -1996,18 +1996,17 @@ pub mod keyboard {
                     KeyHandleResult::Handled
                 }
             }
-            VK_RETURN => match area {
-                // Enter inserts a line break in a textarea...
-                Some(a) => {
-                    if a.insert_newline() {
-                        KeyHandleResult::ValueChanged
-                    } else {
-                        KeyHandleResult::Handled
-                    }
+            // Enter inserts a line break in a textarea (the engine passes
+            // the bare edit state, marked multi-line)...
+            VK_RETURN if area.is_some() || state.kind() == TextControlKind::MultiLine => {
+                if state.insert_text("\n") {
+                    KeyHandleResult::ValueChanged
+                } else {
+                    KeyHandleResult::Handled
                 }
-                // ...and submits the form from a single-line input.
-                None => KeyHandleResult::Submit,
-            },
+            }
+            // ...and submits the form from a single-line input.
+            VK_RETURN => KeyHandleResult::Submit,
             // Tab moves focus; Escape typically blurs.
             VK_TAB | VK_ESCAPE => KeyHandleResult::Unhandled,
             // Character input
@@ -2398,6 +2397,27 @@ mod tests {
         let result = keyboard::handle_textarea_key(&state, 0x0D, "", false, false, false);
         assert_eq!(result, KeyHandleResult::ValueChanged);
         assert_eq!(state.value(), "Hello\n");
+    }
+
+    #[test]
+    fn test_keyboard_enter_in_a_bare_multiline_state_is_a_line_break() {
+        // The engine keeps a textarea as a bare edit state marked
+        // multi-line (CH2.E37): Enter must not read as a submit.
+        let state = TextEditState::with_value("ab");
+        state.set_kind(TextControlKind::MultiLine);
+        state.set_caret(1);
+        let clipboard = crate::clipboard::thread_default();
+        let result =
+            keyboard::handle_key(&state, None, &*clipboard, KeyPlatform::Mac, 0x0D, "", false, true, false);
+        assert_eq!(result, KeyHandleResult::ValueChanged);
+        assert_eq!(state.value(), "a\nb");
+
+        // A single-line field still submits.
+        let field = TextEditState::with_value("ab");
+        let result =
+            keyboard::handle_key(&field, None, &*clipboard, KeyPlatform::Mac, 0x0D, "", false, false, false);
+        assert_eq!(result, KeyHandleResult::Submit);
+        assert_eq!(field.value(), "ab");
     }
 
     #[test]
