@@ -68,6 +68,26 @@ fn an_inline_bad_url_is_dropped_and_the_next_declaration_applies() {
     }
 }
 
+/// CH2.E29: a rejected `background-image` leaves the image the cascade
+/// already had (a stylesheet's, or an earlier declaration's), as Chromium
+/// keeps it. It used to clear the layers: a bad inline url wiped the sheet's
+/// image. The shorthand already dropped a bad url whole.
+#[test]
+fn a_rejected_background_image_keeps_the_earlier_image() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let url = "data:image/svg+xml;base64,PHN2Zy8+";
+    for bad in ["url(a(b.png)", "url(it's)", "URL(a b.png)"] {
+        for property in ["background-image", "background"] {
+            let attr = format!("background-image:url({url});{property}:{bad}");
+            let mut style = ComputedStyle::default();
+            let vars: HashMap<String, String> = HashMap::new();
+            engine.lctx.apply_inline_style(&mut style, None, &attr, &vars, &mut ChPending::default(), false);
+            let lines = computed_style_lines(&LayoutBox::new(rustkit_layout::BoxType::Block, style));
+            assert!(lines.contains(&format!("\nbackground-image\turl(\"{url}\")")), "{attr}");
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "headless"))]
 #[test]
 fn style_attribute_declarations_read_as_chromium() {
