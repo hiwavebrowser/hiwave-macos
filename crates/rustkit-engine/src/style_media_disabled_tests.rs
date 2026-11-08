@@ -312,3 +312,118 @@ fn a_disabled_flag_dies_with_the_sheet_not_with_its_text() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+#[test]
+fn a_sheet_dies_when_an_ancestor_moves_and_a_stale_wrapper_is_inert() {
+    // #964 second HOLD. Chromium 148.0.7778.216 headless, 800x600: a
+    // connection change anywhere above a <style> makes a new, enabled
+    // sheet (CSSOM "update a style block"), and a CSSStyleSheet object the
+    // element no longer owns is inert: its `disabled`, insertRule and
+    // deleteRule reach nothing, its ownerNode is null, its rules stay.
+    let c = "<div id=c><style id=s>#t{width:20px}</style></div>";
+    let cd = "<div id=c><style id=s>#t{width:20px}</style></div><div id=d></div>";
+    let cases = [
+        (
+            "container detached and reinserted, sheet disabled",
+            c,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; var c=document.getElementById('c'); c.remove(); document.body.appendChild(c)",
+            "20x0 disabled=false",
+        ),
+        (
+            "container detached, text replaced, reinserted; the old wrapper disabled",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; var c=document.getElementById('c'); c.remove(); e.textContent='#t{width:30px}'; document.body.appendChild(c); o.disabled=true",
+            "30x0 disabled=false",
+        ),
+        (
+            "container detached, text replaced, reinserted; insertRule on the old wrapper",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; var c=document.getElementById('c'); c.remove(); e.textContent='#t{width:30px}'; document.body.appendChild(c); o.insertRule('#t{height:5px}',0)",
+            "30x0 disabled=false",
+        ),
+        (
+            "container detached, text replaced, reinserted; insertRule on the new wrapper",
+            c,
+            "var e=document.getElementById('s'); var c=document.getElementById('c'); c.remove(); e.textContent='#t{width:30px}'; document.body.appendChild(c); e.sheet.insertRule('#t{height:5px}',0)",
+            "30x5 disabled=false",
+        ),
+        (
+            "container moved connected to connected, sheet disabled",
+            cd,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; document.getElementById('d').appendChild(document.getElementById('c'))",
+            "20x0 disabled=false",
+        ),
+        (
+            "container moved connected to connected, then the new sheet disabled",
+            cd,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; document.getElementById('d').appendChild(document.getElementById('c')); e.sheet.disabled=true",
+            "10x0 disabled=true",
+        ),
+        (
+            "old enabled wrapper: text changed, then old.disabled = true",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; e.textContent='#t{width:30px}'; o.disabled=true",
+            "30x0 disabled=false",
+        ),
+        (
+            "old enabled wrapper: text changed, then old.insertRule",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; e.textContent='#t{width:30px}'; o.insertRule('#t{height:5px}',0)",
+            "30x0 disabled=false",
+        ),
+        (
+            "old enabled wrapper: text changed, new sheet read, then old.deleteRule",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; e.textContent='#t{width:30px}'; e.sheet.cssRules.length; o.deleteRule(0)",
+            "30x0 disabled=false",
+        ),
+        (
+            "old disabled wrapper: text changed, new sheet read, then old.insertRule",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; o.disabled=true; e.textContent='#t{width:30px}'; e.sheet.cssRules.length; o.insertRule('#t{height:5px}',0)",
+            "30x0 disabled=false",
+        ),
+        (
+            "style removed, text replaced, reinserted; the old wrapper disabled",
+            c,
+            "var e=document.getElementById('s'); var o=e.sheet; e.remove(); e.textContent='#t{width:30px}'; document.body.appendChild(e); o.disabled=true",
+            "30x0 disabled=false",
+        ),
+        (
+            "a clone of a disabled style applies, the original stays disabled",
+            c,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; var k=e.cloneNode(true); k.id='k'; document.body.appendChild(k)",
+            "20x0 disabled=true",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, body, script, want) in cases {
+        let got = size_and_flag(body, script);
+        if got != want {
+            wrong.push(format!("{name}: got {got}, Chromium {want}"));
+        }
+    }
+    // replaceChild: the replacement's sheet applies (the old element is gone).
+    let replaced = size(
+        c,
+        "var e=document.getElementById('s'); e.sheet.disabled=true; var k=document.createElement('style'); k.textContent='#t{width:40px}'; e.parentNode.replaceChild(k,e)",
+    );
+    if replaced != "40x0" {
+        wrong.push(format!("replaceChild: got {replaced}, Chromium 40x0"));
+    }
+    // A wrapper taken before its container moved is a different object from
+    // the element's new sheet, owns no node, and keeps its rules.
+    let (mut engine, view) = page(c);
+    engine
+        .execute_script(
+            view,
+            "var e=document.getElementById('s'); var o=e.sheet; var c=document.getElementById('c'); c.remove(); document.body.appendChild(c);\
+             window.__r = [e.sheet===o, o.ownerNode===null, o.cssRules.length, e.sheet.cssRules.length].join(',')",
+        )
+        .unwrap();
+    let identity = read(&mut engine, view, "window.__r");
+    if identity != "false,true,1,1" {
+        wrong.push(format!("stale wrapper identity: got {identity}, Chromium false,true,1,1"));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
