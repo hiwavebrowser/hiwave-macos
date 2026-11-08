@@ -110,6 +110,13 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Run the page's CSS animations and transitions as the app does (the
+    /// parity config holds them still so a frame is reproducible). For
+    /// `--live-ms` measurements of animation frames; a frame taken with it
+    /// is not comparable with the board.
+    #[arg(long)]
+    animations: bool,
+
     /// Write the view's Inspector event log for the whole capture to this
     /// file, as JSON Lines (one record per line; see
     /// docs/INSPECTOR_EVENT_LOG.md). URLs lose their query and fragment.
@@ -1895,6 +1902,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
         config.script_budget_ms = budget;
     }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    if args.animations {
+        config.disable_animations = false;
+    }
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -1991,6 +2001,15 @@ mod tests {
             config.timer_horizon_ms,
             EngineConfig::for_parity_testing().timer_horizon_ms
         );
+    }
+
+    /// LAT14: animations run in a capture only with `--animations`; the
+    /// board's frames stay still.
+    #[test]
+    fn animations_run_only_with_the_flag() {
+        assert!(capture_config(&parsed(&[]), None).disable_animations);
+        assert!(capture_config(&parsed(&["--live-ms", "1000"]), None).disable_animations);
+        assert!(!capture_config(&parsed(&["--animations"]), None).disable_animations);
     }
 
     #[test]
