@@ -160,6 +160,81 @@
    "name": "script-border-5px-then-style",
    "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px\"></div><script>var a=document.getElementById(\"a\");a.offsetWidth;a.style.borderStyle=\"solid\"</script><div id=b></div></body></html>",
    "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "input-author-40px-red-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border:revert\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:24:14 b:0:14:100:90"
+  },
+  {
+   "name": "button-author-40px-red-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}button{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><button id=a style=\"border:revert\">x</button></body></html>",
+   "chrome_boxes": "a:0:0:20:10"
+  },
+  {
+   "name": "select-author-40px-red-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}select{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><select id=a style=\"border:revert\"><option>x</option></select></body></html>",
+   "chrome_boxes": "a:0:0:20:10"
+  },
+  {
+   "name": "textarea-author-40px-red-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}textarea{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><textarea id=a style=\"border:revert\"></textarea><textarea id=b></textarea></body></html>",
+   "chrome_boxes": "a:0:0:22:12 b:0:12:100:90"
+  },
+  {
+   "name": "input-author-40px-red-then-border-top-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border-top:revert\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:100:52 b:0:52:100:90"
+  },
+  {
+   "name": "input-author-40px-red-then-border-width-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border-width:revert\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:24:14 b:0:14:100:90"
+  },
+  {
+   "name": "input-author-40px-red-then-border-left-width-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border-left-width:revert\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:62:90 b:0:90:100:90"
+  },
+  {
+   "name": "input-author-40px-red-then-border-style-revert-keeps-width",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border-style:revert\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:100:90 b:0:90:100:90"
+  },
+  {
+   "name": "input-author-40px-red-then-border-revert-layer",
+   "html": "<!doctype html><html><head><style>body{margin:0}input{display:block;width:20px;height:10px;padding:0;border:40px solid red}</style></head><body><input id=a style=\"border:revert-layer\"><input id=b></body></html>",
+   "chrome_boxes": "a:0:0:100:90 b:0:90:100:90"
+  },
+  {
+   "name": "button-border-5px-dotted-then-border-style-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}button{display:block;width:20px;height:10px;padding:0}</style></head><body><button id=a style=\"border:5px dotted;border-style:revert\">x</button><button id=b>x</button></body></html>",
+   "chrome_boxes": "a:0:0:20:10 b:0:10:20:10"
+  },
+  {
+   "name": "div-author-5px-solid-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px;border:5px solid}</style></head><body><div id=a style=\"border:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:20:20"
+  },
+  {
+   "name": "div-author-5px-solid-then-border-top-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px;border:5px solid}</style></head><body><div id=a style=\"border-top:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:15 b:0:15:20:20"
+  },
+  {
+   "name": "div-author-5px-solid-then-border-width-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px;border:5px solid}</style></head><body><div id=a style=\"border-width:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:20:20"
+  },
+  {
+   "name": "hr-author-10px-solid-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}hr{border:10px solid red;margin:0}</style></head><body><hr id=a style=\"border:revert\"><hr id=b></body></html>",
+   "chrome_boxes": "a:0:0:400:2 b:0:2:400:20"
+  },
+  {
+   "name": "fieldset-author-10px-solid-then-border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}fieldset{border:10px solid red;padding:0;margin:0;height:10px}</style></head><body><fieldset id=a style=\"border:revert\"></fieldset><fieldset id=b></fieldset></body></html>",
+   "chrome_boxes": "a:0:0:400:14 b:0:14:400:30"
   }
  ],
  "chrome": "143.0.7499.4"
