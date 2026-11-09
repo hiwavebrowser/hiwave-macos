@@ -148,3 +148,96 @@ def test_i0a_layout_still_opens_a_new_tab(tmp_path, monkeypatch):
     d.i0a_layout()
     keys = [argv for argv in d.sent if argv and argv[0] == "key"]
     assert any(argv[2] == 17 for argv in keys), "i0a_layout no longer presses Cmd+T: %s" % keys
+
+
+# ── R1 delta: the page view's frame, timed from hwdrive's request ──────────
+
+REQ = 1_800_000_050.0
+LAYOUT = "while the page lays out: the page is laid out at the new size within 200 ms"
+LAYOUT_RESIZE = "while the page lays out: a resize is answered within 200 ms"
+
+
+def page_log(*relayouts):
+    return ("%s  INFO rustkit_engine: Loading URL id=EngineViewId(4) url=http://127.0.0.1:1/i0a_layout.html replace=false\n"
+            "%s  INFO rustkit_engine: Loading HTML content id=EngineViewId(3) len=259514\n"
+            % (stamp(REQ - 5), stamp(REQ - 5))) + "".join(relayouts)
+
+
+def test_req_epoch_is_read():
+    assert rw.resize_request_epoch({"req_epoch": REQ}) == REQ
+    assert rw.resize_request_epoch({"ack_ms": 3.0}) is None
+    assert rw.resize_request_epoch(None) is None
+
+
+def test_the_page_view_is_the_one_the_fixture_url_loaded_into():
+    assert rw.page_view_id(page_log(), "http://127.0.0.1:1") == 4
+    assert rw.page_view_id(page_log(), "http://127.0.0.1:2") is None
+
+
+def layout_driver(tmp_path, monkeypatch, log, out):
+    d = nav_driver(tmp_path, monkeypatch, dict({"ack_ms": 20.0, "ax_ms": 1.0, "ax_error": 0, "req_epoch": REQ}, **out))
+    LogApp.text = log
+    return d
+
+
+def test_i0a_layout_asserts_the_page_frame_within_the_limit(tmp_path, monkeypatch):
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.031, 3), relayout(REQ + 0.150, 4)), {})
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    got, detail = status(d, "i0a_layout", LAYOUT)
+    assert got == "PASS" and "150 ms after the request; page view 4" in detail, detail
+
+
+def test_a_slow_page_frame_fails_honestly(tmp_path, monkeypatch):
+    # Today's expensive-layout figure (triage: 134-239 ms) fails at 239 ms.
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.031, 3), relayout(REQ + 0.239, 4)), {})
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    assert status(d, "i0a_layout", LAYOUT)[0] == "FAIL"
+
+
+def test_the_chrome_s_frame_does_not_stand_in_for_the_page_s(tmp_path, monkeypatch):
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.031, 3)), {})
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    got, detail = status(d, "i0a_layout", LAYOUT)
+    assert got == "FAIL" and "no relayout cause=resize" in detail, detail
+
+
+def test_the_frame_is_timed_from_hwdrive_s_request_not_the_driver_s_t0(tmp_path, monkeypatch):
+    # The driver's clock here reads 50 s before hwdrive's request (the fake
+    # clock starts at REQ - 50). The page laid out 150 ms after the request:
+    # that passes; timed from the driver's t0 it would read about 50 s.
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.150, 4)), {})
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    assert status(d, "i0a_layout", LAYOUT)[0] == "PASS"
+
+
+def test_no_req_epoch_fails_the_frame_closed(tmp_path, monkeypatch):
+    d = nav_driver(tmp_path, monkeypatch, {"ack_ms": 20.0, "ax_ms": 1.0, "ax_error": 0})
+    LogApp.text = page_log(relayout(REQ + 0.010, 4))
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    got, detail = status(d, "i0a_layout", LAYOUT)
+    assert got == "FAIL" and "no req_epoch" in detail, detail
+
+
+def test_held_pages_report_the_frame_as_info_only(tmp_path, monkeypatch):
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.900, 4)), {})
+    d.expect_controls("i0a_nav", "while the first page loads", new_tab=False)
+    assert not any("laid out at the new size" in r[1] for r in d.results), d.results
+    got, detail = status(d, "i0a_nav", RESIZE)
+    assert got == "PASS" and "info, not asserted" in detail, detail
+
+
+def test_a_non_dict_hwdrive_answer_fails_instead_of_crashing(tmp_path, monkeypatch):
+    d = nav_driver(tmp_path, monkeypatch, None)
+    d.expect_controls("i0a_nav", "while the first page loads", new_tab=False)
+    got, detail = status(d, "i0a_nav", RESIZE)
+    assert got == "FAIL" and "not reported" in detail, detail
+
+
+def test_the_resize_comes_before_cmd_t(tmp_path, monkeypatch):
+    # Cmd+T loads the start page into the content view; the frame must be
+    # the page under test's (the first T36 run timed the start page's).
+    d = layout_driver(tmp_path, monkeypatch, page_log(relayout(REQ + 0.100, 4)), {})
+    d.app.wait_log = lambda pattern, timeout, start=0: True
+    d.expect_controls("i0a_layout", "while the page lays out", frame="assert")
+    order = [argv[0] if argv[0] != "key" else "key%d" % argv[2] for argv in d.sent if argv[0] in ("resize", "key")]
+    assert order == ["resize", "key17"], order
