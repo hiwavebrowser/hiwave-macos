@@ -554,6 +554,9 @@ impl EndpointSide {
                 if let Some(control) = engine.view_control(self.view) {
                     control.clear_all();
                 }
+                // A load cancelled before the word was lowered could not
+                // settle its document; it reads `complete` now (LAT15 R1).
+                engine.settle_ready_state(self.view);
                 let _ = reply.send(stopped);
             }
             PageCmd::Reload { reply, .. } => {
@@ -957,6 +960,9 @@ impl EndpointSide {
         if !self.deferred.front().is_some_and(runs_mid_load) {
             return served;
         }
+        // `deferred` holds only what the window has sent: commands move
+        // here from the channel and leave in order once the load returns,
+        // so it is bounded by what the channel carried meanwhile.
         let queued: Vec<PageCmd> = self.deferred.drain(..).collect();
         self.deferred = coalesce(queued).into();
         self.asked_to_leave.set(false);

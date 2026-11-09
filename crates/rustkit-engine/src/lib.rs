@@ -1623,6 +1623,18 @@ thread_local! {
     static SERVING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// A document whose load ended early (Stop, a cancel after the commit)
+/// reads `complete`, as Chrome's does after a stop, rather than the
+/// `loading` it has read since the commit. No `readystatechange` fires: no
+/// page code runs for a stopped load. Not for a runtime that panicked
+/// (nothing more runs on it; its `readyState` stays as it was).
+fn settle_ready_state(bindings: Option<&DomBindings>) {
+    let Some(bindings) = bindings else { return };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bindings.evaluate("if (document.readyState !== 'complete') { document.readyState = 'complete'; }")
+    }));
+}
+
 /// Whether this thread is inside a load's safe point.
 fn serving() -> bool {
     SERVING.with(|s| s.get())
@@ -7553,6 +7565,12 @@ impl Engine {
                             view.bindings = slot.take();
                         }
                         self.safe_point(id, watch, &mut serve).await;
+                        // What the served commands logged (a listener that
+                        // threw, one the budget stopped) follows the
+                        // scripts already run, in time order.
+                        if let Some(view) = self.views.get_mut(&id) {
+                            log.append(&mut view.script_log);
+                        }
                         *slot = self.views.get_mut(&id).and_then(|view| view.bindings.take());
                     }
                     _ => tokio::task::yield_now().await,
@@ -16884,6 +16902,12 @@ impl Engine {
     /// This is deliberately NOT the `DownloadManager` cancel path in
     /// rustkit-net — that one cancels FILE DOWNLOADS and has nothing to do
     /// with page loads. Conflating them was the first wrong turn on this unit.
+    /// After a Stop (LAT15 R1): the document left on screen reads
+    /// `complete`, as Chrome's does, once its interrupt word is lowered.
+    pub(crate) fn settle_ready_state(&self, id: EngineViewId) {
+        settle_ready_state(self.views.get(&id).and_then(|view| view.bindings.as_ref()));
+    }
+
     pub fn stop(&mut self, id: EngineViewId) -> bool {
         match self.views.get_mut(&id) {
             Some(view) => {
@@ -17041,6 +17065,11 @@ impl Engine {
         console_log::doc("navigation-teardown", &format!("committed={committed}"));
         if committed {
             view.control.stop_cancelled();
+        }
+        // The document this load committed stays on screen. It read
+        // `loading` from the commit (LAT15); stopped, it reads `complete`.
+        if committed {
+            settle_ready_state(view.bindings.as_ref());
         }
         // A cancel during a render-blocking sheet (or before the first
         // layout) leaves the committed document never laid out: lay it out
