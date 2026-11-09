@@ -21,7 +21,16 @@ the latency-relevant counts the engine already logs:
 * timer pressure: ``relayout cause=timer`` per second of dwell, and the
   ``Page lifecycle step done source="timers"`` callbacks;
 * ``Page scripts ran`` and ``Navigation finished`` elapsed_ms;
-* ``Input to present`` summary lines;
+* ``Input to present`` lines: (LAT1c) ``Input to present view=N host=H n=...
+  by_kind=... over_100_ms=... no_frame=... role=page|chrome at=...``, one per
+  visit and one per 100 inputs, from each input's native event time to the
+  present of the first changed frame after its turn; grouped by the line's
+  own view and host (``role=chrome`` lines -- the RustKit chrome and panels --
+  under ``(chrome)``), they give the exact p95 per host over every headline
+  input (keys, presses, releases, wheels, edits; moves are sampled and kept
+  apart) whenever it is 100 ms or more, and "under 100" when it is not. The
+  older untagged ``Input to present p50_ms=...`` windows are still read
+  (worst window) when a site has no LAT1c line;
 * (LAT1) the ``Content thread holds view=N host=H n=... by_entry=...``
   summary lines, one per 100 entries and one per content visit, over
   **every** content-thread entry whatever its length; merged with the hold
@@ -34,8 +43,8 @@ the latency-relevant counts the engine already logs:
   content-thread summary gets n/a, never a verdict;
 * the exit metric of ``trench/latency/BASELINE.md`` per site: live
   script-budget stops per minute <= 1, content-thread hold p95 over all
-  entries <= 50 ms, and input-to-present p95 <= 100 ms (the worst
-  100-input window, since windows' percentiles do not merge);
+  entries <= 50 ms, and input-to-present p95 <= 100 ms (LAT1c: exact over
+  every input of the site; before LAT1c, the worst 100-input window);
 * an input-to-paint proxy: for each pointer/mouse event that hit the budget
   line, the ms of the first hold that followed within 2 s.
 
@@ -88,6 +97,8 @@ EXIT_STOPS_PER_MIN = 1.0
 EXIT_HOLD_P95_MS = 50.0
 EXIT_INPUT_P95_MS = 100.0
 HOLD_SUMMARY = re.compile(r"\b(Content|Window) thread holds (?:view=(\S+) host=(\S+) )?n=")
+INPUT_SUMMARY = re.compile(r"\bInput to present view=(\S+) host=(\S+) n=")
+CHROME = "(chrome)"
 
 
 def pct(values, p):
@@ -162,6 +173,13 @@ class Site:
         self.page_scripts_ran = []
         self.nav_finished = []
         self.input_to_present = []  # (p50, p95, max, n)
+        # LAT1c: the tagged lines' headline inputs, the ones of 100 ms or
+        # more they list, inputs by kind, and inputs that drew no frame.
+        self.input_n = 0
+        self.input_over = []
+        self.input_by_kind = defaultdict(int)
+        self.input_no_frame = 0
+        self.input_lines = 0
         self.proxy = []  # hold ms following a pointer stop
         self.proxy_entries = defaultdict(int)
         self.watchdog = []  # ran_ms of watchdog interrupts
@@ -317,6 +335,24 @@ def parse_one(path, sites, by_view):
                 sites[key_for(cv, host_load)].page_scripts_ran.append(num(kv(msg), "elapsed_ms"))
             elif "Navigation finished" in msg:
                 sites[key_for(cv, host_load)].nav_finished.append(num(kv(msg), "elapsed_ms"))
+            elif INPUT_SUMMARY.search(msg):
+                im = INPUT_SUMMARY.search(msg)
+                tag_view, tag_host = im.group(1), im.group(2)
+                fields = kv(msg)
+                vid = int(tag_view) if tag_view.isdigit() else None
+                if fields.get("role") == "chrome":
+                    target = sites[key_for(vid, CHROME)]
+                else:
+                    target = sites[key_for(vid, "(html)" if tag_host == "-" else tag_host)]
+                target.input_lines += 1
+                target.input_n += int(num(fields, "n"))
+                over = fields.get("over_100_ms", "-")
+                target.input_over.extend(float(x) for x in over.split(",") if over != "-")
+                target.input_no_frame += int(num(fields, "no_frame"))
+                for item in fields.get("by_kind", "-").split(","):
+                    parts = item.split(":")
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        target.input_by_kind[parts[0]] += int(parts[1])
             elif "Input to present p50_ms" in msg:
                 d = kv(msg)
                 site.input_to_present.append(
@@ -379,6 +415,13 @@ def summarize(sites):
             "page_scripts_ran_ms": dist(s.page_scripts_ran),
             "navigation_finished_ms": dist(s.nav_finished),
             "input_to_present": s.input_to_present,
+            "input_to_present_lat1c": {
+                "lines": s.input_lines,
+                "n": s.input_n,
+                "over_100_ms": sorted(s.input_over, reverse=True),
+                "by_kind": dict(s.input_by_kind),
+                "no_frame": s.input_no_frame,
+            },
             "pointer_stop_to_hold_ms": dist(s.proxy),
             "pointer_stop_hold_entries": dict(s.proxy_entries),
             "watchdog_ran_ms": dist(s.watchdog),
@@ -403,9 +446,10 @@ def hold_entry_counts(s):
 
 
 def merged_p95(n, logged):
-    """Nearest-rank p95 over `n` entries of which `logged` (each >= 50 ms)
-    are known: (exact p95, False) when it is one of them, (None, True) when
-    it falls under the threshold, (None, None) with no entries."""
+    """Nearest-rank p95 over `n` entries of which `logged` (each at or over
+    the line's threshold: 50 ms for holds, 100 ms for inputs) are known:
+    (exact p95, False) when it is one of them, (None, True) when it falls
+    under the threshold, (None, None) with no entries."""
     n = max(n, len(logged))
     if n == 0:
         return None, None
@@ -424,7 +468,14 @@ def exit_metric(s, row):
     else:
         logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
     p95, under = merged_p95(entries, logged) if thread else (None, None)
-    itp = max((w[1] for w in s.input_to_present), default=None)
+    # LAT1c: exact over every headline input when the site has tagged
+    # lines; before LAT1c, the worst untagged 100-input window.
+    itp_p95, itp_under = (None, None)
+    if s.input_lines:
+        itp_p95, itp_under = merged_p95(s.input_n, s.input_over)
+        itp = itp_p95
+    else:
+        itp = max((w[1] for w in s.input_to_present), default=None)
     stops = row["stops_live_per_min"]
     stops_ok = (stops if stops is not None else (0.0 if row["stops_live"] == 0 else None))
     hold_ok = None if under is None else (under or p95 <= EXIT_HOLD_P95_MS)
@@ -432,6 +483,9 @@ def exit_metric(s, row):
     if hold_ok is not None and stops_ok is not None:
         verdict = (stops_ok <= EXIT_STOPS_PER_MIN and hold_ok
                    and (itp is None or itp <= EXIT_INPUT_P95_MS))
+    if verdict is None and s.input_lines and stops_ok is None and hold_ok is None and itp_under is not None:
+        # The chrome (or a site with only input lines): the input half alone.
+        verdict = bool(itp_under or itp <= EXIT_INPUT_P95_MS)
     return {
         "stops_live_per_min": stops,
         "hold_thread": thread,
@@ -440,6 +494,9 @@ def exit_metric(s, row):
         "hold_p95_ms": p95,
         "hold_p95_under_threshold": under,
         "input_to_present_p95_worst_ms": itp,
+        "input_to_present_n": s.input_n if s.input_lines else None,
+        "input_to_present_p95_ms": itp_p95,
+        "input_to_present_p95_under_threshold": itp_under,
         "pass": verdict,
     }
 
@@ -470,7 +527,7 @@ def print_table(summary, out=sys.stdout):
         ]) + "\n")
     w("\n")
     for name, s in summary.items():
-        if not (s["stops"] or s["relayouts"] or s["holds"]):
+        if not (s["stops"] or s["relayouts"] or s["holds"] or s["input_to_present_lat1c"]["lines"]):
             continue
         w(f"## {name}\n")
         if s["stops"]:
@@ -489,6 +546,13 @@ def print_table(summary, out=sys.stdout):
                 f"{e} {h['ms']['n']}, {fmt_d(h['ms'])}, {h['ms'].get('sum', 0):.0f}; "
                 + " ".join(f"{st[:-3]} {fmt_d(h[st], ('p50', 'p95'))}" for st in STAGES)
                 for e, h in s["holds"].items()) + "\n")
+        lat = s["input_to_present_lat1c"]
+        if lat["lines"]:
+            m = s["exit_metric"]
+            p95 = (f"{m['input_to_present_p95_ms']:g}" if m["input_to_present_p95_ms"] is not None
+                   else f"< {EXIT_INPUT_P95_MS:g}" if m["input_to_present_p95_under_threshold"] else "-")
+            w(f"input to present (LAT1c): n={lat['n']} p95 {p95} ms, over 100 ms {len(lat['over_100_ms'])}, "
+              f"by kind {lat['by_kind']}, no frame {lat['no_frame']}\n")
         if s["input_to_present"]:
             w("input to present (p50/p95/max n): " + ", ".join(
                 f"{a:g}/{b:g}/{c:g} n={n}" for a, b, c, n in s["input_to_present"]) + "\n")
@@ -509,12 +573,14 @@ def print_table(summary, out=sys.stdout):
 def print_exit_metric(summary, out=sys.stdout):
     w = out.write
     w(f"## exit metric (live stops/min <= {EXIT_STOPS_PER_MIN:g}, hold p95 over all entries <= "
-      f"{EXIT_HOLD_P95_MS:g} ms, input-to-present p95 <= {EXIT_INPUT_P95_MS:g} ms, worst window)\n")
-    w("site | live stops/min | hold entries n (logged >= 50) | hold p95 ms | input-to-present p95 worst ms | pass\n")
+      f"{EXIT_HOLD_P95_MS:g} ms, input-to-present p95 <= {EXIT_INPUT_P95_MS:g} ms: over every input "
+      f"(LAT1c), else the worst window)\n")
+    w("site | live stops/min | hold entries n (logged >= 50) | hold p95 ms | input-to-present p95 ms (n) | pass\n")
     w("|".join(["---"] * 6) + "\n")
     for name, s in summary.items():
         m = s["exit_metric"]
-        if not (s["visits"] or m["hold_n"] or s["stops_live"] or s["input_to_present"]):
+        if not (s["visits"] or m["hold_n"] or s["stops_live"] or s["input_to_present"]
+                or s["input_to_present_lat1c"]["lines"]):
             continue
         if m["hold_p95_ms"] is not None:
             p95 = f"{m['hold_p95_ms']:g}"
@@ -526,9 +592,23 @@ def print_exit_metric(summary, out=sys.stdout):
         w(" | ".join(str(x) for x in [
             name, "-" if m["stops_live_per_min"] is None else m["stops_live_per_min"],
             f"{m['hold_n']} ({m['hold_logged_over_threshold']})", p95,
-            "-" if m["input_to_present_p95_worst_ms"] is None else f"{m['input_to_present_p95_worst_ms']:g}",
+            input_cell(m),
             verdict,
         ]) + "\n")
+
+
+def input_cell(m):
+    if m["input_to_present_n"] is not None:
+        if m["input_to_present_p95_ms"] is not None:
+            p95 = f"{m['input_to_present_p95_ms']:g}"
+        elif m["input_to_present_p95_under_threshold"]:
+            p95 = f"< {EXIT_INPUT_P95_MS:g}"
+        else:
+            p95 = "-"
+        return f"{p95} ({m['input_to_present_n']})"
+    if m["input_to_present_p95_worst_ms"] is None:
+        return "-"
+    return f"{m['input_to_present_p95_worst_ms']:g} (worst window)"
 
 
 def rank(summary):

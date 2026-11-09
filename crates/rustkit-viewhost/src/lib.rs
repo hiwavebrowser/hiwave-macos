@@ -37,7 +37,8 @@ pub use macos::{
 #[cfg(target_os = "macos")]
 pub use macos::{raise_raw_view_above, raise_raw_view_to_front, set_raw_view_region, set_raw_view_transparent};
 pub use input_queue::{
-    drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
+    drain_input, drain_input_view, instant_of_native_event, retire_view_input, set_text_input_state,
+    text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
