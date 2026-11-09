@@ -1044,7 +1044,16 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
-    deadline: tokio::time::Instant,
+    /// Each image's own budget, counted from when its request starts
+    /// (`subresource_budget_ms`; LAT9).
+    budget: std::time::Duration,
+    /// How long a load waits for the pass: the budget from when the pass
+    /// was planned, as before LAT9. What is still out then goes on as live
+    /// work and is put in on the live turn it arrives.
+    wait_until: tokio::time::Instant,
+    /// An image not started by then fails without a request: the cap on
+    /// one pass ([`IMAGE_PASS_START_BUDGETS`] budgets from planning).
+    start_by: tokio::time::Instant,
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
@@ -1077,6 +1086,33 @@ type LoadedSheets = (
 struct FetchedImages {
     loaded: usize,
     svgs: Vec<(String, rustkit_svg::SvgDocument)>,
+}
+
+/// Images one pass fetches at once. SVG and raster images share them, so
+/// a slow SVG holds one slot, not the pass (LAT9).
+const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+/// How many budgets after a pass is planned its last image may start: with
+/// 8 slots and an 8 s budget, a pass ends within 40 s however many images
+/// the page names, and an image still queued at 32 s fails unrequested.
+const IMAGE_PASS_START_BUDGETS: u32 = 4;
+
+/// One image of a pass ([`Engine::start_planned_images`]): what it needs,
+/// owned, so it can run on the network runtime.
+struct ImageJob {
+    url: Url,
+    /// Named `.svg`: the SVG lane. Anything else is raster, and an SVG
+    /// served under it is handed back by its type.
+    svg: bool,
+    slots: Arc<tokio::sync::Semaphore>,
+    start_by: tokio::time::Instant,
+    budget: std::time::Duration,
+    referrer: Arc<SubresourceReferrer>,
+    loader: Arc<ResourceLoader>,
+    image_manager: Arc<ImageManager>,
+    nav: rustkit_image::DecodeNav,
+    inspector: Arc<Inspector>,
+    initiator: &'static str,
 }
 
 /// What a view's last presented frame was drawn from: the frame is drawn
@@ -1393,6 +1429,7 @@ impl ViewState {
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
+        self.lay.shown_images.borrow_mut().clear();
         self.lay.select_popup.borrow_mut().take();
         self.lay.select_popup_release.set(false);
         self.lay.select_popup_opening_press.set(false);
@@ -5618,7 +5655,7 @@ impl Engine {
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
-                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                        view.live_images.extend(Self::start_planned_images(plan));
                     }
                 }
                 Ok(_) => {}
@@ -6050,7 +6087,7 @@ impl Engine {
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
-                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                        view.live_images.extend(Self::start_planned_images(plan));
                     }
                 }
                 Ok(_) => {}
@@ -8950,7 +8987,7 @@ impl Engine {
                 match self.plan_image_loads(id, true) {
                     Ok(Some(plan)) if !plan.is_empty() => {
                         if let Some(view) = self.views.get_mut(&id) {
-                            view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                            view.live_images.extend(Self::start_planned_images(plan));
                         }
                     }
                     Ok(_) => {}
@@ -11549,6 +11586,18 @@ impl layout_ctx::LayoutCtx {
             Some((w, h)),
         ) = (&mut layout_box.box_type, hints)
         {
+            // The box may paint an `<img>`'s previous image while its new
+            // `src` loads (LAT9): once the new one is in, it paints that.
+            if let Some(node) = layout_box.node_id {
+                let wanted = self
+                    .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted.clone()))
+                    .flatten();
+                if let Some(wanted) = wanted {
+                    if let Some(paint) = self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted)) {
+                        *url = paint;
+                    }
+                }
+            }
             (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h);
         }
         1 + layout_box
@@ -11556,6 +11605,35 @@ impl layout_ctx::LayoutCtx {
             .iter_mut()
             .map(|child| self.refresh_image_sizes(child, images))
             .sum::<usize>()
+    }
+
+    /// The URL an `<img>` paints (LAT9): its `src` once that image is
+    /// loaded; until then, after a `src` swap, the image it last painted, as
+    /// Chrome keeps the current image up while the new request is pending.
+    /// A swap whose image never arrives keeps the old one. An empty `src`
+    /// takes nothing over. Records `src` as the element's wanted URL, which
+    /// a reused tree resolves again ([`Self::refresh_image_sizes`]).
+    fn img_src_to_paint(&self, lay: &layout_ctx::ViewLayout, node: usize, src: &str) -> String {
+        let ready = |url: &str| {
+            Url::parse(url).is_ok_and(|u| {
+                u.scheme() == "data" || self.image_manager.is_cached(&u) || self.svg_cache.borrow().contains_key(u.as_str())
+            })
+        };
+        let mut images = lay.shown_images.borrow_mut();
+        let entry = images.entry(node).or_default();
+        if entry.wanted != src {
+            entry.wanted = src.to_string();
+        }
+        if ready(src) {
+            if entry.shown.as_deref() != Some(src) {
+                entry.shown = Some(src.to_string());
+            }
+            return src.to_string();
+        }
+        match &entry.shown {
+            Some(shown) if !src.is_empty() && shown != src && ready(shown) => shown.clone(),
+            _ => src.to_string(),
+        }
     }
 
     /// An `<img>`'s natural size, from what is loaded at layout time.
@@ -12064,6 +12142,9 @@ impl layout_ctx::LayoutCtx {
                     let src = self
                         .resolve_resource_url(&src)
                         .map(|u| u.to_string())
+                        .unwrap_or(src);
+                    let src = self
+                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src))
                         .unwrap_or(src);
 
                     let (natural_width, natural_height) =
@@ -18415,12 +18496,14 @@ impl Engine {
             Ok(None) => return Some(Ok(0)),
             Err(e) => return Some(Err(e)),
         };
-        let mut fetch = std::pin::pin!(Self::fetch_planned_images(plan));
+        let until = plan.wait_until;
+        let mut fetch = std::pin::pin!(Self::collect_images_until(Self::start_planned_images(plan), until));
         loop {
             let tick = std::pin::pin!(tokio::time::sleep(std::time::Duration::from_millis(LIVE_FRAME_MS)));
             let raced = futures::future::select(fetch.as_mut(), tick);
             match nav_cancel::unless_cancelled(Some(watch), raced).await? {
-                futures::future::Either::Left((fetched, _)) => {
+                futures::future::Either::Left(((fetched, late), _)) => {
+                    self.keep_late_images(id, late);
                     return Some(Ok(self.keep_fetched_images(fetched)));
                 }
                 futures::future::Either::Right(((), _)) => self.safe_point(id, watch, serve).await,
@@ -18432,7 +18515,9 @@ impl Engine {
         let Some(plan) = self.plan_image_loads(id, only_new)? else {
             return Ok(0);
         };
-        let fetched = Self::fetch_planned_images(plan).await;
+        let until = plan.wait_until;
+        let (fetched, late) = Self::collect_images_until(Self::start_planned_images(plan), until).await;
+        self.keep_late_images(id, late);
         Ok(self.keep_fetched_images(fetched))
     }
 
@@ -18498,11 +18583,15 @@ impl Engine {
             }
         }
 
+        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
+        let now = tokio::time::Instant::now();
         Ok(Some(ImagePlan {
             pending,
             svg_urls,
             already_loaded: loaded,
-            deadline: self.subresource_deadline(),
+            budget,
+            wait_until: now + budget,
+            start_by: now + budget * IMAGE_PASS_START_BUDGETS,
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
@@ -18513,23 +18602,28 @@ impl Engine {
         }))
     }
 
-    /// The second part: fetch and decode what the plan lists. It borrows
-    /// nothing from the engine, so the load awaits it in place and the live
-    /// loop keeps it across turns.
-    async fn fetch_planned_images(plan: ImagePlan) -> FetchedImages {
-        // Fetch concurrently with bounded parallelism. The serial loop cost
-        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
-        // a sequential round-trip failing (2026-08-05 live session);
-        // buffer_unordered polls the futures on this thread, so no Send
-        // bounds are required and the engine stays single-threaded.
-        use futures::stream::StreamExt;
-        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
-
+    /// The second part: start every image the plan lists, each its own
+    /// future, so a live turn puts in each image as it arrives. It borrows
+    /// nothing from the engine.
+    ///
+    /// LAT9 (a real-window session, 2026-11-09): the pass had one deadline,
+    /// set when it was planned, and ran its SVG images before any raster.
+    /// One slow SVG spent the clock, and 78 rasters queued behind it failed
+    /// on their first poll without a request. Now SVG and raster images
+    /// share [`MAX_CONCURRENT_IMAGE_LOADS`] slots, each image's budget
+    /// starts when it takes a slot, and the fetch and decode run on the
+    /// network runtime, so live turns that hold the page thread for seconds
+    /// (the session's ran 1.5 to 4.7 s, with 2 ms of image polling each)
+    /// no longer starve them. A `data:` image decodes on the page, as
+    /// before; so does every image when the network runtime is off.
+    fn start_planned_images(plan: ImagePlan) -> Vec<script_net::LiveFuture<FetchedImages>> {
         let ImagePlan {
             pending,
             svg_urls,
             already_loaded,
-            deadline,
+            budget,
+            wait_until: _,
+            start_by,
             referrer,
             loader,
             image_manager,
@@ -18538,158 +18632,210 @@ impl Engine {
             initiator,
             css_urls,
         } = plan;
-        let initiator_of = |url: &Url| if css_urls.contains(url) { "css" } else { initiator };
-        let inspector = &inspector;
-        let mut loaded = already_loaded;
-        let mut svgs = Vec::new();
-
-        // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
-        // serial while images were parallelized). Parsing happens inside the
-        // futures; the engine's cache insert comes afterwards, in
-        // `keep_fetched_images`.
-        {
-            let loader = loader.clone();
-            let referrer = &referrer;
-            let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
-                futures::stream::iter(svg_urls.into_iter().map(|url| {
-                    let loader = loader.clone();
-                    let initiator = initiator_of(&url);
-                    async move {
-                        info!(url = %url_for_log(&url), "Loading SVG image");
-                        let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
-                        let fetched = match tokio::time::timeout_at(
-                            deadline,
-                            loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
-                        )
-                        .await
-                        {
-                            Ok(fetched) => fetched,
-                            Err(_) => {
-                                if let Some(guard) = guard {
-                                    guard.fail(FailureStage::OverBudget, "subresource budget spent");
-                                }
-                                warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
-                                return None;
-                            }
-                        };
-                        match fetched {
-                            Ok(response) if response.ok() => {
-                                let received = guard.map(|g| g.received(&response));
-                                match response.text().await {
-                                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                        Ok(doc) => {
-                                            if let Some(received) = received {
-                                                received.read(xml.len());
-                                            }
-                                            Some((url.to_string(), image_svg(doc)))
-                                        }
-                                        Err(e) => {
-                                            if let Some(received) = received {
-                                                received.fail(FailureStage::Decode, "SVG did not parse");
-                                            }
-                                            warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
-                                            None
-                                        }
-                                    },
-                                    Err(e) => {
-                                        if let Some(received) = received {
-                                            received.fail(FailureStage::Decode, "body is not UTF-8");
-                                        }
-                                        warn!(?e, url = %url_for_log(&url), "Failed to read SVG body");
-                                        None
-                                    }
-                                }
-                            }
-                            Ok(response) => {
-                                if let Some(guard) = guard {
-                                    guard.received(&response).unread();
-                                }
-                                warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch SVG image");
-                                None
-                            }
-                            Err(e) => {
-                                inspector::fail_net(guard, &e);
-                                warn!(?e, url = %url_for_log(&url), "Failed to fetch SVG image");
-                                None
-                            }
-                        }
-                    }
-                }))
-                .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
-                .collect()
-                .await;
-
-            for (url, doc) in parsed.into_iter().flatten() {
-                svgs.push((url, doc));
-                loaded += 1;
-            }
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_IMAGE_LOADS));
+        let referrer = Arc::new(referrer);
+        let mut started: Vec<script_net::LiveFuture<FetchedImages>> = Vec::new();
+        if already_loaded > 0 {
+            started.push(Box::pin(std::future::ready(FetchedImages { loaded: already_loaded, svgs: Vec::new() })));
         }
+        let svgs = svg_urls.into_iter().map(|url| (url, true));
+        let rasters = pending.into_iter().map(|url| (url, false));
+        for (url, svg) in svgs.chain(rasters) {
+            let job = ImageJob {
+                initiator: if css_urls.contains(&url) { "css" } else { initiator },
+                url,
+                svg,
+                slots: slots.clone(),
+                start_by,
+                budget,
+                referrer: referrer.clone(),
+                loader: loader.clone(),
+                image_manager: image_manager.clone(),
+                nav,
+                inspector: inspector.clone(),
+            };
+            let on_page = job.url.scheme() == "data";
+            let work = Self::fetch_one_image(job);
+            let fetch: script_net::LiveFuture<FetchedImages> = if on_page {
+                Box::pin(work)
+            } else {
+                match script_net::spawn_on_net(work) {
+                    Ok(on_net) => Box::pin(async move {
+                        on_net.await.unwrap_or(FetchedImages { loaded: 0, svgs: Vec::new() })
+                    }),
+                    Err(work) => Box::pin(work),
+                }
+            };
+            started.push(fetch);
+        }
+        started
+    }
 
-        // Each raster load is loaded (true), failed (false), or turned out to
-        // be SVG by its type and parsed here for the SVG cache.
-        type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
-        let referrer = &referrer;
-        let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
-            let image_manager = image_manager.clone();
-            let loader = loader.clone();
-            let initiator = initiator_of(&url);
-            async move {
-                info!(url = %url_for_log(&url), "Loading image");
-                let load = fetch_raster_image(
-                    &loader,
-                    &image_manager,
-                    referrer,
-                    url.clone(),
-                    nav,
-                    Some((inspector, initiator, deadline)),
-                );
-                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
-                    warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
-                    return (false, None);
-                };
-                match loaded {
-                    Ok(image) => {
-                        debug!(
-                            %url,
-                            width = image.natural_width,
-                            height = image.natural_height,
-                            "Image loaded and cached"
-                        );
-                        (true, None)
+    /// One image: wait for a slot (until the pass's `start_by`), then fetch
+    /// and decode it within its own budget.
+    async fn fetch_one_image(job: ImageJob) -> FetchedImages {
+        let failed = FetchedImages { loaded: 0, svgs: Vec::new() };
+        let ImageJob {
+            url,
+            svg,
+            slots,
+            start_by,
+            budget,
+            referrer,
+            loader,
+            image_manager,
+            nav,
+            inspector,
+            initiator,
+        } = job;
+        let Ok(Ok(_slot)) = tokio::time::timeout_at(start_by, slots.acquire_owned()).await else {
+            warn!(url = %url_for_log(&url), "Image not started within its image pass's cap; rendering without it");
+            return failed;
+        };
+        let deadline = tokio::time::Instant::now() + budget;
+        let inspector = &inspector;
+        let referrer = &*referrer;
+        if svg {
+            info!(url = %url_for_log(&url), "Loading SVG image");
+            let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
+            let fetched = match tokio::time::timeout_at(
+                deadline,
+                loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
+            )
+            .await
+            {
+                Ok(fetched) => fetched,
+                Err(_) => {
+                    if let Some(guard) = guard {
+                        guard.fail(FailureStage::OverBudget, "subresource budget spent");
                     }
-                    Err(rustkit_image::ImageError::Svg(xml)) => {
-                        match rustkit_svg::SvgDocument::parse(&xml) {
+                    warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
+                    return failed;
+                }
+            };
+            return match fetched {
+                Ok(response) if response.ok() => {
+                    let received = guard.map(|g| g.received(&response));
+                    match response.text().await {
+                        Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
-                                info!(url = %url_for_log(&url), "Image served as image/svg+xml; using the SVG lane");
-                                (true, Some((url.to_string(), image_svg(doc))))
+                                if let Some(received) = received {
+                                    received.read(xml.len());
+                                }
+                                FetchedImages { loaded: 1, svgs: vec![(url.to_string(), image_svg(doc))] }
                             }
                             Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Decode, "SVG did not parse");
+                                }
                                 warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
-                                (false, None)
+                                failed
                             }
+                        },
+                        Err(e) => {
+                            if let Some(received) = received {
+                                received.fail(FailureStage::Decode, "body is not UTF-8");
+                            }
+                            warn!(?e, url = %url_for_log(&url), "Failed to read SVG body");
+                            failed
                         }
-                    }
-                    Err(rustkit_image::ImageError::Superseded) => {
-                        debug!(%url, "Image decoded for a superseded navigation; dropped");
-                        (false, None)
-                    }
-                    Err(e) => {
-                        warn!(?e, url = %url_for_log(&url), "Failed to load image");
-                        (false, None)
                     }
                 }
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
-        .collect()
-        .await;
-
-        for (ok, svg) in results {
-            svgs.extend(svg);
-            loaded += usize::from(ok);
+                Ok(response) => {
+                    if let Some(guard) = guard {
+                        guard.received(&response).unread();
+                    }
+                    warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch SVG image");
+                    failed
+                }
+                Err(e) => {
+                    inspector::fail_net(guard, &e);
+                    warn!(?e, url = %url_for_log(&url), "Failed to fetch SVG image");
+                    failed
+                }
+            };
         }
 
-        FetchedImages { loaded, svgs }
+        info!(url = %url_for_log(&url), "Loading image");
+        let load = fetch_raster_image(
+            &loader,
+            &image_manager,
+            referrer,
+            url.clone(),
+            nav,
+            Some((inspector, initiator, deadline)),
+        );
+        let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
+            warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
+            return failed;
+        };
+        match loaded {
+            Ok(image) => {
+                debug!(
+                    %url,
+                    width = image.natural_width,
+                    height = image.natural_height,
+                    "Image loaded and cached"
+                );
+                FetchedImages { loaded: 1, svgs: Vec::new() }
+            }
+            Err(rustkit_image::ImageError::Svg(xml)) => match rustkit_svg::SvgDocument::parse(&xml) {
+                Ok(doc) => {
+                    info!(url = %url_for_log(&url), "Image served as image/svg+xml; using the SVG lane");
+                    FetchedImages { loaded: 1, svgs: vec![(url.to_string(), image_svg(doc))] }
+                }
+                Err(e) => {
+                    warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
+                    failed
+                }
+            },
+            Err(rustkit_image::ImageError::Superseded) => {
+                debug!(%url, "Image decoded for a superseded navigation; dropped");
+                failed
+            }
+            Err(e) => {
+                warn!(?e, url = %url_for_log(&url), "Failed to load image");
+                failed
+            }
+        }
+    }
+
+    /// What a load waits for of a pass: every image that arrives by
+    /// `until`, summed. What is still out then is returned, for the live
+    /// loop to put in when it arrives (as a late stylesheet is, S6).
+    async fn collect_images_until(
+        started: Vec<script_net::LiveFuture<FetchedImages>>,
+        until: tokio::time::Instant,
+    ) -> (FetchedImages, Vec<script_net::LiveFuture<FetchedImages>>) {
+        use futures::stream::StreamExt;
+        let mut out = FetchedImages { loaded: 0, svgs: Vec::new() };
+        let mut pending: futures::stream::FuturesUnordered<_> = started.into_iter().collect();
+        let stop = tokio::time::sleep_until(until);
+        tokio::pin!(stop);
+        loop {
+            tokio::select! {
+                next = pending.next() => match next {
+                    Some(fetched) => {
+                        out.loaded += fetched.loaded;
+                        out.svgs.extend(fetched.svgs);
+                    }
+                    None => break,
+                },
+                () = &mut stop => break,
+            }
+        }
+        (out, pending.into_iter().collect())
+    }
+
+    /// Hand the fetches a load stopped waiting for to the live loop.
+    fn keep_late_images(&mut self, id: EngineViewId, late: Vec<script_net::LiveFuture<FetchedImages>>) {
+        if late.is_empty() {
+            return;
+        }
+        info!(count = late.len(), "Images still loading at the budget; they are shown when they arrive");
+        if let Some(view) = self.views.get_mut(&id) {
+            view.live_images.extend(late);
+        }
     }
 
     /// The last part: keep what a fetch brought. Returns how many images

@@ -562,6 +562,21 @@ pub(crate) struct ViewLayout {
     /// ran them. Read by tests to pin that a relayout takes one pass.
     pub(crate) layout_passes: Cell<u32>,
     pub(crate) layout_builds: Cell<u32>,
+    /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
+    /// image. When script swaps its `src`, the box keeps painting this one
+    /// until the new image is in, and keeps it if the new one never
+    /// arrives, so a card does not go blank between the two. Per view and
+    /// cleared with the document, like the other NodeId tables.
+    pub(crate) shown_images: RefCell<HashMap<usize, ImgSource>>,
+}
+
+/// An `<img>`'s `src` and the image it painted last ([`ViewLayout::shown_images`]).
+#[derive(Default)]
+pub(crate) struct ImgSource {
+    /// The absolute URL its `src` (or `srcset` pick) names now.
+    pub(crate) wanted: String,
+    /// The last loaded image it painted.
+    pub(crate) shown: Option<String>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box
