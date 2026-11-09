@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>M1d keys</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* As e3_text.html: #a under 35% of the window height, #b under 75%. */
+  input { position: fixed; left: 0; right: 0; width: 100%; margin: 0; padding: 0 0 0 8px; border: 0;
+          box-sizing: border-box; font: 24px Menlo; }
+  #a { top: 0; height: 300px; background: #ffffe0; }
+  #b { top: 340px; height: 300px; background: #e0ffff; }
+</style>
+<input id="a" value="">
+<input id="b" value="">
+<script>
+  // M1d. The page reports, as beacons the driver reads, the Tab and Cmd
+  // keys it hears (tagged with the tab it was opened as, ?tab=N). Options:
+  //   prevent  cancel the keydown of Cmd+1..9 (a page that keeps them)
+  //   slowimg  add an image the server holds 8 s, so the page is still loading
+  //   busy     hold the page's thread 1.5 s of every 1.6 s
+  var q = location.search;
+  var tag = (q.match(/tab=(\d+)/) || [0, '0'])[1];
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  ['a', 'b'].forEach(function (id) {
+    document.getElementById(id).addEventListener('focus', function () { beacon('e3-' + id + '-focus'); });
+  });
+  ['keydown', 'keyup'].forEach(function (type) {
+    document.addEventListener(type, function (e) {
+      if (e.key === 'Tab' || e.metaKey) {
+        beacon('m1d-t' + tag + '-' + type + '-' + encodeURIComponent(e.key) +
+               '-c' + (e.ctrlKey ? 1 : 0) + '-a' + (e.altKey ? 1 : 0) + '-m' + (e.metaKey ? 1 : 0));
+      }
+      if (type === 'keydown' && q.indexOf('prevent') >= 0 && e.metaKey && e.key >= '1' && e.key <= '9') {
+        e.preventDefault();
+      }
+    });
+  });
+  if (q.indexOf('slowimg') >= 0) {
+    var img = new Image();
+    img.src = '/slowimg/00ff00.png?ms=8000';
+    document.body.appendChild(img);
+  }
+  if (q.indexOf('busy') >= 0) {
+    setInterval(function () { var t = Date.now(); while (Date.now() - t < 1500) {} }, 1600);
+  }
+  beacon('e3n-ready');
+  beacon('m1d-t' + tag + '-ready');
+</script>

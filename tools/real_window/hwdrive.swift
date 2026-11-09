@@ -385,18 +385,22 @@ case "key":
     requireFrontmost()
     guard args.count >= 3, let code = UInt16(args[2]) else { emit(["error": "key needs a keycode"], code: 2) }
     var flags: CGEventFlags = []
+    // "bareup": the key's release carries no modifiers, as when the user
+    // lets go of Ctrl before Tab (M1d).
+    var bareUp = false
     for m in args.dropFirst(3) {
         switch m {
         case "cmd": flags.insert(.maskCommand)
         case "shift": flags.insert(.maskShift)
         case "alt": flags.insert(.maskAlternate)
         case "ctrl": flags.insert(.maskControl)
+        case "bareup": bareUp = true
         default: emit(["error": "unknown modifier \(m)"], code: 2)
         }
     }
     for down in [true, false] {
         let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
-        e?.flags = flags
+        e?.flags = (bareUp && !down) ? [] : flags
         post(e)
     }
     emit(["key": Int(code)])

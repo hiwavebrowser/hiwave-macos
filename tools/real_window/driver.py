@@ -2957,10 +2957,13 @@ class Driver:
         self.expect(c, "%s: switched exactly once%s" % (what, " to tab %s" % want if want else ""), ok, detail)
         return got[0] if len(got) == 1 else None
 
+    def m1d_beacons(self, mark, needle):
+        return [urllib.parse.unquote(p) for p in self.fixture.seen(needle, mark)]
+
     def m1d_tab_shortcuts(self):
-        """M1d: five tabs, focus in a page text field: Cmd+3 the third tab, Cmd+9 the last, Ctrl+Tab the next; with the address bar focused Cmd+2 the second, each exactly once."""
+        """M1d: five tabs, focus in a page text field: Cmd+3 the third tab, Cmd+9 the last, Ctrl+Tab the next (its Tab release swallowed even with Ctrl let go first; Ctrl+Option+Tab is the page's); with the address bar focused Cmd+2 the second, each exactly once."""
         c = "m1d_tab_shortcuts"
-        started = self.e3_start(c)
+        started = self.e3_start(c, page="m1d_keys.html")
         if not started:
             return
         pid, w, h = started
@@ -2969,14 +2972,14 @@ class Driver:
         made = self.m1_tabs(c, 4)
         if len(made) != 4:
             return
-        # The fifth tab onto the text page, through the address bar (a new
+        # The fifth tab onto the keys page, through the address bar (a new
         # tab's is empty and focused after Cmd+T).
-        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        mark = self.fixture.mark()
         self.hw("key", pid, 37, "cmd")  # Cmd+L
         time.sleep(0.4)
-        self.hw("type", pid, "%s/e3_text.html?tab=5" % self.fixture.base)
+        self.hw("type", pid, "%s/m1d_keys.html?tab=5" % self.fixture.base)
         self.hw("key", pid, 36)
-        self.expect(c, "the fifth tab loaded the text page", self.fixture.wait("beacon?e3-ready", 10, mark))
+        self.expect(c, "the fifth tab loaded the keys page", self.fixture.wait("beacon?m1d-t5-ready", 10, mark))
         time.sleep(1.0)
         if not self.e3_focus(c, pid, w, h):
             return
@@ -2984,10 +2987,25 @@ class Driver:
         self.m1d_press(c, "Cmd+9", 25, ["cmd"], made[3], "select_last_tab")
         time.sleep(1.0)
         self.e3_focus(c, pid, w, h)
-        first = self.m1d_press(c, "Ctrl+Tab in a page text field (from the last: wraps to the first)",
-                               48, ["ctrl"], None, None)
+        # Ctrl let go before Tab: the release carries no Ctrl (R1 nit 1).
+        mark = self.fixture.mark()
+        first = self.m1d_press(c, "Ctrl+Tab in a page text field, Ctrl released first (from the last: wraps to the first)",
+                               48, ["ctrl", "bareup"], None, None)
         self.expect(c, "Ctrl+Tab's tab is the first (not one Cmd+T made)", first is not None and first not in made,
                     str(first))
+        heard = self.m1d_beacons(mark, "beacon?m1d-t") 
+        tabs = [b for b in heard if "-Tab-" in b]
+        self.expect(c, "no page heard the Ctrl+Tab press or its release", not tabs, str(tabs))
+        # Ctrl+Option+Tab is not the chord (R1 nit 2): no switch, the page hears it.
+        self.fixture.wait("beacon?m1d-t0-ready", 5, mark)
+        time.sleep(0.8)
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 48, "ctrl", "alt")
+        time.sleep(2.0)
+        switched = re.findall(self.ACTIVATE_IPC, self.app.log_text()[log_from:])
+        down = [b for b in self.m1d_beacons(mark, "beacon?m1d-t0-keydown-Tab") if "-c1-a1" in b]
+        self.expect(c, "Ctrl+Option+Tab: no switch, and the page heard its keydown", not switched and bool(down),
+                    "activate_tab %s, page %s" % (switched or "none", down or "heard nothing"))
         self.m1d_press(c, "Cmd+Shift+]", 30, ["cmd", "shift"], made[0], "select_next_tab")
         self.m1d_press(c, "Ctrl+Shift+Tab", 48, ["ctrl", "shift"], first, None)
         # The address bar focused: the chrome's listener switches and claims
@@ -2996,6 +3014,64 @@ class Driver:
         time.sleep(0.6)
         self.m1d_press(c, "Cmd+2 in the address bar", 19, ["cmd"], made[0], False)
         self.expect(c, "the app is still running", self.app.alive())
+
+    def m1d_page_keeps_cmd_digits(self):
+        """M1d R1 nit 4: a page that cancels Cmd+1..9 keeps them (Chromium does not reserve them): Cmd+2 in it switches nothing and the page hears it."""
+        c = "m1d_page_keeps_cmd_digits"
+        started = self.e3_start(c, page="m1d_keys.html?prevent")
+        if not started:
+            return
+        pid, w, h = started
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        made = self.m1_tabs(c, 1)
+        if len(made) != 1:
+            return
+        # From the address bar (the chrome's, which switches), back to the page.
+        first = self.m1d_press(c, "Cmd+1 in the address bar", 18, ["cmd"], None, False)
+        if first is None:
+            return
+        self.fixture.wait("beacon?m1d-t0-ready", 5, self.since)
+        time.sleep(1.0)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 19, "cmd")  # Cmd+2
+        time.sleep(2.0)
+        log = self.app.log_text()[log_from:]
+        switched = re.findall(self.ACTIVATE_IPC, log)
+        heard = self.m1d_beacons(mark, "beacon?m1d-t0-keydown-2")
+        self.expect(c, "Cmd+2 in a page that cancels it: no switch, no menu event, the page heard it",
+                    not switched and 'menu event id="select_tab_2"' not in log and bool(heard),
+                    "activate_tab %s, page %s" % (switched or "none", heard or "heard nothing"))
+
+    def m1d_cmd_l_while_loading(self):
+        """Handtest 11-09: Cmd+L, the first press of the app's life, with focus in a page that is still loading (an image the server holds 8 s; then a page whose thread is busy) reaches the menu and focuses the address bar."""
+        c = "m1d_cmd_l_while_loading"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for query, what in (("slowimg", "an image still loading"), ("busy", "the page's thread busy")):
+            if not self.open_page(c, "m1d_keys.html?" + query, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            if not self.e3_focus(c, pid, win["w"], win["h"]):
+                self.close_page()
+                continue
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', 5, log_from)
+            log = self.app.log_text()[log_from:]
+            sent = "Cmd chord to the page first" in log
+            answer = re.search(r"went to the menu[^\n]*", log)
+            loading = len(self.fixture.seen("/slowimg/", self.since)) > 0 and \
+                not re.search(r"Navigation finished", self.app.log_text())
+            self.expect(c, "%s: the first Cmd+L reached the menu" % what, bool(took),
+                        "after %.1f s; to the page first: %s; answer: %s; still loading: %s" % (
+                            time.time() - t, sent, answer.group(0) if answer else "none", loading))
+            self.close_page()
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
@@ -3009,7 +3085,8 @@ class Driver:
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
-              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts"]
+              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
