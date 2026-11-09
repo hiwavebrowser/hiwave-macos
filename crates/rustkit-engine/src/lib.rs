@@ -1086,18 +1086,32 @@ type LoadedSheets = (
 struct FetchedImages {
     loaded: usize,
     svgs: Vec<(String, rustkit_svg::SvgDocument)>,
-    /// The URLs whose load ended without an image (LAT9-r1): settled, not
-    /// still out. See [`layout_ctx::FailedImages`].
+    /// The URLs whose load failed (LAT9-r1): an error status, a failed
+    /// connection, bytes that do not decode. What Chrome would show as a
+    /// broken image. See [`layout_ctx::FailedImages`].
     failed: Vec<String>,
+    /// The URLs the engine stopped loading on its own account: the image's
+    /// budget ran out, or it got no slot within the pass's cap. Such an
+    /// image was slow or queued, not broken; Chrome would still load it.
+    /// It is not a failure to the page: nothing of it is kept, the element
+    /// goes on painting what it painted and reads as still loading.
+    gave_up: Vec<String>,
 }
 
 impl FetchedImages {
     fn loaded(count: usize, svgs: Vec<(String, rustkit_svg::SvgDocument)>) -> Self {
-        Self { loaded: count, svgs, failed: Vec::new() }
+        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new() }
     }
 
+    /// The image's load failed: the page is told ([`FetchedImages::failed`]).
     fn failed(url: &Url) -> Self {
-        Self { loaded: 0, svgs: Vec::new(), failed: vec![url.to_string()] }
+        Self { failed: vec![url.to_string()], ..Self::loaded(0, Vec::new()) }
+    }
+
+    /// The engine gave up on the image; the page is not told
+    /// ([`FetchedImages::gave_up`]).
+    fn gave_up(url: &Url) -> Self {
+        Self { gave_up: vec![url.to_string()], ..Self::loaded(0, Vec::new()) }
     }
 }
 
@@ -18306,10 +18320,7 @@ impl Engine {
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         Self::img_elements(document, base_url)
             .into_iter()
-            .map(|(_, src, url)| {
-                debug!(%url, "Discovered image");
-                (src, url)
-            })
+            .map(|(_, src, url)| (src, url))
             .collect()
     }
 
@@ -18591,7 +18602,28 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let mut images = self.discover_images(document.as_ref(), base_url);
+        let elements = Self::img_elements(document.as_ref(), base_url);
+        // The `<img>` elements asking for a URL that has failed: who is
+        // owed an `error` (LAT9-r1). Nothing is collected on a page with
+        // no failed image.
+        let wants_failed: Vec<(usize, String)> = {
+            let failed = view.lay.failed_images.borrow();
+            match failed.urls.is_empty() {
+                true => Vec::new(),
+                false => elements
+                    .iter()
+                    .filter(|(_, _, url)| failed.urls.contains(url.as_str()))
+                    .map(|(node, _, url)| (*node, url.to_string()))
+                    .collect(),
+            }
+        };
+        let mut images: Vec<(String, Url)> = elements
+            .into_iter()
+            .map(|(_, src, url)| {
+                debug!(%url, "Discovered image");
+                (src, url)
+            })
+            .collect();
         let backgrounds = Self::discover_background_images(view.display_list.as_deref());
         let css_urls = match view.inspector.is_active() {
             true => backgrounds.iter().map(|(_, url)| url.clone()).collect(),
@@ -18654,9 +18686,17 @@ impl Engine {
                     let layout_ctx::FailedImages { urls, heard, .. } = &mut *failed;
                     heard.retain(|_, url| urls.contains(url));
                 }
-                // The document's images were looked over: an `<img>` may
-                // have been pointed at a URL that already failed, or away.
-                failed.due = true;
+                // An `<img>` may have been pointed at a URL that already
+                // failed, or away from one. Events are due only then: a
+                // page that lays out every turn while it holds failed
+                // images walks nothing more for them.
+                let owed = wants_failed
+                    .iter()
+                    .filter(|(_, url)| failed.urls.contains(url))
+                    .collect::<Vec<_>>();
+                if owed.len() != failed.heard.len() || owed.iter().any(|(node, url)| failed.heard.get(node) != Some(url)) {
+                    failed.due = true;
+                }
             }
         }
 
@@ -18769,7 +18809,7 @@ impl Engine {
         } = job;
         let Ok(Ok(_slot)) = tokio::time::timeout_at(start_by, slots.acquire_owned()).await else {
             warn!(url = %url_for_log(&url), "Image not started within its image pass's cap; rendering without it");
-            return failed;
+            return FetchedImages::gave_up(&url);
         };
         let deadline = tokio::time::Instant::now() + budget;
         let inspector = &inspector;
@@ -18789,7 +18829,7 @@ impl Engine {
                         guard.fail(FailureStage::OverBudget, "subresource budget spent");
                     }
                     warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
-                    return failed;
+                    return FetchedImages::gave_up(&url);
                 }
             };
             return match fetched {
@@ -18846,7 +18886,7 @@ impl Engine {
         );
         let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
             warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
-            return failed;
+            return FetchedImages::gave_up(&url);
         };
         match loaded {
             Ok(image) => {
@@ -18870,7 +18910,7 @@ impl Engine {
             },
             Err(rustkit_image::ImageError::Superseded) => {
                 debug!(%url, "Image decoded for a superseded navigation; dropped");
-                failed
+                FetchedImages::gave_up(&url)
             }
             Err(e) => {
                 warn!(?e, url = %url_for_log(&url), "Failed to load image");
@@ -18898,6 +18938,7 @@ impl Engine {
                         out.loaded += fetched.loaded;
                         out.svgs.extend(fetched.svgs);
                         out.failed.extend(fetched.failed);
+                        out.gave_up.extend(fetched.gave_up);
                     }
                     None => break,
                 },
@@ -18922,6 +18963,11 @@ impl Engine {
     /// the pass loaded.
     fn keep_fetched_images(&mut self, id: EngineViewId, fetched: FetchedImages) -> usize {
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
+        if !fetched.gave_up.is_empty() {
+            // Not failures: nothing is recorded, so the elements keep what
+            // they paint and hear nothing.
+            debug!(count = fetched.gave_up.len(), "Images given up on (budget or pass cap)");
+        }
         if !fetched.failed.is_empty() {
             if let Some(view) = self.views.get(&id) {
                 let mut failed = view.lay.failed_images.borrow_mut();

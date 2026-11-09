@@ -576,14 +576,19 @@ pub(crate) struct ViewLayout {
 
 /// The current document's failed image loads ([`ViewLayout::failed_images`]).
 ///
-/// A URL is in `urls` only once its fetch has ended without an image: an
-/// error status, a failed connection, bytes that do not decode, its own
-/// budget spent, or no slot within the pass's cap. A request that is still
-/// out is not in here, however long it has been out, and neither is one the
-/// load stopped waiting for (that one goes on as live work). One document
-/// asks for a URL once (`ViewState::images_attempted`), so nothing in here
-/// is tried again behind its back; a pass that does ask again (the next
-/// full pass) takes the URL out when it starts the request.
+/// A URL is in `urls` only once its load has failed: an error status, a
+/// failed connection, bytes that do not decode (`FetchedImages::failed`).
+/// A request that is still out is not in here, however long it has been
+/// out, nor is one the load stopped waiting for (that one goes on as live
+/// work). Nor is one the engine gave up on, its own budget spent or no slot
+/// within the pass's cap (`FetchedImages::gave_up`): that image was slow,
+/// not broken, Chrome would still load it, and its element keeps what it
+/// paints and hears nothing. A pass that asks for a failed URL again takes
+/// it out when it starts the request.
+///
+/// Limit: `error` goes to the `<img>` elements in the document. An image
+/// that is not in it (`new Image()` with an `onerror`, a preload or a
+/// pixel) is not fetched at all, so it hears neither `load` nor `error`.
 #[derive(Default)]
 pub(crate) struct FailedImages {
     /// Absolute URLs.
