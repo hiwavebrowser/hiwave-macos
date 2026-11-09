@@ -694,13 +694,26 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let pass = |event: id| -> bool { msg_send![super(this, superclass), performKeyEquivalent: event] };
                 let kind: u64 = msg_send![event, type];
                 let flags: u64 = msg_send![event, modifierFlags];
-                if kind != 10 || flags & (1 << 20) == 0 {
+                let cmd = flags & (1 << 20) != 0;
+                // Ctrl+Tab / Ctrl+Shift+Tab (M1d): AppKit offers it here
+                // and, unclaimed, the window takes it for its key-view loop,
+                // so keyDown: never sees it. It is the app's (next/previous
+                // tab), from the key stream, as Chromium reserves it.
+                let ctrl_tab = kind == 10 && !cmd && flags & (1 << 18) != 0 && {
+                    let keycode: u16 = msg_send![event, keyCode];
+                    keycode == 48
+                };
+                if kind != 10 || !(cmd || ctrl_tab) {
                     return pass(event);
                 }
                 let window: id = msg_send![this, window];
                 let responder: id = if window == nil { nil } else { msg_send![window, firstResponder] };
                 if responder != this as *const Object as id {
                     return pass(event);
+                }
+                if ctrl_tab {
+                    record_key(this, event, false, None);
+                    return true;
                 }
                 let key = pending_key(event, false, None);
                 let plain = text_of(msg_send![event, charactersIgnoringModifiers]);

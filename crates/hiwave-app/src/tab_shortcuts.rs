@@ -13,7 +13,9 @@
 //!   the "⇥" glyph, not a tab character, so a menu item cannot take this
 //!   chord; the app takes it from the view's key stream instead
 //!   (`tab_cycle_chord`), before the page or the chrome hears it, as
-//!   Chromium reserves it.
+//!   Chromium reserves it. The RustKit view records it from
+//!   performKeyEquivalent: (rustkit-viewhost): left unclaimed there, the
+//!   window takes it for its key-view loop and keyDown: never sees it.
 //!
 //! Exactly once: a Cmd chord goes to the focused RustKit view first and
 //! on to the menu only when the view's page did not claim it
