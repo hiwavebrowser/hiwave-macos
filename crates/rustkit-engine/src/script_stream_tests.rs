@@ -233,6 +233,16 @@ fn each_page_of_the_i0a_chain_is_left_before_its_slow_script_arrives() {
     for (n, nav) in NAV.iter().enumerate() {
         assert_eq!(fixture.requests(nav).len(), 1, "page {} requested once", n + 1);
     }
+    // Each page's first script ran, and the request it made before asking
+    // to leave reached the server, as in Chrome (the real window's "five
+    // visits" assertion reads these beacons).
+    for n in 1..=5 {
+        let start = format!("/beacon?start-{n}");
+        assert!(
+            load.until(Duration::from_secs(5), |_| !fixture.requests(&start).is_empty()),
+            "page {n}'s first request never reached the server"
+        );
+    }
     // A page that was left runs none of its later scripts.
     for n in 1..=4 {
         let after = format!("/beacon?after-{n}");
