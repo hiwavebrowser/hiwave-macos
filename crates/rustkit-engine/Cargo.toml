@@ -79,3 +79,8 @@ raw-window-handle = "0.6"
 name = "macos_live_click"
 harness = false
 
+
+# CH2.E35: makes an NSWindow (main thread only), so no test harness.
+[[test]]
+name = "macos_window_surface_drop"
+harness = false

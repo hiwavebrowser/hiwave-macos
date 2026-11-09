@@ -1137,9 +1137,24 @@ impl ViewHost {
                 tracing::error!("ViewState lock poisoned in destroy_view: {}", e);
                 ViewHostError::LockPoisoned
             })?;
-            #[cfg(windows)]
             let hwnd_raw = state_lock.hwnd_raw;
             drop(state_lock);
+            let _ = hwnd_raw;
+
+            // CH2.E35: the NSView leaves its window and is released (it was
+            // alloc'd by `create_view`; the superview held the other
+            // reference). Before, a destroyed view stayed in the window,
+            // still showing its last frame: one per closed view. The GPU
+            // surface on its layer is the caller's to release first
+            // (`Presenter::destroy_view`).
+            #[cfg(target_os = "macos")]
+            if hwnd_raw != 0 {
+                let view = hwnd_raw as id;
+                unsafe {
+                    let _: () = msg_send![view, removeFromSuperview];
+                    let _: () = msg_send![view, release];
+                }
+            }
 
             #[cfg(windows)]
             {

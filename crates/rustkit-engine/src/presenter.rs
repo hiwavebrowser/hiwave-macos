@@ -1046,6 +1046,21 @@ impl WindowSurface {
     }
 }
 
+/// CH2.E35: a surface owns its host view. Dropping it (a closed tab, a
+/// closed panel) releases the GPU surface first, then removes and releases
+/// the host view and its view-host registration
+/// ([`Presenter::destroy_view`]), so no shell has to tear the window or
+/// view down itself. Without this the presenter's fields dropped in
+/// declaration order: the view host (and the view under the swapchain)
+/// before the compositor's surface.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl Drop for WindowSurface {
+    fn drop(&mut self) {
+        self.shown = None;
+        self.presenter.destroy_view(self.id, self.viewhost_id);
+    }
+}
+
 #[cfg(test)]
 mod present_choice_tests {
     use super::*;
