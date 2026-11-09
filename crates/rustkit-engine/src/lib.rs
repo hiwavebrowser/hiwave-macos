@@ -21186,10 +21186,6 @@ impl Engine {
     /// `no_frame` at the next `render_changed_views`.
     pub fn note_input(&mut self, id: EngineViewId, mark: InputMark) {
         if let Some(view) = self.views.get_mut(&id) {
-            // RED: develop's semantics, the earliest input per frame only.
-            if !view.input_pending.is_empty() {
-                return;
-            }
             if mark.kind.sampled() && view.input_pending.iter().any(|m| m.kind.sampled()) {
                 return;
             }

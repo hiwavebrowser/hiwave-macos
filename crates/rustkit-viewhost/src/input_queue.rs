@@ -213,9 +213,7 @@ impl InputQueue {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
-        // RED: develop's semantics, the handler's time.
-        let _ = made;
-        self.events.push(InputEvent { seq, at: Instant::now(), view, kind });
+        self.events.push(InputEvent { seq, at: made, view, kind });
         seq
     }
 
