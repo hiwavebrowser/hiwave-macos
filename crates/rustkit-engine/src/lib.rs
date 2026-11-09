@@ -330,7 +330,7 @@ pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
 mod wgate;
-pub use wgate::InputMark;
+pub use wgate::{InputClass, InputMark, VisitTag};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1088,6 +1088,11 @@ struct PresentedFrame {
 /// costs a second of staleness and not a stuck window.
 const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The most inputs a view holds for its next commit (LAT1c); more are
+/// counted `no_frame`. A page that commits nothing through 256 inputs is
+/// already the story.
+const MAX_PENDING_INPUTS: usize = 256;
+
 struct ViewState {
     /// What the last wheel moved, while a run of wheels holds to it.
     wheel_gesture: Option<WheelGesture>,
@@ -1136,10 +1141,16 @@ struct ViewState {
     /// The element the developer tools outline on this page
     /// (`Engine::devtools_highlight`), drawn over the display list.
     devtools_highlight: Option<usize>,
-    /// The earliest input the view took since its last commit
-    /// (`Engine::note_input`); rides the next commit for the W-gate's
-    /// input-to-present log, or is dropped when the input changed no frame.
-    input_pending: Option<InputMark>,
+    /// The inputs the view took since its last commit
+    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
+    /// the next commit for the input-to-present log (LAT1c), or are
+    /// counted `no_frame` when their turn changed no frame.
+    input_pending: Vec<InputMark>,
+    /// Inputs since the last commit that presented no frame of their own.
+    inputs_unpresented: u32,
+    /// The host of the view's current visit, as `wgate::begin_visit` was
+    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
+    visit_host: Arc<str>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The canvases of the page's bindings, held apart from them: the
@@ -2982,7 +2993,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -3097,7 +3110,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -3229,7 +3244,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -8078,7 +8095,7 @@ impl Engine {
     }
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
-        wgate::begin_visit(id.raw(), url.host_str());
+        self.begin_view_visit(id, url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, false, None)
             .await
@@ -8103,7 +8120,7 @@ impl Engine {
         id: EngineViewId,
         url: Url,
     ) -> Result<LoadYield, EngineError> {
-        wgate::begin_visit(id.raw(), url.host_str());
+        self.begin_view_visit(id, url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, None)
             .await
@@ -8118,7 +8135,7 @@ impl Engine {
         url: Url,
         nav_id: u64,
     ) -> Result<LoadYield, EngineError> {
-        wgate::begin_visit(id.raw(), url.host_str());
+        self.begin_view_visit(id, url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, Some(nav_id))
             .await
@@ -8853,7 +8870,7 @@ impl Engine {
         html: &str,
         preset_nav: Option<u64>,
     ) -> Result<(), EngineError> {
-        wgate::begin_visit(id.raw(), None);
+        self.begin_view_visit(id, None);
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
@@ -21162,14 +21179,52 @@ impl Engine {
         self.render_views(true)
     }
 
-    /// An input event for view `id` arrived at the app's queue at
-    /// `at` (W-gate: input-to-present). The earliest since the last commit
-    /// is kept; it rides the next commit the view makes, and is dropped at
-    /// the next `render_changed_views` if the frame did not move.
+    /// The user made an input on view `id` (LAT1c: input-to-present),
+    /// noted before it is dispatched. Every one rides the next commit the
+    /// view makes, except moves, which are sampled: the earliest since the
+    /// last commit. Inputs whose turn moves no frame are counted
+    /// `no_frame` at the next `render_changed_views`.
     pub fn note_input(&mut self, id: EngineViewId, mark: InputMark) {
         if let Some(view) = self.views.get_mut(&id) {
-            if view.input_pending.is_none() {
-                view.input_pending = Some(mark);
+            // RED: develop's semantics, the earliest input per frame only.
+            if !view.input_pending.is_empty() {
+                return;
+            }
+            if mark.kind.sampled() && view.input_pending.iter().any(|m| m.kind.sampled()) {
+                return;
+            }
+            if view.input_pending.len() >= MAX_PENDING_INPUTS {
+                // A page that commits nothing for this long: what is past
+                // the cap is not measured, and said so.
+                view.inputs_unpresented = view.inputs_unpresented.saturating_add(1);
+                return;
+            }
+            view.input_pending.push(mark);
+        }
+    }
+
+    /// The inputs pending on view `id` will present no frame of their own
+    /// (its frame did not move, or a navigation replaces the document):
+    /// they are counted `no_frame` on the next commit.
+    fn retire_pending_inputs(&mut self, id: EngineViewId) {
+        if let Some(view) = self.views.get_mut(&id) {
+            let n = view.input_pending.len() as u32;
+            view.input_pending.clear();
+            view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+        }
+    }
+
+    /// A navigation of view `id` to `host` begins (LAT1b/LAT1c): the hold
+    /// summary starts a new visit, the commits are tagged with the host,
+    /// and inputs made on the document being left are not charged to the
+    /// new document's first frame.
+    fn begin_view_visit(&mut self, id: EngineViewId, host: Option<&str>) {
+        wgate::begin_visit(id.raw(), host);
+        self.retire_pending_inputs(id);
+        if let Some(view) = self.views.get_mut(&id) {
+            let host = host.unwrap_or("-");
+            if &*view.visit_host != host {
+                view.visit_host = Arc::from(host);
             }
         }
     }
@@ -21217,9 +21272,7 @@ impl Engine {
             if only_changed && self.frame_is_current(id) {
                 // The drain that noted an input is over and the frame did
                 // not move: that input is not charged to a later frame.
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.input_pending = None;
-                }
+                self.retire_pending_inputs(id);
                 continue;
             }
             drawn += 1;
@@ -21988,7 +22041,14 @@ impl Engine {
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
-                input: view.input_pending.take(),
+                inputs: std::mem::take(&mut view.input_pending),
+                inputs_unpresented: std::mem::take(&mut view.inputs_unpresented),
+                visit: wgate::VisitTag {
+                    view: id.raw(),
+                    host: Arc::clone(&view.visit_host),
+                    chrome: view.app_owned,
+                    nav: view.nav_id,
+                },
                 canvas,
                 modal_popup: view.lay.select_popup.borrow().is_some(),
             };
@@ -22024,6 +22084,11 @@ impl Engine {
         });
         if !moved {
             // A draw for any other reason presents the commit already held.
+            // The inputs this commit took moved no frame (LAT1c).
+            let n = (commit.inputs.len() as u32).saturating_add(commit.inputs_unpresented);
+            if let Some(view) = self.views.get_mut(&id) {
+                view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+            }
         } else if self.presenter.is_none() {
             // The window thread presents. This thread only publishes.
             // The event is how a load still in progress hands the frame
@@ -22031,6 +22096,13 @@ impl Engine {
             // can read the channel while that future is pending.
             if commit.list.is_some() {
                 let _ = self.event_tx.send(EngineEvent::FrameCommitted(commit.clone()));
+            } else {
+                // Not laid out, so never drawn: its inputs go to the next
+                // commit as `no_frame` (LAT1c).
+                let n = (commit.inputs.len() as u32).saturating_add(commit.inputs_unpresented);
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+                }
             }
             self.page_commits.insert(id, commit);
             return Ok(());

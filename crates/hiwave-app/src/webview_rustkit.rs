@@ -603,11 +603,15 @@ impl RustKitView {
         }
     }
 
-    /// An input event for this view arrived at the queue at `at` with
-    /// sequence number `seq` (W-gate: input-to-present latency). Called
-    /// before the event is delivered.
-    pub fn note_input(&self, at: Instant, seq: u64) {
-        self.submit(PageCmd::NoteInput { at, seq });
+    /// The user made `event` on this view (LAT1c: input-to-present
+    /// latency, from the native event's time). Called before the event
+    /// is delivered.
+    pub fn note_input(&self, event: &rustkit_viewhost::InputEvent) {
+        self.submit(PageCmd::NoteInput {
+            at: event.at,
+            seq: event.seq,
+            kind: rustkit_engine::InputClass::of(&event.kind),
+        });
     }
 
     /// Route OS keyboard delivery to the content view (first responder).
@@ -1352,8 +1356,14 @@ impl RustKitView {
                 continue;
             }
             match event {
-                PageEvent::Commit(commit) => {
-                    *self.latest_commit.borrow_mut() = Some(commit);
+                PageEvent::Commit(mut commit) => {
+                    // A commit the window has not drawn yet hands its
+                    // inputs on to this one (LAT1c).
+                    let mut latest = self.latest_commit.borrow_mut();
+                    if let Some(older) = latest.as_mut() {
+                        commit.absorb_undrawn(older);
+                    }
+                    *latest = Some(commit);
                 }
                 PageEvent::Title { text, .. } => {
                     self.chrome_updates.borrow_mut().title = Some(text.clone());
@@ -1458,7 +1468,13 @@ impl RustKitView {
         let Some(surface) = &self.surface else {
             return;
         };
-        if let Err(error) = surface.borrow_mut().present_commit(&commit, &images) {
+        let presented = surface.borrow_mut().present_commit(&commit, &images);
+        // Measured (or counted `no_frame`) by that call: a redraw of this
+        // commit (a resize) must not measure its inputs again (LAT1c).
+        if let Some(latest) = self.latest_commit.borrow_mut().as_mut() {
+            latest.take_inputs();
+        }
+        if let Err(error) = presented {
             warn!(%error, "content frame was not presented");
             return;
         }
