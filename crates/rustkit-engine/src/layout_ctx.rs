@@ -564,10 +564,36 @@ pub(crate) struct ViewLayout {
     pub(crate) layout_builds: Cell<u32>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
-    /// until the new image is in, and keeps it if the new one never
-    /// arrives, so a card does not go blank between the two. Per view and
-    /// cleared with the document, like the other NodeId tables.
+    /// while the new image is in flight, so a card does not go blank
+    /// between the two. Once the new one has settled as failed
+    /// ([`Self::failed_images`]) the old image goes, as in Chrome. Per view
+    /// and cleared with the document, like the other NodeId tables.
     pub(crate) shown_images: RefCell<HashMap<usize, ImgSource>>,
+    /// LAT9-r1: the image URLs of this document whose load has settled as
+    /// failed, and which `<img>` elements have heard `error` for theirs.
+    pub(crate) failed_images: RefCell<FailedImages>,
+}
+
+/// The current document's failed image loads ([`ViewLayout::failed_images`]).
+///
+/// A URL is in `urls` only once its fetch has ended without an image: an
+/// error status, a failed connection, bytes that do not decode, its own
+/// budget spent, or no slot within the pass's cap. A request that is still
+/// out is not in here, however long it has been out, and neither is one the
+/// load stopped waiting for (that one goes on as live work). One document
+/// asks for a URL once (`ViewState::images_attempted`), so nothing in here
+/// is tried again behind its back; a pass that does ask again (the next
+/// full pass) takes the URL out when it starts the request.
+#[derive(Default)]
+pub(crate) struct FailedImages {
+    /// Absolute URLs.
+    pub(crate) urls: std::collections::HashSet<String>,
+    /// A failure arrived, or the document's images were looked over again,
+    /// since `error` was last sent: the next live turn has events to send.
+    pub(crate) due: bool,
+    /// The failed URL each `<img>` (raw NodeId) has heard `error` for. An
+    /// element whose `src` moves on is dropped, so it hears the next one.
+    pub(crate) heard: HashMap<usize, String>,
 }
 
 /// An `<img>`'s `src` and the image it painted last ([`ViewLayout::shown_images`]).
