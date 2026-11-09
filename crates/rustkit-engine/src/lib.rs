@@ -7555,6 +7555,56 @@ impl Engine {
         }
     }
 
+    /// The load ended because its page asked to navigate: the requests the
+    /// page made before that still go out, as in Chromium, with nobody to
+    /// answer (LAT17). Not when the load goes on (the window did not take
+    /// the navigation): the page then gets its answers as usual.
+    ///
+    /// `queued` was taken from the page before the safe point. If the load
+    /// goes on after all, they start as live requests and the page gets its
+    /// answers from the live loop, after the load.
+    fn send_leaving_requests(
+        &mut self,
+        id: EngineViewId,
+        queued: Vec<rustkit_bindings::NetRequest>,
+        policy: &Option<Arc<FetchPolicy>>,
+        loader: &Arc<ResourceLoader>,
+        inspector: &Arc<Inspector>,
+        watch: Option<&NavWatch>,
+    ) {
+        let Some(policy) = policy.as_ref() else {
+            return;
+        };
+        if queued.is_empty() {
+            return;
+        }
+        if nav_cancel::cancelled(watch) {
+            let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+            let sent = script_net::send_for_leaving_page(policy, loader, queued, deadline, inspector);
+            debug!(sent, "The page left with requests out: sent, unanswered");
+            return;
+        }
+        let Some(view) = self.views.get_mut(&id) else { return };
+        let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+        for request in queued {
+            let out = view.live_requests.len();
+            view.live_requests.push(script_net::start_live(
+                policy.clone(),
+                loader.clone(),
+                request,
+                deadline,
+                inspector.clone(),
+                out,
+            ));
+        }
+    }
+
+    /// What the page has queued for the network and not yet sent.
+    fn take_queued_requests(slot: &Option<DomBindings>) -> Vec<rustkit_bindings::NetRequest> {
+        let Some(bindings) = slot.as_ref() else { return Vec::new() };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())).unwrap_or_default()
+    }
+
     async fn run_page_scripts_with(
         &mut self,
         id: EngineViewId,
@@ -7705,8 +7755,13 @@ impl Engine {
                 && serve.is_some()
                 && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested());
             if leaving || frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                // Taken before the safe point: once the window takes the
+                // navigation it raises the interrupt word, and the old
+                // page's queue can no longer be read.
+                let queued = if leaving { Self::take_queued_requests(slot) } else { Vec::new() };
                 feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
                 frame_at = std::time::Instant::now();
+                self.send_leaving_requests(id, queued, &policy, &loader, &inspector, watch);
             }
             // Its fetch, if it is still out. The others keep arriving
             // meanwhile, and the window is served every frame (LAT17).
@@ -7999,7 +8054,9 @@ impl Engine {
         // it) asked to leave: the same boundary as between two scripts, so
         // the page fires no DOMContentLoaded or `load` (LAT17).
         if follows && serve.is_some() && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested()) {
+            let queued = Self::take_queued_requests(slot);
             feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
+            self.send_leaving_requests(id, queued, &policy, &loader, &inspector, watch);
         }
         if poisoned.get() || nav_cancel::cancelled(watch) {
             return;
