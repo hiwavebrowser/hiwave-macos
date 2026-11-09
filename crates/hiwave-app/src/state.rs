@@ -578,6 +578,11 @@ pub struct AppState {
     #[allow(dead_code)]
     pub recent_popups: Vec<(String, Instant)>,
 
+    /// The tab a tab shortcut last asked the chrome to activate, while
+    /// that `activate_tab` is in flight (M1d): the next shortcut steps
+    /// from it, so two fast presses reach two tabs. Runtime only.
+    pub tab_select_pending: Option<crate::tab_shortcuts::PendingSelect>,
+
     /// Zoom levels per tab (tab_id -> zoom_level, default 1.0)
     pub tab_zoom_levels: HashMap<String, f32>,
 
@@ -649,6 +654,7 @@ impl AppState {
             next_visit_id: 1,
             user_blocklist,
             recent_popups: Vec::new(),
+            tab_select_pending: None,
             tab_zoom_levels: HashMap::new(),
             tab_audio_playing: HashMap::new(),
             tab_audio_muted: HashMap::new(),

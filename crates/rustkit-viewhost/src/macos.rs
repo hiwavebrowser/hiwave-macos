@@ -517,6 +517,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             }
         }
         extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
+            let keycode: u16 = unsafe { msg_send![event, keyCode] };
+            if crate::take_tab_up(view_id_of(this).raw(), keycode) {
+                return; // a claimed Ctrl+Tab's release: not the page's
+            }
             record_key(this, event, true, None);
         }
         // ---- NSTextInputClient (CH2.E3) ----
@@ -699,9 +703,9 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 // and, unclaimed, the window takes it for its key-view loop,
                 // so keyDown: never sees it. It is the app's (next/previous
                 // tab), from the key stream, as Chromium reserves it.
-                let ctrl_tab = kind == 10 && !cmd && flags & (1 << 18) != 0 && {
+                let ctrl_tab = kind == 10 && {
                     let keycode: u16 = msg_send![event, keyCode];
-                    keycode == 48
+                    crate::is_tab_cycle_chord(keycode, flags & (1 << 18) != 0, cmd, flags & (1 << 19) != 0)
                 };
                 if kind != 10 || !(cmd || ctrl_tab) {
                     return pass(event);
@@ -713,6 +717,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 }
                 if ctrl_tab {
                     record_key(this, event, false, None);
+                    crate::owe_tab_up(view_id_of(this).raw());
                     return true;
                 }
                 let key = pending_key(event, false, None);

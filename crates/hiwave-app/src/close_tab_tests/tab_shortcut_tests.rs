@@ -139,3 +139,52 @@ fn a_page_text_field_leaves_cmd_digits_to_the_menu() {
         assert!(!claimed, "the page claimed Cmd+{digit}");
     }
 }
+
+/// #1012 R1 nit 3: two Ctrl+Tab (or Cmd+Shift+]) presses before the
+/// first `activate_tab` comes back reach two distinct tabs, not the same
+/// next tab twice.
+#[test]
+fn two_fast_next_presses_reach_two_tabs() {
+    let app = App::with_tabs(4);
+    let ids = app.ids_in_strip_order();
+    assert_eq!(app.active(), Some(ids[3]));
+    // Both presses before the chrome's messages are answered.
+    select_tab(&app.state, &app.chrome, TabShortcut::Next);
+    select_tab(&app.state, &app.chrome, TabShortcut::Next);
+    let seen = app.answer_chrome();
+    assert_eq!(seen, vec![format!("activate_tab {}", ids[0]), format!("activate_tab {}", ids[1])]);
+    assert_eq!(app.active(), Some(ids[1]));
+    // Answered: the next press steps from the shell's tab again.
+    assert_eq!(app.menu(TabShortcut::Previous), activated(ids[0]));
+    // Cmd+N to the tab already on its way is not sent twice.
+    select_tab(&app.state, &app.chrome, TabShortcut::Nth(3));
+    select_tab(&app.state, &app.chrome, TabShortcut::Nth(3));
+    assert_eq!(app.answer_chrome(), activated(ids[2]));
+}
+
+/// #1012 R1 nit 4: Chromium does not reserve Cmd+1..9 from the page
+/// (`kReservedCommandIds` in chrome/browser/ui/accelerator_table.cc lists
+/// new/close tab and window, restore tab, next/previous tab and exit,
+/// not IDC_SELECT_TAB_0..7 or IDC_SELECT_LAST_TAB), so a page that
+/// cancels the keydown keeps the chord and the tab does not switch. Ours
+/// matches: the page claims it, and the window does not hand it to the
+/// menu.
+#[test]
+fn a_page_that_cancels_cmd_digits_keeps_them() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds::new(0, 0, 800, 600)).expect("view");
+    engine
+        .load_html(
+            view,
+            "<!doctype html><input id=q><script>document.addEventListener('keydown', function (e) { if (e.metaKey && e.key >= '1' && e.key <= '9') e.preventDefault(); });</script>",
+        )
+        .expect("page");
+    engine.execute_script(view, "document.getElementById('q').focus();").expect("focus");
+    for digit in 1..=9 {
+        assert!(engine.handle_command_key(view, 0, &digit.to_string(), false, false), "Cmd+{digit} not claimed");
+    }
+    // Next/previous tab are reserved: the page never hears Cmd+Shift+[ ].
+    assert!(rustkit_viewhost::is_reserved_chord("}", 30, true, true, false));
+    assert!(rustkit_viewhost::is_reserved_chord("{", 33, true, true, false));
+    assert!(!rustkit_viewhost::is_reserved_chord("3", 20, true, false, false));
+}

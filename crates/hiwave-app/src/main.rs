@@ -6426,12 +6426,11 @@ fn main() {
                     let _ = proxy.send_event(UserEvent::ToggleInspector);
                 }
                 // M1d: Cmd+1..9, Cmd+Shift+[ ] (Tab menu).
-                id if tab_shortcuts::shortcut_for_menu_id(id).is_some() => {
+                id => {
                     if let Some(shortcut) = tab_shortcuts::shortcut_for_menu_id(id) {
                         tab_shortcuts::select_tab(&state_for_events, &chrome_for_events, shortcut);
                     }
                 }
-                _ => {}
             }
         }
     });

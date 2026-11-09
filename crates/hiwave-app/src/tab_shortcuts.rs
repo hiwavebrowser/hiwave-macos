@@ -25,6 +25,8 @@
 //! and the menu switches. Cmd+Shift+[ ] are reserved chords that go
 //! straight to the menu and no page hears.
 
+use std::time::{Duration, Instant};
+
 use hiwave_core::types::TabId;
 
 /// A tab shortcut, resolved against the strip's order.
@@ -55,13 +57,46 @@ pub(crate) fn tab_for_shortcut(order: &[TabId], active: Option<TabId>, shortcut:
     target.filter(|t| Some(*t) != active)
 }
 
+/// How long a pending shortcut target stands in for the active tab: the
+/// `activate_tab` round trip is one event-loop turn, so this only bounds
+/// a target whose activation never landed.
+const PENDING_FOR: Duration = Duration::from_millis(1000);
+
+/// A tab shortcut's target while its `activate_tab` is in flight (#1012
+/// R1 nit 3): `select_tab` reads the shell's active tab, which changes
+/// only when the chrome's message comes back, so two fast presses of
+/// Ctrl+Tab (or key repeat) both stepped from the same tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingSelect {
+    /// The shell's active tab when the shortcut was sent.
+    pub from: Option<TabId>,
+    /// The tab it asked for.
+    pub to: TabId,
+    pub at: Instant,
+}
+
+/// The tab the next shortcut steps from: a pending target while the shell
+/// still shows the tab it was sent from, the target is still in the strip
+/// and it is recent; otherwise the shell's active tab.
+pub(crate) fn effective_active(
+    shell_active: Option<TabId>,
+    order: &[TabId],
+    pending: Option<&PendingSelect>,
+    now: Instant,
+) -> Option<TabId> {
+    match pending {
+        Some(p) if p.from == shell_active && order.contains(&p.to) && now.duration_since(p.at) < PENDING_FOR => Some(p.to),
+        _ => shell_active,
+    }
+}
+
 /// Ctrl+Tab (next) and Ctrl+Shift+Tab (previous), from a view's key
-/// stream: `Some` for the press and for its release, which the app
-/// swallows too so the page hears neither half. Cmd or Option held, it is
-/// not the chord.
+/// stream. The chord itself is `rustkit_viewhost::is_tab_cycle_chord`,
+/// the one predicate the view also claims it by (#1012 R1 nit 2), so
+/// Ctrl+Option+Tab is neither claimed nor taken: the page hears it.
 pub(crate) fn tab_cycle_chord(mac_keycode: u16, ctrl: bool, cmd: bool, alt: bool, shift: bool) -> Option<TabShortcut> {
-    const TAB: u16 = 48;
-    (mac_keycode == TAB && ctrl && !cmd && !alt).then_some(if shift { TabShortcut::Previous } else { TabShortcut::Next })
+    rustkit_viewhost::is_tab_cycle_chord(mac_keycode, ctrl, cmd, alt)
+        .then_some(if shift { TabShortcut::Previous } else { TabShortcut::Next })
 }
 
 /// The menu item ids of the tab shortcuts, and the shortcut each runs.
@@ -89,11 +124,17 @@ pub(crate) fn select_tab(
     shortcut: TabShortcut,
 ) {
     let target = {
-        let Ok(s) = state.lock() else { return };
+        let Ok(mut s) = state.lock() else { return };
         let workspace = s.shell.get_active_workspace().map(|w| w.id);
         let order: Vec<TabId> = s.shell.list_tabs(workspace).iter().map(|t| t.id).collect();
-        let active = s.shell.get_active_tab().map(|t| t.id);
-        tab_for_shortcut(&order, active, shortcut)
+        let shell_active = s.shell.get_active_tab().map(|t| t.id);
+        let now = Instant::now();
+        let active = effective_active(shell_active, &order, s.tab_select_pending.as_ref(), now);
+        let target = tab_for_shortcut(&order, active, shortcut);
+        if let Some(to) = target {
+            s.tab_select_pending = Some(PendingSelect { from: shell_active, to, at: now });
+        }
+        target
     };
     tracing::info!(?shortcut, target = ?target.map(|t| t.0), "tab shortcut");
     if let Some(id) = target {
@@ -161,6 +202,36 @@ mod tests {
         assert_eq!(tab_cycle_chord(48, true, true, false, false), None, "Cmd+Ctrl+Tab");
         assert_eq!(tab_cycle_chord(48, true, false, true, false), None, "Ctrl+Option+Tab");
         assert_eq!(tab_cycle_chord(0, true, false, false, false), None, "Ctrl+A");
+    }
+
+    #[test]
+    fn ctrl_option_tab_is_not_the_chord() {
+        // #1012 R1 nit 2: the view and the app use one predicate, so the
+        // view does not claim a chord the app then hands to the page.
+        assert_eq!(tab_cycle_chord(48, true, false, true, false), None);
+        assert_eq!(tab_cycle_chord(48, true, false, true, true), None);
+        assert!(!rustkit_viewhost::is_tab_cycle_chord(48, true, false, true));
+        assert!(rustkit_viewhost::is_tab_cycle_chord(48, true, false, false));
+    }
+
+    #[test]
+    fn a_pending_target_is_the_step_base_until_the_shell_moves() {
+        let order = ids(5);
+        let t0 = Instant::now();
+        let pending = PendingSelect { from: Some(TabId(1)), to: TabId(2), at: t0 };
+        // In flight: the shell still shows tab 1, the next step is from 2.
+        assert_eq!(effective_active(Some(TabId(1)), &order, Some(&pending), t0), Some(TabId(2)));
+        // Landed (or another tab was activated): the shell's own.
+        assert_eq!(effective_active(Some(TabId(2)), &order, Some(&pending), t0), Some(TabId(2)));
+        assert_eq!(effective_active(Some(TabId(4)), &order, Some(&pending), t0), Some(TabId(4)));
+        // Stale: an activation that never landed stops counting.
+        assert_eq!(
+            effective_active(Some(TabId(1)), &order, Some(&pending), t0 + Duration::from_secs(2)),
+            Some(TabId(1))
+        );
+        // Its target closed meanwhile.
+        assert_eq!(effective_active(Some(TabId(1)), &[TabId(1), TabId(3)], Some(&pending), t0), Some(TabId(1)));
+        assert_eq!(effective_active(Some(TabId(1)), &order, None, t0), Some(TabId(1)));
     }
 
     #[cfg(target_os = "macos")]

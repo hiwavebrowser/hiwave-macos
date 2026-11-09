@@ -328,6 +328,41 @@ fn clip_view_layer(view: id) {
     }
 }
 
+/// The macOS virtual keycode of Tab.
+const TAB_KEYCODE: u16 = 48;
+
+/// Ctrl+Tab / Ctrl+Shift+Tab, the browser's next/previous tab (M1d).
+/// Chromium reserves it from the page. Cmd or Option held, it is not the
+/// chord: Ctrl+Option+Tab is the page's. The one predicate both the
+/// RustKit view (which claims the chord from the window's key-view loop)
+/// and the app (which switches tabs) use, so the two never disagree
+/// (#1012 R1 nit 2).
+pub fn is_tab_cycle_chord(mac_keycode: u16, ctrl: bool, cmd: bool, alt: bool) -> bool {
+    mac_keycode == TAB_KEYCODE && ctrl && !cmd && !alt
+}
+
+thread_local! {
+    /// Views whose Tab release is owed to a claimed Ctrl+Tab (main thread).
+    static TAB_UP_OWED: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// A view claimed a Ctrl+Tab press: its Tab release is swallowed too,
+/// whichever key the user lets go first (#1012 R1 nit 1: with Ctrl
+/// released first the release carries no Ctrl and reached the page as a
+/// stray Tab keyup).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn owe_tab_up(view: u64) {
+    TAB_UP_OWED.with(|owed| owed.borrow_mut().insert(view));
+}
+
+/// Whether this key release is the one a claimed Ctrl+Tab owes (and so
+/// is swallowed). Consumes the debt.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn take_tab_up(view: u64, mac_keycode: u16) -> bool {
+    mac_keycode == TAB_KEYCODE && TAB_UP_OWED.with(|owed| owed.borrow_mut().remove(&view))
+}
+
 /// Move an existing `NSView` and clip its layer. Does not touch the engine,
 /// so a content load can inset the page while the engine is borrowed.
 #[cfg(target_os = "macos")]
@@ -1867,6 +1902,26 @@ impl ViewHostTrait for ViewHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_cycle_chord_is_ctrl_tab_without_cmd_or_option() {
+        assert!(is_tab_cycle_chord(48, true, false, false));
+        assert!(!is_tab_cycle_chord(48, true, false, true), "Ctrl+Option+Tab is the page's");
+        assert!(!is_tab_cycle_chord(48, true, true, false), "Cmd+Ctrl+Tab");
+        assert!(!is_tab_cycle_chord(48, false, false, false), "plain Tab");
+        assert!(!is_tab_cycle_chord(0, true, false, false), "Ctrl+A");
+    }
+
+    #[test]
+    fn a_claimed_ctrl_tab_swallows_exactly_its_tab_release() {
+        let (a, b) = (0xA1D0_0001, 0xA1D0_0002);
+        assert!(!take_tab_up(a, 48), "nothing owed yet");
+        owe_tab_up(a);
+        assert!(!take_tab_up(b, 48), "another view owes nothing");
+        assert!(!take_tab_up(a, 59), "the Ctrl release is not it");
+        assert!(take_tab_up(a, 48), "the Tab release is swallowed, Ctrl down or not");
+        assert!(!take_tab_up(a, 48), "once");
+    }
 
     #[test]
     fn test_view_id_uniqueness() {
