@@ -429,6 +429,14 @@ mod float_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ua_em_margin_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ua_heading_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ua_control_margin_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod emoji_presentation_fallback_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod inline_content_area_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
@@ -562,6 +570,8 @@ mod animations;
 mod ancestor_attribute_tests;
 #[cfg(test)]
 mod attribute_flag_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_value_escape_tests;
 #[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
@@ -11475,14 +11485,20 @@ impl Engine {
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
-    /// and stops the walk at `body`, so the body element reports `html > body`.
+    /// and stops the walk at `body`, so the body element reports `html > body`
+    /// (`html > body.<class>` when body is classed: its own segment is built
+    /// before the walk reaches `html`).
     /// Neither affects descendant paths — a child of an id'd element still
     /// reports the full tag/class path — which is why the reported selector and
     /// the path used to build children are computed separately.
     fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
         match attributes.get("id") {
             Some(id) if !id.is_empty() => format!("#{}", id),
-            _ if selector_path == "body" => "html > body".to_string(),
+            // Body's own segment carries its class (`html > body.focus-mode`);
+            // only its descendants hang off a bare `body`.
+            _ if selector_path == "body" => {
+                format!("html > {}", Self::selector_segment("body", attributes, 1, 1, false))
+            }
             _ => selector_path.to_string(),
         }
     }
@@ -13663,47 +13679,51 @@ impl layout_ctx::LayoutCtx {
             // on a <p> kept 16px margins where Chromium has 14.4px: settings
             // and report shifted 1.6px below their header (chrome board
             // re-rank 2026-11-07, ua_em_margin_tests). The 40px inline
-            // margins/paddings are px in html.css and stay px. Heading
-            // FONT-SIZES are still px here (2em/1.5em/… of the parent in
-            // Chromium) — a separate change.
+            // margins/paddings are px in html.css and stay px. The heading
+            // FONT-SIZES are em of the PARENT's font-size too (CH2.B31): Em
+            // here is absolutized against the parent after the cascade, like
+            // an author em, so a heading under a 10px parent is 20/15/11.7/
+            // 10/8.3/6.7px as in Chromium (ua_heading_font_size_tests). They
+            // were px at 16px. Chromium 148 has no sectioning-h1 rule (an h1
+            // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(32.0); // 2em
+                style.font_size = rustkit_css::Length::Em(2.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.67);
                 style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(24.0); // 1.5em
+                style.font_size = rustkit_css::Length::Em(1.5);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.83);
                 style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(18.72); // 1.17em
+                style.font_size = rustkit_css::Length::Em(1.17);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.0);
                 style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(16.0); // 1em
+                style.font_size = rustkit_css::Length::Em(1.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
                 style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(13.28); // 0.83em
+                style.font_size = rustkit_css::Length::Em(0.83);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
                 style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(10.72); // 0.67em
+                style.font_size = rustkit_css::Length::Em(0.67);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
                 style.margin_bottom = rustkit_css::Length::Em(2.33);
@@ -13810,6 +13830,22 @@ impl layout_ctx::LayoutCtx {
                 };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
+                }
+                // html.css: `input[type=checkbox] { margin: 3px 3px 3px 4px }`,
+                // `input[type=radio] { margin: 3px 3px 0px 5px }` (Chromium
+                // 148 computes exactly these; ua_control_margin_tests).
+                if tag_name == "input" {
+                    let margins = match attributes.get("type").map(|t| t.to_ascii_lowercase()) {
+                        Some(t) if t == "checkbox" => Some((3.0, 3.0, 3.0, 4.0)),
+                        Some(t) if t == "radio" => Some((3.0, 3.0, 0.0, 5.0)),
+                        _ => None,
+                    };
+                    if let Some((t, r, b, l)) = margins {
+                        style.margin_top = rustkit_css::Length::Px(t);
+                        style.margin_right = rustkit_css::Length::Px(r);
+                        style.margin_bottom = rustkit_css::Length::Px(b);
+                        style.margin_left = rustkit_css::Length::Px(l);
+                    }
                 }
             }
             "small" => {
@@ -14339,7 +14375,19 @@ impl layout_ctx::LayoutCtx {
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
-                hints: hints.clone(),
+                // The UA defaults above read an <input>'s `type` (checkbox
+                // and radio margins, the button-like background), so two
+                // inputs of different types never share a style.
+                hints: {
+                    let mut h = hints.clone();
+                    if lower_tag(tag_name) == "input" {
+                        h.push((
+                            "ua-input-type",
+                            attributes.get("type").map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
+                        ));
+                    }
+                    h
+                },
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -19271,7 +19319,7 @@ impl layout_ctx::LayoutCtx {
             if let Some(r) = rest.strip_prefix('[') {
                 // The matcher's first check after the tag: the element must
                 // carry the attribute match_attribute_selector looks up.
-                let end = r.find(']').unwrap_or(r.len());
+                let end = SelectorMatcher::attr_bracket_end(r);
                 key.attr = Some(SelectorMatcher::attr_selector_name(&r[..end]).to_string());
             } else if key.tag.is_none() {
                 if let Some(r) = rest.strip_prefix(':') {
@@ -19997,7 +20045,7 @@ impl SelectorMatcher {
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
                 // Attribute selector with operators
-                let bracket_end = rest.find(']').unwrap_or(rest.len());
+                let bracket_end = SelectorMatcher::attr_bracket_end(rest);
                 let attr_selector = &rest[..bracket_end];
                 remaining = if bracket_end < rest.len() {
                     &rest[bracket_end + 1..]
@@ -20041,7 +20089,7 @@ impl SelectorMatcher {
         match Self::attr_selector_test(attr_selector) {
             Some((op, attr_value)) => attributes
                 .get(attr_name)
-                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+                .is_some_and(|el_attr| Self::attr_test_passes(op, &attr_value, el_attr)),
             // Just [attr] - check presence
             None => attributes.contains_key(attr_name),
         }
@@ -20069,20 +20117,33 @@ impl SelectorMatcher {
     /// The operator of an `[...]` selector and the value it compares with
     /// (trimmed, quotes removed); with an `i` flag after the value, the
     /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
-    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, Cow<'_, str>)> {
         let (start, end) = Self::attr_operator(attr_selector)?;
         let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
         let rest = attr_selector[end..].trim();
-        let (attr_value, flag) = match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
-                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+        // The value's escapes resolve as a string token's or an ident's
+        // (CSS Syntax §4.3.7): `CSS.escape("0.1.1")` is `\30 \.1\.1`, and
+        // the Inspector's `[data-path="…"]` query matched nothing while
+        // the raw text was compared. An escaped quote does not close the
+        // string; an escape's trailing space does not end an ident.
+        let (attr_value, flag): (Cow<'_, str>, &str) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match Self::string_close(&rest[1..], q) {
+                Some(close) => (
+                    rustkit_css::css_string_value(&rest[1..1 + close]),
+                    rest[2 + close..].trim(),
+                ),
                 // CSS Syntax: EOF closes a string.
-                None => (&rest[1..], ""),
+                None => (rustkit_css::css_string_value(&rest[1..]), ""),
             },
-            _ => match rest.find(char::is_whitespace) {
-                Some(space) => (&rest[..space], rest[space..].trim()),
-                None => (rest, ""),
-            },
+            _ => {
+                let token_end = Self::ident_end(rest);
+                let token = rustkit_css::css_ident(&rest[..token_end]);
+                let value = match token {
+                    Cow::Borrowed(t) => rustkit_css::css_string_value(t),
+                    Cow::Owned(t) => Cow::Owned(rustkit_css::css_string_value(&t).into_owned()),
+                };
+                (value, rest[token_end..].trim())
+            }
         };
         let op = match flag {
             "" => Self::ATTR_OPERATORS[at],
@@ -20090,6 +20151,75 @@ impl SelectorMatcher {
             _ => Self::ATTR_INVALID_FLAG,
         };
         Some((op, attr_value))
+    }
+
+    /// Byte offset of the quote that closes a string whose contents start
+    /// `s` (the opening quote already consumed); an escaped quote is part
+    /// of the string. None when EOF closes it.
+    fn string_close(s: &str, quote: char) -> Option<usize> {
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Byte length of the ident token at the start of `s`: up to the first
+    /// unescaped whitespace, where a hex escape owns one whitespace after
+    /// its digits (`\30 \.1` is one ident).
+    fn ident_end(s: &str) -> usize {
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c.is_whitespace() {
+                return i;
+            }
+            if c != '\\' {
+                continue;
+            }
+            let mut digits = 0;
+            while digits < 6 && chars.peek().is_some_and(|(_, d)| d.is_ascii_hexdigit()) {
+                chars.next();
+                digits += 1;
+            }
+            if digits > 0 {
+                if chars.peek().is_some_and(|(_, d)| d.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                chars.next();
+            }
+        }
+        s.len()
+    }
+
+    /// Byte offset of the `]` that ends an attribute selector whose
+    /// contents start `s` (the `[` already consumed), skipping quoted
+    /// strings and escaped characters; `s.len()` when EOF closes it.
+    fn attr_bracket_end(s: &str) -> usize {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+            } else if c == ']' {
+                return i;
+            }
+        }
+        s.len()
     }
 
     /// Whether an `[...]` selector's flag is one the engine takes.
@@ -20286,6 +20416,12 @@ impl SelectorMatcher {
         let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
+            // An escaped character (`\"` in a string, `\]` in a value) has
+            // no syntax of its own here.
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -20393,7 +20529,16 @@ impl SelectorMatcher {
         let mut in_brackets = false;
         let mut quote: Option<char> = None;
         let mut start = 0;
+        let mut escaped = false;
         for (i, c) in selector.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -21256,6 +21401,7 @@ impl Engine {
                     advances,
                     ascent,
                     run,
+                    faces: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint
@@ -27041,63 +27187,240 @@ fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
-/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+/// The TIGHT geometry bbox of a path, in user units, as Chrome's
+/// `getBBox()` / `getBoundingClientRect()` report it (stroke excluded).
 ///
-/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
-/// bbox of its control points — that is a superset, and Chrome reports the
-/// tight bbox — so bounding one from its control points would report a box
-/// larger than the shape and call the difference a geometry defect. Refusing
-/// leaves the element UNMEASURED, which is the honest reading; the tight
-/// extrema of a cubic are a separate unit.
-fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+/// A Bezier's bbox is NOT the bbox of its control points — that is a
+/// superset — so curves contribute their endpoints plus the interior
+/// extrema where the derivative is zero, and arcs are converted to center
+/// parameterization (SVG 2 Appendix B.2.4, radii scaled up when too small
+/// for the chord) and contribute their endpoints plus every axis extremum
+/// the swept angle crosses. Matches Chrome for Testing 148 on the chrome
+/// board's logo wave and the inspector's arc icons
+/// (`curved_and_arc_paths_report_chromes_tight_bbox`).
+fn path_tight_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
     use rustkit_svg::PathCommand as C;
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let (mut cx, mut cy) = (0.0f32, 0.0f32);
-    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    // The previous segment's last control point, for S/T reflection: Some
+    // only right after a cubic (for S) or a quad (for T).
+    let mut last_cubic_ctrl: Option<(f64, f64)> = None;
+    let mut last_quad_ctrl: Option<(f64, f64)> = None;
+
+    fn cubic_extrema(p0: f64, p1: f64, p2: f64, p3: f64) -> Vec<f64> {
+        // B'(t)/3 = a t^2 + b t + c
+        let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+        let b = 2.0 * (p0 - 2.0 * p1 + p2);
+        let c = p1 - p0;
+        let mut ts = Vec::new();
+        if a.abs() < 1e-12 {
+            if b.abs() > 1e-12 {
+                ts.push(-c / b);
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let r = disc.sqrt();
+                ts.push((-b + r) / (2.0 * a));
+                ts.push((-b - r) / (2.0 * a));
+            }
+        }
+        ts.into_iter().filter(|t| *t > 0.0 && *t < 1.0).collect()
+    }
+    fn cubic_at(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+        let u = 1.0 - t;
+        u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+    }
+    fn push_cubic(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+    ) {
+        let mut ts = cubic_extrema(p0.0, p1.0, p2.0, p3.0);
+        ts.extend(cubic_extrema(p0.1, p1.1, p2.1, p3.1));
+        for t in ts {
+            points.push((cubic_at(p0.0, p1.0, p2.0, p3.0, t), cubic_at(p0.1, p1.1, p2.1, p3.1, t)));
+        }
+        points.push(p3);
+    }
+    fn push_quad(points: &mut Vec<(f64, f64)>, p0: (f64, f64), p1: (f64, f64), p2: (f64, f64)) {
+        // A quad is the cubic with control points p0 + 2/3 (p1 - p0), p2 + 2/3 (p1 - p2).
+        let c1 = (p0.0 + 2.0 / 3.0 * (p1.0 - p0.0), p0.1 + 2.0 / 3.0 * (p1.1 - p0.1));
+        let c2 = (p2.0 + 2.0 / 3.0 * (p1.0 - p2.0), p2.1 + 2.0 / 3.0 * (p1.1 - p2.1));
+        push_cubic(points, p0, c1, c2, p2);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push_arc(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        rx: f64,
+        ry: f64,
+        phi_deg: f64,
+        large: bool,
+        sweep: bool,
+        p1: (f64, f64),
+    ) {
+        points.push(p1);
+        let (mut rx, mut ry) = (rx.abs(), ry.abs());
+        if rx == 0.0 || ry == 0.0 || p0 == p1 {
+            return; // a straight line (or nothing): the endpoints bound it
+        }
+        let phi = phi_deg.to_radians();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let dx = (p0.0 - p1.0) / 2.0;
+        let dy = (p0.1 - p1.1) / 2.0;
+        let x1p = cos_phi * dx + sin_phi * dy;
+        let y1p = -sin_phi * dx + cos_phi * dy;
+        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lambda > 1.0 {
+            let s = lambda.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut coef = if den == 0.0 { 0.0 } else { (num / den).max(0.0).sqrt() };
+        if large == sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1p / ry;
+        let cyp = -coef * ry * x1p / rx;
+        let ccx = cos_phi * cxp - sin_phi * cyp + (p0.0 + p1.0) / 2.0;
+        let ccy = sin_phi * cxp + cos_phi * cyp + (p0.1 + p1.1) / 2.0;
+        let angle = |ux: f64, uy: f64, vx: f64, vy: f64| -> f64 {
+            (ux * vy - uy * vx).atan2(ux * vx + uy * vy)
+        };
+        let ux = (x1p - cxp) / rx;
+        let uy = (y1p - cyp) / ry;
+        let theta1 = angle(1.0, 0.0, ux, uy);
+        let mut dtheta = angle(ux, uy, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+        let tau = std::f64::consts::TAU;
+        if !sweep && dtheta > 0.0 {
+            dtheta -= tau;
+        } else if sweep && dtheta < 0.0 {
+            dtheta += tau;
+        }
+        let at = |t: f64| -> (f64, f64) {
+            let (s, c) = t.sin_cos();
+            (
+                ccx + rx * cos_phi * c - ry * sin_phi * s,
+                ccy + rx * sin_phi * c + ry * cos_phi * s,
+            )
+        };
+        // dx/dθ = 0 and dy/dθ = 0, each with its antipode.
+        let tx = (-ry * sin_phi).atan2(rx * cos_phi);
+        let ty = (ry * cos_phi).atan2(rx * sin_phi);
+        let (lo, hi) = if dtheta >= 0.0 {
+            (theta1, theta1 + dtheta)
+        } else {
+            (theta1 + dtheta, theta1)
+        };
+        for base in [tx, tx + std::f64::consts::PI, ty, ty + std::f64::consts::PI] {
+            // Every representative of `base` inside [lo, hi].
+            let mut t = base + ((lo - base) / tau).ceil() * tau;
+            while t <= hi {
+                points.push(at(t));
+                t += tau;
+            }
+        }
+    }
+
     for cmd in commands {
+        let mut cubic_ctrl = None;
+        let mut quad_ctrl = None;
         match *cmd {
             C::MoveTo(x, y) => {
-                (cx, cy) = (x, y);
-                (sx, sy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
+                (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::MoveToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::LineTo(x, y) => {
-                (cx, cy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
                 points.push((cx, cy));
             }
             C::LineToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 points.push((cx, cy));
             }
             C::HorizontalTo(x) => {
-                cx = x;
+                cx = x as f64;
                 points.push((cx, cy));
             }
             C::HorizontalToRel(dx) => {
-                cx += dx;
+                cx += dx as f64;
                 points.push((cx, cy));
             }
             C::VerticalTo(y) => {
-                cy = y;
+                cy = y as f64;
                 points.push((cx, cy));
             }
             C::VerticalToRel(dy) => {
-                cy += dy;
+                cy += dy as f64;
                 points.push((cx, cy));
+            }
+            C::CubicTo(x1, y1, x2, y2, x, y) | C::CubicToRel(x1, y1, x2, y2, x, y) => {
+                let rel = matches!(cmd, C::CubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = (ox + x1 as f64, oy + y1 as f64);
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::SmoothCubicTo(x2, y2, x, y) | C::SmoothCubicToRel(x2, y2, x, y) => {
+                let rel = matches!(cmd, C::SmoothCubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = last_cubic_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::QuadTo(x1, y1, x, y) | C::QuadToRel(x1, y1, x, y) => {
+                let rel = matches!(cmd, C::QuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = (ox + x1 as f64, oy + y1 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::SmoothQuadTo(x, y) | C::SmoothQuadToRel(x, y) => {
+                let rel = matches!(cmd, C::SmoothQuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = last_quad_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::ArcTo(rx, ry, rot, large, sweep, x, y)
+            | C::ArcToRel(rx, ry, rot, large, sweep, x, y) => {
+                let rel = matches!(cmd, C::ArcToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let end = (ox + x as f64, oy + y as f64);
+                push_arc(&mut points, (cx, cy), rx as f64, ry as f64, rot as f64, large, sweep, end);
+                (cx, cy) = end;
             }
             C::Close => {
                 (cx, cy) = (sx, sy);
             }
-            // Any curve or arc: refuse the whole path.
-            _ => return None,
         }
+        last_cubic_ctrl = cubic_ctrl;
+        last_quad_ctrl = quad_ctrl;
     }
-    bounds_of_points(&points)
+    let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    bounds_of_points(&pts)
 }
 
 /// The user-space geometry bbox of one SVG shape element, or `None` where the
@@ -27149,7 +27472,7 @@ fn svg_shape_user_bbox(
         }
         "path" => {
             let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
-            straight_path_bbox(&commands)
+            path_tight_bbox(&commands)
         }
         // Everything else is UNMODELLED and stays unmeasured, deliberately:
         // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
@@ -28116,6 +28439,43 @@ mod tests {
         }
     }
 
+    /// Curved and arc paths get their TIGHT geometry bbox, as Chrome reports
+    /// it. Expected values are Chrome for Testing 148 `getBBox()` on the same
+    /// `d` strings (impl-board2 probe, 2026-11-08); they include the chrome
+    /// board's logo wave and the inspector's refresh and warning icons, which
+    /// were `missing_box` join failures on every chrome and inspector row.
+    #[test]
+    fn curved_and_arc_paths_report_chromes_tight_bbox() {
+        let cases: [(&str, [f32; 4]); 9] = [
+            ("M10 10 C 20 20, 40 20, 50 10", [10.0, 10.0, 40.0, 7.5]),
+            ("M2 13C4 13 6 9 9 9C12 9 14 13 17 13C20 13 22 9 22 9", [2.0, 9.0, 20.0, 4.0]),
+            ("M10 50 C 10 70 30 70 30 50 S 50 30 50 50", [10.0, 35.0, 40.0, 30.0]),
+            ("M10 80 Q 30 100 50 80 T 90 80", [10.0, 70.0, 80.0, 20.0]),
+            ("m10 30 q 20 -20 40 0 t 40 0", [10.0, 20.0, 80.0, 20.0]),
+            (
+                "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+                [1.0, 3.002364, 22.0, 17.995272],
+            ),
+            (
+                "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+                [1.551981, 2.897256, 20.896038, 18.102745],
+            ),
+            ("M60 60 A 20 10 30 1 1 90 70", [55.914055, 45.310505, 36.05552, 24.689495]),
+            // Radii too small for the chord are scaled up (SVG 2 §9.5.1 step 3).
+            ("M60 20 A 5 5 0 0 1 80 20", [60.0, 10.0, 20.0, 10.0]),
+        ];
+        for (d, want) in cases {
+            let attrs: HashMap<String, String> =
+                [("d".to_string(), d.to_string())].into_iter().collect();
+            let got = svg_shape_user_bbox("path", &attrs)
+                .unwrap_or_else(|| panic!("{d}: refused, Chrome reports {want:?}"));
+            let got = [got.0, got.1, got.2, got.3];
+            for (axis, (g, w)) in ["x", "y", "width", "height"].iter().zip(got.iter().zip(want)) {
+                assert!((g - w).abs() < 1e-3, "{d} {axis}: {g} vs Chrome {w}");
+            }
+        }
+    }
+
     /// The refusals, which are the load-bearing half: a shape this exporter
     /// does not model EXACTLY must produce NO box, leaving Gate A to file it
     /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
@@ -28137,12 +28497,12 @@ mod tests {
             }
         };
 
-        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
-        // bbox Chrome reports), an element carrying a transform this walk does
-        // not compose, a <text> needing shaped glyph extents, and a <use>
-        // rustkit-svg's renderer does not resolve. Plus one straight-line
-        // path and one rect, which MUST still come through — a refusal that
-        // refuses everything would pass this test vacuously.
+        // An element carrying a transform this walk does not compose, a
+        // <text> needing shaped glyph extents, and a <use> rustkit-svg's
+        // renderer does not resolve. Plus one cubic Bezier (exported with its
+        // TIGHT bbox, which is not its control points' bbox), one
+        // straight-line path and one rect, which MUST come through — a
+        // refusal that refuses everything would pass this test vacuously.
         let html = r##"<!DOCTYPE html><html><body>
             <svg width="100" height="100" viewBox="0 0 100 100">
               <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
@@ -28170,10 +28530,15 @@ mod tests {
             selectors.contains(&"rect:nth-of-type(2)"),
             "the untransformed rect must be exported; got {selectors:?}"
         );
-        assert!(
-            !selectors.contains(&"path:nth-of-type(1)"),
-            "a path with a cubic Bezier must be REFUSED, not bounded by its \
-             control points; got {selectors:?}"
+        let curve = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(1)")
+            .unwrap_or_else(|| panic!("the cubic path must be exported; got {selectors:?}"));
+        // Chrome 148 getBBox(): 10,10 40x7.5 (control points would say 40x10).
+        assert_eq!(
+            (curve.x, curve.y, curve.width, curve.height),
+            (10.0, 10.0, 40.0, 7.5)
         );
         assert!(
             !selectors.contains(&"rect:nth-of-type(1)"),
@@ -28190,8 +28555,8 @@ mod tests {
         );
         assert_eq!(
             entry.shapes.len(),
-            2,
-            "exactly the two modelled shapes; got {selectors:?}"
+            3,
+            "exactly the three modelled shapes; got {selectors:?}"
         );
 
         // The straight path's bbox is the tight one: M10 10 L30 40 spans
@@ -31398,6 +31763,27 @@ mod element_identity_tests {
         });
         assert_eq!(b.element_id(), Some(42));
         assert_eq!(b.identity().map(|i| i.element_id), Some(42));
+    }
+
+    /// Chrome's `getSelector()` builds body's OWN segment (tag + class) before it
+    /// reaches `html`, so a classed body reports `html > body.focus-mode`
+    /// (chrome board, focus_mode rows: Chrome `html > body.focus-mode`, RustKit
+    /// `html > body`, one missing_box + one phantom_box on every size). Its
+    /// descendants still hang off a bare `body`.
+    #[test]
+    fn reported_selector_keeps_the_class_of_a_classed_body() {
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "focus-mode")])),
+            "html > body.focus-mode"
+        );
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "  a  b ")])),
+            "html > body.a b"
+        );
+        assert_eq!(
+            Engine::reported_selector("body > div.x", &attrs(&[("class", "x")])),
+            "body > div.x"
+        );
     }
 
     /// The join key is only worth anything if it actually JOINS. This walks the
@@ -39600,7 +39986,7 @@ impl SubjectCompound {
                 parts.push(SubjectPart::Id(css_ident(&rest[..end]).into_owned()));
                 remaining = &rest[end..];
             } else if let Some(rest) = remaining.strip_prefix('[') {
-                let end = rest.find(']').unwrap_or(rest.len());
+                let end = SelectorMatcher::attr_bracket_end(rest);
                 parts.push(SubjectPart::Attr(rest[..end].to_string()));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
@@ -42036,8 +42422,8 @@ impl SelectorReads {
             let name = SelectorMatcher::attr_selector_name(attr).to_string();
             if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                 let tests = self.attribute_tests.entry(name.clone()).or_default();
-                if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                    tests.push((op, value.to_string()));
+                if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                    tests.push((op, value.into_owned()));
                 }
             }
             self.ancestor_attributes.insert(name);
@@ -42106,8 +42492,8 @@ impl SelectorReads {
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                            tests.push((op, value.to_string()));
+                        if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                            tests.push((op, value.into_owned()));
                         }
                     }
                 }
@@ -43743,7 +44129,7 @@ mod style_share_tests {
             assert_eq!(keyed.len(), kept.len());
             for test in tests {
                 let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
-                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                let at = kept.iter().position(|(o, v)| *o == op && *v == *operand).expect("kept");
                 assert_eq!(
                     keyed[at],
                     SelectorMatcher.match_attribute_selector(test, &attributes),
@@ -44807,9 +45193,12 @@ mod windows_engine_pins {
             .iter()
             .map(|t| {
                 let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                // The UA heading sizes are em of the parent (CH2.B31); the
+                // cascade absolutizes them, here against the 16px default.
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
-                    other => panic!("<{t}> font-size is {other:?}, expected Px"),
+                    rustkit_css::Length::Em(em) => em * 16.0,
+                    other => panic!("<{t}> font-size is {other:?}, expected Px or Em"),
                 }
             })
             .collect();
