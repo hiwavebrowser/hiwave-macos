@@ -12,6 +12,12 @@ use hiwave_core::{
 
 pub struct BrowserShell {
     tabs: HashMap<TabId, TabInfo>,
+    /// Every open tab, in tab-strip order (M1c): the order they were
+    /// opened, a new tab at the end, a tab moved to another workspace at
+    /// the end of it. Filtered to one workspace it equals that
+    /// workspace's `tabs`. Every reader of tab order reads this, never the
+    /// map's order.
+    tab_order: Vec<TabId>,
     workspaces: HashMap<WorkspaceId, WorkspaceInfo>,
     active_workspace: Option<WorkspaceId>,
     command_palette: CommandPalette,
@@ -23,6 +29,7 @@ impl BrowserShell {
 
         let mut shell = Self {
             tabs: HashMap::new(),
+            tab_order: Vec::new(),
             workspaces: HashMap::new(),
             active_workspace: None,
             command_palette: CommandPalette::new(),
@@ -33,6 +40,11 @@ impl BrowserShell {
         shell.set_active_workspace(default_ws).ok();
 
         shell
+    }
+
+    /// The open tabs in tab-strip order.
+    fn ordered_tabs(&self) -> impl Iterator<Item = &TabInfo> {
+        self.tab_order.iter().filter_map(|id| self.tabs.get(id))
     }
 
     fn current_timestamp_secs() -> u64 {
@@ -70,13 +82,14 @@ impl BrowserShell {
             log::info!("Deleted workspace {:?}: {}", id, workspace.name);
 
             // Close all tabs in this workspace
-            for tab_id in workspace.tabs {
-                self.tabs.remove(&tab_id);
+            for tab_id in &workspace.tabs {
+                self.tabs.remove(tab_id);
             }
+            self.tab_order.retain(|tab_id| !workspace.tabs.contains(tab_id));
 
             // Switch to another workspace if this was active
             if self.active_workspace == Some(id) {
-                if let Some(&new_active) = self.workspaces.keys().next() {
+                if let Some(new_active) = self.workspaces.keys().min_by_key(|ws| ws.0).copied() {
                     self.set_active_workspace(new_active)?;
                 }
             }
@@ -136,8 +149,11 @@ impl BrowserShell {
         self.workspaces.get(&id)
     }
 
+    /// Workspaces in creation order (ids are handed out in sequence).
     pub fn list_workspaces(&self) -> Vec<&WorkspaceInfo> {
-        self.workspaces.values().collect()
+        let mut workspaces: Vec<&WorkspaceInfo> = self.workspaces.values().collect();
+        workspaces.sort_by_key(|ws| ws.id.0);
+        workspaces
     }
 
     // Tab management
@@ -147,7 +163,16 @@ impl BrowserShell {
 
         log::info!("Creating tab {:?} in workspace {:?}", tab_id, workspace_id);
 
-        self.tabs.insert(tab_id, tab);
+        // A re-used id (no caller does this) replaces the old tab, which
+        // leaves both lists before the new one joins at the end.
+        if let Some(old) = self.tabs.insert(tab_id, tab) {
+            if let Some(workspace) = self.workspaces.get_mut(&old.workspace_id) {
+                workspace.tabs.retain(|&id| id != tab_id);
+            }
+            self.tab_order.retain(|&id| id != tab_id);
+        }
+        // A new tab goes at the end of the strip.
+        self.tab_order.push(tab_id);
 
         // Add to workspace
         if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
@@ -163,6 +188,7 @@ impl BrowserShell {
     pub fn close_tab(&mut self, tab_id: TabId) -> HiWaveResult<()> {
         if let Some(tab) = self.tabs.remove(&tab_id) {
             log::info!("Closing tab {:?}", tab_id);
+            self.tab_order.retain(|&id| id != tab_id);
 
             // Remove from workspace
             if let Some(workspace) = self.workspaces.get_mut(&tab.workspace_id) {
@@ -235,8 +261,7 @@ impl BrowserShell {
     pub fn stale_locks(&self, threshold_days: u64) -> Vec<TabInfo> {
         let cutoff_secs = threshold_days.saturating_mul(86400);
         let now = Self::current_timestamp_secs();
-        self.tabs
-            .values()
+        self.ordered_tabs()
             .filter(|tab| tab.locked)
             .filter(|tab| {
                 tab.last_visited
@@ -277,8 +302,7 @@ impl BrowserShell {
 
     /// Get all tabs with their decay levels for a workspace
     pub fn tabs_with_decay(&self, workspace_id: Option<WorkspaceId>, decay_days: u32) -> Vec<(TabInfo, u8)> {
-        self.tabs
-            .values()
+        self.ordered_tabs()
             .filter(|tab| workspace_id.is_none() || tab.workspace_id == workspace_id.unwrap())
             .map(|tab| {
                 let decay_level = Self::calculate_decay_level(tab.last_visited, decay_days);
@@ -289,8 +313,7 @@ impl BrowserShell {
 
     /// Get tabs that have reached maximum decay (level 5) and are candidates for auto-shelving
     pub fn expired_tabs(&self, workspace_id: Option<WorkspaceId>, decay_days: u32) -> Vec<TabInfo> {
-        self.tabs
-            .values()
+        self.ordered_tabs()
             .filter(|tab| workspace_id.is_none() || tab.workspace_id == workspace_id.unwrap())
             .filter(|tab| !tab.locked) // Don't expire locked tabs
             .filter(|tab| Self::calculate_decay_level(tab.last_visited, decay_days) >= 5)
@@ -339,6 +362,9 @@ impl BrowserShell {
             workspace.tabs.push(tab_id);
             workspace.active_tab = Some(tab_id);
         }
+        // At the end of its new workspace, as in `workspace.tabs`.
+        self.tab_order.retain(|&id| id != tab_id);
+        self.tab_order.push(tab_id);
 
         Ok(())
     }
@@ -370,20 +396,15 @@ impl BrowserShell {
         }
     }
 
+    /// The open tabs (of one workspace, or all), in tab-strip order.
     pub fn list_tabs(&self, workspace_id: Option<WorkspaceId>) -> Vec<&TabInfo> {
-        if let Some(ws_id) = workspace_id {
-            self.tabs
-                .values()
-                .filter(|tab| tab.workspace_id == ws_id)
-                .collect()
-        } else {
-            self.tabs.values().collect()
-        }
+        self.ordered_tabs()
+            .filter(|tab| workspace_id.map_or(true, |ws_id| tab.workspace_id == ws_id))
+            .collect()
     }
 
     pub fn snapshot(&self) -> ShellSnapshot {
-        let mut workspaces: Vec<&WorkspaceInfo> = self.workspaces.values().collect();
-        workspaces.sort_by_key(|ws| ws.id.0);
+        let workspaces = self.list_workspaces();
 
         let active_workspace_index = self
             .active_workspace
@@ -424,6 +445,7 @@ impl BrowserShell {
 
     pub fn load_snapshot(&mut self, snapshot: ShellSnapshot) -> HiWaveResult<()> {
         self.tabs.clear();
+        self.tab_order.clear();
         self.workspaces.clear();
         self.active_workspace = None;
 
@@ -457,6 +479,7 @@ impl BrowserShell {
                     last_visited: tab_snapshot.last_visited,
                 };
                 self.tabs.insert(tab_id, tab_info);
+                self.tab_order.push(tab_id);
                 workspace.tabs.push(tab_id);
             }
 

@@ -136,6 +136,7 @@ fn tab_lists_over_ipc_are_in_opening_order() {
     assert_eq!(urls(&ws["tabs"]), want, "get_workspaces");
     assert_eq!(urls(&app.ask(IpcMessage::GetActiveWorkspace)["tabs"]), want, "get_active_workspace");
     let export = app.ask(IpcMessage::ExportData { include_settings: false, include_workspaces: true });
+    let export: serde_json::Value = serde_json::from_str(export["data"].as_str().expect("export json")).unwrap();
     let exported = export["workspaces"].as_array().unwrap().iter().find(|w| !w["tabs"].as_array().unwrap().is_empty()).expect("exported ws");
     assert_eq!(urls(&exported["tabs"]), want, "export");
 }
