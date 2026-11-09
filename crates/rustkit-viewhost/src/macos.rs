@@ -250,7 +250,10 @@ unsafe fn chord_to_menu(event: id, token: u64, why: &'static str, waited: std::t
     let menu: id = msg_send![app, mainMenu];
     if menu != nil {
         let taken: bool = msg_send![menu, performKeyEquivalent: event];
-        debug!(token, taken, why, waited_ms = waited.as_millis() as u64, "Cmd chord went to the menu");
+        // From the press as the window server stamped it, for the
+        // real-window gate (m1d_cmd_l_while_loading).
+        let since_press_ms = native_event_instant(event).elapsed().as_millis() as u64;
+        debug!(token, taken, why, waited_ms = waited.as_millis() as u64, since_press_ms, "Cmd chord went to the menu");
     }
     let _: () = msg_send![event, release];
 }
