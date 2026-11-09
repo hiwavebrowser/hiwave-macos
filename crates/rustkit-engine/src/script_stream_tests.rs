@@ -422,3 +422,111 @@ fn a_page_left_by_its_script_fires_what_a_page_left_by_a_click_fires() {
     assert_eq!(next_script.len(), 1, "navigated once (script)");
     assert_eq!(next_click.len(), 1, "navigated once (click)");
 }
+
+// ---------------------------------------------------------------------
+// Prometheus R1 (review 5828788579), nits 1, 2 and 4.
+// ---------------------------------------------------------------------
+
+/// Nit 1: a page thread that does not follow script navigation mid-load
+/// (`follows_script_navigation` false) is not left at a safe point: its
+/// scripts all run and the load completes, and the navigation is
+/// reported after it, as before LAT17.
+#[test]
+fn without_follows_a_script_navigation_does_not_end_the_load() {
+    let page = r#"<!doctype html><body><p>staying</p>
+<script>location.href = '/next';</script>
+<script src="/slow.js"></script>
+<script>fetch('/beacon?s3');</script>"#;
+    let fixture = serve(vec![
+        ("/page", html(page)),
+        ("/slow.js", slow_js("", 800)),
+        ("/next", html("<p>next</p>")),
+    ]);
+    let thread = crate::content_thread::ContentThread::spawn(
+        crate::EngineBuilder::new()
+            .javascript_enabled(true)
+            .script_budget_ms(15_000)
+            .interrupt_scripts_at_budget(true)
+            .live_turn_budget_ms(5_000)
+            .follows_script_navigation(false)
+            .post_load_requests_live(true),
+        Bounds { x: 0, y: 0, width: 800, height: 600 },
+    )
+    .expect("content thread spawns");
+    let mut load = Load::start_on(thread, &fixture, "/page");
+    load.follow = true;
+    load.wait_complete();
+    assert!(
+        load.until(Duration::from_secs(5), |_| !fixture.requests("/beacon?s3").is_empty()),
+        "the last script ran"
+    );
+}
+
+/// Nit 2: a script navigation the window does not take (nothing reports
+/// it here) is offered at one boundary only. A request a later script
+/// makes is answered before DOMContentLoaded, as on any load.
+#[test]
+fn a_navigation_that_is_not_taken_is_offered_once() {
+    let page = r#"<!doctype html><body>
+<script>window.order = ['s1']; document.addEventListener('DOMContentLoaded', function () { order.push('dcl'); }); location.href = '/next';</script>
+<script src="/slow.js"></script>
+<script>fetch('/b').then(function () { order.push('b'); });</script>"#;
+    let fixture = serve(vec![("/page", html(page)), ("/slow.js", slow_js("order.push('s2');", 300)), ("/b", js("b"))]);
+    let mut engine = Engine::new(EngineConfig { follows_script_navigation: true, ..EngineConfig::default() }).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+        .expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut offers = 0usize;
+    let mut serve = |engine: &mut Engine| {
+        // The window that never takes the navigation: count the safe
+        // points at which one was pending.
+        if engine
+            .views
+            .get(&view)
+            .and_then(|v| v.bindings.as_ref())
+            .is_some_and(|b| b.navigation_requested())
+        {
+            offers += 1;
+        }
+        crate::Served::default()
+    };
+    let lend: &mut crate::ServeFn<'_> = &mut serve;
+    rt.block_on(engine.load_url_serving(view, fixture.url("/page"), None, Some(lend))).expect("load");
+    assert_eq!(read(&mut engine, view, "order.join(',')"), "s1,s2,b,dcl");
+    assert_eq!(offers, 1, "the pending navigation was offered at {offers} safe points");
+}
+
+/// Nit 4: requests a leaving page left out, held by the server, do not
+/// take the next page's places: the next page's own request goes out at
+/// once. (The policy, its slots and budget are per page.)
+#[test]
+fn a_leaving_pages_held_requests_do_not_delay_the_next_pages_request() {
+    let first = r#"<!doctype html><body><p>leaving</p>
+<script>for (var i = 0; i < 10; i++) { fetch('/held?' + i); } location.href = '/next';</script>
+<script src="/slow.js"></script>"#;
+    let next = r#"<!doctype html><body><p>next</p><script>fetch('/beacon?next');</script>"#;
+    let mut routes: Vec<(&'static str, Route)> = vec![
+        ("/page", html(first)),
+        ("/slow.js", slow_js("", 1_500)),
+        ("/next", html(next)),
+    ];
+    const HELD: [&str; 10] =
+        ["/held?0", "/held?1", "/held?2", "/held?3", "/held?4", "/held?5", "/held?6", "/held?7", "/held?8", "/held?9"];
+    for path in HELD {
+        routes.push((path, ("text/plain", b"held".to_vec(), 5_000)));
+    }
+    let fixture = serve(routes);
+    let mut load = Load::start(&fixture, "/page");
+    load.follow = true;
+    assert!(load.until(Duration::from_secs(10), |_| !fixture.requests("/next").is_empty()), "/next requested");
+    let next_at = fixture.requests("/next")[0];
+    assert!(
+        load.until(Duration::from_secs(4), |_| !fixture.requests("/beacon?next").is_empty()),
+        "the next page's request waited behind the old page's held ones"
+    );
+    let beacon = fixture.requests("/beacon?next")[0];
+    let held = HELD.iter().filter(|p| !fixture.requests(p).is_empty()).count();
+    eprintln!("LAT17 nit 4: {held} held requests out; next page's request {} ms after it", beacon - next_at);
+    assert!(held >= 6, "the old page's requests went out ({held})");
+}

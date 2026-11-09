@@ -172,7 +172,11 @@ pub(crate) struct Load {
 
 impl Load {
     pub(crate) fn start(fixture: &Fixture, path: &str) -> Self {
-        let page = app_page();
+        Self::start_on(app_page(), fixture, path)
+    }
+
+    /// [`Load::start`] on a page thread built some other way.
+    pub(crate) fn start_on(page: ContentThread, fixture: &Fixture, path: &str) -> Self {
         let mut boot = page.eval("0");
         assert!(wait(&mut boot, Duration::from_secs(30)).is_some(), "the page thread boots");
         let _ = page.poll();
