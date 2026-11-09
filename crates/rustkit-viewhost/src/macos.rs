@@ -699,14 +699,17 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let kind: u64 = msg_send![event, type];
                 let flags: u64 = msg_send![event, modifierFlags];
                 let cmd = flags & (1 << 20) != 0;
-                // Ctrl+Tab / Ctrl+Shift+Tab (M1d): AppKit offers it here
-                // and, unclaimed, the window takes it for its key-view loop,
-                // so keyDown: never sees it. It is the app's (next/previous
-                // tab), from the key stream, as Chromium reserves it.
-                let ctrl_tab = kind == 10 && {
-                    let keycode: u16 = msg_send![event, keyCode];
-                    crate::is_tab_cycle_chord(keycode, flags & (1 << 18) != 0, cmd, flags & (1 << 19) != 0)
-                };
+                // Ctrl+Tab and its Shift/Option forms (M1d): AppKit offers
+                // them here and, unclaimed, the window takes them for its
+                // key-view loop, so keyDown: never sees them. They go to
+                // the key stream: Ctrl+Tab / Ctrl+Shift+Tab are the app's
+                // (next/previous tab, `is_tab_cycle_chord`, as Chromium
+                // reserves them); Ctrl+Option+Tab is the page's (#1012 R1
+                // nit 2), as in Chrome.
+                let keycode: u16 = msg_send![event, keyCode];
+                let ctrl = flags & (1 << 18) != 0;
+                let ctrl_tab = kind == 10 && keycode == 48 && ctrl && !cmd;
+                let cycle = crate::is_tab_cycle_chord(keycode, ctrl, cmd, flags & (1 << 19) != 0);
                 if kind != 10 || !(cmd || ctrl_tab) {
                     return pass(event);
                 }
@@ -717,7 +720,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 }
                 if ctrl_tab {
                     record_key(this, event, false, None);
-                    crate::owe_tab_up(view_id_of(this).raw());
+                    if cycle {
+                        // The app's: its release is not the page's either.
+                        crate::owe_tab_up(view_id_of(this).raw());
+                    }
                     return true;
                 }
                 let key = pending_key(event, false, None);
