@@ -334,6 +334,71 @@ thread_local! {
     /// The stages of the last outermost entry that closed, for tests.
     #[cfg(test)]
     static LAST_STAGES: Cell<HoldMs> = const { Cell::new(HOLD_MS_ZERO) };
+    #[cfg(test)]
+    static LAST_LINE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static SEGMENTS: Cell<Option<Segments>> = const { Cell::new(None) };
+}
+
+/// The stretches of an outermost hold between its suspensions (LAT15).
+#[derive(Debug, Clone, Copy)]
+struct Segments {
+    /// When the stretch in progress began.
+    started: Instant,
+    longest_ms: f64,
+    /// Stretches ended so far.
+    count: u32,
+}
+
+/// What [`suspend_hold`] put aside, restored when it is dropped.
+pub(crate) struct HoldSuspended {
+    held: Option<(HoldMs, Option<HoldBucket>, Option<Segments>)>,
+}
+
+/// A load lends its thread out at a safe point (LAT15): the commands
+/// applied there are entries of their own, not part of the load's hold.
+/// Ends the load's current stretch, takes its stage and bucket times aside
+/// and lowers the depth, so an entry made meanwhile is outermost and is
+/// reported on its own. The time until the guard drops is charged to
+/// nothing; the next stretch starts then. Inert unless exactly one entry
+/// (the load's) is open.
+pub(crate) fn suspend_hold() -> HoldSuspended {
+    if HOLD_DEPTH.with(|d| d.get()) != 1 {
+        return HoldSuspended { held: None };
+    }
+    charge();
+    let now = Instant::now();
+    let segments = SEGMENTS.with(|s| s.take()).map(|seg| Segments {
+        started: seg.started,
+        longest_ms: seg.longest_ms.max(now.duration_since(seg.started).as_secs_f64() * 1000.0),
+        count: seg.count + 1,
+    });
+    let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
+    let bucket = ACTIVE.with(|active| active.take()).map(|(bucket, _)| bucket);
+    HOLD_DEPTH.with(|d| d.set(0));
+    HoldSuspended { held: Some((stages, bucket, segments)) }
+}
+
+impl Drop for HoldSuspended {
+    fn drop(&mut self) {
+        let Some((stages, bucket, segments)) = self.held.take() else {
+            return;
+        };
+        let now = Instant::now();
+        HOLD_DEPTH.with(|d| d.set(1));
+        HOLD_MS.with(|c| c.set(stages));
+        ACTIVE.with(|active| active.set(bucket.map(|bucket| (bucket, now))));
+        SEGMENTS.with(|s| {
+            s.set(Some(match segments {
+                Some(seg) => Segments { started: now, ..seg },
+                None => Segments { started: now, longest_ms: 0.0, count: 0 },
+            }))
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn last_line() -> Option<String> {
+    LAST_LINE.with(|c| c.borrow().clone())
 }
 
 /// The stages of the last outermost entry that closed on this thread, for
@@ -421,6 +486,7 @@ pub(crate) fn hold(entry: &'static str) -> WindowHold {
     if outermost {
         charge();
         HOLD_MS.with(|c| c.set(HoldMs::default()));
+        SEGMENTS.with(|s| s.set(Some(Segments { started: Instant::now(), longest_ms: 0.0, count: 0 })));
     }
     WindowHold {
         entry,
@@ -438,13 +504,26 @@ impl Drop for WindowHold {
         let total_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         charge();
         let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
+        // A load that lent the thread out at its safe points (LAT15): the
+        // line keeps the whole span, as before, and names the longest
+        // stretch between safe points; the summary takes that stretch.
+        let segments = SEGMENTS.with(|s| s.take()).filter(|seg| seg.count > 0).map(|seg| {
+            let last = seg.started.elapsed().as_secs_f64() * 1000.0;
+            (seg.longest_ms.max(last), seg.count + 1)
+        });
+        let sample_ms = segments.map_or(total_ms, |(longest, _)| longest);
         #[cfg(test)]
         LAST_ENTRY.with(|c| c.set(Some(self.entry)));
         #[cfg(test)]
         LAST_STAGES.with(|c| c.set(stages));
-        if let Some(line) = hold_line(hold_thread_name(), self.entry, total_ms, &stages) {
+        if let Some(mut line) = hold_line(hold_thread_name(), self.entry, total_ms, &stages) {
+            if let Some((longest, count)) = segments {
+                line.push_str(&format!(" longest_segment_ms={longest:.0} segments={count}"));
+            }
             #[cfg(test)]
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
+            #[cfg(test)]
+            LAST_LINE.with(|c| *c.borrow_mut() = Some(line.clone()));
             tracing::warn!("{line}");
         }
         if !ON_CONTENT.with(|on| *on) {
@@ -457,7 +536,7 @@ impl Drop for WindowHold {
             }
             // f64, as the hold line compares it: `over_50` counts exactly the
             // entries that logged a hold line.
-            summary.push((self.entry, total_ms));
+            summary.push((self.entry, sample_ms));
             summary.len() >= HOLD_SUMMARY_EVERY
         });
         if full {
@@ -969,5 +1048,45 @@ mod tests {
         assert_eq!(latency.record(3), None, "a new window");
         assert_eq!(summary_line(&[]), "Input to present p50_ms=0 p95_ms=0 max_ms=0 n=0");
         assert_eq!(summary_line(&[7]), "Input to present p50_ms=7 p95_ms=7 max_ms=7 n=1");
+    }
+
+    /// LAT15: a load that lends its thread out at safe points reports its
+    /// whole span on the hold line, as before, with the longest stretch
+    /// between safe points; the summary takes that stretch, and an entry
+    /// made at the safe point is outermost, a sample of its own.
+    #[test]
+    fn a_suspended_load_reports_its_whole_span_and_its_longest_stretch() {
+        clear_last();
+        {
+            let _load = hold("load");
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            {
+                let _lent = suspend_hold();
+                {
+                    let _click = hold("click");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                assert_eq!(last_entry(), Some("click"), "the served entry is outermost");
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(last_entry(), Some("load"));
+        let (_, whole) = last_hold().expect("the load's hold line");
+        assert!(whole >= 130.0, "the line keeps the whole span: {whole}");
+        let line = last_line().expect("line");
+        let longest: f64 = line
+            .split(" longest_segment_ms=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or_else(|| panic!("no longest_segment_ms: {line}"));
+        assert!((80.0..130.0).contains(&longest), "longest stretch {longest}: {line}");
+        assert!(line.ends_with(" segments=2"), "{line}");
+        // Nothing nested outlives the load: the next entry is outermost.
+        {
+            let _next = hold("move");
+        }
+        assert_eq!(last_entry(), Some("move"));
     }
 }
