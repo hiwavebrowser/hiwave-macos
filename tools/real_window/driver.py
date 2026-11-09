@@ -2930,6 +2930,73 @@ class Driver:
         self.expect(c, "once it is closed, a click on the page reaches the page",
                     self.fixture.wait("beacon?a3-click-", 5, mark))
 
+    # ── M1d: tab shortcuts from a focused page, exactly once ───────────────
+
+    ACTIVATE_IPC = r'RustKit chrome IPC body=\{"cmd":"activate_tab","id":"(\d+)"\}'
+
+    def m1d_press(self, c, what, keycode, mods, want, menu_id):
+        """One chord; within 2 s the chrome posts exactly one activate_tab
+        (for tab `want` if given). `menu_id`: the menu item that must (a
+        string) or must not (False) take it. Returns the activated id."""
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("key", pid, keycode, *mods)
+        self.app.wait_log(self.ACTIVATE_IPC, 3, log_from)
+        time.sleep(2.0)
+        log = self.app.log_text()[log_from:]
+        got = re.findall(self.ACTIVATE_IPC, log)
+        detail = "activate_tab %s" % (got or "none")
+        ok = len(got) == 1 and (want is None or got[0] == want)
+        if menu_id:
+            took = 'menu event id="%s"' % menu_id in log
+            ok = ok and took
+            detail += ", menu %s" % ("took it" if took else "did not take it")
+        elif menu_id is False:
+            menu = re.findall(r'menu event id="(select_[a-z_0-9]+)"', log)
+            ok = ok and not menu
+            detail += ", menu events %s" % (menu or "none")
+        self.expect(c, "%s: switched exactly once%s" % (what, " to tab %s" % want if want else ""), ok, detail)
+        return got[0] if len(got) == 1 else None
+
+    def m1d_tab_shortcuts(self):
+        """M1d: five tabs, focus in a page text field: Cmd+3 the third tab, Cmd+9 the last, Ctrl+Tab the next; with the address bar focused Cmd+2 the second, each exactly once."""
+        c = "m1d_tab_shortcuts"
+        started = self.e3_start(c)
+        if not started:
+            return
+        pid, w, h = started
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        made = self.m1_tabs(c, 4)
+        if len(made) != 4:
+            return
+        # The fifth tab onto the text page, through the address bar (a new
+        # tab's is empty and focused after Cmd+T).
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.4)
+        self.hw("type", pid, "%s/e3_text.html?tab=5" % self.fixture.base)
+        self.hw("key", pid, 36)
+        self.expect(c, "the fifth tab loaded the text page", self.fixture.wait("beacon?e3-ready", 10, mark))
+        time.sleep(1.0)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        self.m1d_press(c, "Cmd+3 in a page text field", 20, ["cmd"], made[1], "select_tab_3")
+        self.m1d_press(c, "Cmd+9", 25, ["cmd"], made[3], "select_last_tab")
+        time.sleep(1.0)
+        self.e3_focus(c, pid, w, h)
+        first = self.m1d_press(c, "Ctrl+Tab in a page text field (from the last: wraps to the first)",
+                               48, ["ctrl"], None, None)
+        self.expect(c, "Ctrl+Tab's tab is the first (not one Cmd+T made)", first is not None and first not in made,
+                    str(first))
+        self.m1d_press(c, "Cmd+Shift+]", 30, ["cmd", "shift"], made[0], "select_next_tab")
+        self.m1d_press(c, "Ctrl+Shift+Tab", 48, ["ctrl", "shift"], first, None)
+        # The address bar focused: the chrome's listener switches and claims
+        # the chord, so the menu does not switch again.
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.6)
+        self.m1d_press(c, "Cmd+2 in the address bar", 19, ["cmd"], made[0], False)
+        self.expect(c, "the app is still running", self.app.alive())
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
@@ -2942,7 +3009,7 @@ class Driver:
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
-              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks"]
+              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
