@@ -18,6 +18,9 @@ use crate::chrome_state::CoalescedChrome;
 use crate::ipc::{self, IpcMessage};
 use crate::{AppState, ChromeUi};
 
+// M1c: tab order through the shell, the strip and Cmd+1..9 (uses `App`).
+mod tab_order_tests;
+
 /// chrome.html on a headless engine view, as the app's chrome view.
 struct HeadlessChrome {
     engine: RefCell<Engine>,
