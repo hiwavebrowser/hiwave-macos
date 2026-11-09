@@ -26,7 +26,7 @@
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive menu     <pid> <menu title> <item title>   (press a menu bar item)
 //   hwdrive type     <pid> <text>
-//   hwdrive resize   <pid> <w> <h>
+//   hwdrive resize   <pid> <w> <h>      (returns once the window server shows the size; ack_ms)
 //   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //
 // x, y are points from the top-left corner of the window's frame (title bar
@@ -466,10 +466,35 @@ case "resize":
     else { emit(["error": "no accessibility window for pid \(pid)"], code: 2) }
     var size = CGSize(width: num(args[2]), height: num(args[3]))
     let axSize = AXValueCreate(.cgSize, &size)!
+    // The acknowledgement is timed here, not by the caller: spawning this
+    // process and finding the window cost tens of ms that are not the app's.
+    // ax_ms is the AX set round trip (the app's main thread serves it);
+    // bounds_ms is request to the window server showing the asked size,
+    // polled every 2 ms for up to 2 s. ack_ms is bounds_ms, or null if the
+    // window never reached the size in 2 s.
+    let t0 = DispatchTime.now().uptimeNanoseconds
+    let ms = { (t: UInt64) -> Double in (Double(t - t0) / 1e4).rounded() / 100 }
     let err = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, axSize)
-    usleep(400_000)
-    var out: [String: Any] = ["ax_error": Int(err.rawValue)]
-    if let w = mainWindow(pid) { out["window"] = windowJSON(w) }
+    let axMs = ms(DispatchTime.now().uptimeNanoseconds)
+    var boundsMs: Double? = nil
+    var last = mainWindow(pid)
+    if err == .success {
+        let deadline = t0 + 2_000_000_000
+        while true {
+            if let w = last, abs(w.frame.width - size.width) < 1, abs(w.frame.height - size.height) < 1 {
+                boundsMs = ms(DispatchTime.now().uptimeNanoseconds)
+                break
+            }
+            if DispatchTime.now().uptimeNanoseconds >= deadline { break }
+            usleep(2_000)
+            last = mainWindow(pid)
+        }
+    }
+    var out: [String: Any] = [
+        "ax_error": Int(err.rawValue), "ax_ms": axMs,
+        "bounds_ms": boundsMs ?? NSNull(), "ack_ms": boundsMs ?? NSNull(),
+    ]
+    if let w = last { out["window"] = windowJSON(w) }
     emit(out, code: err == .success ? 0 : 2)
 
 default:

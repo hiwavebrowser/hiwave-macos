@@ -130,10 +130,16 @@ the page made in the turn its script was stopped in is still answered to it. Two
   the figure. With the flag on the loop wakes ten times a second, so the other
   checks leave it off.
 - **The controls** (input, unlocked screen): Cmd+T, a resize and, in
-  `i0a_close`, Cmd+W, each answered within 200 ms. `i0a_script` leaves out
-  Cmd+T: the new tab's start page loads into the one content view, and the
-  check goes on to ask the spinning page to tick, answer its request and stay
-  green. Its stop is the content thread's (`Script stopped at the script
+  `i0a_close`, Cmd+W, each answered within 200 ms. `i0a_script` and
+  `i0a_nav` leave out Cmd+T: the new tab's start page loads into the one
+  content view, and the check goes on to ask the spinning page to tick,
+  answer its request and stay green (i0a_script) or the five pages to load
+  and leave (i0a_nav). A resize is answered when the window server shows the
+  new size, as `hwdrive resize` times it itself (`ack_ms` in its JSON line;
+  it polls every 2 ms for up to 2 s, `null` if the size never arrives). The
+  subprocess's wall time and, from the app log, each view's first
+  `relayout cause=resize` after the request are reported beside it for
+  information. Its stop is the content thread's (`Script stopped at the script
   budget source=timers`); the window thread is not held while it spins. **None of these has run
   once.** A quiet stall log is not a pass for them: a loop that turns can
   still draw nothing.

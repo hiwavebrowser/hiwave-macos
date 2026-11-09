@@ -244,6 +244,40 @@ def set_tab_urls(node, url):
 
 # ── frames ─────────────────────────────────────────────────────────────────
 
+def resize_ack(out):
+    """The acknowledgement `hwdrive resize` measured itself, from its JSON
+    line: (ack_ms, ax_ms). ack_ms is request to the window server showing
+    the asked size; None if the window did not reach it within hwdrive's
+    2 s, or if this hwdrive predates the field (it then slept a fixed
+    400 ms and timed nothing)."""
+    def ms(key):
+        v = out.get(key) if isinstance(out, dict) else None
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return ms("ack_ms"), ms("ax_ms")
+
+
+RELAYOUT_RESIZE = re.compile(
+    r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b.*?"
+    r"relayout\{id=EngineViewId\((\d+)\).*\brelayout cause=resize\b", re.M)
+
+
+def resize_relayouts(log, t0):
+    """For information: each engine view's first `relayout cause=resize`
+    line stamped at or after `t0` (epoch seconds), as {view id: ms after t0},
+    from the app log's own UTC timestamps. That is when the view laid its
+    page out at the new size, which is a separate figure from the window's
+    acknowledgement: a page whose thread is busy (a load, a runaway script)
+    lays out later."""
+    import datetime
+    got = {}
+    for m in RELAYOUT_RESIZE.finditer(log):
+        when = datetime.datetime.fromisoformat(m.group(1)[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+        view = int(m.group(2))
+        if when >= t0 and view not in got:
+            got[view] = round((when - t0) * 1000, 1)
+    return got
+
+
 def count_colours(png_path, colours, tolerance=48):
     """How many pixels of the frame are within `tolerance` of each colour."""
     from PIL import Image
@@ -959,9 +993,15 @@ class Driver:
         within LIMIT_MS. Written without a seat that can post input: expect to
         fix these the first time they run.
 
+        The resize is answered when the window server shows the new size, as
+        `hwdrive resize` times it itself (ack_ms); until T36 this timed the
+        whole hwdrive subprocess, which ended in a fixed 400 ms sleep and so
+        could never pass (TRIAGE-i0a-2026-11-09).
+
         `new_tab=False` leaves out Cmd+T: the new tab's start page is loaded
         into the same content view, so a check that goes on measuring the
-        page cannot open one (i0a_script; i0a_close keeps it)."""
+        page cannot open one (i0a_script, i0a_nav; i0a_layout and i0a_close
+        keep it)."""
         if not self.can_input:
             for what in (["a new tab (Cmd+T)"] if new_tab else []) + ["a resize"] + (["closing the tab (Cmd+W)"] if close else []):
                 self.not_run(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
@@ -985,10 +1025,27 @@ class Driver:
             t0 = time.time()
             code, out = self.hw("resize", pid, w, h)
             took = time.time() - t0
+            # The answer is hwdrive's own figure (request to the window
+            # server showing the new size). The subprocess's wall time also
+            # counts its spawn and window lookup, and it is kept for
+            # information only.
+            ack, ax = resize_ack(out)
             code2, now = self.hw("window", pid)
+            # Also for information: when each view laid its page out at the
+            # new size, from the log (up to 300 ms for chrome and page both).
+            end = time.time() + 0.3
+            laid = resize_relayouts(self.app.log_text(), t0)
+            while len(laid) < 2 and time.time() < end:
+                time.sleep(0.05)
+                laid = resize_relayouts(self.app.log_text(), t0)
             self.expect(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
-                        code == 0 and took < limit and abs(now.get("w", 0) - w) < 4,
-                        "%.0f ms; asked %dx%d, window %s" % (took * 1000, w, h, json.dumps(now)))
+                        code == 0 and ack is not None and ack < self.LIMIT_MS and abs(now.get("w", 0) - w) < 4,
+                        "ack %s (AX set %s); subprocess wall %.0f ms; asked %dx%d, window %s; "
+                        "info, relayout cause=resize after the request: %s"
+                        % ("%.1f ms" % ack if ack is not None else "none in 2 s" if "ack_ms" in out else "not reported",
+                           "%.1f ms" % ax if ax is not None else "-", took * 1000, w, h, json.dumps(now),
+                           ", ".join("view %d +%.0f ms" % kv for kv in sorted(laid.items(), key=lambda kv: kv[1]))
+                           or "none in 300 ms"))
         else:
             self.not_run(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
                          self.why_not("Accessibility"))
@@ -1070,7 +1127,12 @@ class Driver:
         if not self.open_page(c, "i0a_nav.html?n=1", self.STALL_ENV):
             return
         log_from = self.stall_log_on(c)
-        self.expect_controls(c, "while the first page loads")
+        # No Cmd+T here, as in i0a_script: the new tab's start page goes into
+        # the content view this check goes on measuring, and in batch 47 it
+        # cancelled page 1 before its first script ran, so no visit, no
+        # leaving and no green frame could be seen (TRIAGE-i0a-2026-11-09).
+        # i0a_layout and i0a_close still press it.
+        self.expect_controls(c, "while the first page loads", new_tab=False)
         last = self.fixture.wait("beacon?i0a-nav-last", 40, self.since)
         starts = [p.rsplit("-", 1)[1] for p in self.fixture.seen("beacon?i0a-nav-start-", self.since)]
         self.expect(c, "the five visits happened in order and the last one finished", last and starts == list("12345"),
