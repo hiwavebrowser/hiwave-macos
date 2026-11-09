@@ -514,6 +514,8 @@ mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
 #[cfg(test)]
+mod border_shorthand_no_style_apply_tests;
+#[cfg(test)]
 mod transform_parse_pure_tests;
 #[cfg(test)]
 mod individual_translate_parse_tests;
