@@ -177,16 +177,170 @@ fn a_src_swap_keeps_the_old_image_until_the_new_one_decodes() {
     assert_eq!(painted(&engine, view), [new], "the new image replaced it once decoded");
 }
 
-/// A swap whose new image never arrives keeps the old one painted.
+/// What script reads of `#card`, and the `load`/`error` events it heard
+/// (the page's `log`).
+fn card(engine: &mut Engine, view: EngineViewId) -> String {
+    engine
+        .execute_script(
+            view,
+            "(function(){var c=document.getElementById('card');var r=c.getBoundingClientRect();\
+             return 'complete='+c.complete+' naturalWidth='+c.naturalWidth+' currentSrc='+c.currentSrc.replace(location.origin,'')\
+             +' box='+r.width+'x'+r.height+' events='+window.log.join('|');})()",
+        )
+        .unwrap()
+        .trim_start_matches("String(\"")
+        .trim_end_matches("\")")
+        .to_string()
+}
+
+/// A page with one `<img id=card>` showing `first`, whose `load` and `error`
+/// events go to `window.log`.
+fn card_page(first: &str, attrs: &str) -> String {
+    format!(
+        "<html><body><img id=card src={first} {attrs}><script>window.log=[];\
+         ['load','error'].forEach(function(t){{document.getElementById('card')\
+         .addEventListener(t,function(){{window.log.push(t)}})}});</script></body></html>"
+    )
+}
+
+const QUICK: std::time::Duration = std::time::Duration::from_millis(20);
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// LAT9-r1. Chrome for Testing 148.0.7778.216, measured on a loopback
+/// fixture: once the new `src` has settled as failed (here a 404) the old
+/// image is gone, the element is the broken image it would have been had
+/// the first load failed, `error` fires once, and script reads
+/// `complete === true`, `naturalWidth === 0`, `currentSrc` the failed URL.
+/// While the request is out, the old image stays and nothing is heard.
 #[test]
-fn a_failed_src_swap_keeps_the_old_image() {
-    let page = "<html><body><img id=card src=/old.png width=40 height=40></body></html>".to_string();
+fn a_src_swap_that_404s_keeps_the_old_image_only_while_it_is_in_flight() {
+    let page = card_page("/old.png", "width=40 height=40");
     let (mut engine, view, server, _) = load(page, vec![png_route("/old.png")], 5_000);
     let old = at(&server, "/old.png").to_string();
+    let missing = at(&server, "/missing.png?delay=700").to_string();
     engine
-        .execute_script(view, "document.getElementById('card').src='/missing.png'")
+        .execute_script(view, "document.getElementById('card').src='/missing.png?delay=700'")
         .unwrap();
-    turns(&mut engine, view, std::time::Duration::from_millis(20), std::time::Duration::from_secs(5));
-    assert!(!server.served("/missing.png").is_empty(), "precondition: the new image was requested");
-    assert_eq!(painted(&engine, view), [old], "the old image stays when the new one fails");
+    runtime().block_on(engine.pump_live(view, 16));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    runtime().block_on(engine.pump_live(view, 16));
+    assert!(server.served("/missing.png?delay=700").iter().all(|r| r.answered.is_none()), "precondition: still in flight");
+    assert_eq!(painted(&engine, view), [old], "the old image stays up while the new one is in flight");
+    let pending = card(&mut engine, view);
+    assert!(pending.contains("complete=false") && pending.ends_with("events="), "nothing has settled yet: {pending}");
+
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [missing], "a settled failure takes the old image down");
+    assert_eq!(
+        card(&mut engine, view),
+        "complete=true naturalWidth=0 currentSrc=/missing.png?delay=700 box=40x40 events=error",
+    );
+}
+
+/// The broken image after a failed swap is the one a failed first load
+/// gives: same box, same paint, for an `<img>` with no size of its own.
+#[test]
+fn a_failed_src_swap_renders_as_a_failed_first_load_does() {
+    let (mut first, first_view, first_server, _) = load(card_page("/missing.png", "alt=card"), vec![], 5_000);
+    turns(&mut first, first_view, QUICK, std::time::Duration::from_millis(200));
+    let first_paint = painted(&first, first_view);
+    assert_eq!(first_paint, [at(&first_server, "/missing.png").to_string()]);
+    let first_load = card(&mut first, first_view);
+    assert!(
+        first_load.starts_with("complete=true naturalWidth=0 currentSrc=/missing.png ") && first_load.ends_with("events=error"),
+        "a failed first load: {first_load}"
+    );
+
+    let (mut engine, view, server, _) = load(card_page("/old.png", "alt=card"), vec![png_route("/old.png")], 5_000);
+    engine.execute_script(view, "document.getElementById('card').src='/missing.png'").unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [at(&server, "/missing.png").to_string()]);
+    assert_eq!(card(&mut engine, view), first_load, "the swap's broken image is the first load's");
+}
+
+/// Bytes that are not an image, a body cut short, and a connection nobody
+/// answers settle as a 404 does (Chrome: `error`, broken image, each).
+#[test]
+fn a_src_swap_that_does_not_decode_or_connect_clears_to_the_broken_image() {
+    let mut truncated = PNG.to_vec();
+    truncated.truncate(20);
+    let dead = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://127.0.0.1:{}/gone.png", listener.local_addr().unwrap().port())
+    };
+    for bad in ["/garbage.png", "/truncated.png", dead.as_str()] {
+        let routes = vec![
+            png_route("/old.png"),
+            ("/garbage.png", "image/png", b"this is not an image at all".to_vec()),
+            ("/truncated.png", "image/png", truncated.clone()),
+        ];
+        let (mut engine, view, server, _) = load(card_page("/old.png", "width=40 height=40"), routes, 5_000);
+        engine
+            .execute_script(view, &format!("document.getElementById('card').src='{bad}'"))
+            .unwrap();
+        turns(&mut engine, view, QUICK, LIMIT);
+        turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+        let failed = if bad.starts_with('/') { at(&server, bad).to_string() } else { bad.to_string() };
+        assert_eq!(painted(&engine, view), [failed.clone()], "{bad}: the old image is taken down");
+        let read = card(&mut engine, view);
+        let current = if bad.starts_with('/') { bad.to_string() } else { failed };
+        assert_eq!(
+            read,
+            format!("complete=true naturalWidth=0 currentSrc={current} box=40x40 events=error"),
+            "{bad}"
+        );
+    }
+}
+
+/// An image whose own budget runs out is not asked for again in this
+/// document, so that is a settled failure too. The load's wait running out
+/// is not: the request goes on, and the old image stays up meanwhile.
+#[test]
+fn a_src_swap_whose_image_outlives_its_budget_settles_as_failed() {
+    let page = card_page("/old.png", "width=40 height=40");
+    let routes = vec![png_route("/old.png"), png_route("/hang.png?delay=2500")];
+    let (mut engine, view, server, _) = load(page, routes, 600);
+    let old = at(&server, "/old.png").to_string();
+    engine
+        .execute_script(view, "document.getElementById('card').src='/hang.png?delay=2500'")
+        .unwrap();
+    runtime().block_on(engine.pump_live(view, 16));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    runtime().block_on(engine.pump_live(view, 16));
+    assert_eq!(painted(&engine, view), [old], "in flight: the old image");
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [at(&server, "/hang.png?delay=2500").to_string()]);
+    assert_eq!(
+        card(&mut engine, view),
+        "complete=true naturalWidth=0 currentSrc=/hang.png?delay=2500 box=40x40 events=error",
+    );
+}
+
+/// After a failed swap, a `src` that loads shows its image; the failure is
+/// not held against the element. Going back to the failed URL fails again.
+#[test]
+fn a_good_src_after_a_failed_swap_shows_the_new_image() {
+    let page = card_page("/old.png", "width=40 height=40");
+    let routes = vec![png_route("/old.png"), png_route("/new.png")];
+    let (mut engine, view, server, _) = load(page, routes, 5_000);
+    engine.execute_script(view, "document.getElementById('card').src='/missing.png'").unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [at(&server, "/missing.png").to_string()]);
+    engine.execute_script(view, "document.getElementById('card').src='/new.png'").unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [at(&server, "/new.png").to_string()], "the new image shows");
+    let read = card(&mut engine, view);
+    assert!(read.contains("currentSrc=/new.png ") && read.ends_with("events=error"), "one error, from the failed swap: {read}");
+
+    engine.execute_script(view, "document.getElementById('card').src='/missing.png'").unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    assert_eq!(painted(&engine, view), [at(&server, "/missing.png").to_string()], "the failed URL is broken again");
+    let read = card(&mut engine, view);
+    assert!(read.starts_with("complete=true naturalWidth=0 ") && read.ends_with("events=error|error"), "{read}");
 }
