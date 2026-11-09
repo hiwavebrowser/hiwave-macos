@@ -294,11 +294,12 @@ fn a_src_swap_that_does_not_decode_or_connect_clears_to_the_broken_image() {
     }
 }
 
-/// An image whose own budget runs out is not asked for again in this
-/// document, so that is a settled failure too. The load's wait running out
-/// is not: the request goes on, and the old image stays up meanwhile.
+/// The engine giving up on an image is not the image failing (LAT9-r1,
+/// R1 delta): one whose own budget runs out was only slow, and Chrome would
+/// still load it. The old image stays up, no `error` reaches the page, and
+/// script reads it as still loading.
 #[test]
-fn a_src_swap_whose_image_outlives_its_budget_settles_as_failed() {
+fn a_src_swap_whose_image_outlives_its_budget_keeps_the_old_image() {
     let page = card_page("/old.png", "width=40 height=40");
     let routes = vec![png_route("/old.png"), png_route("/hang.png?delay=2500")];
     let (mut engine, view, server, _) = load(page, routes, 600);
@@ -306,17 +307,84 @@ fn a_src_swap_whose_image_outlives_its_budget_settles_as_failed() {
     engine
         .execute_script(view, "document.getElementById('card').src='/hang.png?delay=2500'")
         .unwrap();
-    runtime().block_on(engine.pump_live(view, 16));
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    runtime().block_on(engine.pump_live(view, 16));
-    assert_eq!(painted(&engine, view), [old], "in flight: the old image");
     turns(&mut engine, view, QUICK, LIMIT);
     turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
-    assert_eq!(painted(&engine, view), [at(&server, "/hang.png?delay=2500").to_string()]);
+    assert!(!server.served("/hang.png?delay=2500").is_empty(), "precondition: it was requested");
+    assert!(
+        !engine.image_manager().is_cached(&at(&server, "/hang.png?delay=2500")),
+        "precondition: the engine gave up on it"
+    );
+    assert_eq!(painted(&engine, view), [old], "a slow image is not a failed one: the old image stays");
     assert_eq!(
         card(&mut engine, view),
-        "complete=true naturalWidth=0 currentSrc=/hang.png?delay=2500 box=40x40 events=error",
+        "complete=false naturalWidth=0 currentSrc=/hang.png?delay=2500 box=40x40 events=",
     );
+}
+
+/// Nor is an image the pass never started. 56 cards swap to images that do
+/// not answer: 8 at a time hold the slots for a budget each, so the pass's
+/// cap of four budgets passes with some never requested (which ones is the
+/// network runtime's order). Every card, given up on either way, keeps its
+/// old image, and the page hears nothing.
+#[test]
+fn a_src_swap_that_misses_the_slot_cap_keeps_the_old_image() {
+    const CARDS: usize = 56;
+    let cards: String = (0..CARDS).map(|_| "<img class=card src=/old.png width=4 height=4>").collect();
+    let page = format!(
+        "<html><body>{cards}<script>window.log=[];\
+         document.addEventListener('error',function(e){{window.log.push('error')}},true);\
+         document.addEventListener('load',function(e){{window.log.push('load')}},true);</script></body></html>"
+    );
+    let mut routes = vec![png_route("/old.png")];
+    routes.extend((0..CARDS).map(|i| png_route(&format!("/hang{i}.png?delay=4000"))));
+    let (mut engine, view, server, _) = load(page, routes, 300);
+    let old = at(&server, "/old.png").to_string();
+    assert_eq!(painted(&engine, view), vec![old.clone(); CARDS], "precondition: every card painted");
+    engine
+        .execute_script(
+            view,
+            "var c=document.querySelectorAll('.card');\
+             for(var i=0;i<c.length;i++){c[i].src='/hang'+i+'.png?delay=4000';}",
+        )
+        .unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    let requested = (0..CARDS).filter(|i| !server.served(&format!("/hang{i}.png?delay=4000")).is_empty()).count();
+    assert!(requested >= 8, "precondition: the slots were used ({requested} requested)");
+    assert!(requested < CARDS, "precondition: the cap passed with images never started ({requested} requested)");
+    assert_eq!(painted(&engine, view), vec![old; CARDS], "an image the engine gave up on is not a failed one");
+    let read = engine
+        .execute_script(
+            view,
+            "(function(){var c=document.querySelectorAll('.card'),done=0;\
+             for(var i=0;i<c.length;i++){if(c[i].complete)done++;}\
+             return 'complete='+done+' events='+window.log.join('|');})()",
+        )
+        .unwrap();
+    assert!(read.contains("complete=0 events=") && !read.contains("error"), "{read}");
+}
+
+/// The mark `complete` reads is kept by the element's script wrapper: the
+/// same object however the page reaches the element, for the document's
+/// life, so a second lookup reads the failure the first heard.
+#[test]
+fn a_failed_image_reads_the_same_through_every_lookup_of_the_element() {
+    let (mut engine, view, _server, _) = load(card_page("/old.png", "width=40 height=40"), vec![png_route("/old.png")], 5_000);
+    engine.execute_script(view, "document.getElementById('card').src='/missing.png'").unwrap();
+    turns(&mut engine, view, QUICK, LIMIT);
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(200));
+    let read = engine
+        .execute_script(
+            view,
+            "(function(){var a=document.getElementById('card'),b=document.querySelector('img#card');\
+             return [a===b,a.complete,b.complete,window.log.join('|')].join(' ');})()",
+        )
+        .unwrap();
+    assert!(read.contains("true true true error") && !read.contains("error|error"), "{read}");
+    // More turns, more layouts: still one event.
+    engine.execute_script(view, "document.body.style.padding='3px'").unwrap();
+    turns(&mut engine, view, QUICK, std::time::Duration::from_millis(300));
+    assert!(card(&mut engine, view).ends_with("events=error"));
 }
 
 /// After a failed swap, a `src` that loads shows its image; the failure is
