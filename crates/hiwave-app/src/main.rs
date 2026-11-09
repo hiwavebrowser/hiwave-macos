@@ -1805,8 +1805,16 @@ fn chrome_loading(chrome: &impl ChromeUi, loading: bool) {
 
 /// Cmd+W (File > Close Tab): the chrome sends `close_tab` for the tab its
 /// strip shows as active.
+///
+/// Its names live in a function scope (M1): each `eval` is a classic
+/// script on the chrome's one global scope, so a top-level
+/// `const activeTab` declared a global binding on the first Cmd+W and
+/// every later script declaring it again was a SyntaxError ("duplicate
+/// lexical declaration"): nothing in it ran, and the app's chrome closed
+/// one tab per run. The same holds for any script the app runs on the
+/// chrome: no top-level `const`/`let`/`class`.
 #[cfg(target_os = "macos")]
-const CLOSE_ACTIVE_TAB_JS: &str = "const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }";
+const CLOSE_ACTIVE_TAB_JS: &str = "(function () { var activeTab = document.querySelector('.tab.active'); if (activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); } })();";
 
 /// Cmd+W: ask the chrome to close its active tab (`CLOSE_ACTIVE_TAB_JS`).
 #[cfg(target_os = "macos")]
