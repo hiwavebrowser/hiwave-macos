@@ -660,6 +660,8 @@ mod unitless_zero_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_medium_tests;
 #[cfg(all(test, feature = "headless"))]
+mod border_shorthand_no_style_tests;
+#[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod abspos_static_margin_tests;
@@ -14514,6 +14516,14 @@ impl layout_ctx::LayoutCtx {
                         );
                     }
                     ch_pending.note(&decl.property, &resolved_value);
+                    // What the author's `!important` rules set of the border:
+                    // an important `revert-layer` in the style attribute
+                    // rolls back to these (`revert_border`).
+                    if important_pass {
+                        if let Some((sides, parts)) = border_property_parts(&decl.property) {
+                            AUTHOR_IMPORTANT_BORDER_MASK.with(|m| m.set(m.get() | border_longhand_mask(sides, parts)));
+                        }
+                    }
                     self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
                     if recording {
                         records.push(DeclarationRecord {
@@ -14700,6 +14710,32 @@ impl Engine {
 impl layout_ctx::LayoutCtx {
     /// Apply inline style attribute to computed style.
     fn apply_inline_style(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        style_attr: &str,
+        css_vars: &dyn VarSource,
+        ch_pending: &mut ChPending,
+        important_pass: bool,
+    ) {
+        // The author stylesheets have applied: `revert-layer` in the
+        // attribute rolls a border back to this (`revert_border`): the
+        // normal rules' state before the normal pass, the important rules'
+        // before the `!important` pass.
+        if important_pass {
+            AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        } else {
+            AUTHOR_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        }
+        let was_inline = INLINE_STYLE_PASS.with(|c| c.replace(true));
+        let was_important = INLINE_IMPORTANT_PASS.with(|c| c.replace(important_pass));
+        self.apply_inline_declarations(style, parent_style, style_attr, css_vars, ch_pending, important_pass);
+        INLINE_STYLE_PASS.with(|c| c.set(was_inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(was_important));
+    }
+
+    /// [`Self::apply_inline_style`]'s declarations, one importance level.
+    fn apply_inline_declarations(
         &self,
         style: &mut ComputedStyle,
         parent_style: Option<&ComputedStyle>,
@@ -14954,6 +14990,12 @@ impl layout_ctx::LayoutCtx {
                     return;
                 } else {
                     self.apply_initial_value(style, property);
+                    return;
+                }
+            }
+            "revert" | "revert-layer" => {
+                if let Some((sides, parts)) = border_property_parts(property) {
+                    revert_border(style, sides, parts, value == "revert-layer");
                     return;
                 }
             }
@@ -24010,13 +24052,15 @@ fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
     }
 }
 
-/// The border style a `border` / `border-<side>` shorthand names; a
-/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+/// The style a `border` / `border-<side>` shorthand sets. One with no style
+/// keyword sets the initial value, `none` (CSS Backgrounds 3 §3.6: a
+/// shorthand resets what it leaves out), so `border: 5px` paints nothing,
+/// as in Chromium 143 (CH2.B18b). It used to keep RustKit's default `Solid`.
 fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
     value
         .split_whitespace()
-        .find_map(rustkit_css::BorderStyle::from_keyword)
-        .unwrap_or_default()
+        .find_map(|token| rustkit_css::BorderStyle::from_keyword(&token.to_ascii_lowercase()))
+        .unwrap_or(rustkit_css::BorderStyle::None)
 }
 
 /// An `outline-color` value, lowercase: `Some(None)` for `currentcolor`.
@@ -24112,25 +24156,270 @@ thread_local! {
     /// The sides (`BORDER_SIDE_*`) of the element being cascaded that some
     /// origin gave a `border-style` (`zero_width_of_styleless_sides`).
     static BORDER_STYLE_DECLARED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// The element's border longhands as the UA sheet left them, taken by
+    /// `note_ua_border_sides` before any author rule: what `revert` (and
+    /// `revert-layer` in a stylesheet rule) rolls a border property back
+    /// to (CH2.B18b).
+    static UA_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// The border longhands as the author's stylesheet rules left them,
+    /// taken before the element's `style` attribute applies: what
+    /// `revert-layer` in that attribute rolls back to (CSS Cascade 5 §7.3:
+    /// the style attribute is a layer above every author layer, so
+    /// `border: revert-layer` there keeps a stylesheet's `border: 40px`,
+    /// as Chromium 148 does).
+    static AUTHOR_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// Whether the declarations being applied are the `style` attribute's.
+    static INLINE_STYLE_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether they are its `!important` ones (the second inline pass).
+    static INLINE_IMPORTANT_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The border longhands as the author stylesheets' `!important` rules
+    /// left them, taken before the attribute's `!important` pass, and the
+    /// longhands those rules wrote (`border_longhand_mask`). A `border:
+    /// revert-layer !important` in the attribute rolls each longhand back
+    /// to this where an important rule set it, else to `AUTHOR_BORDER`:
+    /// the attribute's normal declarations are the same layer and go
+    /// too (CSS Cascade 5 §7.3; #987 second HOLD: the normal pass's
+    /// snapshot was reused and an important stylesheet border was lost).
+    static AUTHOR_IMPORTANT_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_IMPORTANT_BORDER_MASK: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
-/// Holds `BORDER_STYLE_DECLARED` for one element's (or pseudo-element's)
-/// cascade and restores the previous value on drop. A form control starts
-/// with every side declared: Chromium's UA sheet gives input, textarea,
-/// button and select a border style, so `border-width` alone applies there.
-struct BorderStyleDeclaredScope(u8);
+/// The bits of a longhand mask (`AUTHOR_IMPORTANT_BORDER_MASK`) for the
+/// `BORDER_SIDE_*` sides and `BORDER_PART_*` parts a property covers: side
+/// bits in the low nibble for widths, the next for styles, the next for
+/// colours.
+fn border_longhand_mask(sides: u8, parts: u8) -> u16 {
+    let mut mask = 0u16;
+    for (part, shift) in [(BORDER_PART_WIDTH, 0), (BORDER_PART_STYLE, 4), (BORDER_PART_COLOR, 8)] {
+        if parts & part != 0 {
+            mask |= (sides as u16) << shift;
+        }
+    }
+    mask
+}
+
+/// One element's border longhands (top, right, bottom, left) and which
+/// sides had a declared style at that point, as `revert` restores them.
+#[derive(Clone)]
+struct BorderSnapshot {
+    widths: [rustkit_css::Length; 4],
+    styles: [rustkit_css::BorderStyle; 4],
+    colors: [rustkit_css::Color; 4],
+    declared: u8,
+}
+
+impl BorderSnapshot {
+    fn take(style: &ComputedStyle) -> Self {
+        Self {
+            widths: [
+                style.border_top_width.clone(),
+                style.border_right_width.clone(),
+                style.border_bottom_width.clone(),
+                style.border_left_width.clone(),
+            ],
+            styles: [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            colors: [
+                style.border_top_color,
+                style.border_right_color,
+                style.border_bottom_color,
+                style.border_left_color,
+            ],
+            declared: BORDER_STYLE_DECLARED.with(std::cell::Cell::get),
+        }
+    }
+}
+
+/// The parts of a border side a property covers (`border_property_parts`).
+const BORDER_PART_WIDTH: u8 = 1;
+const BORDER_PART_STYLE: u8 = 2;
+const BORDER_PART_COLOR: u8 = 4;
+const BORDER_PARTS_ALL: u8 = 7;
+
+/// Holds `BORDER_STYLE_DECLARED`, the border snapshots and the inline flag for one
+/// element's (or pseudo-element's) cascade and restores the previous values
+/// on drop. A form control starts with every side declared: Chromium's UA
+/// sheet gives input, textarea, button and select a border style, so
+/// `border-width` alone applies there.
+struct BorderStyleDeclaredScope {
+    declared: u8,
+    ua: Option<BorderSnapshot>,
+    author: Option<BorderSnapshot>,
+    author_important: Option<BorderSnapshot>,
+    author_important_mask: u16,
+    inline: bool,
+    inline_important: bool,
+}
 
 impl BorderStyleDeclaredScope {
     fn enter(tag_name: &str) -> Self {
         let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
         let start = if control { BORDER_SIDES_ALL } else { 0 };
-        Self(BORDER_STYLE_DECLARED.with(|c| c.replace(start)))
+        Self {
+            declared: BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
+            ua: UA_BORDER.with(|c| c.replace(None)),
+            author: AUTHOR_BORDER.with(|c| c.replace(None)),
+            author_important: AUTHOR_IMPORTANT_BORDER.with(|c| c.replace(None)),
+            author_important_mask: AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.replace(0)),
+            inline: INLINE_STYLE_PASS.with(|c| c.replace(false)),
+            inline_important: INLINE_IMPORTANT_PASS.with(|c| c.replace(false)),
+        }
     }
 }
 
 impl Drop for BorderStyleDeclaredScope {
     fn drop(&mut self) {
-        BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
+        BORDER_STYLE_DECLARED.with(|c| c.set(self.declared));
+        UA_BORDER.with(|c| *c.borrow_mut() = self.ua.take());
+        AUTHOR_BORDER.with(|c| *c.borrow_mut() = self.author.take());
+        AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = self.author_important.take());
+        AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.set(self.author_important_mask));
+        INLINE_STYLE_PASS.with(|c| c.set(self.inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(self.inline_important));
+    }
+}
+
+/// The `BORDER_SIDE_*` bits and `BORDER_PART_*` bits a border property
+/// covers, or `None` for any other property: the `border` shorthand is
+/// every side and part, `border-top` one side's three parts, `border-width`
+/// every side's width, `border-top-width` one side's width.
+fn border_property_parts(property: &str) -> Option<(u8, u8)> {
+    let rest = property.strip_prefix("border")?;
+    if rest.is_empty() {
+        return Some((BORDER_SIDES_ALL, BORDER_PARTS_ALL));
+    }
+    let rest = rest.strip_prefix('-')?;
+    let (sides, part) = match rest.split_once('-') {
+        Some((side @ ("top" | "right" | "bottom" | "left"), part)) => (border_side_bit(side_property(side)), part),
+        None if matches!(rest, "top" | "right" | "bottom" | "left") => {
+            return Some((border_side_bit(side_property(rest)), BORDER_PARTS_ALL));
+        }
+        _ => (BORDER_SIDES_ALL, rest),
+    };
+    let parts = match part {
+        "width" => BORDER_PART_WIDTH,
+        "style" => BORDER_PART_STYLE,
+        "color" => BORDER_PART_COLOR,
+        _ => return None,
+    };
+    Some((sides, parts))
+}
+
+/// `border-<side>`, for `border_side_bit`.
+fn side_property(side: &str) -> &'static str {
+    match side {
+        "top" => "border-top",
+        "right" => "border-right",
+        "bottom" => "border-bottom",
+        _ => "border-left",
+    }
+}
+
+/// CH2.B18b: `revert` / `revert-layer` on a border property rolls every
+/// longhand it covers back to an earlier cascade state (CSS Cascade 5
+/// §7.3): `revert` to the UA sheet's (`UA_BORDER`, taken before any
+/// author rule), `revert-layer` in the `style` attribute to the author
+/// stylesheets' (`AUTHOR_BORDER`, taken before the attribute applies), and
+/// `revert-layer` in a stylesheet rule to the UA sheet's too, which is
+/// right for an unlayered rule and an approximation inside `@layer`
+/// (there is no per-layer snapshot). Widths and colours come back with the
+/// style: an `<input>` given `border: 40px solid red` by a rule and
+/// `border: revert` inline is back to its UA frame, 58×16 in Chromium 148
+/// (#987 R1 HOLD: only the style came back and the 40px red frame stayed).
+/// A side whose snapshot had no declared style loses its declared bit, so
+/// `zero_width_of_styleless_sides` makes it `none` with a 0 width, as the
+/// UA leaves a div. The declaration was dropped before this row, so an
+/// author's frame stayed.
+fn revert_border(style: &mut ComputedStyle, sides: u8, parts: u8, layer: bool) {
+    let from = if layer && INLINE_STYLE_PASS.with(std::cell::Cell::get) {
+        let author = AUTHOR_BORDER.with(|c| c.borrow().clone());
+        if INLINE_IMPORTANT_PASS.with(std::cell::Cell::get) {
+            // The attribute's `!important` pass: the author stylesheets'
+            // important rules are the layers below; where they set a
+            // longhand, their value, else the normal rules' (the
+            // attribute's own normal declarations are the same layer and
+            // roll back with it).
+            let important = AUTHOR_IMPORTANT_BORDER.with(|c| c.borrow().clone());
+            let mask = AUTHOR_IMPORTANT_BORDER_MASK.with(std::cell::Cell::get);
+            match (author, important) {
+                (Some(mut merged), Some(important)) => {
+                    for i in 0..4 {
+                        let bit = 1u8 << i;
+                        if mask & border_longhand_mask(bit, BORDER_PART_WIDTH) != 0 {
+                            merged.widths[i] = important.widths[i].clone();
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_STYLE) != 0 {
+                            merged.styles[i] = important.styles[i];
+                            merged.declared = (merged.declared & !bit) | (important.declared & bit);
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_COLOR) != 0 {
+                            merged.colors[i] = important.colors[i];
+                        }
+                    }
+                    Some(merged)
+                }
+                (author, important) => important.or(author),
+            }
+        } else {
+            author
+        }
+    } else {
+        UA_BORDER.with(|c| c.borrow().clone())
+    };
+    let Some(from) = from else {
+        return;
+    };
+    let widths = [
+        &mut style.border_top_width,
+        &mut style.border_right_width,
+        &mut style.border_bottom_width,
+        &mut style.border_left_width,
+    ];
+    let styles = [
+        &mut style.border_top_style,
+        &mut style.border_right_style,
+        &mut style.border_bottom_style,
+        &mut style.border_left_style,
+    ];
+    let colors = [
+        &mut style.border_top_color,
+        &mut style.border_right_color,
+        &mut style.border_bottom_color,
+        &mut style.border_left_color,
+    ];
+    for (i, (width, (side_style, color))) in widths.into_iter().zip(styles.into_iter().zip(colors)).enumerate() {
+        let bit = 1u8 << i;
+        if sides & bit == 0 {
+            continue;
+        }
+        if parts & BORDER_PART_WIDTH != 0 {
+            *width = from.widths[i].clone();
+        }
+        if parts & BORDER_PART_COLOR != 0 {
+            *color = from.colors[i];
+        }
+        if parts & BORDER_PART_STYLE != 0 {
+            *side_style = from.styles[i];
+            BORDER_STYLE_DECLARED.with(|c| {
+                let declared = c.get() & !bit;
+                c.set(declared | (from.declared & bit));
+            });
+        }
+        // A UA width of `Zero` is "unset" on an element the UA gave no
+        // style (a div): with a declared style the side is `medium`, as
+        // `border-style` alone makes it (`div { border: 5px solid }` then
+        // `border-width: revert` is 3px in Chromium). On a control the UA
+        // declared the style and `Zero` is its own frame: left alone.
+        if parts & BORDER_PART_WIDTH != 0
+            && from.declared & bit == 0
+            && BORDER_STYLE_DECLARED.with(|c| c.get() & bit != 0)
+        {
+            medium_if_unset(width, *side_style);
+        }
     }
 }
 
@@ -24163,6 +24452,9 @@ fn note_ua_border_sides(style: &ComputedStyle) {
             note_border_style(bit);
         }
     }
+    // Author rules come after this point: what the border is now is the
+    // UA's, which `revert` restores.
+    UA_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
 }
 
 /// CH2.B18 R1 hold 2: a side no origin gave a `border-style` is `none`
@@ -24170,17 +24462,21 @@ fn note_ua_border_sides(style: &ComputedStyle) {
 /// said, a keyword or a length (CSS Backgrounds 3 §3.3; Chromium 143:
 /// `div { border-width: thick }` is 0px). RustKit's initial `BorderStyle`
 /// is `Solid`, so the cascade tracks which sides were declared instead.
-/// The `border` shorthands count as declaring a style (RustKit keeps
-/// `Solid` for one without a style keyword).
+/// The `border` shorthands count as declaring a style; one without a style
+/// keyword declares `none` (`border_style_keyword`).
 fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
     let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
-    for (bit, width) in [
-        (BORDER_SIDE_TOP, &mut style.border_top_width),
-        (BORDER_SIDE_RIGHT, &mut style.border_right_width),
-        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_width),
-        (BORDER_SIDE_LEFT, &mut style.border_left_width),
+    for (bit, side_style, width) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_style, &mut style.border_top_width),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_style, &mut style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_style, &mut style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &mut style.border_left_style, &mut style.border_left_width),
     ] {
         if declared & bit == 0 {
+            // CH2.B18b: the style too, so a width written after the
+            // cascade (an animation or transition, `on_style`) is zeroed
+            // again by `zero_width_of_borderless_sides`.
+            *side_style = rustkit_css::BorderStyle::None;
             *width = rustkit_css::Length::Zero;
         }
     }
