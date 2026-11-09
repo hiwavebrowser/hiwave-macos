@@ -1399,4 +1399,25 @@ mod tests {
         }
         assert_eq!(last_entry(), Some("move"));
     }
+
+    /// LAT15 R1 (3): the bucket open across a safe point (the images the
+    /// load waits for) stops its clock while the thread is lent out: a
+    /// served command is not image time.
+    #[test]
+    fn a_suspended_load_does_not_charge_the_served_time_to_its_open_bucket() {
+        clear_last();
+        {
+            let _load = hold("load");
+            let _images = bucket(HoldBucket::Images);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            {
+                let _lent = suspend_hold();
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert_eq!(last_entry(), Some("load"));
+        let images = last_stages().in_bucket(HoldBucket::Images);
+        assert!((70.0..140.0).contains(&images), "images charged {images} ms; the 120 ms lent out is not image time");
+    }
 }

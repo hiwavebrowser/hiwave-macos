@@ -701,4 +701,131 @@ fn stop_after_a_served_click_ends_the_load() {
     assert!(fixture.requests("/beacon?load").is_empty(), "the stopped load fired `load`");
     let (clicks, _) = load.eval("String(window.clicks)", Duration::from_secs(5));
     assert_eq!(clicks.as_deref(), Some("String(\"1\")"));
+    // R1 (1): the stopped document does not read `loading` for good.
+    let (state, _) = load.eval("document.readyState", Duration::from_secs(5));
+    assert_eq!(state.as_deref(), Some("String(\"complete\")"), "a stopped document reads `complete`, as in Chrome");
+}
+
+/// R1 (2): what a listener served between scripts logs keeps its place in
+/// the script log, after the script that ran before it and before the next.
+#[test]
+fn a_served_listener_record_keeps_its_place_in_the_script_log() {
+    let mut routes = script_page();
+    let s1 = format!(
+        "{}\norder.push('s1'); window.s1done = true;\n\
+         document.getElementById('main').addEventListener('click', function () {{ throw new Error('served'); }});",
+        spin(200)
+    );
+    routes[1] = ("/s1.js", js(&s1));
+    let fixture = serve(routes);
+    let mut engine = EngineBuilder::new()
+        .javascript_enabled(true)
+        .script_budget_ms(15_000)
+        .interrupt_scripts_at_budget(true)
+        .post_load_requests_live(true)
+        .build()
+        .expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut clicked = false;
+    // Plays the endpoint: at the first safe point after s1, a click.
+    let mut serve = |engine: &mut crate::Engine| {
+        let mut served = crate::Served::default();
+        if !clicked && engine.execute_script(view, "String(window.s1done)").is_ok_and(|v| v.contains("true")) {
+            engine.click_at_point(view, 200.0, 100.0);
+            clicked = true;
+            served.ran = true;
+        }
+        served
+    };
+    let loaded = rt.block_on(engine.load_url_serving(view, fixture.url("/page"), None, Some(&mut serve)));
+    assert!(loaded.is_ok(), "{loaded:?}");
+    assert!(clicked, "no safe point came after s1");
+    let sources: Vec<String> = engine
+        .script_log(view)
+        .unwrap_or_default()
+        .iter()
+        .map(|record| record.source.clone())
+        .collect();
+    let at = |needle: &str| {
+        sources
+            .iter()
+            .position(|source| source.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} not in {sources:?}"))
+    };
+    assert!(at("s1.js") < at("event:click") && at("event:click") < at("s2.js"), "{sources:?}");
+}
+
+// ---------------------------------------------------------------------
+// R1 ruling on the app's evals that write the DOM: pinned, not deferred.
+// ---------------------------------------------------------------------
+
+/// The app's find-in-page script, run while an image arrives and before a
+/// page script that replaces the text (as a hydrating page does). In
+/// RustKit content the script stops at `Range.surroundContents`, which is
+/// not callable here, after it has added its `<style>`; it does so after
+/// the load too (a separate gap). The pin: the find is answered at once,
+/// wraps no text, and the page's own script and load are untouched.
+#[test]
+fn find_in_page_mid_load_then_a_hydrating_script() {
+    const FIND: &str = include_str!("../../hiwave-app/src/ui/find_in_page.js");
+    let find = |query: &str| {
+        format!(
+            "{FIND}\n(function () {{ var r = window.__hiwaveFind.run({{ query: '{query}', case_sensitive: false, direction: 'reset' }}); return String(r.count); }})()"
+        )
+    };
+    let page = r#"<!doctype html><body style="margin:0">
+<div id="main" style="width:400px;height:200px;background:rgb(0,160,0)">Main text hello</div>
+<img src="/slow.jpg" width="100" height="100">
+<script>window.sawMark = document.getElementById('main').innerHTML.indexOf('zen-find-match') >= 0;
+document.getElementById('main').textContent = 'hydrated hello world';</script>"#;
+    let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000))]);
+    let mut load = Load::start(&fixture, "/page");
+    load.wait_main();
+    let mut rx = load.page.eval(&find("hello"));
+    let sent = Instant::now();
+    let answer = wait(&mut rx, Duration::from_secs(20));
+    let waited = sent.elapsed();
+    assert!(waited < SERVED, "find waited {waited:?}");
+    assert!(
+        answer.as_ref().is_some_and(|r| r.as_ref().is_err_and(|e| e.contains("surroundContents") || e.contains("not a callable"))),
+        "find mid-load: {answer:?}"
+    );
+    load.wait_complete();
+    let (state, _) = load.eval(
+        "String(window.sawMark) + ',' + document.getElementById('main').textContent + ',' + document.readyState",
+        Duration::from_secs(5),
+    );
+    assert_eq!(state.as_deref(), Some("String(\"false,hydrated hello world,complete\")"));
+}
+
+/// The app's autofill scripts mid-load. On macOS the autofill helper is
+/// not injected into RustKit content (main.rs injects it off macOS only),
+/// so the trigger is a no-op and the credentials message reaches only a
+/// page listener. Neither touches the form or the load.
+#[test]
+fn autofill_scripts_mid_load_leave_the_form_and_the_load_alone() {
+    let page = r#"<!doctype html><body style="margin:0">
+<div id="main" style="width:400px;height:200px;background:rgb(0,160,0)">Main text</div>
+<form><input id="user" name="user" value="typed"></form>
+<img src="/slow.jpg" width="100" height="100">
+<script>window.ran = true;</script>"#;
+    let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000))]);
+    let mut load = Load::start(&fixture, "/page");
+    load.wait_main();
+    // `UserEvent::TriggerAutofill` and `SendAutofillCredentials`, verbatim.
+    let (_, waited) = load.eval("if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }", Duration::from_secs(20));
+    assert!(waited < SERVED, "the trigger waited {waited:?}");
+    let _ = load.eval(
+        "window.postMessage({ type: 'hiwave_autofill_credentials', credentials: [{\"username\":\"u\",\"password\":\"p\"}] }, '*');",
+        Duration::from_secs(20),
+    );
+    load.wait_complete();
+    let (state, _) = load.eval(
+        "String(window.ran) + ',' + document.getElementById('user').value + ',' + document.readyState",
+        Duration::from_secs(5),
+    );
+    assert_eq!(state.as_deref(), Some("String(\"true,typed,complete\")"));
 }
