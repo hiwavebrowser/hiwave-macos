@@ -477,24 +477,15 @@ fn a_navigation_that_is_not_taken_is_offered_once() {
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
         .expect("view");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let mut offers = 0usize;
-    let mut serve = |engine: &mut Engine| {
-        // The window that never takes the navigation: count the safe
-        // points at which one was pending.
-        if engine
-            .views
-            .get(&view)
-            .and_then(|v| v.bindings.as_ref())
-            .is_some_and(|b| b.navigation_requested())
-        {
-            offers += 1;
-        }
-        crate::Served::default()
-    };
+    // The window that never takes the navigation: it serves nothing.
+    let mut serve = |_: &mut Engine| crate::Served::default();
     let lend: &mut crate::ServeFn<'_> = &mut serve;
     rt.block_on(engine.load_url_serving(view, fixture.url("/page"), None, Some(lend))).expect("load");
     assert_eq!(read(&mut engine, view, "order.join(',')"), "s1,s2,b,dcl");
-    assert_eq!(offers, 1, "the pending navigation was offered at {offers} safe points");
+    // Only the requests queued at the one offer (none here) moved to the
+    // live loop; the later script's request was the load's own.
+    let live = engine.views.get(&view).map(|v| v.live_requests.len());
+    assert_eq!(live, Some(0), "requests were moved to the live loop at later boundaries");
 }
 
 /// Nit 4: requests a leaving page left out, held by the server, do not

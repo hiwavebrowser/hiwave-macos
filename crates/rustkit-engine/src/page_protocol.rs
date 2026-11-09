@@ -986,11 +986,12 @@ impl EndpointSide {
             self.report_focus(engine);
             self.report_script_navigation(engine);
             self.report_ipc(engine);
-        } else {
+        } else if engine.follows_script_navigation() {
             // The load's own script asked to leave (`location.href = ...`)
             // and nothing else ran: report it now, not when the load ends,
             // so the window's navigation starts at once and ends this load
-            // (LAT17).
+            // (LAT17). A page thread that does not follow script
+            // navigation mid-load hears of it after the load, as before.
             self.report_script_navigation(engine);
         }
         served.leave = self.asked_to_leave.replace(false);

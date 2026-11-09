@@ -7011,6 +7011,12 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether a page's script navigation is followed (and, on the content
+    /// thread, ends the load that asked for it; LAT17).
+    pub(crate) fn follows_script_navigation(&self) -> bool {
+        self.config.follows_script_navigation
+    }
+
     /// Load a URL in a view.
     /// What the current document's scripts did on load: one record per
     /// `<script>` in execution order, then any exception that escaped a
@@ -7739,6 +7745,11 @@ impl Engine {
             }
         };
         let follows = self.config.follows_script_navigation;
+        // The leave boundary is offered once per load: a navigation the
+        // window does not take (nothing reported it) does not turn every
+        // later boundary into a safe point, and the requests later scripts
+        // make stay with the load's own pump.
+        let mut offered = false;
         let mut rest = order.into_iter();
         // Counts the scripts that reach their run, as before LAT17.
         let mut index = 0usize;
@@ -7752,8 +7763,10 @@ impl Engine {
             // safe point reports it, and the window's navigation ends this
             // load (LAT17).
             let leaving = follows
+                && !offered
                 && serve.is_some()
                 && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested());
+            offered |= leaving;
             if leaving || frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
                 // Taken before the safe point: once the window takes the
                 // navigation it raises the interrupt word, and the old
@@ -8053,7 +8066,11 @@ impl Engine {
         // The last script (or a promise reaction it queued, drained with
         // it) asked to leave: the same boundary as between two scripts, so
         // the page fires no DOMContentLoaded or `load` (LAT17).
-        if follows && serve.is_some() && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested()) {
+        if follows
+            && !offered
+            && serve.is_some()
+            && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested())
+        {
             let queued = Self::take_queued_requests(slot);
             feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
             self.send_leaving_requests(id, queued, &policy, &loader, &inspector, watch);
