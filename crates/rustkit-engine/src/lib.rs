@@ -560,6 +560,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod animation_layer_reset_tests;
+#[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod chrome_bridge_tests;
@@ -1383,6 +1385,15 @@ impl ViewState {
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
         self.lay.animations.borrow_mut().reset();
+        // LAT14: and the animated-style layer the page's Web Animations
+        // wrote, with the CSS animations published to script and script's
+        // controls of them: per raw NodeId as well, and shared with every
+        // document's bindings. Until 2026-11-08 it survived the swap: the
+        // next document's animation frames found a layer entry for a node
+        // the new page never captured and every one was laid out in full
+        // (`LayoutCtx::animation_frame`), and a new element that took the
+        // old node's id painted the old page's animated values.
+        *self.lay.animated.borrow_mut() = rustkit_bindings::AnimatedStyles::default();
         self.wheel_gesture = None;
         self.scrollbar_drag = None;
         self.scrollbar_hover = None;
@@ -9321,7 +9332,15 @@ impl Engine {
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
-        let dirty = dirty.unwrap_or_else(|| restyle_invalidation::DirtySet::full("no_dom_record"));
+        // No script-write set: an animation frame that needed a layout says
+        // so (LAT14); anything else nobody computed a set for.
+        let dirty = dirty.unwrap_or_else(|| {
+            restyle_invalidation::DirtySet::full(if causes.counts.get("animation") > 0 {
+                "animation"
+            } else {
+                "no_dom_record"
+            })
+        });
         let mut would = format!("dirty_nodes={} would_path={}", dirty.nodes.len(), dirty.would_path());
         if let Some(reason) = dirty.full {
             would.push_str(&format!(" full_reason={reason}"));
@@ -9334,6 +9353,14 @@ impl Engine {
             }
             Some(false) => would.push_str(" restyle_miss=\"not tried\""),
             _ => {}
+        }
+        // LAT14: why an animation frame took the full path (the live log
+        // runs at info; the frame's own line is debug).
+        if causes.counts.get("animation") > 0 {
+            let why = LAST_ANIMATION_MISS.with(|why| std::mem::take(&mut *why.borrow_mut()));
+            if !why.is_empty() {
+                would.push_str(&format!(" anim_miss={why:?}"));
+            }
         }
         let cause = causes
             .first
@@ -10468,6 +10495,7 @@ impl Engine {
         }
         let miss = |why: &str| {
             debug!(?id, why, "Animation frame needs a layout");
+            LAST_ANIMATION_MISS.with(|last| *last.borrow_mut() = why.to_string());
             Ok(false)
         };
         let Some(view) = self.views.get(&id) else {
@@ -43442,6 +43470,12 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
+}
+
+thread_local! {
+    /// LAT14: why the last animation frame on this thread needed a layout
+    /// (`Engine::paint_animation_frame`'s miss), for the relayout line.
+    static LAST_ANIMATION_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 thread_local! {
