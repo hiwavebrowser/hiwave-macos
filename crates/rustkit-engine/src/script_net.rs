@@ -342,12 +342,20 @@ where
         return Err(work);
     };
     let (deliver, outcome) = tokio::sync::oneshot::channel();
-    let task = AbortOnDrop(net.spawn(DiagContext::new(async move {
-        let value = work.await;
-        if deliver.send(value).is_ok() {
-            poke_live_turn();
-        }
-    })));
+    // The work logs under the caller's tracing subscriber, as it did when
+    // the page thread polled it: a subscriber scoped to that thread (a
+    // test's log capture, `resource_url_log_tests`) would otherwise never
+    // see an image's lines.
+    use tracing::instrument::WithSubscriber;
+    let task = AbortOnDrop(net.spawn(
+        DiagContext::new(async move {
+            let value = work.await;
+            if deliver.send(value).is_ok() {
+                poke_live_turn();
+            }
+        })
+        .with_current_subscriber(),
+    ));
     Ok(Box::pin(async move {
         let _task = task;
         outcome.await.ok()
