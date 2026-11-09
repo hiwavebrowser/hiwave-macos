@@ -64,6 +64,8 @@ cocoa = "0.25"
 objc = "0.2"
 
 [dev-dependencies]
+# Only to force a collection in navigation_release_tests (M2).
+boa_gc = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 
