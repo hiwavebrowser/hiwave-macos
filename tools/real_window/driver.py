@@ -3211,15 +3211,24 @@ class Driver:
                             ms, (time.time() - t) * 1000, chord.group(0)[-160:] if chord else "no chord-to-menu line"))
             if query == "slowimg":
                 # The address bar has the keyboard: Escape there is the
-                # chrome's stop.
+                # chrome's stop. The chrome's Escape closes an open sidebar
+                # first (chrome.html's keydown, older than M1e), so a
+                # second Escape is the stop then; the note says which.
                 stop_from = len(self.app.log_text())
                 self.hw("key", pid, 53)
-                stopped = self.app.wait_log(r"Stopping load", 3, stop_from)
+                stopped = self.app.wait_log(r"Stopping load", 1.5, stop_from)
+                presses = 1
+                if not stopped and re.search(r'"cmd":"set_sidebar_width"', self.app.log_text()[stop_from:]):
+                    self.note(c, "%s: the first Escape closed the sidebar" % what, "INFO")
+                    self.hw("key", pid, 53)
+                    presses = 2
+                    stopped = self.app.wait_log(r"Stopping load", 3, stop_from)
                 time.sleep(0.5)
                 after = self.app.log_text()[stop_from:]
                 self.expect(c, "%s: Escape then stopped the load" % what,
                             bool(stopped) and "Stop: nothing loading" not in after,
-                            "stop: %s; %s" % (bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+                            "%d Escape; stop: %s; %s" % (presses, bool(stopped),
+                                                         "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
             # The page's late answer (its thread freed by the stop or between
             # busy spells) is dropped: the menu ran once.
             self.app.wait_log(r"late answer for a Cmd chord dropped", 4, log_from)
@@ -3228,6 +3237,8 @@ class Driver:
             runs = len(re.findall(r'menu event id="focus_url"', log))
             self.expect(c, "%s: one Cmd+L, one focus_url (the late answer did not run it again)" % what, runs == 1,
                         "%d focus_url; late answer %s" % (runs, "dropped" if "late answer for a Cmd chord dropped" in log else "not seen"))
+            # Both runs write the check's one log: keep each.
+            (self.out / ("%s.%s.app.log" % (c, query))).write_text(self.app.log_text())
             self.close_page()
 
     def m1e_page_keeps_cmd_l(self):
