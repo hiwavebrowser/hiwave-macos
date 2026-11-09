@@ -2010,6 +2010,108 @@ class Driver:
             code, win = self.hw("window", pid)
             subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)])
 
+    # ── M1: Cmd+W closes the active tab every time ─────────────────────────
+
+    CLOSE_IPC = r'RustKit chrome IPC body=\{"cmd":"close_tab","id":"(\d+)"\}'
+
+    def m1_tabs(self, c, n):
+        """Cmd+T until `n` more tabs exist. Returns the new tab ids, in order."""
+        pid, made = self.app.proc.pid, []
+        for _ in range(n):
+            log_from = len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")
+            m = self.app.wait_log(r"Created tab: TabId\((\d+)\)", 5, log_from)
+            if m:
+                made.append(m.group(1))
+            time.sleep(0.8)
+        self.expect(c, "Cmd+T made %d tabs" % n, len(made) == n, "made %s" % made)
+        return made
+
+    def m1_cmd_w(self, c, what, want=None):
+        """One Cmd+W: the chrome posts close_tab (for tab `want` if given) and the app closes it.
+        Returns the id it closed, or None."""
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("key", pid, 13, "cmd")
+        ipc = self.app.wait_log(self.CLOSE_IPC, 3, log_from)
+        closed = self.app.wait_log(r"Closed tab: TabId\((\d+)\)", 3, log_from) if ipc else None
+        ok = bool(ipc) and bool(closed) and (want is None or ipc.group(1) == want)
+        self.expect(c, "%s: the chrome sent close_tab%s and the app closed it" % (
+            what, " for tab %s" % want if want else ""), ok,
+            ("close_tab %s, closed %s" % (ipc.group(1), closed.group(1) if closed else "nothing")) if ipc
+            else ("menu event logged, no close_tab in 3 s" if self.app.wait_log(r'menu event id="close_tab"', 0, log_from)
+                  else "no menu event in 3 s"))
+        time.sleep(0.8)
+        return ipc.group(1) if ok else None
+
+    def m1_saved_tabs(self):
+        """How many tabs the app's saved state holds (it saves on each close)."""
+        try:
+            return len(tab_urls(json.loads(self.app.state_file.read_text())))
+        except (OSError, ValueError):
+            return None
+
+    def m1_cmd_w_repeat(self):
+        """M1: three tabs, Cmd+W three times: each press closes the active tab and no tab is left."""
+        c = "m1_cmd_w_repeat"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "Cmd+W three times", self.why_not("Accessibility"))
+        restored = self.m1_saved_tabs()
+        self.expect(c, "the app was restored on one tab", restored == 1, "saved tabs %s" % restored)
+        self.m1_tabs(c, 2)
+        for press in (1, 2, 3):
+            self.m1_cmd_w(c, "Cmd+W #%d" % press)
+        left = self.m1_saved_tabs()
+        self.expect(c, "no tab is left after three Cmd+W", left == 0, "saved tabs %s" % left)
+        self.expect(c, "the app is still running", self.app.alive())
+
+    def m1_cmd_w_after_clicks(self):
+        """M1: Cmd+W after clicking a background tab closes that tab; after a tab's close button, Cmd+W closes the active tab of the rest."""
+        c = "m1_cmd_w_after_clicks"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "clicks on tabs, then Cmd+W", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        self.m1_tabs(c, 3)
+        # The first tab of the strip is a background tab now (Cmd+T made
+        # the last one active). A click on it activates it.
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, *self.E4_TAB)
+        act = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"activate_tab","id":"(\d+)"\}', 3, log_from)
+        self.expect(c, "a click on the first (background) tab activates it", bool(act),
+                    act.group(0) if act else "no activate_tab")
+        time.sleep(0.8)
+        if act:
+            self.m1_cmd_w(c, "Cmd+W after the click", act.group(1))
+        # The active tab shows its close button at its right end. Walk right
+        # from the first tab's middle until a click closes a tab (16 px
+        # button, 6 px steps); a click elsewhere on it only re-activates it.
+        hit, first = None, None
+        for dx in range(0, 200, 6):
+            at = len(self.app.log_text())
+            self.hw("click", pid, self.E4_TAB[0] + dx, self.E4_TAB[1])
+            hit = self.app.wait_log(self.CLOSE_IPC, 0.6, at)
+            if hit:
+                break
+            # Past the first tab: a click activated another one.
+            moved = self.app.wait_log(r'"cmd":"activate_tab","id":"(\d+)"', 0, at)
+            if moved:
+                first = first or moved.group(1)
+                if moved.group(1) != first:
+                    break
+        self.expect(c, "a click on the active tab's close button closes it", bool(hit),
+                    hit.group(0) if hit else "no close_tab while walking the first tab")
+        time.sleep(0.8)
+        if hit:
+            self.m1_cmd_w(c, "Cmd+W after the close button")
+        self.expect(c, "the app is still running", self.app.alive())
+
     # ── CH3.A4: the shelf, the Inspector and settings as RustKit views ──────
 
     # The panel probe reports shapes only (#910 R1): per selector the first
@@ -2794,7 +2896,8 @@ class Driver:
               "e4_chrome_tab", "e19_icon_hover", "e22_focus_ring",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
-              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
+              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
