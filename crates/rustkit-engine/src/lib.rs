@@ -427,6 +427,16 @@ mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_margin_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ua_em_margin_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ua_heading_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ua_control_margin_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod emoji_presentation_fallback_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod inline_content_area_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
@@ -444,6 +454,8 @@ mod redirect_url_tests;
 mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
+mod style_media_disabled_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sheet_reuse_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -471,6 +483,8 @@ mod computed_read;
 mod computed_read_tests;
 #[cfg(test)]
 mod style_attr_declaration_tests;
+#[cfg(test)]
+mod style_string_brace_tests;
 #[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
@@ -556,6 +570,8 @@ mod animations;
 mod ancestor_attribute_tests;
 #[cfg(test)]
 mod attribute_flag_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_value_escape_tests;
 #[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
@@ -603,6 +619,8 @@ mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
+mod layer_frame_time_tests;
+#[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_paint_state_tests;
@@ -642,9 +660,13 @@ mod unitless_zero_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_medium_tests;
 #[cfg(all(test, feature = "headless"))]
+mod border_shorthand_no_style_tests;
+#[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod abspos_static_margin_tests;
+#[cfg(all(test, feature = "headless"))]
+mod abspos_static_rest_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -11465,14 +11487,20 @@ impl Engine {
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
-    /// and stops the walk at `body`, so the body element reports `html > body`.
+    /// and stops the walk at `body`, so the body element reports `html > body`
+    /// (`html > body.<class>` when body is classed: its own segment is built
+    /// before the walk reaches `html`).
     /// Neither affects descendant paths — a child of an id'd element still
     /// reports the full tag/class path — which is why the reported selector and
     /// the path used to build children are computed separately.
     fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
         match attributes.get("id") {
             Some(id) if !id.is_empty() => format!("#{}", id),
-            _ if selector_path == "body" => "html > body".to_string(),
+            // Body's own segment carries its class (`html > body.focus-mode`);
+            // only its descendants hang off a bare `body`.
+            _ if selector_path == "body" => {
+                format!("html > {}", Self::selector_segment("body", attributes, 1, 1, false))
+            }
             _ => selector_path.to_string(),
         }
     }
@@ -11778,6 +11806,9 @@ impl layout_ctx::LayoutCtx {
                 if tag_lower == "html" && style.display == rustkit_css::Display::Contents {
                     style.display = rustkit_css::Display::Block;
                 }
+                // An inline-level abspos box keeps its static position on
+                // the line (CH2.B25), so layout is told what it was.
+                style.abspos_was_inline_level = out_of_flow && style.display.is_inline_level();
                 if is_item || out_of_flow || floated || tag_lower == "html" {
                     style.display = style.display.blockified();
                 }
@@ -13641,54 +13672,69 @@ impl layout_ctx::LayoutCtx {
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
                 style.margin_left = rustkit_css::Length::Px(8.0);
             }
-            // Headings (Chrome uses em units, we convert to px assuming 16px base)
+            // Headings. Chromium's html.css writes the block margins of
+            // h1-h6, p, ul/ol/menu/dir, dl, blockquote, figure, pre/listing/
+            // xmp/plaintext and hr in `em`, and an em margin resolves against
+            // the element's OWN computed font-size — after the author's
+            // `font-size` has applied. They were px pre-multiplied at 16px
+            // (and at the UA heading size), so `.subtitle { font-size: .9rem }`
+            // on a <p> kept 16px margins where Chromium has 14.4px: settings
+            // and report shifted 1.6px below their header (chrome board
+            // re-rank 2026-11-07, ua_em_margin_tests). The 40px inline
+            // margins/paddings are px in html.css and stay px. The heading
+            // FONT-SIZES are em of the PARENT's font-size too (CH2.B31): Em
+            // here is absolutized against the parent after the cascade, like
+            // an author em, so a heading under a 10px parent is 20/15/11.7/
+            // 10/8.3/6.7px as in Chromium (ua_heading_font_size_tests). They
+            // were px at 16px. Chromium 148 has no sectioning-h1 rule (an h1
+            // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(32.0); // 2em
+                style.font_size = rustkit_css::Length::Em(2.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(21.44); // 0.67em * 32px
-                style.margin_bottom = rustkit_css::Length::Px(21.44);
+                style.margin_top = rustkit_css::Length::Em(0.67);
+                style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(24.0); // 1.5em
+                style.font_size = rustkit_css::Length::Em(1.5);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(19.92); // 0.83em * 24px
-                style.margin_bottom = rustkit_css::Length::Px(19.92);
+                style.margin_top = rustkit_css::Length::Em(0.83);
+                style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(18.72); // 1.17em
+                style.font_size = rustkit_css::Length::Em(1.17);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(18.72); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(18.72);
+                style.margin_top = rustkit_css::Length::Em(1.0);
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(16.0); // 1em
+                style.font_size = rustkit_css::Length::Em(1.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(21.28); // 1.33em
-                style.margin_bottom = rustkit_css::Length::Px(21.28);
+                style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
+                style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(13.28); // 0.83em
+                style.font_size = rustkit_css::Length::Em(0.83);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(22.17); // 1.67em
-                style.margin_bottom = rustkit_css::Length::Px(22.17);
+                style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
+                style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(10.72); // 0.67em
+                style.font_size = rustkit_css::Length::Em(0.67);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(25.0); // 2.33em
-                style.margin_bottom = rustkit_css::Length::Px(25.0);
+                style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
+                style.margin_bottom = rustkit_css::Length::Em(2.33);
             }
             // Paragraphs and text blocks
             "p" => {
                 style.display = rustkit_css::Display::Block;
-                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "div" => {
                 style.display = rustkit_css::Display::Block;
@@ -13787,6 +13833,22 @@ impl layout_ctx::LayoutCtx {
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }
+                // html.css: `input[type=checkbox] { margin: 3px 3px 3px 4px }`,
+                // `input[type=radio] { margin: 3px 3px 0px 5px }` (Chromium
+                // 148 computes exactly these; ua_control_margin_tests).
+                if tag_name == "input" {
+                    let margins = match attributes.get("type").map(|t| t.to_ascii_lowercase()) {
+                        Some(t) if t == "checkbox" => Some((3.0, 3.0, 3.0, 4.0)),
+                        Some(t) if t == "radio" => Some((3.0, 3.0, 0.0, 5.0)),
+                        _ => None,
+                    };
+                    if let Some((t, r, b, l)) = margins {
+                        style.margin_top = rustkit_css::Length::Px(t);
+                        style.margin_right = rustkit_css::Length::Px(r);
+                        style.margin_bottom = rustkit_css::Length::Px(b);
+                        style.margin_left = rustkit_css::Length::Px(l);
+                    }
+                }
             }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
@@ -13810,8 +13872,8 @@ impl layout_ctx::LayoutCtx {
             "pre" => {
                 style.display = rustkit_css::Display::Block;
                 style.font_family = "monospace".to_string();
-                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
                 // HTML §15.3.9 UA sheet: `pre { white-space: pre }`. This
                 // was "(not implemented)" — every `<pre>` block without an
                 // author white-space rule collapsed its newlines and
@@ -13822,8 +13884,8 @@ impl layout_ctx::LayoutCtx {
             "listing" | "xmp" | "plaintext" => {
                 style.display = rustkit_css::Display::Block;
                 style.font_family = "monospace".to_string();
-                style.margin_top = rustkit_css::Length::Px(16.0);
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0);
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
                 style.white_space = rustkit_css::WhiteSpace::Pre;
             }
             "code" | "kbd" | "samp" | "tt" => {
@@ -13833,8 +13895,8 @@ impl layout_ctx::LayoutCtx {
             // Lists
             "ul" | "ol" | "menu" | "dir" => {
                 style.display = rustkit_css::Display::Block;
-                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
                 style.padding_left = rustkit_css::Length::Px(40.0);
             }
             "li" => {
@@ -13845,8 +13907,8 @@ impl layout_ctx::LayoutCtx {
             }
             "dl" => {
                 style.display = rustkit_css::Display::Block;
-                style.margin_top = rustkit_css::Length::Px(16.0);
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0);
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "dt" => {
                 style.display = rustkit_css::Display::Block;
@@ -13858,8 +13920,8 @@ impl layout_ctx::LayoutCtx {
             // Quotes
             "blockquote" => {
                 style.display = rustkit_css::Display::Block;
-                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
                 style.margin_left = rustkit_css::Length::Px(40.0);
                 style.margin_right = rustkit_css::Length::Px(40.0);
             }
@@ -13885,8 +13947,8 @@ impl layout_ctx::LayoutCtx {
                 style.border_right_color = gray;
                 style.border_bottom_color = gray;
                 style.border_left_color = gray;
-                style.margin_top = rustkit_css::Length::Px(8.0); // 0.5em
-                style.margin_bottom = rustkit_css::Length::Px(8.0);
+                style.margin_top = rustkit_css::Length::Em(0.5);
+                style.margin_bottom = rustkit_css::Length::Em(0.5);
             }
             // Sections
             "article" | "aside" | "footer" | "header" | "hgroup" | "main" | "nav" | "search"
@@ -13896,8 +13958,8 @@ impl layout_ctx::LayoutCtx {
             // Figure
             "figure" => {
                 style.display = rustkit_css::Display::Block;
-                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
-                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_top = rustkit_css::Length::Em(1.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Em(1.0);
                 style.margin_left = rustkit_css::Length::Px(40.0);
                 style.margin_right = rustkit_css::Length::Px(40.0);
             }
@@ -14315,7 +14377,19 @@ impl layout_ctx::LayoutCtx {
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
-                hints: hints.clone(),
+                // The UA defaults above read an <input>'s `type` (checkbox
+                // and radio margins, the button-like background), so two
+                // inputs of different types never share a style.
+                hints: {
+                    let mut h = hints.clone();
+                    if lower_tag(tag_name) == "input" {
+                        h.push((
+                            "ua-input-type",
+                            attributes.get("type").map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
+                        ));
+                    }
+                    h
+                },
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -14442,6 +14516,14 @@ impl layout_ctx::LayoutCtx {
                         );
                     }
                     ch_pending.note(&decl.property, &resolved_value);
+                    // What the author's `!important` rules set of the border:
+                    // an important `revert-layer` in the style attribute
+                    // rolls back to these (`revert_border`).
+                    if important_pass {
+                        if let Some((sides, parts)) = border_property_parts(&decl.property) {
+                            AUTHOR_IMPORTANT_BORDER_MASK.with(|m| m.set(m.get() | border_longhand_mask(sides, parts)));
+                        }
+                    }
                     self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
                     if recording {
                         records.push(DeclarationRecord {
@@ -14628,6 +14710,32 @@ impl Engine {
 impl layout_ctx::LayoutCtx {
     /// Apply inline style attribute to computed style.
     fn apply_inline_style(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        style_attr: &str,
+        css_vars: &dyn VarSource,
+        ch_pending: &mut ChPending,
+        important_pass: bool,
+    ) {
+        // The author stylesheets have applied: `revert-layer` in the
+        // attribute rolls a border back to this (`revert_border`): the
+        // normal rules' state before the normal pass, the important rules'
+        // before the `!important` pass.
+        if important_pass {
+            AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        } else {
+            AUTHOR_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        }
+        let was_inline = INLINE_STYLE_PASS.with(|c| c.replace(true));
+        let was_important = INLINE_IMPORTANT_PASS.with(|c| c.replace(important_pass));
+        self.apply_inline_declarations(style, parent_style, style_attr, css_vars, ch_pending, important_pass);
+        INLINE_STYLE_PASS.with(|c| c.set(was_inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(was_important));
+    }
+
+    /// [`Self::apply_inline_style`]'s declarations, one importance level.
+    fn apply_inline_declarations(
         &self,
         style: &mut ComputedStyle,
         parent_style: Option<&ComputedStyle>,
@@ -14882,6 +14990,12 @@ impl layout_ctx::LayoutCtx {
                     return;
                 } else {
                     self.apply_initial_value(style, property);
+                    return;
+                }
+            }
+            "revert" | "revert-layer" => {
+                if let Some((sides, parts)) = border_property_parts(property) {
+                    revert_border(style, sides, parts, value == "revert-layer");
                     return;
                 }
             }
@@ -16894,8 +17008,9 @@ impl Engine {
 
 impl layout_ctx::LayoutCtx {
     /// The parsed sheet of each `<style>` element the document has, in
-    /// tree order. Parsing is a function of the text alone (no base URL,
-    /// no `media` attribute, nothing from the element), so a sheet whose
+    /// tree order, less those script disabled. Parsing is a function of the
+    /// text alone (no base URL; a `media` attribute is folded into the text
+    /// by `style_sheet_text`), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
@@ -16910,14 +17025,13 @@ impl layout_ctx::LayoutCtx {
             if !sheet_element_counts(javascript_enabled, &style_el) {
                 continue;
             }
-            let mut css_text = String::new();
-            for child in style_el.children() {
-                if let NodeType::Text(text) = &child.node_type {
-                    css_text.push_str(text);
-                }
+            // `sheet.disabled = true` from script (CH2.E17).
+            if document.style_sheet_disabled(&style_el) {
+                continue;
             }
+            let css_text = rustkit_dom::style_element_text(&style_el);
             if !css_text.is_empty() {
-                texts.push(css_text);
+                texts.push(style_sheet_text(&style_el, css_text));
             }
         }
 
@@ -16941,6 +17055,117 @@ impl layout_ctx::LayoutCtx {
         self.with_building_lay(|lay| lay.sheet_cache.borrow_mut().take_parsed())
             .unwrap_or_else(|| ADHOC_SHEET_CACHE.with(|cache| cache.borrow_mut().take_parsed()))
     }
+}
+
+/// The CSS text a `<style>` element contributes: `css_text`, inside
+/// `@media <list> { ... }` when the element has a `media` attribute
+/// (HTML 4.2.6: the sheet applies only where the list matches). The list is
+/// serialized first, so a query Chrome rejects (`foo bar`) becomes
+/// `not all` and matches nothing; an empty list applies everywhere. The
+/// engine has no `@import`, so wrapping the text changes nothing else, and
+/// the wrapped rules carry the list as their outermost `@media` condition,
+/// which the cascade re-evaluates on every resize.
+pub(crate) fn style_sheet_text(element: &Node, css_text: String) -> String {
+    let media = match &element.node_type {
+        NodeType::Element { attributes, .. } => attributes.get("media"),
+        _ => None,
+    };
+    let list = media.map(|m| rustkit_css::media_query_list_serialize(m)).unwrap_or_default();
+    if list.is_empty() {
+        css_text
+    } else {
+        let css_text = drop_brace_broken_statements(&css_text);
+        format!("@media {list} {{\n{css_text}\n}}")
+    }
+}
+
+/// `css_text` less each top-level statement whose prelude holds a stray
+/// `}`. At the top level of a sheet that `}` is part of the statement's
+/// prelude, which then fails, so dropping the statement changes nothing
+/// there (CSS Syntax 3 "consume a qualified rule" / "consume an at-rule";
+/// Chromium drops it). Inside `@media <list> { ... }` the same `}` would
+/// close the wrapper and every rule after it would apply wherever the list
+/// does not match, so [`style_sheet_text`] drops the statement before
+/// wrapping. A qualified rule runs to the end of its `{}` block, an at-rule
+/// to its `;` or block; comments, strings, escapes and `()`/`[]` blocks are
+/// skipped, as the tokenizer does. Only ASCII bytes are compared, so every
+/// cut is on a char boundary.
+fn drop_brace_broken_statements(css_text: &str) -> std::borrow::Cow<'_, str> {
+    let b = css_text.as_bytes();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut closers: Vec<u8> = Vec::new();
+    // The current top-level statement: where it starts, whether it is an
+    // at-rule, and whether its prelude met a stray `}`.
+    let mut start: Option<usize> = None;
+    let mut at_rule = false;
+    let mut broken = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            i = css_text[i + 2..].find("*/").map_or(b.len(), |n| i + 2 + n + 2);
+            continue;
+        }
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if closers.is_empty() && start.is_none() {
+            start = Some(i);
+            at_rule = c == b'@';
+            broken = false;
+        }
+        let mut end = None;
+        match c {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'"' | b'\'' => {
+                i += 1;
+                while i < b.len() && b[i] != c && b[i] != b'\n' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                continue;
+            }
+            b'{' => closers.push(b'}'),
+            b'(' => closers.push(b')'),
+            b'[' => closers.push(b']'),
+            _ if closers.last() == Some(&c) => {
+                closers.pop();
+                if c == b'}' && closers.is_empty() {
+                    end = Some(i + 1);
+                }
+            }
+            b'}' if closers.is_empty() => broken = true,
+            b';' if closers.is_empty() && at_rule => end = Some(i + 1),
+            _ => {}
+        }
+        if let Some(end) = end {
+            if broken {
+                cuts.push((start.unwrap_or(end), end));
+            }
+            start = None;
+        }
+        i += 1;
+    }
+    if broken {
+        if let Some(start) = start {
+            cuts.push((start, b.len()));
+        }
+    }
+    if cuts.is_empty() {
+        return std::borrow::Cow::Borrowed(css_text);
+    }
+    let mut out = String::with_capacity(css_text.len());
+    let mut at = 0;
+    for (from, to) in cuts {
+        out.push_str(&css_text[at..from]);
+        at = to;
+    }
+    out.push_str(&css_text[at..]);
+    std::borrow::Cow::Owned(out)
 }
 
 /// [`Engine::sheet_element_counts`] for a given scripting setting.
@@ -19136,7 +19361,7 @@ impl layout_ctx::LayoutCtx {
             if let Some(r) = rest.strip_prefix('[') {
                 // The matcher's first check after the tag: the element must
                 // carry the attribute match_attribute_selector looks up.
-                let end = r.find(']').unwrap_or(r.len());
+                let end = SelectorMatcher::attr_bracket_end(r);
                 key.attr = Some(SelectorMatcher::attr_selector_name(&r[..end]).to_string());
             } else if key.tag.is_none() {
                 if let Some(r) = rest.strip_prefix(':') {
@@ -19862,7 +20087,7 @@ impl SelectorMatcher {
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
                 // Attribute selector with operators
-                let bracket_end = rest.find(']').unwrap_or(rest.len());
+                let bracket_end = SelectorMatcher::attr_bracket_end(rest);
                 let attr_selector = &rest[..bracket_end];
                 remaining = if bracket_end < rest.len() {
                     &rest[bracket_end + 1..]
@@ -19906,7 +20131,7 @@ impl SelectorMatcher {
         match Self::attr_selector_test(attr_selector) {
             Some((op, attr_value)) => attributes
                 .get(attr_name)
-                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+                .is_some_and(|el_attr| Self::attr_test_passes(op, &attr_value, el_attr)),
             // Just [attr] - check presence
             None => attributes.contains_key(attr_name),
         }
@@ -19934,20 +20159,33 @@ impl SelectorMatcher {
     /// The operator of an `[...]` selector and the value it compares with
     /// (trimmed, quotes removed); with an `i` flag after the value, the
     /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
-    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, Cow<'_, str>)> {
         let (start, end) = Self::attr_operator(attr_selector)?;
         let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
         let rest = attr_selector[end..].trim();
-        let (attr_value, flag) = match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
-                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+        // The value's escapes resolve as a string token's or an ident's
+        // (CSS Syntax §4.3.7): `CSS.escape("0.1.1")` is `\30 \.1\.1`, and
+        // the Inspector's `[data-path="…"]` query matched nothing while
+        // the raw text was compared. An escaped quote does not close the
+        // string; an escape's trailing space does not end an ident.
+        let (attr_value, flag): (Cow<'_, str>, &str) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match Self::string_close(&rest[1..], q) {
+                Some(close) => (
+                    rustkit_css::css_string_value(&rest[1..1 + close]),
+                    rest[2 + close..].trim(),
+                ),
                 // CSS Syntax: EOF closes a string.
-                None => (&rest[1..], ""),
+                None => (rustkit_css::css_string_value(&rest[1..]), ""),
             },
-            _ => match rest.find(char::is_whitespace) {
-                Some(space) => (&rest[..space], rest[space..].trim()),
-                None => (rest, ""),
-            },
+            _ => {
+                let token_end = Self::ident_end(rest);
+                let token = rustkit_css::css_ident(&rest[..token_end]);
+                let value = match token {
+                    Cow::Borrowed(t) => rustkit_css::css_string_value(t),
+                    Cow::Owned(t) => Cow::Owned(rustkit_css::css_string_value(&t).into_owned()),
+                };
+                (value, rest[token_end..].trim())
+            }
         };
         let op = match flag {
             "" => Self::ATTR_OPERATORS[at],
@@ -19955,6 +20193,75 @@ impl SelectorMatcher {
             _ => Self::ATTR_INVALID_FLAG,
         };
         Some((op, attr_value))
+    }
+
+    /// Byte offset of the quote that closes a string whose contents start
+    /// `s` (the opening quote already consumed); an escaped quote is part
+    /// of the string. None when EOF closes it.
+    fn string_close(s: &str, quote: char) -> Option<usize> {
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Byte length of the ident token at the start of `s`: up to the first
+    /// unescaped whitespace, where a hex escape owns one whitespace after
+    /// its digits (`\30 \.1` is one ident).
+    fn ident_end(s: &str) -> usize {
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c.is_whitespace() {
+                return i;
+            }
+            if c != '\\' {
+                continue;
+            }
+            let mut digits = 0;
+            while digits < 6 && chars.peek().is_some_and(|(_, d)| d.is_ascii_hexdigit()) {
+                chars.next();
+                digits += 1;
+            }
+            if digits > 0 {
+                if chars.peek().is_some_and(|(_, d)| d.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                chars.next();
+            }
+        }
+        s.len()
+    }
+
+    /// Byte offset of the `]` that ends an attribute selector whose
+    /// contents start `s` (the `[` already consumed), skipping quoted
+    /// strings and escaped characters; `s.len()` when EOF closes it.
+    fn attr_bracket_end(s: &str) -> usize {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+            } else if c == ']' {
+                return i;
+            }
+        }
+        s.len()
     }
 
     /// Whether an `[...]` selector's flag is one the engine takes.
@@ -20151,6 +20458,12 @@ impl SelectorMatcher {
         let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
+            // An escaped character (`\"` in a string, `\]` in a value) has
+            // no syntax of its own here.
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -20258,7 +20571,16 @@ impl SelectorMatcher {
         let mut in_brackets = false;
         let mut quote: Option<char> = None;
         let mut start = 0;
+        let mut escaped = false;
         for (i, c) in selector.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -21121,6 +21443,7 @@ impl Engine {
                     advances,
                     ascent,
                     run,
+                    faces: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint
@@ -23729,13 +24052,15 @@ fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
     }
 }
 
-/// The border style a `border` / `border-<side>` shorthand names; a
-/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+/// The style a `border` / `border-<side>` shorthand sets. One with no style
+/// keyword sets the initial value, `none` (CSS Backgrounds 3 §3.6: a
+/// shorthand resets what it leaves out), so `border: 5px` paints nothing,
+/// as in Chromium 143 (CH2.B18b). It used to keep RustKit's default `Solid`.
 fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
     value
         .split_whitespace()
-        .find_map(rustkit_css::BorderStyle::from_keyword)
-        .unwrap_or_default()
+        .find_map(|token| rustkit_css::BorderStyle::from_keyword(&token.to_ascii_lowercase()))
+        .unwrap_or(rustkit_css::BorderStyle::None)
 }
 
 /// An `outline-color` value, lowercase: `Some(None)` for `currentcolor`.
@@ -23831,25 +24156,270 @@ thread_local! {
     /// The sides (`BORDER_SIDE_*`) of the element being cascaded that some
     /// origin gave a `border-style` (`zero_width_of_styleless_sides`).
     static BORDER_STYLE_DECLARED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// The element's border longhands as the UA sheet left them, taken by
+    /// `note_ua_border_sides` before any author rule: what `revert` (and
+    /// `revert-layer` in a stylesheet rule) rolls a border property back
+    /// to (CH2.B18b).
+    static UA_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// The border longhands as the author's stylesheet rules left them,
+    /// taken before the element's `style` attribute applies: what
+    /// `revert-layer` in that attribute rolls back to (CSS Cascade 5 §7.3:
+    /// the style attribute is a layer above every author layer, so
+    /// `border: revert-layer` there keeps a stylesheet's `border: 40px`,
+    /// as Chromium 148 does).
+    static AUTHOR_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// Whether the declarations being applied are the `style` attribute's.
+    static INLINE_STYLE_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether they are its `!important` ones (the second inline pass).
+    static INLINE_IMPORTANT_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The border longhands as the author stylesheets' `!important` rules
+    /// left them, taken before the attribute's `!important` pass, and the
+    /// longhands those rules wrote (`border_longhand_mask`). A `border:
+    /// revert-layer !important` in the attribute rolls each longhand back
+    /// to this where an important rule set it, else to `AUTHOR_BORDER`:
+    /// the attribute's normal declarations are the same layer and go
+    /// too (CSS Cascade 5 §7.3; #987 second HOLD: the normal pass's
+    /// snapshot was reused and an important stylesheet border was lost).
+    static AUTHOR_IMPORTANT_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_IMPORTANT_BORDER_MASK: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
-/// Holds `BORDER_STYLE_DECLARED` for one element's (or pseudo-element's)
-/// cascade and restores the previous value on drop. A form control starts
-/// with every side declared: Chromium's UA sheet gives input, textarea,
-/// button and select a border style, so `border-width` alone applies there.
-struct BorderStyleDeclaredScope(u8);
+/// The bits of a longhand mask (`AUTHOR_IMPORTANT_BORDER_MASK`) for the
+/// `BORDER_SIDE_*` sides and `BORDER_PART_*` parts a property covers: side
+/// bits in the low nibble for widths, the next for styles, the next for
+/// colours.
+fn border_longhand_mask(sides: u8, parts: u8) -> u16 {
+    let mut mask = 0u16;
+    for (part, shift) in [(BORDER_PART_WIDTH, 0), (BORDER_PART_STYLE, 4), (BORDER_PART_COLOR, 8)] {
+        if parts & part != 0 {
+            mask |= (sides as u16) << shift;
+        }
+    }
+    mask
+}
+
+/// One element's border longhands (top, right, bottom, left) and which
+/// sides had a declared style at that point, as `revert` restores them.
+#[derive(Clone)]
+struct BorderSnapshot {
+    widths: [rustkit_css::Length; 4],
+    styles: [rustkit_css::BorderStyle; 4],
+    colors: [rustkit_css::Color; 4],
+    declared: u8,
+}
+
+impl BorderSnapshot {
+    fn take(style: &ComputedStyle) -> Self {
+        Self {
+            widths: [
+                style.border_top_width.clone(),
+                style.border_right_width.clone(),
+                style.border_bottom_width.clone(),
+                style.border_left_width.clone(),
+            ],
+            styles: [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            colors: [
+                style.border_top_color,
+                style.border_right_color,
+                style.border_bottom_color,
+                style.border_left_color,
+            ],
+            declared: BORDER_STYLE_DECLARED.with(std::cell::Cell::get),
+        }
+    }
+}
+
+/// The parts of a border side a property covers (`border_property_parts`).
+const BORDER_PART_WIDTH: u8 = 1;
+const BORDER_PART_STYLE: u8 = 2;
+const BORDER_PART_COLOR: u8 = 4;
+const BORDER_PARTS_ALL: u8 = 7;
+
+/// Holds `BORDER_STYLE_DECLARED`, the border snapshots and the inline flag for one
+/// element's (or pseudo-element's) cascade and restores the previous values
+/// on drop. A form control starts with every side declared: Chromium's UA
+/// sheet gives input, textarea, button and select a border style, so
+/// `border-width` alone applies there.
+struct BorderStyleDeclaredScope {
+    declared: u8,
+    ua: Option<BorderSnapshot>,
+    author: Option<BorderSnapshot>,
+    author_important: Option<BorderSnapshot>,
+    author_important_mask: u16,
+    inline: bool,
+    inline_important: bool,
+}
 
 impl BorderStyleDeclaredScope {
     fn enter(tag_name: &str) -> Self {
         let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
         let start = if control { BORDER_SIDES_ALL } else { 0 };
-        Self(BORDER_STYLE_DECLARED.with(|c| c.replace(start)))
+        Self {
+            declared: BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
+            ua: UA_BORDER.with(|c| c.replace(None)),
+            author: AUTHOR_BORDER.with(|c| c.replace(None)),
+            author_important: AUTHOR_IMPORTANT_BORDER.with(|c| c.replace(None)),
+            author_important_mask: AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.replace(0)),
+            inline: INLINE_STYLE_PASS.with(|c| c.replace(false)),
+            inline_important: INLINE_IMPORTANT_PASS.with(|c| c.replace(false)),
+        }
     }
 }
 
 impl Drop for BorderStyleDeclaredScope {
     fn drop(&mut self) {
-        BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
+        BORDER_STYLE_DECLARED.with(|c| c.set(self.declared));
+        UA_BORDER.with(|c| *c.borrow_mut() = self.ua.take());
+        AUTHOR_BORDER.with(|c| *c.borrow_mut() = self.author.take());
+        AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = self.author_important.take());
+        AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.set(self.author_important_mask));
+        INLINE_STYLE_PASS.with(|c| c.set(self.inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(self.inline_important));
+    }
+}
+
+/// The `BORDER_SIDE_*` bits and `BORDER_PART_*` bits a border property
+/// covers, or `None` for any other property: the `border` shorthand is
+/// every side and part, `border-top` one side's three parts, `border-width`
+/// every side's width, `border-top-width` one side's width.
+fn border_property_parts(property: &str) -> Option<(u8, u8)> {
+    let rest = property.strip_prefix("border")?;
+    if rest.is_empty() {
+        return Some((BORDER_SIDES_ALL, BORDER_PARTS_ALL));
+    }
+    let rest = rest.strip_prefix('-')?;
+    let (sides, part) = match rest.split_once('-') {
+        Some((side @ ("top" | "right" | "bottom" | "left"), part)) => (border_side_bit(side_property(side)), part),
+        None if matches!(rest, "top" | "right" | "bottom" | "left") => {
+            return Some((border_side_bit(side_property(rest)), BORDER_PARTS_ALL));
+        }
+        _ => (BORDER_SIDES_ALL, rest),
+    };
+    let parts = match part {
+        "width" => BORDER_PART_WIDTH,
+        "style" => BORDER_PART_STYLE,
+        "color" => BORDER_PART_COLOR,
+        _ => return None,
+    };
+    Some((sides, parts))
+}
+
+/// `border-<side>`, for `border_side_bit`.
+fn side_property(side: &str) -> &'static str {
+    match side {
+        "top" => "border-top",
+        "right" => "border-right",
+        "bottom" => "border-bottom",
+        _ => "border-left",
+    }
+}
+
+/// CH2.B18b: `revert` / `revert-layer` on a border property rolls every
+/// longhand it covers back to an earlier cascade state (CSS Cascade 5
+/// §7.3): `revert` to the UA sheet's (`UA_BORDER`, taken before any
+/// author rule), `revert-layer` in the `style` attribute to the author
+/// stylesheets' (`AUTHOR_BORDER`, taken before the attribute applies), and
+/// `revert-layer` in a stylesheet rule to the UA sheet's too, which is
+/// right for an unlayered rule and an approximation inside `@layer`
+/// (there is no per-layer snapshot). Widths and colours come back with the
+/// style: an `<input>` given `border: 40px solid red` by a rule and
+/// `border: revert` inline is back to its UA frame, 58×16 in Chromium 148
+/// (#987 R1 HOLD: only the style came back and the 40px red frame stayed).
+/// A side whose snapshot had no declared style loses its declared bit, so
+/// `zero_width_of_styleless_sides` makes it `none` with a 0 width, as the
+/// UA leaves a div. The declaration was dropped before this row, so an
+/// author's frame stayed.
+fn revert_border(style: &mut ComputedStyle, sides: u8, parts: u8, layer: bool) {
+    let from = if layer && INLINE_STYLE_PASS.with(std::cell::Cell::get) {
+        let author = AUTHOR_BORDER.with(|c| c.borrow().clone());
+        if INLINE_IMPORTANT_PASS.with(std::cell::Cell::get) {
+            // The attribute's `!important` pass: the author stylesheets'
+            // important rules are the layers below; where they set a
+            // longhand, their value, else the normal rules' (the
+            // attribute's own normal declarations are the same layer and
+            // roll back with it).
+            let important = AUTHOR_IMPORTANT_BORDER.with(|c| c.borrow().clone());
+            let mask = AUTHOR_IMPORTANT_BORDER_MASK.with(std::cell::Cell::get);
+            match (author, important) {
+                (Some(mut merged), Some(important)) => {
+                    for i in 0..4 {
+                        let bit = 1u8 << i;
+                        if mask & border_longhand_mask(bit, BORDER_PART_WIDTH) != 0 {
+                            merged.widths[i] = important.widths[i].clone();
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_STYLE) != 0 {
+                            merged.styles[i] = important.styles[i];
+                            merged.declared = (merged.declared & !bit) | (important.declared & bit);
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_COLOR) != 0 {
+                            merged.colors[i] = important.colors[i];
+                        }
+                    }
+                    Some(merged)
+                }
+                (author, important) => important.or(author),
+            }
+        } else {
+            author
+        }
+    } else {
+        UA_BORDER.with(|c| c.borrow().clone())
+    };
+    let Some(from) = from else {
+        return;
+    };
+    let widths = [
+        &mut style.border_top_width,
+        &mut style.border_right_width,
+        &mut style.border_bottom_width,
+        &mut style.border_left_width,
+    ];
+    let styles = [
+        &mut style.border_top_style,
+        &mut style.border_right_style,
+        &mut style.border_bottom_style,
+        &mut style.border_left_style,
+    ];
+    let colors = [
+        &mut style.border_top_color,
+        &mut style.border_right_color,
+        &mut style.border_bottom_color,
+        &mut style.border_left_color,
+    ];
+    for (i, (width, (side_style, color))) in widths.into_iter().zip(styles.into_iter().zip(colors)).enumerate() {
+        let bit = 1u8 << i;
+        if sides & bit == 0 {
+            continue;
+        }
+        if parts & BORDER_PART_WIDTH != 0 {
+            *width = from.widths[i].clone();
+        }
+        if parts & BORDER_PART_COLOR != 0 {
+            *color = from.colors[i];
+        }
+        if parts & BORDER_PART_STYLE != 0 {
+            *side_style = from.styles[i];
+            BORDER_STYLE_DECLARED.with(|c| {
+                let declared = c.get() & !bit;
+                c.set(declared | (from.declared & bit));
+            });
+        }
+        // A UA width of `Zero` is "unset" on an element the UA gave no
+        // style (a div): with a declared style the side is `medium`, as
+        // `border-style` alone makes it (`div { border: 5px solid }` then
+        // `border-width: revert` is 3px in Chromium). On a control the UA
+        // declared the style and `Zero` is its own frame: left alone.
+        if parts & BORDER_PART_WIDTH != 0
+            && from.declared & bit == 0
+            && BORDER_STYLE_DECLARED.with(|c| c.get() & bit != 0)
+        {
+            medium_if_unset(width, *side_style);
+        }
     }
 }
 
@@ -23882,6 +24452,9 @@ fn note_ua_border_sides(style: &ComputedStyle) {
             note_border_style(bit);
         }
     }
+    // Author rules come after this point: what the border is now is the
+    // UA's, which `revert` restores.
+    UA_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
 }
 
 /// CH2.B18 R1 hold 2: a side no origin gave a `border-style` is `none`
@@ -23889,17 +24462,21 @@ fn note_ua_border_sides(style: &ComputedStyle) {
 /// said, a keyword or a length (CSS Backgrounds 3 §3.3; Chromium 143:
 /// `div { border-width: thick }` is 0px). RustKit's initial `BorderStyle`
 /// is `Solid`, so the cascade tracks which sides were declared instead.
-/// The `border` shorthands count as declaring a style (RustKit keeps
-/// `Solid` for one without a style keyword).
+/// The `border` shorthands count as declaring a style; one without a style
+/// keyword declares `none` (`border_style_keyword`).
 fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
     let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
-    for (bit, width) in [
-        (BORDER_SIDE_TOP, &mut style.border_top_width),
-        (BORDER_SIDE_RIGHT, &mut style.border_right_width),
-        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_width),
-        (BORDER_SIDE_LEFT, &mut style.border_left_width),
+    for (bit, side_style, width) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_style, &mut style.border_top_width),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_style, &mut style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_style, &mut style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &mut style.border_left_style, &mut style.border_left_width),
     ] {
         if declared & bit == 0 {
+            // CH2.B18b: the style too, so a width written after the
+            // cascade (an animation or transition, `on_style`) is zeroed
+            // again by `zero_width_of_borderless_sides`.
+            *side_style = rustkit_css::BorderStyle::None;
             *width = rustkit_css::Length::Zero;
         }
     }
@@ -26906,63 +27483,240 @@ fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
-/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+/// The TIGHT geometry bbox of a path, in user units, as Chrome's
+/// `getBBox()` / `getBoundingClientRect()` report it (stroke excluded).
 ///
-/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
-/// bbox of its control points — that is a superset, and Chrome reports the
-/// tight bbox — so bounding one from its control points would report a box
-/// larger than the shape and call the difference a geometry defect. Refusing
-/// leaves the element UNMEASURED, which is the honest reading; the tight
-/// extrema of a cubic are a separate unit.
-fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+/// A Bezier's bbox is NOT the bbox of its control points — that is a
+/// superset — so curves contribute their endpoints plus the interior
+/// extrema where the derivative is zero, and arcs are converted to center
+/// parameterization (SVG 2 Appendix B.2.4, radii scaled up when too small
+/// for the chord) and contribute their endpoints plus every axis extremum
+/// the swept angle crosses. Matches Chrome for Testing 148 on the chrome
+/// board's logo wave and the inspector's arc icons
+/// (`curved_and_arc_paths_report_chromes_tight_bbox`).
+fn path_tight_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
     use rustkit_svg::PathCommand as C;
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let (mut cx, mut cy) = (0.0f32, 0.0f32);
-    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    // The previous segment's last control point, for S/T reflection: Some
+    // only right after a cubic (for S) or a quad (for T).
+    let mut last_cubic_ctrl: Option<(f64, f64)> = None;
+    let mut last_quad_ctrl: Option<(f64, f64)> = None;
+
+    fn cubic_extrema(p0: f64, p1: f64, p2: f64, p3: f64) -> Vec<f64> {
+        // B'(t)/3 = a t^2 + b t + c
+        let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+        let b = 2.0 * (p0 - 2.0 * p1 + p2);
+        let c = p1 - p0;
+        let mut ts = Vec::new();
+        if a.abs() < 1e-12 {
+            if b.abs() > 1e-12 {
+                ts.push(-c / b);
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let r = disc.sqrt();
+                ts.push((-b + r) / (2.0 * a));
+                ts.push((-b - r) / (2.0 * a));
+            }
+        }
+        ts.into_iter().filter(|t| *t > 0.0 && *t < 1.0).collect()
+    }
+    fn cubic_at(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+        let u = 1.0 - t;
+        u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+    }
+    fn push_cubic(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+    ) {
+        let mut ts = cubic_extrema(p0.0, p1.0, p2.0, p3.0);
+        ts.extend(cubic_extrema(p0.1, p1.1, p2.1, p3.1));
+        for t in ts {
+            points.push((cubic_at(p0.0, p1.0, p2.0, p3.0, t), cubic_at(p0.1, p1.1, p2.1, p3.1, t)));
+        }
+        points.push(p3);
+    }
+    fn push_quad(points: &mut Vec<(f64, f64)>, p0: (f64, f64), p1: (f64, f64), p2: (f64, f64)) {
+        // A quad is the cubic with control points p0 + 2/3 (p1 - p0), p2 + 2/3 (p1 - p2).
+        let c1 = (p0.0 + 2.0 / 3.0 * (p1.0 - p0.0), p0.1 + 2.0 / 3.0 * (p1.1 - p0.1));
+        let c2 = (p2.0 + 2.0 / 3.0 * (p1.0 - p2.0), p2.1 + 2.0 / 3.0 * (p1.1 - p2.1));
+        push_cubic(points, p0, c1, c2, p2);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push_arc(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        rx: f64,
+        ry: f64,
+        phi_deg: f64,
+        large: bool,
+        sweep: bool,
+        p1: (f64, f64),
+    ) {
+        points.push(p1);
+        let (mut rx, mut ry) = (rx.abs(), ry.abs());
+        if rx == 0.0 || ry == 0.0 || p0 == p1 {
+            return; // a straight line (or nothing): the endpoints bound it
+        }
+        let phi = phi_deg.to_radians();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let dx = (p0.0 - p1.0) / 2.0;
+        let dy = (p0.1 - p1.1) / 2.0;
+        let x1p = cos_phi * dx + sin_phi * dy;
+        let y1p = -sin_phi * dx + cos_phi * dy;
+        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lambda > 1.0 {
+            let s = lambda.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut coef = if den == 0.0 { 0.0 } else { (num / den).max(0.0).sqrt() };
+        if large == sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1p / ry;
+        let cyp = -coef * ry * x1p / rx;
+        let ccx = cos_phi * cxp - sin_phi * cyp + (p0.0 + p1.0) / 2.0;
+        let ccy = sin_phi * cxp + cos_phi * cyp + (p0.1 + p1.1) / 2.0;
+        let angle = |ux: f64, uy: f64, vx: f64, vy: f64| -> f64 {
+            (ux * vy - uy * vx).atan2(ux * vx + uy * vy)
+        };
+        let ux = (x1p - cxp) / rx;
+        let uy = (y1p - cyp) / ry;
+        let theta1 = angle(1.0, 0.0, ux, uy);
+        let mut dtheta = angle(ux, uy, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+        let tau = std::f64::consts::TAU;
+        if !sweep && dtheta > 0.0 {
+            dtheta -= tau;
+        } else if sweep && dtheta < 0.0 {
+            dtheta += tau;
+        }
+        let at = |t: f64| -> (f64, f64) {
+            let (s, c) = t.sin_cos();
+            (
+                ccx + rx * cos_phi * c - ry * sin_phi * s,
+                ccy + rx * sin_phi * c + ry * cos_phi * s,
+            )
+        };
+        // dx/dθ = 0 and dy/dθ = 0, each with its antipode.
+        let tx = (-ry * sin_phi).atan2(rx * cos_phi);
+        let ty = (ry * cos_phi).atan2(rx * sin_phi);
+        let (lo, hi) = if dtheta >= 0.0 {
+            (theta1, theta1 + dtheta)
+        } else {
+            (theta1 + dtheta, theta1)
+        };
+        for base in [tx, tx + std::f64::consts::PI, ty, ty + std::f64::consts::PI] {
+            // Every representative of `base` inside [lo, hi].
+            let mut t = base + ((lo - base) / tau).ceil() * tau;
+            while t <= hi {
+                points.push(at(t));
+                t += tau;
+            }
+        }
+    }
+
     for cmd in commands {
+        let mut cubic_ctrl = None;
+        let mut quad_ctrl = None;
         match *cmd {
             C::MoveTo(x, y) => {
-                (cx, cy) = (x, y);
-                (sx, sy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
+                (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::MoveToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::LineTo(x, y) => {
-                (cx, cy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
                 points.push((cx, cy));
             }
             C::LineToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 points.push((cx, cy));
             }
             C::HorizontalTo(x) => {
-                cx = x;
+                cx = x as f64;
                 points.push((cx, cy));
             }
             C::HorizontalToRel(dx) => {
-                cx += dx;
+                cx += dx as f64;
                 points.push((cx, cy));
             }
             C::VerticalTo(y) => {
-                cy = y;
+                cy = y as f64;
                 points.push((cx, cy));
             }
             C::VerticalToRel(dy) => {
-                cy += dy;
+                cy += dy as f64;
                 points.push((cx, cy));
+            }
+            C::CubicTo(x1, y1, x2, y2, x, y) | C::CubicToRel(x1, y1, x2, y2, x, y) => {
+                let rel = matches!(cmd, C::CubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = (ox + x1 as f64, oy + y1 as f64);
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::SmoothCubicTo(x2, y2, x, y) | C::SmoothCubicToRel(x2, y2, x, y) => {
+                let rel = matches!(cmd, C::SmoothCubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = last_cubic_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::QuadTo(x1, y1, x, y) | C::QuadToRel(x1, y1, x, y) => {
+                let rel = matches!(cmd, C::QuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = (ox + x1 as f64, oy + y1 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::SmoothQuadTo(x, y) | C::SmoothQuadToRel(x, y) => {
+                let rel = matches!(cmd, C::SmoothQuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = last_quad_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::ArcTo(rx, ry, rot, large, sweep, x, y)
+            | C::ArcToRel(rx, ry, rot, large, sweep, x, y) => {
+                let rel = matches!(cmd, C::ArcToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let end = (ox + x as f64, oy + y as f64);
+                push_arc(&mut points, (cx, cy), rx as f64, ry as f64, rot as f64, large, sweep, end);
+                (cx, cy) = end;
             }
             C::Close => {
                 (cx, cy) = (sx, sy);
             }
-            // Any curve or arc: refuse the whole path.
-            _ => return None,
         }
+        last_cubic_ctrl = cubic_ctrl;
+        last_quad_ctrl = quad_ctrl;
     }
-    bounds_of_points(&points)
+    let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    bounds_of_points(&pts)
 }
 
 /// The user-space geometry bbox of one SVG shape element, or `None` where the
@@ -27014,7 +27768,7 @@ fn svg_shape_user_bbox(
         }
         "path" => {
             let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
-            straight_path_bbox(&commands)
+            path_tight_bbox(&commands)
         }
         // Everything else is UNMODELLED and stays unmeasured, deliberately:
         // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
@@ -27981,6 +28735,43 @@ mod tests {
         }
     }
 
+    /// Curved and arc paths get their TIGHT geometry bbox, as Chrome reports
+    /// it. Expected values are Chrome for Testing 148 `getBBox()` on the same
+    /// `d` strings (impl-board2 probe, 2026-11-08); they include the chrome
+    /// board's logo wave and the inspector's refresh and warning icons, which
+    /// were `missing_box` join failures on every chrome and inspector row.
+    #[test]
+    fn curved_and_arc_paths_report_chromes_tight_bbox() {
+        let cases: [(&str, [f32; 4]); 9] = [
+            ("M10 10 C 20 20, 40 20, 50 10", [10.0, 10.0, 40.0, 7.5]),
+            ("M2 13C4 13 6 9 9 9C12 9 14 13 17 13C20 13 22 9 22 9", [2.0, 9.0, 20.0, 4.0]),
+            ("M10 50 C 10 70 30 70 30 50 S 50 30 50 50", [10.0, 35.0, 40.0, 30.0]),
+            ("M10 80 Q 30 100 50 80 T 90 80", [10.0, 70.0, 80.0, 20.0]),
+            ("m10 30 q 20 -20 40 0 t 40 0", [10.0, 20.0, 80.0, 20.0]),
+            (
+                "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+                [1.0, 3.002364, 22.0, 17.995272],
+            ),
+            (
+                "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+                [1.551981, 2.897256, 20.896038, 18.102745],
+            ),
+            ("M60 60 A 20 10 30 1 1 90 70", [55.914055, 45.310505, 36.05552, 24.689495]),
+            // Radii too small for the chord are scaled up (SVG 2 §9.5.1 step 3).
+            ("M60 20 A 5 5 0 0 1 80 20", [60.0, 10.0, 20.0, 10.0]),
+        ];
+        for (d, want) in cases {
+            let attrs: HashMap<String, String> =
+                [("d".to_string(), d.to_string())].into_iter().collect();
+            let got = svg_shape_user_bbox("path", &attrs)
+                .unwrap_or_else(|| panic!("{d}: refused, Chrome reports {want:?}"));
+            let got = [got.0, got.1, got.2, got.3];
+            for (axis, (g, w)) in ["x", "y", "width", "height"].iter().zip(got.iter().zip(want)) {
+                assert!((g - w).abs() < 1e-3, "{d} {axis}: {g} vs Chrome {w}");
+            }
+        }
+    }
+
     /// The refusals, which are the load-bearing half: a shape this exporter
     /// does not model EXACTLY must produce NO box, leaving Gate A to file it
     /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
@@ -28002,12 +28793,12 @@ mod tests {
             }
         };
 
-        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
-        // bbox Chrome reports), an element carrying a transform this walk does
-        // not compose, a <text> needing shaped glyph extents, and a <use>
-        // rustkit-svg's renderer does not resolve. Plus one straight-line
-        // path and one rect, which MUST still come through — a refusal that
-        // refuses everything would pass this test vacuously.
+        // An element carrying a transform this walk does not compose, a
+        // <text> needing shaped glyph extents, and a <use> rustkit-svg's
+        // renderer does not resolve. Plus one cubic Bezier (exported with its
+        // TIGHT bbox, which is not its control points' bbox), one
+        // straight-line path and one rect, which MUST come through — a
+        // refusal that refuses everything would pass this test vacuously.
         let html = r##"<!DOCTYPE html><html><body>
             <svg width="100" height="100" viewBox="0 0 100 100">
               <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
@@ -28035,10 +28826,15 @@ mod tests {
             selectors.contains(&"rect:nth-of-type(2)"),
             "the untransformed rect must be exported; got {selectors:?}"
         );
-        assert!(
-            !selectors.contains(&"path:nth-of-type(1)"),
-            "a path with a cubic Bezier must be REFUSED, not bounded by its \
-             control points; got {selectors:?}"
+        let curve = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(1)")
+            .unwrap_or_else(|| panic!("the cubic path must be exported; got {selectors:?}"));
+        // Chrome 148 getBBox(): 10,10 40x7.5 (control points would say 40x10).
+        assert_eq!(
+            (curve.x, curve.y, curve.width, curve.height),
+            (10.0, 10.0, 40.0, 7.5)
         );
         assert!(
             !selectors.contains(&"rect:nth-of-type(1)"),
@@ -28055,8 +28851,8 @@ mod tests {
         );
         assert_eq!(
             entry.shapes.len(),
-            2,
-            "exactly the two modelled shapes; got {selectors:?}"
+            3,
+            "exactly the three modelled shapes; got {selectors:?}"
         );
 
         // The straight path's bbox is the tight one: M10 10 L30 40 spans
@@ -31263,6 +32059,27 @@ mod element_identity_tests {
         });
         assert_eq!(b.element_id(), Some(42));
         assert_eq!(b.identity().map(|i| i.element_id), Some(42));
+    }
+
+    /// Chrome's `getSelector()` builds body's OWN segment (tag + class) before it
+    /// reaches `html`, so a classed body reports `html > body.focus-mode`
+    /// (chrome board, focus_mode rows: Chrome `html > body.focus-mode`, RustKit
+    /// `html > body`, one missing_box + one phantom_box on every size). Its
+    /// descendants still hang off a bare `body`.
+    #[test]
+    fn reported_selector_keeps_the_class_of_a_classed_body() {
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "focus-mode")])),
+            "html > body.focus-mode"
+        );
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "  a  b ")])),
+            "html > body.a b"
+        );
+        assert_eq!(
+            Engine::reported_selector("body > div.x", &attrs(&[("class", "x")])),
+            "body > div.x"
+        );
     }
 
     /// The join key is only worth anything if it actually JOINS. This walks the
@@ -39465,7 +40282,7 @@ impl SubjectCompound {
                 parts.push(SubjectPart::Id(css_ident(&rest[..end]).into_owned()));
                 remaining = &rest[end..];
             } else if let Some(rest) = remaining.strip_prefix('[') {
-                let end = rest.find(']').unwrap_or(rest.len());
+                let end = SelectorMatcher::attr_bracket_end(rest);
                 parts.push(SubjectPart::Attr(rest[..end].to_string()));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
@@ -41901,8 +42718,8 @@ impl SelectorReads {
             let name = SelectorMatcher::attr_selector_name(attr).to_string();
             if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                 let tests = self.attribute_tests.entry(name.clone()).or_default();
-                if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                    tests.push((op, value.to_string()));
+                if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                    tests.push((op, value.into_owned()));
                 }
             }
             self.ancestor_attributes.insert(name);
@@ -41971,8 +42788,8 @@ impl SelectorReads {
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                            tests.push((op, value.to_string()));
+                        if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                            tests.push((op, value.into_owned()));
                         }
                     }
                 }
@@ -43608,7 +44425,7 @@ mod style_share_tests {
             assert_eq!(keyed.len(), kept.len());
             for test in tests {
                 let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
-                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                let at = kept.iter().position(|(o, v)| *o == op && *v == *operand).expect("kept");
                 assert_eq!(
                     keyed[at],
                     SelectorMatcher.match_attribute_selector(test, &attributes),
@@ -44672,9 +45489,12 @@ mod windows_engine_pins {
             .iter()
             .map(|t| {
                 let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                // The UA heading sizes are em of the parent (CH2.B31); the
+                // cascade absolutizes them, here against the 16px default.
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
-                    other => panic!("<{t}> font-size is {other:?}, expected Px"),
+                    rustkit_css::Length::Em(em) => em * 16.0,
+                    other => panic!("<{t}> font-size is {other:?}, expected Px or Em"),
                 }
             })
             .collect();
