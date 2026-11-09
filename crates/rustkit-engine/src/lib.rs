@@ -407,6 +407,8 @@ mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_turns_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_stream_tests;
+#[cfg(all(test, feature = "headless"))]
 mod error_page_script_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resource_url_log_tests;
