@@ -2032,6 +2032,131 @@ class Driver:
             code, win = self.hw("window", pid)
             subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)])
 
+    # ── M1: Cmd+W closes the active tab every time ─────────────────────────
+
+    CLOSE_IPC = r'RustKit chrome IPC body=\{"cmd":"close_tab","id":"(\d+)"\}'
+
+    def m1_tabs(self, c, n):
+        """Cmd+T until `n` more tabs exist. Returns the new tab ids, in order."""
+        pid, made = self.app.proc.pid, []
+        for _ in range(n):
+            log_from = len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")
+            m = self.app.wait_log(r"Created tab: TabId\((\d+)\)", 5, log_from)
+            if m:
+                made.append(m.group(1))
+            time.sleep(0.8)
+        self.expect(c, "Cmd+T made %d tabs" % n, len(made) == n, "made %s" % made)
+        return made
+
+    def m1_cmd_w(self, c, what, want=None):
+        """One Cmd+W: the chrome posts close_tab (for tab `want` if given) and the app closes it.
+        Returns the id it closed, or None."""
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("key", pid, 13, "cmd")
+        ipc = self.app.wait_log(self.CLOSE_IPC, 3, log_from)
+        closed = self.app.wait_log(r"Closed tab: TabId\((\d+)\)", 3, log_from) if ipc else None
+        ok = bool(ipc) and bool(closed) and (want is None or ipc.group(1) == want)
+        self.expect(c, "%s: the chrome sent close_tab%s and the app closed it" % (
+            what, " for tab %s" % want if want else ""), ok,
+            ("close_tab %s, closed %s" % (ipc.group(1), closed.group(1) if closed else "nothing")) if ipc
+            else ("menu event logged, no close_tab in 3 s" if self.app.wait_log(r'menu event id="close_tab"', 0, log_from)
+                  else "no menu event in 3 s"))
+        time.sleep(0.8)
+        return ipc.group(1) if ok else None
+
+    def m1_saved_tabs(self):
+        """How many tabs the app's saved state holds (it saves on each close)."""
+        try:
+            return len(tab_urls(json.loads(self.app.state_file.read_text())))
+        except (OSError, ValueError):
+            return None
+
+    def m1_cmd_w_repeat(self):
+        """M1: three tabs, Cmd+W three times: each press closes the active tab and no tab is left."""
+        c = "m1_cmd_w_repeat"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "Cmd+W three times", self.why_not("Accessibility"))
+        restored = self.m1_saved_tabs()
+        self.expect(c, "the app was restored on one tab", restored == 1, "saved tabs %s" % restored)
+        self.m1_tabs(c, 2)
+        for press in (1, 2, 3):
+            self.m1_cmd_w(c, "Cmd+W #%d" % press)
+        left = self.m1_saved_tabs()
+        self.expect(c, "no tab is left after three Cmd+W", left == 0, "saved tabs %s" % left)
+        self.expect(c, "the app is still running", self.app.alive())
+
+    def m1_cmd_w_after_clicks(self):
+        """M1: Cmd+W after clicking a background tab closes that tab; after a tab's close button, Cmd+W closes the active tab of the rest."""
+        c = "m1_cmd_w_after_clicks"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "clicks on tabs, then Cmd+W", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        made = self.m1_tabs(c, 3)
+        # Cmd+T left the last new tab active. Walk the strip's row left to
+        # right (6 px steps; a tab is 100-180 px wide) until a click
+        # activates another tab: where a tab sits is not fixed, the strip
+        # scrolls its active tab to the centre and clips the tab at its left
+        # edge. A tab's close button shows under the pointer, so the walk
+        # can close a tab (a clipped tab's button can be the first thing it
+        # meets): then Cmd+T makes a known active tab again and the walk
+        # starts over, at most three times.
+        act, got, active = None, None, made[-1] if made else None
+        for _ in range(3):
+            for x in range(232, 1000, 6):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1] - 9)
+                got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
+                if got and (got.group(1) == "close_tab" or got.group(2) != active):
+                    break
+            if got and got.group(1) == "activate_tab":
+                act = got
+                break
+            time.sleep(0.8)
+            again = self.m1_tabs(c, 1)
+            active = again[-1] if again else active
+        self.expect(c, "a click on a background tab activates it", bool(act),
+                    act.group(0) if act else ("last: %s" % got.group(0) if got else "no other tab on the row"))
+        time.sleep(0.8)
+        if act:
+            self.m1_cmd_w(c, "Cmd+W after the click", act.group(2))
+        # A tab's close button shows on the active tab and under the
+        # pointer. Walk the strip's row left to right (4 px steps, the
+        # button is 16 px) until a click closes a tab. Each click on a tab
+        # activates it and the strip scrolls it to the centre, so the row
+        # moves under the walk: up to three walks.
+        # The tab's block button (block the site and close the tab) sits
+        # left of it and shows the same way: a walk that meets it first
+        # stops there and the step is NOT RUN, not a fail.
+        hit = blocked = None
+        for _ in range(3):
+            for x in range(232, 1000, 4):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1])
+                hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
+                blocked = self.app.wait_log(r'"cmd":"block_and_close"', 0, at)
+                if hit or blocked:
+                    break
+            if hit or blocked:
+                break
+        if blocked and not hit:
+            return self.not_run(c, "a click on a tab's close button closes it, then Cmd+W",
+                                "the walk met the tab's block button first (x=%d)" % x)
+        self.expect(c, "a click on a tab's close button closes it", bool(hit),
+                    hit.group(0) if hit else "no close_tab while walking the strip")
+        time.sleep(0.8)
+        if hit:
+            self.m1_cmd_w(c, "Cmd+W after the close button")
+        self.expect(c, "the app is still running", self.app.alive())
+
     # ── CH3.A4: the shelf, the Inspector and settings as RustKit views ──────
 
     # The panel probe reports shapes only (#910 R1): per selector the first
@@ -2816,7 +2941,8 @@ class Driver:
               "e4_chrome_tab", "e19_icon_hover", "e22_focus_ring",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
-              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
+              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

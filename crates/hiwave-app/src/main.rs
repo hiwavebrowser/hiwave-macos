@@ -1803,6 +1803,25 @@ fn chrome_loading(chrome: &impl ChromeUi, loading: bool) {
     chrome.send_state("loading", loading.to_string());
 }
 
+/// Cmd+W (File > Close Tab): the chrome sends `close_tab` for the tab its
+/// strip shows as active.
+///
+/// Its names live in a function scope (M1): each `eval` is a classic
+/// script on the chrome's one global scope, so a top-level
+/// `const activeTab` declared a global binding on the first Cmd+W and
+/// every later script declaring it again was a SyntaxError ("duplicate
+/// lexical declaration"): nothing in it ran, and the app's chrome closed
+/// one tab per run. The same holds for any script the app runs on the
+/// chrome: no top-level `const`/`let`/`class`.
+#[cfg(target_os = "macos")]
+const CLOSE_ACTIVE_TAB_JS: &str = "(function () { var activeTab = document.querySelector('.tab.active'); if (activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); } })();";
+
+/// Cmd+W: ask the chrome to close its active tab (`CLOSE_ACTIVE_TAB_JS`).
+#[cfg(target_os = "macos")]
+fn close_active_tab(chrome: &impl ChromeUi) {
+    let _ = chrome.eval(CLOSE_ACTIVE_TAB_JS);
+}
+
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -2251,6 +2270,9 @@ fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod inspector_page_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod close_tab_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
@@ -6354,9 +6376,7 @@ fn main() {
                     let _ = chrome_for_events.eval("sendIpc('create_tab');");
                 }
                 id if id == menu_ids::CLOSE_TAB => {
-                    // Send close_tab command to Chrome
-                    let _ = chrome_for_events.eval("const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }"
-                    );
+                    close_active_tab(&chrome_for_events);
                 }
                 id if id == menu_ids::RELOAD => {
                     let _ = proxy.send_event(UserEvent::Reload);
