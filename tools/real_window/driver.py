@@ -2078,35 +2078,37 @@ class Driver:
         if not self.can_input:
             return self.not_run(c, "clicks on tabs, then Cmd+W", self.why_not("Accessibility"))
         pid = self.app.proc.pid
-        self.m1_tabs(c, 3)
-        # The first tab of the strip is a background tab now (Cmd+T made
-        # the last one active). A click on it activates it.
-        log_from = len(self.app.log_text())
-        self.hw("click", pid, *self.E4_TAB)
-        act = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"activate_tab","id":"(\d+)"\}', 3, log_from)
-        self.expect(c, "a click on the first (background) tab activates it", bool(act),
-                    act.group(0) if act else "no activate_tab")
+        made = self.m1_tabs(c, 3)
+        # Cmd+T left the last new tab active. Walk the strip's row left to
+        # right (6 px steps; a tab is 100-180 px wide) until a click
+        # activates another tab: where a tab sits is not fixed, the strip
+        # scrolls its active tab to the centre.
+        act, active = None, made[-1] if made else None
+        for x in range(232, 1000, 6):
+            at = len(self.app.log_text())
+            self.hw("click", pid, x, self.E4_TAB[1])
+            got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
+            if got and (got.group(1) == "close_tab" or got.group(2) != active):
+                act = got if got.group(1) == "activate_tab" else None
+                break
+        self.expect(c, "a click on a background tab activates it", bool(act),
+                    act.group(0) if act else ("hit a close button: %s" % got.group(0) if got else "no other tab on the row"))
         time.sleep(0.8)
         if act:
-            self.m1_cmd_w(c, "Cmd+W after the click", act.group(1))
-        # The active tab shows its close button at its right end. Walk right
-        # from the first tab's middle until a click closes a tab (16 px
-        # button, 6 px steps); a click elsewhere on it only re-activates it.
-        hit, first = None, None
-        for dx in range(0, 200, 6):
+            self.m1_cmd_w(c, "Cmd+W after the click", act.group(2))
+        # A tab's close button shows on the active tab and under the
+        # pointer. The strip scrolls its active tab to the centre, so where
+        # a tab sits is not fixed: walk the strip's row left to right (4 px
+        # steps, the button is 16 px) until a click closes a tab.
+        hit = None
+        for x in range(232, 1000, 4):
             at = len(self.app.log_text())
-            self.hw("click", pid, self.E4_TAB[0] + dx, self.E4_TAB[1])
-            hit = self.app.wait_log(self.CLOSE_IPC, 0.6, at)
+            self.hw("click", pid, x, self.E4_TAB[1])
+            hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
             if hit:
                 break
-            # Past the first tab: a click activated another one.
-            moved = self.app.wait_log(r'"cmd":"activate_tab","id":"(\d+)"', 0, at)
-            if moved:
-                first = first or moved.group(1)
-                if moved.group(1) != first:
-                    break
-        self.expect(c, "a click on the active tab's close button closes it", bool(hit),
-                    hit.group(0) if hit else "no close_tab while walking the first tab")
+        self.expect(c, "a click on a tab's close button closes it", bool(hit),
+                    hit.group(0) if hit else "no close_tab while walking the strip")
         time.sleep(0.8)
         if hit:
             self.m1_cmd_w(c, "Cmd+W after the close button")
