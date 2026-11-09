@@ -4,6 +4,8 @@
 //! using NSView for rendering surfaces and TAO window handles.
 
 use crate::{Bounds, ViewHostError, ViewId};
+#[cfg(target_os = "macos")]
+use crate::chord_wait::{ChordFate, HeldChords, CHORD_ANSWER_TIMEOUT};
 use raw_window_handle::RawWindowHandle;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -145,9 +147,10 @@ pub(crate) fn forget_marked(view: ViewId) {
 }
 
 /// Cmd chords the view took for the page, by token: the retained `NSEvent`
-/// that goes on to the menu when the page does not claim it.
+/// that goes on to the menu when the page does not claim it, or does not
+/// answer within `CHORD_ANSWER_TIMEOUT` (M1e).
 #[cfg(target_os = "macos")]
-static KEY_EQUIVALENTS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+static KEY_EQUIVALENTS: Mutex<HeldChords<usize>> = Mutex::new(HeldChords::new());
 #[cfg(target_os = "macos")]
 static NEXT_KEY_EQUIVALENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -219,26 +222,69 @@ pub fn is_reserved_chord(chars: &str, keycode: u16, cmd: bool, shift: bool, alt:
 
 /// The page did (`claimed`) or did not take the Cmd chord `token`
 /// (`InputKind::KeyEquivalent`). One it did not goes on to the main menu,
-/// Chromium's order: page first, then the menu. Call on the main thread.
+/// Chromium's order: page first, then the menu. An answer that comes after
+/// the chord's wait ran out (`CHORD_ANSWER_TIMEOUT`, M1e) is dropped: the
+/// chord already went to the menu. Call on the main thread.
 #[cfg(target_os = "macos")]
 pub fn finish_key_equivalent(token: u64, claimed: bool) {
-    let event = {
-        let mut held = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(at) = held.iter().position(|(t, _)| *t == token) else {
-            return;
-        };
-        held.remove(at).1 as id
-    };
-    unsafe {
-        if !claimed {
-            let app: id = msg_send![objc::runtime::Class::get("NSApplication").expect("NSApplication"), sharedApplication];
-            let menu: id = msg_send![app, mainMenu];
-            if menu != nil {
-                let taken: bool = msg_send![menu, performKeyEquivalent: event];
-                debug!(token, taken, "Cmd chord the page did not claim went to the menu");
-            }
+    let answered = KEY_EQUIVALENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .answer(token, claimed, std::time::Instant::now());
+    match answered {
+        None => debug!(token, claimed, "late answer for a Cmd chord dropped: it already went to the menu"),
+        Some((ChordFate::ToMenu(event), waited)) => unsafe {
+            chord_to_menu(event as id, token, "the page did not claim it", waited);
+        },
+        Some((ChordFate::PageKept(event), waited)) => unsafe {
+            debug!(token, waited_ms = waited.as_millis() as u64, "Cmd chord the page claimed");
+            let _: () = msg_send![event as id, release];
+        },
+    }
+}
+
+/// A held chord goes on to the main menu, and its retain is dropped.
+#[cfg(target_os = "macos")]
+unsafe fn chord_to_menu(event: id, token: u64, why: &'static str, waited: std::time::Duration) {
+    let app: id = msg_send![objc::runtime::Class::get("NSApplication").expect("NSApplication"), sharedApplication];
+    let menu: id = msg_send![app, mainMenu];
+    if menu != nil {
+        let taken: bool = msg_send![menu, performKeyEquivalent: event];
+        debug!(token, taken, why, waited_ms = waited.as_millis() as u64, "Cmd chord went to the menu");
+    }
+    let _: () = msg_send![event, release];
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    static _dispatch_main_q: std::ffi::c_void;
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_after_f(
+        when: u64,
+        queue: *const std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+/// Arm `token`'s wait (M1e): on the main queue, `CHORD_ANSWER_TIMEOUT`
+/// from now, a chord the page has not answered goes to the menu. The main
+/// run loop serves the main queue in its common modes, so the timer fires
+/// while the app's event loop waits, whatever the page's thread is doing.
+#[cfg(target_os = "macos")]
+fn arm_chord_wait(token: u64) {
+    extern "C" fn ran_out(context: *mut std::ffi::c_void) {
+        let token = context as usize as u64;
+        let event = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).expire(token);
+        if let Some(event) = event {
+            info!(token, timeout_ms = CHORD_ANSWER_TIMEOUT.as_millis() as u64, "Cmd chord: no answer from the page in time, to the menu");
+            unsafe { chord_to_menu(event as id, token, "the page did not answer in time", CHORD_ANSWER_TIMEOUT) };
         }
-        let _: () = msg_send![event, release];
+    }
+    const DISPATCH_TIME_NOW: u64 = 0;
+    unsafe {
+        let when = dispatch_time(DISPATCH_TIME_NOW, CHORD_ANSWER_TIMEOUT.as_nanos() as i64);
+        dispatch_after_f(when, std::ptr::addr_of!(_dispatch_main_q), token as usize as *mut std::ffi::c_void, ran_out);
     }
 }
 
@@ -736,7 +782,8 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 KEY_EQUIVALENTS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((token, event as usize));
+                    .hold(token, event as usize, std::time::Instant::now());
+                arm_chord_wait(token);
                 push_input_at(view_id_of(this), InputKind::KeyEquivalent { key, token }, native_event_instant(event));
                 true
             }

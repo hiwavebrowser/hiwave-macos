@@ -18,6 +18,7 @@
 
 mod traits;
 
+pub mod chord_wait;
 pub mod input_queue;
 pub mod region;
 pub mod cursor;
@@ -41,6 +42,7 @@ pub use input_queue::{
     text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
+pub use chord_wait::CHORD_ANSWER_TIMEOUT;
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
