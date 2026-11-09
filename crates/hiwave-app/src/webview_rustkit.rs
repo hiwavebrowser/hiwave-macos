@@ -2620,4 +2620,288 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         // The engine's default (parity-capture, the board) lets it run on.
         assert!(!rustkit_engine::EngineConfig::default().interrupt_scripts_at_budget);
     }
+
+    // ── H19: the script budget stops a runaway script, and the page recovers ──
+    //
+    // Real window, batch 44 (develop 28c79bff): `h19_spin` and `i0a_script`
+    // read as "a script that never ends is never stopped, and the page never
+    // comes back". These run the production content view (the content
+    // thread and `content_engine_builder`, the path Pete runs) and keep the
+    // two claims apart: first the watchdog (the budget is armed, a spin is
+    // stopped, and the log says why), then recovery after the stop.
+
+    /// The app's log lines, as the app's own subscriber would write them,
+    /// each with the thread that wrote it. One subscriber for the test
+    /// binary, and the crate's tests run in parallel: every content view's
+    /// page logs on its own thread, so a test reads only its view's lines
+    /// (batch 46: counted unscoped, a sibling's `source=timers` stops were
+    /// read as this view's).
+    fn captured_log() -> &'static CapturedLog {
+        static LOG: std::sync::OnceLock<&'static CapturedLog> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| {
+            let log: &'static CapturedLog = Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+            struct Line(&'static CapturedLog);
+            impl std::io::Write for Line {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    let text = String::from_utf8_lossy(buf).into_owned();
+                    self.0.lock().unwrap().push((std::thread::current().id(), text));
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || Line(log))
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            log
+        })
+    }
+
+    type CapturedLog = std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>;
+
+    /// Where the captured log ends now.
+    fn log_mark() -> usize {
+        captured_log().lock().unwrap().len()
+    }
+
+    /// The thread `view`'s page runs on, once the content thread has built it.
+    fn page_thread(view: &RustKitView) -> std::thread::ThreadId {
+        let thread = view.content.as_ref().expect("a content view");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(id) = thread.page_thread() {
+                return id;
+            }
+            assert!(Instant::now() < deadline, "the content thread never built its page");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// What `view`'s page logged from `mark` on, and nothing another view's did.
+    fn view_log(view: &RustKitView, mark: usize) -> String {
+        let page = page_thread(view);
+        let log = captured_log().lock().unwrap();
+        log.get(mark..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(thread, _)| *thread == page)
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    /// Wake the view until `done` holds or `limit` passes; how long it took.
+    fn wake_while(view: &RustKitView, limit: Duration, mut done: impl FnMut(&RustKitView) -> bool) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            wake(view);
+            if done(view) {
+                return Some(started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    fn loading(view: &RustKitView) -> bool {
+        *view.loading.borrow()
+    }
+
+    /// h19_spin.html's script: nested `forEach` callbacks (no loop
+    /// statement, so the loop-iteration limit never counts it) with a host
+    /// call every 4096.
+    const H19_PAGE: &str = "<body style='margin:0;background:#fff'><p id=p>spin</p>\
+<div style='width:200px;height:100px;background:#00ff00'></div>\
+<script>var spun = 0; var row = new Array(100000).fill(0);\
+row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); });</script>\
+<script>window.after = true;</script></body>";
+
+    /// The bare loop: no host call, no callback, one loop statement.
+    const PURE_SPIN_PAGE: &str = "<body style='margin:0'><p id=p>spin</p>\
+<script>window.first = true; while (true) {}</script>\
+<script>window.after = true;</script></body>";
+
+    /// The same shape with no host call at all: pure JavaScript, and still
+    /// no loop statement. Only the watchdog's interrupt word can stop it.
+    const PURE_CALLBACK_SPIN_PAGE: &str = "<body style='margin:0'><p id=p>spin</p>\
+<script>var spun = 0; var row = new Array(100000).fill(0);\
+row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
+<script>window.after = true;</script></body>";
+
+    /// Load `page` on a production content view and wake it until the load
+    /// has ended. Returns the view, how long the load took and the log it
+    /// wrote.
+    fn load_spin(page: &'static str) -> (RustKitView, Duration, String) {
+        let _ = captured_log();
+        let mark = log_mark();
+        let view = content_view();
+        let (base, _log) = logging_server(page);
+        let started = Instant::now();
+        view.wry_load_url(&base).unwrap();
+        // `loading` is set by the thread's first event; give it a moment.
+        let _ = wake_while(&view, Duration::from_millis(300), |_| false);
+        let ended = wake_while(&view, Duration::from_secs(40), |v| !loading(v));
+        assert!(ended.is_some(), "the load never ended: {}", view_log(&view, mark));
+        let log = view_log(&view, mark);
+        (view, started.elapsed(), log)
+    }
+
+    /// `Script stopped at the script budget source=… elapsed_ms=…`: the
+    /// line the real-window driver reads.
+    fn budget_stops(log: &str) -> Vec<(String, u64)> {
+        log.lines()
+            .filter(|line| line.contains("Script stopped at the script budget"))
+            .map(|line| {
+                let field = |name: &str| {
+                    line.split_whitespace()
+                        .find_map(|word| word.strip_prefix(name))
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                (field("source="), field("elapsed_ms=").parse().unwrap_or(0))
+            })
+            .collect()
+    }
+
+    /// Stage 1 (watchdog): h19_spin.html's script, during the load, on the
+    /// content thread with the app's builder. Stopped at the 15 s load
+    /// budget, and the log names it and how long it ran.
+    #[test]
+    fn content_thread_a_load_script_that_never_ends_is_stopped_at_the_15_s_budget_and_logged() {
+        let (_view, took, log) = load_spin(H19_PAGE);
+        let stops = budget_stops(&log);
+        assert_eq!(stops.len(), 1, "{log}");
+        assert_eq!(stops[0].0, "inline#1", "{log}");
+        assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+    }
+
+    /// Stage 1: pure JavaScript, no host call and no loop statement (so
+    /// neither the deadline's host-call check nor the loop limit can end
+    /// it): the watchdog stops it at the 15 s budget.
+    #[test]
+    fn content_thread_a_pure_js_spin_with_no_host_call_is_stopped_at_the_15_s_budget() {
+        let (view, took, log) = load_spin(PURE_CALLBACK_SPIN_PAGE);
+        let stops = budget_stops(&log);
+        assert_eq!(stops.len(), 1, "{log}");
+        assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+        // The page still runs script once the load is over.
+        assert_eq!(read(&view, "String(typeof window.spun)"), r#"String("number")"#);
+    }
+
+    /// Stage 1: a bare `while (true) {}`. In the app it never reaches the
+    /// 15 s budget: the loop-iteration limit (10M back-edges) ends it first,
+    /// and until H19 nothing in the log said so (the load just took longer).
+    #[test]
+    fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
+        let (view, took, log) = load_spin(PURE_SPIN_PAGE);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+        let why: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("Script stopped at the loop-iteration limit"))
+            .collect();
+        assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
+        assert!(why[0].contains("source=inline#1"), "{}", why[0]);
+        assert_eq!(read(&view, "String(window.first)"), r#"String("true")"#);
+    }
+
+    /// Stage 1, after the load: a timer's bare `while (true) {}` is ended,
+    /// and the log says why.
+    #[test]
+    fn content_thread_a_bare_while_true_in_a_timer_is_stopped_and_the_log_says_why() {
+        let (view, _took, _log) = load_spin(SPIN_PAGE);
+        let mark = log_mark();
+        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let said = wake_while(&view, Duration::from_secs(20), |v| {
+            let log = view_log(v, mark);
+            log.contains("Script stopped at the loop-iteration limit") || log.contains("Script stopped at the script budget")
+        });
+        assert!(said.is_some(), "no line says why the timer ended:\n{}", view_log(&view, mark));
+    }
+
+    /// i0a_spin.html on the content thread, without the driver's Cmd+T (the
+    /// new tab is loaded into the same content view, so the page it was
+    /// measuring is gone). The page ticks; a timer then starts a spin the
+    /// live turn budget (5 s) stops, and a timer due in the same turn asks
+    /// for `/asked`.
+    const RECOVERY_PAGE: &str = "<body style='margin:0;background:#fff'><p id=p>alive</p>\
+<div style='width:200px;height:100px;background:#00ff00'></div>\
+<script>\
+window.ticks = 0; window.answered = 0; window.stopped_at = -1;\
+setInterval(function () { window.ticks++; }, 50);\
+window.go = function () {\
+  setTimeout(function () { var x = new XMLHttpRequest(); x.open('GET', '/asked');\
+    x.onload = function () { document.getElementById('p'); window.answered++; }; x.send(); }, 300);\
+  setTimeout(function () { var spun = 0; var row = new Array(100000).fill(0);\
+    row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); }); }, 300);\
+};\
+</script></body>";
+
+    /// Loads [`RECOVERY_PAGE`], starts the spin and wakes the view until the
+    /// live turn budget has stopped it. Returns the view, the log mark at the
+    /// stop and the green frame it showed before.
+    fn spin_and_stop() -> (RustKitView, Arc<std::sync::Mutex<Vec<(String, Instant)>>>, usize) {
+        let _ = captured_log();
+        let mark = log_mark();
+        let view = content_view();
+        let (base, requests) = logging_server(RECOVERY_PAGE);
+        load_and_settle(&view, &base);
+        let ticking = wake_while(&view, Duration::from_secs(5), |v| read(v, "String(window.ticks > 3)").contains("true"));
+        assert!(ticking.is_some(), "the loaded page never ticked");
+        assert!(green_frame(&view), "the page's frame is not green before the spin");
+        let _ = read(&view, "window.go(); 'armed'");
+        let stopped = wake_while(&view, Duration::from_secs(20), |v| {
+            budget_stops(&view_log(v, mark)).iter().any(|(source, _)| source == "timers")
+        });
+        assert!(stopped.is_some(), "the spin was never stopped:\n{}", view_log(&view, mark));
+        // One stop, one reason: the error that unwinds a budget stop reads
+        // as the loop limit's and must not be logged as one.
+        let _ = wake_while(&view, Duration::from_millis(300), |_| false);
+        let log = view_log(&view, mark);
+        assert!(!log.contains("Script stopped at the loop-iteration limit"), "{log}");
+        (view, requests, log_mark())
+    }
+
+    /// The latest frame the window holds draws the page's green box.
+    fn green_frame(view: &RustKitView) -> bool {
+        let commit = view.latest_commit.borrow().clone();
+        let Some(list) = commit.and_then(|commit| commit.list) else {
+            return false;
+        };
+        format!("{:?}", list.commands).contains("r: 0, g: 255, b: 0")
+    }
+
+    /// Stage 2 (recovery): after the stop, the page's interval runs again.
+    #[test]
+    fn content_thread_after_a_budget_stop_a_fresh_timer_callback_runs() {
+        let (view, _requests, _mark) = spin_and_stop();
+        let before: u64 = read(&view, "String(window.ticks)").trim_start_matches("String(\"").trim_end_matches("\")").parse().unwrap();
+        let ticked = wake_while(&view, Duration::from_secs(3), |v| {
+            let now: u64 = read(v, "String(window.ticks)").trim_start_matches("String(\"").trim_end_matches("\")").parse().unwrap_or(0);
+            now >= before + 3
+        });
+        assert!(ticked.is_some(), "the page never ticked again after the stop (ticks {before})");
+    }
+
+    /// Stage 2: the request asked in the stopped turn is answered to the page.
+    #[test]
+    fn content_thread_after_a_budget_stop_the_request_made_in_the_stopped_turn_completes() {
+        let (view, requests, mark) = spin_and_stop();
+        let answered = wake_while(&view, Duration::from_secs(5), |v| read(v, "String(window.answered)").contains("1"));
+        let asked = requests.lock().unwrap().iter().filter(|(path, _)| path == "/asked").count();
+        assert!(answered.is_some(), "asked {asked}, onload never ran:\n{}", view_log(&view, mark));
+    }
+
+    /// Stage 2: the window keeps the last good frame (the green box); no
+    /// blank commit replaces it after the stop.
+    #[test]
+    fn content_thread_after_a_budget_stop_the_last_good_frame_stays_visible() {
+        let (view, _requests, _mark) = spin_and_stop();
+        let _ = wake_while(&view, Duration::from_secs(1), |_| false);
+        assert!(green_frame(&view), "the frame after the stop does not draw the page");
+    }
 }

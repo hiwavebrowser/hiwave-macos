@@ -875,6 +875,9 @@ class Driver:
             (self.out / ("%s.inline.app.log" % c)).write_text(self.app.log_text())
         self.close_page()
 
+    # The engine's line for a script the budget stopped (load or live turn).
+    STOP_LINE = r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)"
+
     def h19_spin(self):
         """H19: a script that does not end is stopped at the app's script budget (15 s) and the page is shown."""
         c = "h19_spin"
@@ -886,23 +889,30 @@ class Driver:
         self.expect(c, "the engine started the page's script", bool(running))
         if not running:
             return
+        # The page's own stop, then its load's end. Not the first
+        # `Navigation finished`: the RustKit chrome loads its own page beside
+        # this one, on its own thread, and writes that line too (batch 44:
+        # 0 s after the page's script started, 15 s before its stop).
         started = time.time()
-        m = self.app.wait_log(r"Navigation finished", 45, running.end())
+        stopped = self.app.wait_log(self.STOP_LINE, 45, running.end())
+        m = stopped and self.app.wait_log(r"Navigation finished", 5, running.end() + stopped.end())
         took = time.time() - started
         self.expect(c, "the load finished within 45 s of the script's start", bool(m),
                     "%.0f s; app alive: %s" % (took, self.app.alive()))
         if not m:
             return
-        self.expect(c, "the script was given its budget before it was stopped", took > 10, "%.0f s" % took)
-        # The window is frozen while the script runs, so the budget is also
-        # the longest freeze a page can cause: it must not creep back up.
-        self.expect(c, "the window was not held much past the 15 s budget", took < 25, "%.0f s" % took)
-        # The log says so itself: which script, how long the window was held.
-        stopped = self.app.wait_log(r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)",
-                                    2, running.end())
+        # How long the script ran is the engine's own figure: the page runs
+        # on the content thread, and the wall clock here also counts the
+        # driver's polling.
+        ran = int(stopped.group(2)) / 1000
+        self.expect(c, "the script was given its budget before it was stopped", ran > 10, "%.1f s" % ran)
+        # The page's thread is held while the script runs, so the budget is
+        # also the longest a page can hold it: it must not creep back up.
+        self.expect(c, "the window was not held much past the 15 s budget", ran < 25, "%.1f s" % ran)
+        # The log says so itself: which script, how long it ran.
         self.expect(c, "the app log names the stopped script and how long it ran",
-                    bool(stopped) and 10000 < int(stopped.group(2)) < 25000,
-                    stopped.group(0) if stopped else "no 'Script stopped at the script budget' line")
+                    stopped.group(1).startswith("inline#") and 10000 < int(stopped.group(2)) < 25000,
+                    stopped.group(0))
         time.sleep(1.0)
         frame = self.frame(c, "after", [GREEN])
         if frame is None:
@@ -944,12 +954,16 @@ class Driver:
         self.expect(c, "%s: the window thread was never held %d ms or more" % (during, self.LIMIT_MS),
                     not holds, "holds (ms): %s" % (holds or "none"))
 
-    def expect_controls(self, c, during, close=False):
+    def expect_controls(self, c, during, close=False, new_tab=True):
         """A new tab, a resize and (if asked) closing the tab, each answered
         within LIMIT_MS. Written without a seat that can post input: expect to
-        fix these the first time they run."""
+        fix these the first time they run.
+
+        `new_tab=False` leaves out Cmd+T: the new tab's start page is loaded
+        into the same content view, so a check that goes on measuring the
+        page cannot open one (i0a_script; i0a_close keeps it)."""
         if not self.can_input:
-            for what in ["a new tab (Cmd+T)", "a resize"] + (["closing the tab (Cmd+W)"] if close else []):
+            for what in (["a new tab (Cmd+T)"] if new_tab else []) + ["a resize"] + (["closing the tab (Cmd+W)"] if close else []):
                 self.not_run(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
                              self.why_not("Accessibility"))
             return
@@ -963,7 +977,8 @@ class Driver:
             self.expect(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
                         bool(m) and took < limit, "%.0f ms" % (took * 1000) if m else "no log line in 3 s")
 
-        key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
+        if new_tab:
+            key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
         if self.can_resize:
             code, win = self.hw("window", pid)
             w, h = int(win.get("w", 1200)) - 120, int(win.get("h", 800)) - 80
@@ -1002,27 +1017,34 @@ class Driver:
         return len(self.app.log_text()) if log_from is not None else None
 
     def i0a_script(self):
-        """I0(a): a script that does not end leaves the window usable."""
+        """I0(a): a script that does not end leaves the window usable, is stopped at the turn budget (5 s), and the page carries on."""
         c = "i0a_script"
         log_from = self.start_spin(c)
         if self.app is None or not self.app.alive():
             return
-        self.expect_controls(c, "while the script runs")
+        spin_from = len(self.app.log_text())
+        # No Cmd+T here: the new tab would take the content view this check
+        # goes on measuring (batch 44: its start page loaded the moment the
+        # stop freed the page's thread). i0a_close presses it during the
+        # same spin.
+        self.expect_controls(c, "while the script runs", new_tab=False)
         time.sleep(5)
         self.expect_no_hold(c, "5 s of the script running", log_from)
-        # The lesser claim, while script still runs on the window's thread:
-        # the hold ends. The app stops the script at its turn budget (5 s).
-        if log_from is not None:
-            ended = self.app.wait_log(r"Window thread held ms=(\d+)", 5, log_from)
-            self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
-                        ended.group(0) if ended else "still held: %s ms" % self.holds(log_from))
-            mark = self.fixture.mark()
-            self.expect(c, "the page ticks again afterwards",
-                        bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
-            asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
-            self.expect(c, "a request made in the turn that was stopped is answered to the page",
-                        bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
-                        "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
+        # The page's script runs on the content thread, so the window thread
+        # is never held and its stall log has no hold to end: the hold that
+        # ends is the page thread's, at the live turn budget (5 s), and the
+        # engine says so.
+        stopped = self.app.wait_log(self.STOP_LINE, 5, spin_from)
+        ended = stopped if stopped and stopped.group(1) == "timers" else None
+        self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
+                    ended.group(0) if ended else "no 'Script stopped at the script budget source=timers' line")
+        mark = self.fixture.mark()
+        self.expect(c, "the page ticks again afterwards",
+                    bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
+        asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
+        self.expect(c, "a request made in the turn that was stopped is answered to the page",
+                    bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
+                    "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
         frame = self.frame(c, "during", [GREEN])
         if frame is None:
             return self.not_run(c, "the window still shows the page's green image", self.why_not("Screen Recording"))
