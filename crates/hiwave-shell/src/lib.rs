@@ -674,3 +674,133 @@ mod tests {
         assert!(results.iter().any(|c| c.id == "new_tab"));
     }
 }
+
+/// M1c: the shell keeps its tabs in one explicit order (the order they
+/// were opened; a new tab goes at the end, a moved tab goes at the end of
+/// its new workspace, a closed tab leaves the rest in place), and every
+/// reader of tab order reads it.
+#[cfg(test)]
+mod tab_order_tests {
+    use super::*;
+
+    fn tab(ws: WorkspaceId, n: usize) -> TabInfo {
+        TabInfo {
+            id: TabId::new(),
+            url: url::Url::parse(&format!("http://127.0.0.1/p{n}")).unwrap(),
+            title: Some(format!("p{n}")),
+            favicon: None,
+            workspace_id: ws,
+            suspended: false,
+            loading: false,
+            locked: false,
+            last_visited: None,
+        }
+    }
+
+    fn ids(tabs: Vec<&TabInfo>) -> Vec<TabId> {
+        tabs.iter().map(|t| t.id).collect()
+    }
+
+    /// Every reader of tab order agrees with `expected` for workspace `ws`,
+    /// and the workspace's own list does too.
+    fn assert_order(shell: &BrowserShell, ws: WorkspaceId, expected: &[TabId], at: &str) {
+        assert_eq!(ids(shell.list_tabs(Some(ws))), expected, "{at}: list_tabs(ws)");
+        assert_eq!(shell.get_workspace(ws).unwrap().tabs, expected, "{at}: workspace.tabs");
+        let decay: Vec<TabId> = shell.tabs_with_decay(Some(ws), 7).iter().map(|(t, _)| t.id).collect();
+        assert_eq!(decay, expected, "{at}: tabs_with_decay");
+        let expired: Vec<TabId> = shell.expired_tabs(Some(ws), 7).iter().map(|t| t.id).collect();
+        assert_eq!(expired, expected, "{at}: expired_tabs (no tab visited: all expired)");
+    }
+
+    #[test]
+    fn list_tabs_is_in_the_order_the_tabs_were_opened() {
+        let mut shell = BrowserShell::new();
+        let ws = shell.get_active_workspace().unwrap().id;
+        let opened: Vec<TabId> = (0..12).map(|n| shell.create_tab(tab(ws, n)).unwrap()).collect();
+        assert_order(&shell, ws, &opened, "12 opened");
+        assert_eq!(ids(shell.list_tabs(None)), opened, "list_tabs(None)");
+    }
+
+    #[test]
+    fn closing_a_tab_keeps_the_others_in_order() {
+        let mut shell = BrowserShell::new();
+        let ws = shell.get_active_workspace().unwrap().id;
+        let mut opened: Vec<TabId> = (0..6).map(|n| shell.create_tab(tab(ws, n)).unwrap()).collect();
+        shell.close_tab(opened[1]).unwrap();
+        opened.remove(1);
+        shell.close_tab(opened[3]).unwrap();
+        opened.remove(3);
+        assert_order(&shell, ws, &opened, "after closing the 2nd and 5th");
+    }
+
+    /// A tiny deterministic generator, so a failure replays.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % below
+        }
+    }
+
+    #[test]
+    fn the_order_survives_a_hundred_random_opens_and_closes() {
+        let mut shell = BrowserShell::new();
+        let ws = shell.get_active_workspace().unwrap().id;
+        let mut rng = Lcg(0x5eed_1c);
+        let mut model: Vec<TabId> = Vec::new();
+        for step in 0..100 {
+            if model.is_empty() || rng.next(3) != 0 {
+                model.push(shell.create_tab(tab(ws, step)).unwrap());
+            } else {
+                let victim = model.remove(rng.next(model.len()));
+                shell.close_tab(victim).unwrap();
+            }
+            assert_order(&shell, ws, &model, &format!("step {step}"));
+        }
+        assert!(model.len() > 20, "the walk should leave many tabs open: {}", model.len());
+    }
+
+    #[test]
+    fn a_moved_tab_goes_to_the_end_of_its_new_workspace() {
+        let mut shell = BrowserShell::new();
+        let a = shell.get_active_workspace().unwrap().id;
+        let b = shell.create_workspace("B".to_string());
+        let in_a: Vec<TabId> = (0..4).map(|n| shell.create_tab(tab(a, n)).unwrap()).collect();
+        let in_b: Vec<TabId> = (0..3).map(|n| shell.create_tab(tab(b, n)).unwrap()).collect();
+        shell.move_tab_to_workspace(in_a[1], b).unwrap();
+        assert_order(&shell, a, &[in_a[0], in_a[2], in_a[3]], "source after move");
+        assert_order(&shell, b, &[in_b[0], in_b[1], in_b[2], in_a[1]], "target after move");
+    }
+
+    #[test]
+    fn a_snapshot_round_trip_keeps_the_order() {
+        let mut shell = BrowserShell::new();
+        let ws = shell.get_active_workspace().unwrap().id;
+        for n in 0..9 {
+            shell.create_tab(tab(ws, n)).unwrap();
+        }
+        let mut restored = BrowserShell::new();
+        restored.load_snapshot(shell.snapshot()).unwrap();
+        let ws = restored.get_active_workspace().unwrap().id;
+        let titles: Vec<String> = restored
+            .list_tabs(Some(ws))
+            .iter()
+            .map(|t| t.title.clone().unwrap())
+            .collect();
+        let expected: Vec<String> = (0..9).map(|n| format!("p{n}")).collect();
+        assert_eq!(titles, expected, "restored list_tabs order");
+        let restored_ids = restored.get_workspace(ws).unwrap().tabs.clone();
+        assert_order(&restored, ws, &restored_ids, "restored");
+    }
+
+    #[test]
+    fn list_workspaces_is_in_creation_order() {
+        let mut shell = BrowserShell::new();
+        let first = shell.get_active_workspace().unwrap().id;
+        let made: Vec<WorkspaceId> = (0..8).map(|n| shell.create_workspace(format!("w{n}"))).collect();
+        let listed: Vec<WorkspaceId> = shell.list_workspaces().iter().map(|w| w.id).collect();
+        let mut expected = vec![first];
+        expected.extend(made);
+        assert_eq!(listed, expected);
+    }
+}
