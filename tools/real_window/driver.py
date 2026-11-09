@@ -2082,31 +2082,52 @@ class Driver:
         # Cmd+T left the last new tab active. Walk the strip's row left to
         # right (6 px steps; a tab is 100-180 px wide) until a click
         # activates another tab: where a tab sits is not fixed, the strip
-        # scrolls its active tab to the centre.
-        act, active = None, made[-1] if made else None
-        for x in range(232, 1000, 6):
-            at = len(self.app.log_text())
-            self.hw("click", pid, x, self.E4_TAB[1])
-            got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
-            if got and (got.group(1) == "close_tab" or got.group(2) != active):
-                act = got if got.group(1) == "activate_tab" else None
+        # scrolls its active tab to the centre and clips the tab at its left
+        # edge. A tab's close button shows under the pointer, so the walk
+        # can close a tab (a clipped tab's button can be the first thing it
+        # meets): then Cmd+T makes a known active tab again and the walk
+        # starts over, at most three times.
+        act, got, active = None, None, made[-1] if made else None
+        for _ in range(3):
+            for x in range(232, 1000, 6):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1] - 9)
+                got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
+                if got and (got.group(1) == "close_tab" or got.group(2) != active):
+                    break
+            if got and got.group(1) == "activate_tab":
+                act = got
                 break
+            time.sleep(0.8)
+            again = self.m1_tabs(c, 1)
+            active = again[-1] if again else active
         self.expect(c, "a click on a background tab activates it", bool(act),
-                    act.group(0) if act else ("hit a close button: %s" % got.group(0) if got else "no other tab on the row"))
+                    act.group(0) if act else ("last: %s" % got.group(0) if got else "no other tab on the row"))
         time.sleep(0.8)
         if act:
             self.m1_cmd_w(c, "Cmd+W after the click", act.group(2))
         # A tab's close button shows on the active tab and under the
-        # pointer. The strip scrolls its active tab to the centre, so where
-        # a tab sits is not fixed: walk the strip's row left to right (4 px
-        # steps, the button is 16 px) until a click closes a tab.
-        hit = None
-        for x in range(232, 1000, 4):
-            at = len(self.app.log_text())
-            self.hw("click", pid, x, self.E4_TAB[1])
-            hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
-            if hit:
+        # pointer. Walk the strip's row left to right (4 px steps, the
+        # button is 16 px) until a click closes a tab. Each click on a tab
+        # activates it and the strip scrolls it to the centre, so the row
+        # moves under the walk: up to three walks.
+        # The tab's block button (block the site and close the tab) sits
+        # left of it and shows the same way: a walk that meets it first
+        # stops there and the step is NOT RUN, not a fail.
+        hit = blocked = None
+        for _ in range(3):
+            for x in range(232, 1000, 4):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1])
+                hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
+                blocked = self.app.wait_log(r'"cmd":"block_and_close"', 0, at)
+                if hit or blocked:
+                    break
+            if hit or blocked:
                 break
+        if blocked and not hit:
+            return self.not_run(c, "a click on a tab's close button closes it, then Cmd+W",
+                                "the walk met the tab's block button first (x=%d)" % x)
         self.expect(c, "a click on a tab's close button closes it", bool(hit),
                     hit.group(0) if hit else "no close_tab while walking the strip")
         time.sleep(0.8)
