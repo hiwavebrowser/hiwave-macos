@@ -564,6 +564,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
