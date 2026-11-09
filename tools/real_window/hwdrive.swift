@@ -26,7 +26,9 @@
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive menu     <pid> <menu title> <item title>   (press a menu bar item)
 //   hwdrive type     <pid> <text>
-//   hwdrive resize   <pid> <w> <h>      (returns once the window server shows the size; ack_ms)
+//   hwdrive resize   <pid> <w> <h>      (returns once the window server shows the size: ack_ms,
+//                                        ax_ms, req_epoch; on an AX error ack_ms is null and
+//                                        `window` is the read from before the request)
 //   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //
 // x, y are points from the top-left corner of the window's frame (title bar
@@ -471,7 +473,12 @@ case "resize":
     // ax_ms is the AX set round trip (the app's main thread serves it);
     // bounds_ms is request to the window server showing the asked size,
     // polled every 2 ms for up to 2 s. ack_ms is bounds_ms, or null if the
-    // window never reached the size in 2 s.
+    // window never reached the size in 2 s. req_epoch is the wall-clock
+    // time of the request (Unix seconds), the clock the app log's UTC
+    // stamps use, so a caller can time the app's own lines from the request
+    // rather than from before this process was spawned. On an AX error
+    // there is no poll: ack_ms is null and `window` is the pre-request read.
+    let reqEpoch = Date().timeIntervalSince1970
     let t0 = DispatchTime.now().uptimeNanoseconds
     let ms = { (t: UInt64) -> Double in (Double(t - t0) / 1e4).rounded() / 100 }
     let err = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, axSize)
@@ -491,7 +498,7 @@ case "resize":
         }
     }
     var out: [String: Any] = [
-        "ax_error": Int(err.rawValue), "ax_ms": axMs,
+        "ax_error": Int(err.rawValue), "ax_ms": axMs, "req_epoch": reqEpoch,
         "bounds_ms": boundsMs ?? NSNull(), "ack_ms": boundsMs ?? NSNull(),
     ]
     if let w = last { out["window"] = windowJSON(w) }
