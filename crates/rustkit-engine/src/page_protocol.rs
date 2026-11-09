@@ -99,9 +99,12 @@ pub enum PageCmd {
     Render {
         every: bool,
     },
+    /// The user made an input (LAT1c): its native event time, sequence
+    /// number and kind.
     NoteInput {
         at: std::time::Instant,
         seq: u64,
+        kind: crate::InputClass,
     },
     GrabKeyboard,
     Relayout,
@@ -619,8 +622,8 @@ impl EndpointSide {
                 }
                 self.publish_commit(engine);
             }
-            PageCmd::NoteInput { at, seq } => {
-                engine.note_input(self.view, InputMark { at, seq });
+            PageCmd::NoteInput { at, seq, kind } => {
+                engine.note_input(self.view, InputMark { at, seq, kind });
             }
             PageCmd::GrabKeyboard => {
                 engine.grab_keyboard(self.view);

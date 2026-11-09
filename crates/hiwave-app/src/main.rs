@@ -983,7 +983,7 @@ fn pump_rustkit_panel(
     view.process_events();
     if let Some(id) = view.input_view() {
         for event in rustkit_viewhost::drain_input_view(id) {
-            view.note_input(event.at, event.seq);
+            view.note_input(&event);
             dispatch_view_input(view, InputTarget::Panel, event.kind, devtools, inspector, click_proxy);
         }
     }
@@ -4041,7 +4041,7 @@ fn main() {
                     // page's own input stays queued for it.
                     if let Some(id) = chrome.input_view() {
                         for event in rustkit_viewhost::drain_input_view(id) {
-                            chrome.note_input(event.at, event.seq);
+                            chrome.note_input(&event);
                             dispatch_view_input(
                                 chrome,
                                 InputTarget::Chrome,
@@ -4160,7 +4160,7 @@ fn main() {
                                     _ => settings.as_deref().ok().and_then(|s| s.as_ref()).map(|(_, v)| v),
                                 };
                                 if let Some(PanelView::RustKit(view)) = panel {
-                                    view.note_input(event.at, event.seq);
+                                    view.note_input(&event);
                                     dispatch_view_input(
                                         view,
                                         InputTarget::Panel,
@@ -4174,7 +4174,7 @@ fn main() {
                             }
                             if route == InputRoute::Chrome {
                                 if let ChromeView::RustKit(ref chrome) = **chrome_for_events {
-                                    chrome.note_input(event.at, event.seq);
+                                    chrome.note_input(&event);
                                     dispatch_view_input(
                                         chrome,
                                         InputTarget::Chrome,
@@ -4188,7 +4188,7 @@ fn main() {
                             }
                             // When it arrived, for the W-gate's input-to-present
                             // figure (logged by the presenter with the frame).
-                            view.note_input(event.at, event.seq);
+                            view.note_input(&event);
                             // CH3.A3: a press on the page while a chrome
                             // popup is open is a click outside it, which
                             // the chrome's own handler closes it on.

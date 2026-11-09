@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>LAT14 page A: element.animate()</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; background: #fff; }
+  .box { display: inline-block; width: 120px; height: 80px; margin: 12px; background: #2a6; }
+</style>
+<p>Page A runs Web Animations on six boxes, then sends the same tab to page B.</p>
+<div class="box"></div><div class="box"></div><div class="box"></div>
+<div class="box"></div><div class="box"></div><div class="box"></div>
+<script>
+  // LAT14: element.animate() writes the view's animated-style layer. Before
+  // the fix that layer outlived the document, and every animation frame of the
+  // next page ran a full relayout.
+  for (const el of document.querySelectorAll('.box')) {
+    el.animate([{ opacity: 1 }, { opacity: 0.2 }],
+               { duration: 800, iterations: Infinity, direction: 'alternate' });
+  }
+  fetch('/beacon?lat14_a_animating');
+  const q = new URLSearchParams(location.search);
+  const dwell = Number(q.get('dwell') || 4000);
+  const leave = Number(q.get('leave') || 15000);
+  setTimeout(() => { location.href = '/lat14_b.html?leave=' + leave; }, dwell);
+</script>
