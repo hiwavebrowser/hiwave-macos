@@ -165,14 +165,42 @@ impl App {
         self.answer_chrome()
     }
 
+    /// The open tabs' ids, as a set: `list_tabs` reads a `HashMap`, so its
+    /// order is not creation order and varies between runs. Pick tabs by
+    /// role (`active`, `background_tab`), never by position here.
     fn tab_ids(&self) -> Vec<u64> {
         let s = self.state.lock().unwrap();
         let ws = s.shell.get_active_workspace().map(|w| w.id);
-        s.shell.list_tabs(ws).iter().map(|t| t.id.0).collect()
+        let mut ids: Vec<u64> = s.shell.list_tabs(ws).iter().map(|t| t.id.0).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// An open tab that is not the active one.
+    fn background_tab(&self) -> u64 {
+        let active = self.active();
+        self.tab_ids()
+            .into_iter()
+            .find(|id| Some(*id) != active)
+            .expect("a background tab")
     }
 
     fn active(&self) -> Option<u64> {
         self.state.lock().unwrap().shell.get_active_tab().map(|t| t.id.0)
+    }
+
+    /// A click on one part (`.tab-title`, `.tab-close`) of tab `id` in the
+    /// chrome's strip. The tab element is found first and the part inside
+    /// it: RustKit's `querySelector` drops an attribute filter on an
+    /// ancestor compound (`.tab[data-id="0"] .tab-title` matches the first
+    /// strip tab's title, whatever its id), so a one-selector lookup clicks
+    /// the wrong tab unless that tab happens to lead the strip.
+    fn click_tab_part(&self, id: u64, part: &str) {
+        self.chrome
+            .eval(&format!(
+                "document.querySelector('#tabs .tab[data-id=\"{id}\"]').querySelector('{part}').click()"
+            ))
+            .expect("click");
     }
 
     /// The tab ids the chrome's strip shows, and the one it marks active.
@@ -208,12 +236,9 @@ fn cmd_w_three_times_closes_three_tabs() {
 #[test]
 fn cmd_w_closes_a_clicked_background_tab() {
     let app = App::with_tabs(3);
-    let ids = app.tab_ids();
-    let background = ids[0];
+    let background = app.background_tab();
     assert_ne!(app.active(), Some(background));
-    app.chrome
-        .eval(&format!("document.querySelector('#tabs .tab[data-id=\"{background}\"] .tab-title').click()"))
-        .expect("click");
+    app.click_tab_part(background, ".tab-title");
     assert_eq!(app.answer_chrome(), vec![format!("activate_tab {background}")]);
     assert_eq!(app.active(), Some(background));
     assert_eq!(app.cmd_w(), vec![format!("close_tab {background}")], "strip {}", app.strip());
@@ -222,17 +247,14 @@ fn cmd_w_closes_a_clicked_background_tab() {
     assert_eq!(app.tab_ids().len(), 1);
 }
 
-/// A tab closed with its close button, then Cmd+W: the press closes the
-/// active tab of what is left.
+/// A background tab closed with its close button, then Cmd+W: the press
+/// closes the active tab of what is left.
 #[test]
 fn cmd_w_after_a_close_button() {
     let app = App::with_tabs(3);
-    let ids = app.tab_ids();
-    let first = ids[0];
-    app.chrome
-        .eval(&format!("document.querySelector('#tabs .tab[data-id=\"{first}\"] .tab-close').click()"))
-        .expect("click");
-    assert_eq!(app.answer_chrome(), vec![format!("close_tab {first}")]);
+    let closed = app.background_tab();
+    app.click_tab_part(closed, ".tab-close");
+    assert_eq!(app.answer_chrome(), vec![format!("close_tab {closed}")]);
     let active = app.active().expect("an active tab");
     assert_eq!(app.cmd_w(), vec![format!("close_tab {active}")], "strip {}", app.strip());
     let active = app.active().expect("an active tab");

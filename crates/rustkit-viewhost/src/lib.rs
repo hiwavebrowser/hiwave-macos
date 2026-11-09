@@ -349,10 +349,49 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// What a RustKit view's `performKeyEquivalent:` does with an event, as
+/// far as Ctrl+Tab goes (M1d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum CtrlTabRoute {
+    /// Not a Ctrl+Tab keyDown: the view's usual handling.
+    NotCtrlTab,
+    /// Ctrl+Option+Tab: to the key stream, for the page.
+    ToPage,
+    /// Ctrl+Tab / Ctrl+Shift+Tab: to the key stream, for the app.
+    Cycle,
+}
+
+/// Route an event of NSEvent `kind` with `flags`. `keycode` is read only
+/// for a keyDown with Ctrl and no Cmd: `-[NSEvent keyCode]` raises on a
+/// non-key event, and AppKit offers `performKeyEquivalent:` other events
+/// too (#1012 delta R1 nit b).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn ctrl_tab_route(kind: u64, flags: u64, keycode: impl FnOnce() -> u16) -> CtrlTabRoute {
+    const KEY_DOWN: u64 = 10;
+    let ctrl = flags & (1 << 18) != 0;
+    let cmd = flags & (1 << 20) != 0;
+    let alt = flags & (1 << 19) != 0;
+    if kind != KEY_DOWN || !ctrl || cmd {
+        return CtrlTabRoute::NotCtrlTab;
+    }
+    let keycode = keycode();
+    if keycode != TAB_KEYCODE {
+        CtrlTabRoute::NotCtrlTab
+    } else if is_tab_cycle_chord(keycode, ctrl, cmd, alt) {
+        CtrlTabRoute::Cycle
+    } else {
+        CtrlTabRoute::ToPage
+    }
+}
+
 /// A view claimed a Ctrl+Tab press: its Tab release is swallowed too,
 /// whichever key the user lets go first (#1012 R1 nit 1: with Ctrl
 /// released first the release carries no Ctrl and reached the page as a
 /// stray Tab keyup).
+/// Kept per view: all tabs share one content view, so a Ctrl+Tab switch
+/// leaves the keyboard on the view that owes the release (#1012 delta R1
+/// nit a).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn owe_tab_up(view: u64) {
     TAB_UP_OWED.with(|owed| owed.borrow_mut().insert(view));
@@ -1912,6 +1951,23 @@ mod tests {
         assert!(!is_tab_cycle_chord(48, true, true, false), "Cmd+Ctrl+Tab");
         assert!(!is_tab_cycle_chord(48, false, false, false), "plain Tab");
         assert!(!is_tab_cycle_chord(0, true, false, false), "Ctrl+A");
+    }
+
+    #[test]
+    fn ctrl_tab_route_reads_the_keycode_of_key_downs_only() {
+        let ctrl = 1u64 << 18;
+        let never = || -> u16 { panic!("keyCode read for an event that is not a Ctrl keyDown") };
+        // A mouse-down (1), a flags-changed (12), a key-up (11): keyCode is not read.
+        for kind in [1u64, 11, 12, 14] {
+            assert_eq!(ctrl_tab_route(kind, ctrl, never), CtrlTabRoute::NotCtrlTab, "kind {kind}");
+        }
+        // A keyDown without Ctrl, or with Cmd, is not read either.
+        assert_eq!(ctrl_tab_route(10, 0, never), CtrlTabRoute::NotCtrlTab);
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 20), never), CtrlTabRoute::NotCtrlTab);
+        assert_eq!(ctrl_tab_route(10, ctrl, || 48), CtrlTabRoute::Cycle);
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 17), || 48), CtrlTabRoute::Cycle, "Ctrl+Shift+Tab");
+        assert_eq!(ctrl_tab_route(10, ctrl | (1 << 19), || 48), CtrlTabRoute::ToPage, "Ctrl+Option+Tab");
+        assert_eq!(ctrl_tab_route(10, ctrl, || 0), CtrlTabRoute::NotCtrlTab, "Ctrl+A");
     }
 
     #[test]
