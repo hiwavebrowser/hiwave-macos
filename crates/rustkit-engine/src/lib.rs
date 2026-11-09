@@ -548,6 +548,8 @@ mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
+mod image_budget_tests;
+#[cfg(all(test, feature = "headless"))]
 mod scroll_paints_first_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_after_yielded_load_tests;
