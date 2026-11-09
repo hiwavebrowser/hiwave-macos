@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>LAT14 page B: an ordinary CSS animation</title>
+<style>
+  body { margin: 24px; font: 16px/1.5 Georgia, serif; background: #fff; color: #222; max-width: 760px; }
+  /* Paint-only: opacity. Its frames should not lay the page out. */
+  @keyframes pulse { from { opacity: 1; } to { opacity: 0.3; } }
+  .spinner { width: 40px; height: 40px; border-radius: 50%; background: #36c;
+             animation: pulse 1s ease-in-out infinite alternate; }
+</style>
+<h1>An unrelated page</h1>
+<div class="spinner"></div>
+<p>Apart from a beacon and a timer that leaves for page C (so the app logs this page's relayout summary), this page has no script. It shows a little text and one CSS
+animation that changes only opacity, the kind most pages run: a spinner, a
+pulsing badge, a fading hint. Its animation frames change no layout.</p>
+<p>Before LAT14, if the page before it in the same tab had called
+<code>element.animate()</code>, every frame of this animation ran a full
+relayout (build, layout and display list), because the view's animated-style
+layer still held the old page's entries.</p>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod
+tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
+quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse
+cillum dolore eu fugiat nulla pariatur.</p>
+<ul><li>One</li><li>Two</li><li>Three</li><li>Four</li></ul>
+<script>
+  fetch('/beacon?lat14_b_loaded');
+  const leave = Number(new URLSearchParams(location.search).get('leave') || 15000);
+  setTimeout(() => { location.href = '/lat14_c.html'; }, leave);
+</script>
