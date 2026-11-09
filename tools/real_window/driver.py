@@ -3182,9 +3182,14 @@ class Driver:
             # the page may hear the click only when its thread is free.
             self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
             time.sleep(0.4)
-            loading = len(self.fixture.seen("/slowimg/", self.since)) > 0 and \
-                not re.search(r"Navigation finished", self.app.log_text())
-            if query == "slowimg" and not self.expect(c, "%s: the image is still held when Cmd+L is pressed" % what, loading):
+            # The server holds the image 8 s from its request: still held
+            # with a second to spare. ("Navigation finished" is no guide:
+            # the chrome's own load logs it too.)
+            held = [t for (t, p) in self.fixture.requests[self.since:] if "/slowimg/" in p]
+            age = (time.time() - self.fixture.t0 - held[0]) if held else None
+            loading = age is not None and age < 7.0
+            if query == "slowimg" and not self.expect(c, "%s: the image is still held when Cmd+L is pressed" % what, loading,
+                                                      "requested %s s ago" % (round(age, 1) if age is not None else "never")):
                 self.close_page()
                 continue
             log_from, t = len(self.app.log_text()), time.time()
@@ -3213,8 +3218,7 @@ class Driver:
                 time.sleep(0.5)
                 after = self.app.log_text()[stop_from:]
                 self.expect(c, "%s: Escape then stopped the load" % what,
-                            bool(stopped) and "Stop: nothing loading" not in after
-                            and not re.search(r"Navigation finished", self.app.log_text()[:stop_from]),
+                            bool(stopped) and "Stop: nothing loading" not in after,
                             "stop: %s; %s" % (bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
             # The page's late answer (its thread freed by the stop or between
             # busy spells) is dropped: the menu ran once.
