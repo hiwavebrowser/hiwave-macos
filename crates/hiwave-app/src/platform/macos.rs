@@ -30,6 +30,11 @@ pub mod menu_ids {
     pub const GO_FORWARD: &str = "go_forward";
     pub const FOCUS_URL: &str = "focus_url";
     pub const TOGGLE_INSPECTOR: &str = "toggle_inspector";
+    /// Tab > Tab 1..8 (Cmd+1..8) are `select_tab_1`..`select_tab_8`.
+    pub const SELECT_TAB_PREFIX: &str = "select_tab_";
+    pub const SELECT_LAST_TAB: &str = "select_last_tab";
+    pub const SELECT_NEXT_TAB: &str = "select_next_tab";
+    pub const SELECT_PREVIOUS_TAB: &str = "select_previous_tab";
 }
 
 /// macOS platform manager

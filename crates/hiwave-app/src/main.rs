@@ -85,6 +85,7 @@ mod content_webview_trait;
 mod content_webview_enum;
 mod chrome_webview_enum;
 mod chrome_state;
+mod tab_shortcuts;
 
 use content_webview_trait::ContentWebViewOps;
 #[cfg(target_os = "macos")]

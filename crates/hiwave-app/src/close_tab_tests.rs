@@ -20,6 +20,8 @@ use crate::{AppState, ChromeUi};
 
 // M1c: tab order through the shell, the strip and Cmd+1..9 (uses `App`).
 mod tab_order_tests;
+// M1d: the tab shortcuts from the menu and the chrome, exactly once.
+mod tab_shortcut_tests;
 
 /// chrome.html on a headless engine view, as the app's chrome view.
 struct HeadlessChrome {
