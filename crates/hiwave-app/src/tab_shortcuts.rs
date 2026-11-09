@@ -90,6 +90,16 @@ pub(crate) fn effective_active(
     }
 }
 
+/// An `activate_tab` landed (a shortcut's or a click's): a pending target
+/// that was this tab has arrived and stops standing in for the active tab
+/// (#1012 delta R1 nit c: left set, a click back to the tab it was sent
+/// from within its second made the next Ctrl+Tab skip a tab).
+pub(crate) fn activation_landed(state: &mut crate::AppState, tab: TabId) {
+    if state.tab_select_pending.is_some_and(|p| p.to == tab) {
+        state.tab_select_pending = None;
+    }
+}
+
 /// Ctrl+Tab (next) and Ctrl+Shift+Tab (previous), from a view's key
 /// stream. The chord itself is `rustkit_viewhost::is_tab_cycle_chord`,
 /// the one predicate the view also claims it by (#1012 R1 nit 2), so

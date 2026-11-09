@@ -11,6 +11,7 @@ use rustkit_viewhost::Bounds;
 
 use super::App;
 use crate::tab_shortcuts::{select_tab, TabShortcut};
+use crate::ipc::IpcMessage;
 use crate::ChromeUi;
 
 impl App {
@@ -187,4 +188,21 @@ fn a_page_that_cancels_cmd_digits_keeps_them() {
     assert!(rustkit_viewhost::is_reserved_chord("}", 30, true, true, false));
     assert!(rustkit_viewhost::is_reserved_chord("{", 33, true, true, false));
     assert!(!rustkit_viewhost::is_reserved_chord("3", 20, true, false, false));
+}
+
+/// #1012 delta R1 nit c: Ctrl+Tab A→B lands, a click goes back to A
+/// within the pending second, and the next Ctrl+Tab goes to B again, not
+/// C (the landed target no longer stands in for the active tab).
+#[test]
+fn a_landed_target_stops_counting_after_a_click_back() {
+    let app = App::with_tabs(4);
+    let ids = app.ids_in_strip_order();
+    app.handle(IpcMessage::ActivateTab { id: ids[0].to_string() });
+    app.end_turn();
+    assert_eq!(app.menu(TabShortcut::Next), activated(ids[1]), "A to B");
+    // A click on A (what the strip sends), within the second.
+    app.handle(IpcMessage::ActivateTab { id: ids[0].to_string() });
+    app.end_turn();
+    assert_eq!(app.active(), Some(ids[0]));
+    assert_eq!(app.menu(TabShortcut::Next), activated(ids[1]), "A to B again, not C");
 }
