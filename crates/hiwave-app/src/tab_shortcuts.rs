@@ -42,8 +42,15 @@ pub(crate) enum TabShortcut {
 /// with `active` the active tab. `None` when it selects nothing, or the
 /// tab that is already active.
 pub(crate) fn tab_for_shortcut(order: &[TabId], active: Option<TabId>, shortcut: TabShortcut) -> Option<TabId> {
-    let _ = (order, active, shortcut);
-    None // red stub
+    let at = active.and_then(|a| order.iter().position(|t| *t == a));
+    let target = match shortcut {
+        TabShortcut::Nth(n) if n >= 1 => order.get(n - 1).copied(),
+        TabShortcut::Nth(_) => None,
+        TabShortcut::Last => order.last().copied(),
+        TabShortcut::Next => at.map(|i| order[(i + 1) % order.len()]),
+        TabShortcut::Previous => at.map(|i| order[(i + order.len() - 1) % order.len()]),
+    };
+    target.filter(|t| Some(*t) != active)
 }
 
 /// Ctrl+Tab (next) and Ctrl+Shift+Tab (previous), from a view's key
@@ -51,15 +58,23 @@ pub(crate) fn tab_for_shortcut(order: &[TabId], active: Option<TabId>, shortcut:
 /// swallows too so the page hears neither half. Cmd or Option held, it is
 /// not the chord.
 pub(crate) fn tab_cycle_chord(mac_keycode: u16, ctrl: bool, cmd: bool, alt: bool, shift: bool) -> Option<TabShortcut> {
-    let _ = (mac_keycode, ctrl, cmd, alt, shift);
-    None // red stub
+    const TAB: u16 = 48;
+    (mac_keycode == TAB && ctrl && !cmd && !alt).then_some(if shift { TabShortcut::Previous } else { TabShortcut::Next })
 }
 
 /// The menu item ids of the tab shortcuts, and the shortcut each runs.
 #[cfg(target_os = "macos")]
 pub(crate) fn shortcut_for_menu_id(id: &str) -> Option<TabShortcut> {
-    let _ = id;
-    None // red stub
+    use crate::platform::menu_ids;
+    match id {
+        menu_ids::SELECT_LAST_TAB => Some(TabShortcut::Last),
+        menu_ids::SELECT_NEXT_TAB => Some(TabShortcut::Next),
+        menu_ids::SELECT_PREVIOUS_TAB => Some(TabShortcut::Previous),
+        _ => {
+            let n: usize = id.strip_prefix(menu_ids::SELECT_TAB_PREFIX)?.parse().ok()?;
+            (1..=8).contains(&n).then_some(TabShortcut::Nth(n))
+        }
+    }
 }
 
 /// Run `shortcut`: the chrome sends `activate_tab` for the tab it selects

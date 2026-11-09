@@ -331,6 +331,78 @@ impl MacOSPlatform {
     }
 }
 
+impl MacOSPlatform {
+    /// The Tab menu (M1d): tab switching as menu key equivalents, so they
+    /// work with a page focused as Cmd+W does. Cmd+1..8 the Nth tab,
+    /// Cmd+9 the last, Cmd+Shift+] / [ the next / previous (Chromium's
+    /// reserved chords: no page hears them). Ctrl+Tab is taken from the
+    /// key stream instead (`tab_shortcuts::tab_cycle_chord`): muda's key
+    /// equivalent for Tab is a glyph that no key press matches.
+    fn create_tab_menu(&self, menu: &Menu) -> PlatformResult<()> {
+        let tab_menu = Submenu::new("Tab", true);
+        let add = |item: &MenuItem, what: &str| {
+            tab_menu
+                .append(item)
+                .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add {what}: {e}")))
+        };
+        add(
+            &MenuItem::with_id(
+                menu_ids::SELECT_NEXT_TAB,
+                "Select Next Tab",
+                true,
+                Some(Accelerator::new(Some(Modifiers::META | Modifiers::SHIFT), Code::BracketRight)),
+            ),
+            "Select Next Tab",
+        )?;
+        add(
+            &MenuItem::with_id(
+                menu_ids::SELECT_PREVIOUS_TAB,
+                "Select Previous Tab",
+                true,
+                Some(Accelerator::new(Some(Modifiers::META | Modifiers::SHIFT), Code::BracketLeft)),
+            ),
+            "Select Previous Tab",
+        )?;
+        tab_menu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add separator: {}", e)))?;
+        const DIGITS: [Code; 8] = [
+            Code::Digit1,
+            Code::Digit2,
+            Code::Digit3,
+            Code::Digit4,
+            Code::Digit5,
+            Code::Digit6,
+            Code::Digit7,
+            Code::Digit8,
+        ];
+        for (i, code) in DIGITS.into_iter().enumerate() {
+            let n = i + 1;
+            add(
+                &MenuItem::with_id(
+                    format!("{}{n}", menu_ids::SELECT_TAB_PREFIX),
+                    format!("Tab {n}"),
+                    true,
+                    Some(Accelerator::new(Some(Modifiers::META), code)),
+                ),
+                "Tab N",
+            )?;
+        }
+        add(
+            &MenuItem::with_id(
+                menu_ids::SELECT_LAST_TAB,
+                "Last Tab",
+                true,
+                Some(Accelerator::new(Some(Modifiers::META), Code::Digit9)),
+            ),
+            "Last Tab",
+        )?;
+        menu.append(&tab_menu)
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to append tab menu: {}", e)))?;
+        Ok(())
+    }
+}
+
 impl Default for MacOSPlatform {
     fn default() -> Self {
         Self::new()
@@ -345,6 +417,7 @@ impl PlatformManager for MacOSPlatform {
         self.create_edit_menu(menu)?;
         self.create_view_menu(menu)?;
         self.create_history_menu(menu)?;
+        self.create_tab_menu(menu)?;
 
         // Initialize the menu for the NSApp
         menu.init_for_nsapp();

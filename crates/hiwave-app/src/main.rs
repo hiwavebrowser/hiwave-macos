@@ -197,6 +197,8 @@ enum UserEvent {
         url: String,
     },
     SyncTabs,
+    /// Ctrl+Tab / Ctrl+Shift+Tab from a RustKit view's keys (M1d).
+    SelectTab(tab_shortcuts::TabShortcut),
     SyncWorkspaces,
     SyncDownloads,
     SyncShieldStats,
@@ -2201,6 +2203,17 @@ fn dispatch_view_input(
                 ) || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
             if key.cmd && !edit_chord {
                 return; // menu shortcuts are not text
+            }
+            // Ctrl+Tab / Ctrl+Shift+Tab (M1d): the next / previous tab,
+            // from the page or the chrome; neither hears it (Chromium
+            // reserves it). Its release is swallowed with it.
+            if let Some(shortcut) =
+                tab_shortcuts::tab_cycle_chord(key.mac_keycode, key.ctrl, key.cmd, key.alt, key.shift)
+            {
+                if !key.up {
+                    let _ = click_proxy.send_event(UserEvent::SelectTab(shortcut));
+                }
+                return;
             }
             // Esc leaves select-element mode; the page does not hear it.
             if target == InputTarget::Page && devtools.picking() && key.mac_keycode == 53 {
@@ -4588,6 +4601,9 @@ fn main() {
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
+                    UserEvent::SelectTab(shortcut) => {
+                        tab_shortcuts::select_tab(&state_for_events, &chrome_for_events, shortcut);
+                    }
                     UserEvent::SyncTabs => {
                         info!("Syncing tabs to Chrome UI");
                         sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
@@ -6408,6 +6424,12 @@ fn main() {
                 }
                 id if id == menu_ids::TOGGLE_INSPECTOR => {
                     let _ = proxy.send_event(UserEvent::ToggleInspector);
+                }
+                // M1d: Cmd+1..9, Cmd+Shift+[ ] (Tab menu).
+                id if tab_shortcuts::shortcut_for_menu_id(id).is_some() => {
+                    if let Some(shortcut) = tab_shortcuts::shortcut_for_menu_id(id) {
+                        tab_shortcuts::select_tab(&state_for_events, &chrome_for_events, shortcut);
+                    }
                 }
                 _ => {}
             }
