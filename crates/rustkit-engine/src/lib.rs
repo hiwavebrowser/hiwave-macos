@@ -477,6 +477,8 @@ mod html_element_ancestor_tests;
 #[cfg(test)]
 mod is_complex_argument_tests;
 #[cfg(test)]
+mod ancestor_attribute_query_tests;
+#[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
