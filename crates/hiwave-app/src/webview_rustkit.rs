@@ -2809,6 +2809,11 @@ window.go = function () {\
             budget_stops(&log_since(mark).0).iter().any(|(source, _)| source == "timers")
         });
         assert!(stopped.is_some(), "the spin was never stopped:\n{}", log_since(mark).0);
+        // One stop, one reason: the error that unwinds a budget stop reads
+        // as the loop limit's and must not be logged as one.
+        let _ = wake_while(&view, Duration::from_millis(300), |_| false);
+        let log = log_since(mark).0;
+        assert!(!log.contains("Script stopped at the loop-iteration limit"), "{log}");
         (view, requests, log_since(0).1)
     }
 
