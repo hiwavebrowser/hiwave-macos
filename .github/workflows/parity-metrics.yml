@@ -2,7 +2,7 @@ name: Parity Metrics
 
 on:
   push:
-    # Master only. This job books a 30-minute macos-14 runner, but the only
+    # Master only. This job books a 30-minute macos-15 runner, but the only
     # step that produces anything durable — "Update metrics history" — is
     # already gated to master/main. On a feature branch the whole run
     # existed to upload an artifact nobody reads, while emitting a CI
@@ -24,7 +24,7 @@ env:
 
 jobs:
   collect-metrics:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: write  # Needed to push metrics
