@@ -22,6 +22,8 @@ use crate::{AppState, ChromeUi};
 mod tab_order_tests;
 // M1d: the tab shortcuts from the menu and the chrome, exactly once.
 mod tab_shortcut_tests;
+// M1f: Escape in the address bar stops or reverts; it never closes the sidebar.
+mod address_bar_escape_tests;
 
 /// chrome.html on a headless engine view, as the app's chrome view.
 struct HeadlessChrome {
