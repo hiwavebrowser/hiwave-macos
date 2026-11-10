@@ -3129,6 +3129,12 @@ pub struct ComputedStyle {
     /// `z-index: auto` both leave `z_index` at 0, and only the computed
     /// style reads them apart (`0` / `auto`).
     pub z_index_declared: bool,
+    /// An author rule set a vertical padding (`padding`, `padding-top`/`-bottom`, a logical
+    /// form), zero included. A form control with no author padding keeps the UA's (CB3).
+    pub padding_v_declared: bool,
+    /// An author rule set a vertical border width or style (`border`, `border-top`/`-bottom`
+    /// and their width/style longhands, `border-width`, `border-style`), `none` and zero included.
+    pub border_v_declared: bool,
 
     // Transforms
     pub transform: TransformList,

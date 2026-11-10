@@ -15568,6 +15568,29 @@ impl layout_ctx::LayoutCtx {
             return;
         }
 
+        // Which vertical box sides the author declared, zero and `none` included: a form
+        // control keeps the UA's padding and border on a side nobody declared (CB3).
+        if matches!(
+            property,
+            "padding" | "padding-top" | "padding-bottom"
+        ) {
+            style.padding_v_declared = true;
+        }
+        if matches!(
+            property,
+            "border"
+                | "border-top"
+                | "border-bottom"
+                | "border-width"
+                | "border-style"
+                | "border-top-width"
+                | "border-bottom-width"
+                | "border-top-style"
+                | "border-bottom-style"
+        ) {
+            style.border_v_declared = true;
+        }
+
         // Handle CSS-wide keywords
         // inherit: use the computed value from the parent (already handled by inherit_from)
         // initial: use the property's initial value

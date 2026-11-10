@@ -335,8 +335,21 @@ pub(crate) fn form_control_intrinsic_size(
     // The content line is the control font's `normal` line (n58): Arial is
     // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
     // read 14.33 / 15, so every styled control was 0.7–1px short.
+    // CB3: an author who declared BOTH a vertical padding and a vertical border (zero and `none`
+    // included) fully specified the box, so the CSS box model applies as written: the content
+    // line (`line-height` when the author set one, else `normal`) plus the author's padding and
+    // border. `button{font-size:16px;line-height:1;padding:0 4px;border:none}` is 16 px tall in
+    // Chrome; with no author size to compose, the calibrated UA blob (22.8 at 16px) was used.
+    let fully_declared = style.padding_v_declared && style.border_v_declared;
+    let content_line = |font_size: f32| match style.line_height {
+        rustkit_css::LineHeight::Number(n) => n * font_size,
+        rustkit_css::LineHeight::Px(px) => px,
+        rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
+    };
     let single_line_box = |blob: f32| {
-        if author_pb_v > 0.0 {
+        if fully_declared {
+            content_line(font_size) + author_pb_v
+        } else if author_pb_v > 0.0 {
             normal_line_height(style, font_size) + author_pb_v
         } else {
             blob
