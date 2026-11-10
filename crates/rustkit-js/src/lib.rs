@@ -1513,6 +1513,25 @@ where
 mod tests {
     use super::*;
 
+    /// M2 / #1005: dropping a runtime takes the stack getter so Boa GC can
+    /// free the realm. Without this, getter → realm → natives → Diagnostics
+    /// → getter keeps every navigated document's realm (~10 MB each).
+    #[cfg(feature = "boa")]
+    #[test]
+    fn dropping_a_runtime_takes_the_stack_getter() {
+        let runtime = JsRuntime::new().unwrap();
+        let diag = runtime.diag.clone();
+        assert!(
+            diag.stack_getter.borrow().is_some(),
+            "a live runtime holds Error.prototype.stack's getter"
+        );
+        drop(runtime);
+        assert!(
+            diag.stack_getter.borrow().is_none(),
+            "Drop must take the getter so the realm is not rooted forever"
+        );
+    }
+
     #[test]
     fn test_basic_evaluation() {
         let mut runtime = JsRuntime::new().unwrap();
