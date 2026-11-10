@@ -328,6 +328,40 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// Runs `work` on the network runtime (LAT9: an image's fetch and decode),
+/// so it makes progress while the page thread is busy; the page side only
+/// takes the outcome. Aborted when the returned future is dropped; `None`
+/// from it when the task ended without an outcome (it panicked). Without
+/// the runtime, `work` comes back for the page to poll itself.
+pub(crate) fn spawn_on_net<T, F>(work: F) -> Result<LiveFuture<Option<T>>, F>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let Some(net) = net_runtime() else {
+        return Err(work);
+    };
+    let (deliver, outcome) = tokio::sync::oneshot::channel();
+    // The work logs under the caller's tracing subscriber, as it did when
+    // the page thread polled it: a subscriber scoped to that thread (a
+    // test's log capture, `resource_url_log_tests`) would otherwise never
+    // see an image's lines.
+    use tracing::instrument::WithSubscriber;
+    let task = AbortOnDrop(net.spawn(
+        DiagContext::new(async move {
+            let value = work.await;
+            if deliver.send(value).is_ok() {
+                poke_live_turn();
+            }
+        })
+        .with_current_subscriber(),
+    ));
+    Ok(Box::pin(async move {
+        let _task = task;
+        outcome.await.ok()
+    }))
+}
+
 /// Runs `inner` with the page's diagnostic nav id (and, in tests, the
 /// `HIWAVE_CONSOLE_LOG` switch and sink) set around every poll, restoring
 /// the thread's own after, also when the poll panics: the one `rustkit-net`
@@ -420,6 +454,10 @@ pub(crate) const MAX_LIVE_NET_TASKS: usize = 240;
 /// inserted-script queue says it.
 const TOO_MANY_REQUESTS: &str = "too many script requests";
 
+/// Why a leaving page's request was not sent (LAT17): nothing would poll it
+/// on the page-polled path.
+const NOT_SENT_PAGE_LEFT: &str = "not sent: the page left";
+
 /// Start `request` for the live loop; it fails as a network error at
 /// `deadline`. On the network runtime the request record is made here, on
 /// the page thread at request start (its document, the URL scrub), and the
@@ -493,6 +531,60 @@ pub(crate) fn start_live(
             }
         }
     })
+}
+
+/// Send the requests a page that is leaving made before it left (LAT17).
+/// As in Chromium, a `fetch` the page started before it asked to navigate
+/// reaches the network even though its answer goes nowhere: the old
+/// document's promises never settle, because the document is gone. Each
+/// request still passes the policy (shield, budgets, slots) and is
+/// recorded; it fails at `deadline`. Only on the network runtime: on the
+/// page-polled path (`HIWAVE_NET_RUNTIME=0`) nothing would poll it, so
+/// nothing is sent; that request, and one past [`MAX_LIVE_NET_TASKS`], is
+/// recorded as failed. Returns how many went out.
+pub(crate) fn send_for_leaving_page(
+    policy: &Arc<FetchPolicy>,
+    loader: &Arc<ResourceLoader>,
+    requests: Vec<NetRequest>,
+    deadline: tokio::time::Instant,
+    inspector: &Arc<Inspector>,
+) -> usize {
+    let net = net_runtime();
+    let mut sent = 0;
+    for (at, request) in requests.iter().enumerate() {
+        let Ok(mut started) = begin(request, inspector, deadline) else {
+            continue;
+        };
+        // Not sent, and still recorded: one terminal record each.
+        let unsent = match net {
+            None => Some(NOT_SENT_PAGE_LEFT),
+            Some(_) if at >= MAX_LIVE_NET_TASKS => Some(TOO_MANY_REQUESTS),
+            Some(_) => None,
+        };
+        let (Some(net), None) = (net, unsent) else {
+            log_request(&started.method, &started.url, "-", "error");
+            if let Some(guard) = started.guard.take() {
+                guard.fail(FailureStage::Policy, unsent.unwrap_or(NOT_SENT_PAGE_LEFT));
+            }
+            continue;
+        };
+        let wait = started.guard.as_ref().and_then(|g| g.slot()).cloned();
+        match policy.reserve(&started.script_request, wait.as_ref()) {
+            Ok(reservation) => started.reservation = Some(reservation),
+            Err(denial) => {
+                let Started { id, guard, method, url, .. } = started;
+                let _ = denied(id, &method, &url, guard, &denial);
+                continue;
+            }
+        }
+        let (policy, loader) = (policy.clone(), loader.clone());
+        // Detached: the task outlives the document, as the request does.
+        drop(net.spawn(DiagContext::new(async move {
+            let _ = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
+        })));
+        sent += 1;
+    }
+    sent
 }
 
 /// Let what is out make progress for at most `slice`, and take the results

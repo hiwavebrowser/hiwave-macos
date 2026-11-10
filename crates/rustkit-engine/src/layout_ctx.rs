@@ -311,10 +311,16 @@ impl LayoutCtx {
             for control in &controls {
                 anims.control(control);
             }
+            // A record's element was captured by the build that made the
+            // record. A script-layer entry's element is captured by the
+            // next build that visits it: one that no build has visited
+            // (detached, or under `display: none`) paints nothing, and
+            // the frame has nothing of it to place (LAT14: until
+            // 2026-11-08 such an entry laid out every frame of the page).
             if let Some(node) = anims
                 .record_nodes()
                 .into_iter()
-                .chain(script.keys().copied())
+                .chain(script.keys().copied().filter(|node| anims.visited(*node)))
                 .find(|node| !anims.captured.contains_key(node))
             {
                 return Err(format!("element {node} animates with no captured style"));
@@ -565,6 +571,103 @@ pub(crate) struct ViewLayout {
     /// ran them. Read by tests to pin that a relayout takes one pass.
     pub(crate) layout_passes: Cell<u32>,
     pub(crate) layout_builds: Cell<u32>,
+    /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
+    /// image. When script swaps its `src`, the box keeps painting this one
+    /// while the new image is in flight, so a card does not go blank
+    /// between the two. Once the new one has settled as failed
+    /// ([`Self::failed_images`]) the old image goes, as in Chrome. Per view
+    /// and cleared with the document, like the other NodeId tables.
+    pub(crate) shown_images: RefCell<HashMap<usize, ImgSource>>,
+    /// LAT9-r1: the image URLs of this document whose load has settled as
+    /// failed, and which `<img>` elements have heard `error` for theirs.
+    pub(crate) failed_images: RefCell<FailedImages>,
+    /// E54: which `<img>` elements have heard `load`, and for which image.
+    pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+/// The current document's loaded images, as its script has been told of
+/// them ([`ViewLayout::loaded_images`]). An `<img>` whose image is in
+/// hears `load` once for that image; script reads `complete`,
+/// `naturalWidth`/`naturalHeight` and `currentSrc` from what the event
+/// brought, so an image reads as in flight until its `load`.
+#[derive(Default)]
+pub(crate) struct LoadedImages {
+    /// An image arrived, an `<img>` was found showing a loaded image it has
+    /// not heard of, or script wrote a `src`: the next live turn (or the
+    /// load, before the window's `load`) has events to send.
+    pub(crate) due: bool,
+    /// The URL each `<img>` (raw NodeId) has heard `load` for, as its
+    /// [`Self::key`]. An element whose `src` moves on, or is written again,
+    /// is dropped, so it hears the next one.
+    pub(crate) heard: HashMap<usize, u64>,
+    /// The `<img>` elements (raw NodeId) script gave a `src` that are in
+    /// no document tree (`new Image()`, a created element not inserted): a
+    /// preload or a pixel. Each is fetched and hears `load` or `error`
+    /// like one in the document; it leaves the list once it has heard, and
+    /// comes back if its `src` is written again.
+    pub(crate) detached: Vec<usize>,
+    /// The URLs the engine gave up on (an image's budget ran out, or it got
+    /// no slot within its pass's cap) and which `<img>` elements were told
+    /// so, by [`Self::key`]. Not a failure: no event fires, and the element
+    /// reads as loading, but a `decode()` waiting on it resolves (E54 R1).
+    /// A pass that asks for such a URL again takes it out.
+    pub(crate) gave_up: std::collections::HashSet<String>,
+    pub(crate) gave_up_heard: HashMap<usize, u64>,
+}
+
+impl LoadedImages {
+    /// What [`Self::heard`] keeps of a URL: a hash. A `data:` URL can be
+    /// megabytes, and a page can show hundreds of them, each looked at on
+    /// every planning pass (R1 nit 4), so a long URL is hashed by its length
+    /// and its first and last 256 bytes, not all of it.
+    pub(crate) fn key(url: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let bytes = url.as_bytes();
+        if bytes.len() <= 1024 {
+            bytes.hash(&mut hasher);
+        } else {
+            bytes.len().hash(&mut hasher);
+            bytes[..256].hash(&mut hasher);
+            bytes[bytes.len() - 256..].hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+/// The current document's failed image loads ([`ViewLayout::failed_images`]).
+///
+/// A URL is in `urls` only once its load has failed: an error status, a
+/// failed connection, bytes that do not decode (`FetchedImages::failed`).
+/// A request that is still out is not in here, however long it has been
+/// out, nor is one the load stopped waiting for (that one goes on as live
+/// work). Nor is one the engine gave up on, its own budget spent or no slot
+/// within the pass's cap (`FetchedImages::gave_up`): that image was slow,
+/// not broken, Chrome would still load it, and its element keeps what it
+/// paints and hears nothing. A pass that asks for a failed URL again takes
+/// it out when it starts the request.
+///
+/// `error` goes to the `<img>` elements in the document and to those
+/// script gave a `src` outside it ([`LoadedImages::detached`]).
+#[derive(Default)]
+pub(crate) struct FailedImages {
+    /// Absolute URLs.
+    pub(crate) urls: std::collections::HashSet<String>,
+    /// A failure arrived, or the document's images were looked over again,
+    /// since `error` was last sent: the next live turn has events to send.
+    pub(crate) due: bool,
+    /// The failed URL each `<img>` (raw NodeId) has heard `error` for. An
+    /// element whose `src` moves on is dropped, so it hears the next one.
+    pub(crate) heard: HashMap<usize, String>,
+}
+
+/// An `<img>`'s `src` and the image it painted last ([`ViewLayout::shown_images`]).
+#[derive(Default)]
+pub(crate) struct ImgSource {
+    /// The absolute URL its `src` (or `srcset` pick) names now.
+    pub(crate) wanted: String,
+    /// The last loaded image it painted.
+    pub(crate) shown: Option<String>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box

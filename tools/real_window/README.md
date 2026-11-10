@@ -95,7 +95,7 @@ of a run (about a minute for all checks).
 | `h6_extent` | H6 scroll | `h6_extent.html`: three 1500 px bands overflowing a `height: 100%` html, body and wrapper; script scrolls to the end | no |
 | `h8` | H8 error page | `h8_error.html`, which the server answers with 403: its script and its image | no |
 | `h16_click_nav` | H14, H16 navigation from a loaded page | `h16_a.html` (red) to `h16_b.html` (green): the user's click on a link, and four routes the page starts itself (`link.click()`, `location.href = url`, a submit button's `click()`, `form.submit()`) | the link click only |
-| `h19_spin` | H19 a script that does not end (ebay hang, 2026-10-08) | `h19_spin.html`: a script inside nested `forEach` callbacks that would run for hours; the load must finish at the app's 60 s script budget (the check takes a minute) | no |
+| `h19_spin` | H19 a script that does not end (ebay hang, 2026-10-08) | `h19_spin.html`: a script inside nested `forEach` callbacks that would run for hours; the engine must stop it at the app's 15 s script budget and log `Script stopped at the script budget source=inline#1`; the check reads that line, not the first `Navigation finished` (the RustKit chrome's own load writes one too) | no |
 | `i0a_script` | I0(a) the window stays usable: a script that does not end | `i0a_spin.html`: ticks after the load; when the driver says so, a timer callback starts a loop that would run for hours | controls only |
 | `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
 | `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
@@ -129,10 +129,26 @@ the page made in the turn its script was stopped in is still answered to it. Two
   key, a scroll or a resize waits too. A hold can be up to 100 ms longer than
   the figure. With the flag on the loop wakes ten times a second, so the other
   checks leave it off.
-- **The controls** (input, unlocked screen): Cmd+T, a resize and, in
-  `i0a_close`, Cmd+W, each answered within 200 ms. **None of these has run
-  once.** A quiet stall log is not a pass for them: a loop that turns can
-  still draw nothing.
+- **The controls** (input, unlocked screen): a resize, Cmd+T and, in
+  `i0a_close`, Cmd+W, each answered within 200 ms. The resize comes first,
+  because Cmd+T loads the start page into the one content view.
+  `i0a_script` and `i0a_nav` leave out Cmd+T: the check goes on to ask the
+  spinning page to tick, answer its request and stay green (i0a_script) or
+  the five pages to load and leave (i0a_nav). A resize is answered when the
+  window server shows the new size, as `hwdrive resize` times it itself
+  (`ack_ms` in its JSON line; it polls every 2 ms for up to 2 s, `null` if
+  the size never arrives); the subprocess's wall time is reported beside it.
+  hwdrive also prints `req_epoch`, the wall-clock time of its request, and
+  the driver times the page view's first `relayout cause=resize` in the app
+  log from it (the page view is the one the fixture URL was loaded into).
+  In `i0a_layout` that frame is asserted against the same 200 ms; in the
+  others the page's thread is knowingly held (a runaway script, a load in
+  progress: LAT15/LAT17), and it is reported for information only. The
+  page's stop in `i0a_script` is the content thread's (`Script stopped at the
+  script budget source=timers`); the window thread is not held while it
+  spins. The resize checks first ran on 2026-11-09 (T36, on develop
+  0a13dfb4). A quiet stall log is not a pass for any of these: a loop that
+  turns can still draw nothing.
 
 Timers a page sets during its load are run by the load itself, so
 `i0a_spin.html` waits for the driver's word (a beacon answered with `spin`)

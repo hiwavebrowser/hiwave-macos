@@ -330,7 +330,7 @@ pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
 mod wgate;
-pub use wgate::InputMark;
+pub use wgate::{InputClass, InputMark, VisitTag};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -405,6 +405,10 @@ use nav_cancel::{load_phase, LoadInProgress, NavWatch};
 #[cfg(all(test, feature = "headless"))]
 mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
+mod load_turns_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_stream_tests;
+#[cfg(all(test, feature = "headless"))]
 mod error_page_script_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resource_url_log_tests;
@@ -429,6 +433,14 @@ mod float_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ua_em_margin_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ua_heading_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
+mod ua_control_margin_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod emoji_presentation_fallback_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod inline_content_area_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
@@ -446,6 +458,8 @@ mod redirect_url_tests;
 mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
+mod style_media_disabled_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sheet_reuse_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -465,6 +479,8 @@ mod html_element_ancestor_tests;
 #[cfg(test)]
 mod is_complex_argument_tests;
 #[cfg(test)]
+mod ancestor_attribute_query_tests;
+#[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
@@ -473,6 +489,8 @@ mod computed_read;
 mod computed_read_tests;
 #[cfg(test)]
 mod style_attr_declaration_tests;
+#[cfg(test)]
+mod style_string_brace_tests;
 #[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
@@ -499,6 +517,8 @@ mod css_display_apply_tests;
 mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
+#[cfg(test)]
+mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
 #[cfg(test)]
@@ -534,6 +554,10 @@ mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
+mod image_budget_tests;
+#[cfg(all(test, feature = "headless"))]
+mod image_load_event_tests;
+#[cfg(all(test, feature = "headless"))]
 mod scroll_paints_first_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_after_yielded_load_tests;
@@ -548,6 +572,10 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
+mod animation_layer_reset_tests;
+#[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod chrome_bridge_tests;
@@ -558,6 +586,8 @@ mod animations;
 mod ancestor_attribute_tests;
 #[cfg(test)]
 mod attribute_flag_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_value_escape_tests;
 #[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
@@ -583,7 +613,13 @@ mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod navigation_release_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
+#[cfg(all(test, feature = "headless"))]
+mod microtask_cap_tests;
+#[cfg(all(test, feature = "headless"))]
+mod record_elapsed_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -596,6 +632,12 @@ mod form_empty_submit_tests;
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod text_coverage_tests;
+#[cfg(all(test, feature = "headless"))]
+mod vector_clip_tests;
+#[cfg(all(test, feature = "headless"))]
+mod form_control_decoration_tests;
 #[cfg(all(test, feature = "headless"))]
 mod color_space_syntax_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -645,6 +687,8 @@ mod grid_item_min_max_tests;
 mod unitless_zero_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_medium_tests;
+#[cfg(all(test, feature = "headless"))]
+mod border_shorthand_no_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1026,7 +1070,18 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
-    deadline: tokio::time::Instant,
+    /// The URLs only an `<img>` outside the document asks for (E54).
+    offscreen: std::collections::HashSet<Url>,
+    /// Each image's own budget, counted from when its request starts
+    /// (`subresource_budget_ms`; LAT9).
+    budget: std::time::Duration,
+    /// How long a load waits for the pass: the budget from when the pass
+    /// was planned, as before LAT9. What is still out then goes on as live
+    /// work and is put in on the live turn it arrives.
+    wait_until: tokio::time::Instant,
+    /// An image not started by then fails without a request: the cap on
+    /// one pass ([`IMAGE_PASS_START_BUDGETS`] budgets from planning).
+    start_by: tokio::time::Instant,
     referrer: SubresourceReferrer,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
@@ -1070,6 +1125,75 @@ pub(crate) struct SheetLink {
 struct FetchedImages {
     loaded: usize,
     svgs: Vec<(String, rustkit_svg::SvgDocument)>,
+    /// The URLs whose load failed (LAT9-r1): an error status, a failed
+    /// connection, bytes that do not decode. What Chrome would show as a
+    /// broken image. See [`layout_ctx::FailedImages`].
+    failed: Vec<String>,
+    /// The URLs the engine stopped loading on its own account: the image's
+    /// budget ran out, or it got no slot within the pass's cap. Such an
+    /// image was slow or queued, not broken; Chrome would still load it.
+    /// It is not a failure to the page: nothing of it is kept, the element
+    /// goes on painting what it painted and reads as still loading.
+    gave_up: Vec<String>,
+    /// Loaded images that no box shows (E54): the image of an `<img>` that
+    /// is in no document tree. Its element hears `load`; the page is not
+    /// laid out again for it.
+    offscreen: usize,
+}
+
+/// An event the engine owes an `<img>` (raw NodeId) about its image (E54).
+enum ImageEvent {
+    /// The image is in: its own size, and the URL it came from (empty for
+    /// a `data:` URL, which is the element's own `src`).
+    Load { node: usize, width: u32, height: u32, url: String },
+    /// Its load failed.
+    Error { node: usize },
+    /// The engine gave up on it: no event, a pending `decode()` resolves.
+    GaveUp { node: usize },
+}
+
+impl FetchedImages {
+    fn loaded(count: usize, svgs: Vec<(String, rustkit_svg::SvgDocument)>) -> Self {
+        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new(), offscreen: 0 }
+    }
+
+    /// The image's load failed: the page is told ([`FetchedImages::failed`]).
+    fn failed(url: &Url) -> Self {
+        Self { failed: vec![url.to_string()], ..Self::loaded(0, Vec::new()) }
+    }
+
+    /// The engine gave up on the image; the page is not told
+    /// ([`FetchedImages::gave_up`]).
+    fn gave_up(url: &Url) -> Self {
+        Self { gave_up: vec![url.to_string()], ..Self::loaded(0, Vec::new()) }
+    }
+}
+
+/// Images one pass fetches at once. SVG and raster images share them, so
+/// a slow SVG holds one slot, not the pass (LAT9).
+const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+/// How many budgets after a pass is planned its last image may start: with
+/// 8 slots and an 8 s budget, a pass ends within 40 s however many images
+/// the page names, and an image still queued at 32 s fails unrequested.
+const IMAGE_PASS_START_BUDGETS: u32 = 4;
+
+/// One image of a pass ([`Engine::start_planned_images`]): what it needs,
+/// owned, so it can run on the network runtime.
+struct ImageJob {
+    url: Url,
+    /// Named `.svg`: the SVG lane. Anything else is raster, and an SVG
+    /// served under it is handed back by its type.
+    svg: bool,
+    slots: Arc<tokio::sync::Semaphore>,
+    start_by: tokio::time::Instant,
+    budget: std::time::Duration,
+    referrer: Arc<SubresourceReferrer>,
+    loader: Arc<ResourceLoader>,
+    image_manager: Arc<ImageManager>,
+    nav: rustkit_image::DecodeNav,
+    inspector: Arc<Inspector>,
+    initiator: &'static str,
 }
 
 /// What a view's last presented frame was drawn from: the frame is drawn
@@ -1088,6 +1212,11 @@ struct PresentedFrame {
 /// not, so that an input to the frame this bookkeeping does not know about
 /// costs a second of staleness and not a stuck window.
 const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The most inputs a view holds for its next commit (LAT1c); more are
+/// counted `no_frame`. A page that commits nothing through 256 inputs is
+/// already the story.
+const MAX_PENDING_INPUTS: usize = 256;
 
 struct ViewState {
     /// What the last wheel moved, while a run of wheels holds to it.
@@ -1137,10 +1266,16 @@ struct ViewState {
     /// The element the developer tools outline on this page
     /// (`Engine::devtools_highlight`), drawn over the display list.
     devtools_highlight: Option<usize>,
-    /// The earliest input the view took since its last commit
-    /// (`Engine::note_input`); rides the next commit for the W-gate's
-    /// input-to-present log, or is dropped when the input changed no frame.
-    input_pending: Option<InputMark>,
+    /// The inputs the view took since its last commit
+    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
+    /// the next commit for the input-to-present log (LAT1c), or are
+    /// counted `no_frame` when their turn changed no frame.
+    input_pending: Vec<InputMark>,
+    /// Inputs since the last commit that presented no frame of their own.
+    inputs_unpresented: u32,
+    /// The host of the view's current visit, as `wgate::begin_visit` was
+    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
+    visit_host: Arc<str>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The canvases of the page's bindings, held apart from them: the
@@ -1407,6 +1542,9 @@ impl ViewState {
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
+        self.lay.shown_images.borrow_mut().clear();
+        *self.lay.failed_images.borrow_mut() = layout_ctx::FailedImages::default();
+        *self.lay.loaded_images.borrow_mut() = layout_ctx::LoadedImages::default();
         self.lay.select_popup.borrow_mut().take();
         self.lay.select_popup_release.set(false);
         self.lay.select_popup_opening_press.set(false);
@@ -1416,6 +1554,15 @@ impl ViewState {
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
         self.lay.animations.borrow_mut().reset();
+        // LAT14: and the animated-style layer the page's Web Animations
+        // wrote, with the CSS animations published to script and script's
+        // controls of them: per raw NodeId as well, and shared with every
+        // document's bindings. Until 2026-11-08 it survived the swap: the
+        // next document's animation frames found a layer entry for a node
+        // the new page never captured and every one was laid out in full
+        // (`LayoutCtx::animation_frame`), and a new element that took the
+        // old node's id painted the old page's animated values.
+        *self.lay.animated.borrow_mut() = rustkit_bindings::AnimatedStyles::default();
         self.wheel_gesture = None;
         self.scrollbar_drag = None;
         self.scrollbar_hover = None;
@@ -1616,6 +1763,59 @@ const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 /// still run in the one turn, which is what a pump of a few timers observes.
 const LIVE_FRAME_MS: u64 = 16;
 
+/// What a load lends the engine to at its safe points (LAT15): the content
+/// thread's endpoint, which applies the window's commands that may run
+/// there. See [`Engine::safe_point`].
+pub(crate) type ServeFn<'s> = dyn FnMut(&mut Engine) -> Served + 's;
+
+/// What one safe point's serve did.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Served {
+    /// At least one command was applied.
+    pub ran: bool,
+    /// A command applied asked to leave the page: a followed link, a
+    /// submit, a script navigation. The window loads that page next.
+    pub leave: bool,
+}
+
+thread_local! {
+    /// Set while a load has lent the engine out at a safe point.
+    static SERVING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A document whose load ended early (Stop, a cancel after the commit)
+/// reads `complete`, as Chrome's does after a stop, rather than the
+/// `loading` it has read since the commit. No `readystatechange` fires: no
+/// page code runs for a stopped load. Not for a runtime that panicked
+/// (nothing more runs on it; its `readyState` stays as it was).
+fn settle_ready_state(bindings: Option<&DomBindings>) {
+    let Some(bindings) = bindings else { return };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bindings.evaluate("if (document.readyState !== 'complete') { document.readyState = 'complete'; }")
+    }));
+}
+
+/// Whether this thread is inside a load's safe point.
+fn serving() -> bool {
+    SERVING.with(|s| s.get())
+}
+
+/// Marks this thread as inside a safe point until dropped.
+struct ServingScope;
+
+impl ServingScope {
+    fn enter() -> Self {
+        SERVING.with(|s| s.set(true));
+        ServingScope
+    }
+}
+
+impl Drop for ServingScope {
+    fn drop(&mut self) {
+        SERVING.with(|s| s.set(false));
+    }
+}
+
 /// Longest one turn of the live loop spends on the script requests that are
 /// out (XHR, fetch). The loop is the UI thread: a request is started on the
 /// turn that finds it and delivered on the turn after its answer comes, and
@@ -1685,6 +1885,89 @@ pub const HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY: &str = "an inline HTML load runs i
 /// Inspector facts)`. A module's label is the URL it was finally served
 /// from (`inline#n` for an inline one).
 type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool, ScriptFetched);
+
+/// The page's `<script>`s as they arrive (LAT17). Each fetch fills its
+/// document-order slot when it lands, so the run can start a script as soon
+/// as it and the scripts before it are in, instead of after every fetch.
+///
+/// The driver owns the fetches. Whoever awaits on the load polls it: the
+/// subresource phase ([`ScriptFeed::alongside`]), and the script run while
+/// it waits for a slot or awaits anything else. Dropping the feed drops
+/// every fetch still out.
+struct ScriptFeed {
+    /// Per script, in document order: its label before any fetch, its
+    /// Inspector kind, and its pass (0 classic or not runnable, 1 `defer`
+    /// and module, 2 `async`).
+    entries: Vec<(String, &'static str, u8)>,
+    slots: Rc<std::cell::RefCell<Vec<Option<FetchedScript>>>>,
+    driver: Option<futures::future::LocalBoxFuture<'static, ()>>,
+    prefetch: module_prefetch::ModulePrefetch,
+}
+
+impl ScriptFeed {
+    /// Poll the fetches once. `true` once they are all in.
+    fn poll_driver(&mut self, cx: &mut std::task::Context<'_>) -> bool {
+        if let Some(driver) = self.driver.as_mut() {
+            if std::future::Future::poll(driver.as_mut(), cx).is_ready() {
+                self.driver = None;
+            }
+        }
+        self.driver.is_none()
+    }
+
+    /// Script `index`, if it has arrived. A script whose fetch was lost
+    /// (the driver ended without it) is reported as skipped.
+    fn take(&mut self, index: usize) -> Option<FetchedScript> {
+        // The borrow ends with this statement: none is held across a poll.
+        let arrived = self.slots.borrow_mut()[index].take();
+        if arrived.is_some() {
+            return arrived;
+        }
+        if self.driver.is_some() {
+            return None;
+        }
+        let (label, kind, _) = &self.entries[index];
+        Some((
+            label.clone(),
+            0,
+            Err(ScriptOutcome::Skipped("script fetch lost")),
+            false,
+            ScriptFetched { kind, fetch: None, arrived: None },
+        ))
+    }
+
+    fn arrived(&self, index: usize) -> bool {
+        self.slots.borrow()[index].is_some()
+    }
+
+    /// Wait until script `index` arrives (`true`) or `tick` ends (`false`),
+    /// driving every fetch meanwhile.
+    async fn wait_for(&mut self, index: usize, tick: impl std::future::Future<Output = ()>) -> bool {
+        let mut tick = std::pin::pin!(tick);
+        std::future::poll_fn(|cx| {
+            let done = self.poll_driver(cx);
+            if done || self.arrived(index) {
+                return std::task::Poll::Ready(true);
+            }
+            if std::future::Future::poll(tick.as_mut(), cx).is_ready() {
+                return std::task::Poll::Ready(false);
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+
+    /// Await `fut`, driving the fetches alongside it, so the network does
+    /// not stall while the load awaits something else.
+    async fn alongside<F: std::future::Future>(&mut self, fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        std::future::poll_fn(|cx| {
+            self.poll_driver(cx);
+            std::future::Future::poll(fut.as_mut(), cx)
+        })
+        .await
+    }
+}
 
 /// What the Inspector's `script` record says about how a page script was
 /// loaded (`inspector::ScriptEnd`).
@@ -1939,6 +2222,28 @@ fn begin_script_turn(bindings: &DomBindings, budget: std::time::Duration) {
 /// Closes what [`begin_script_turn`] opened.
 fn end_script_turn(bindings: &DomBindings) {
     SCRIPT_STAMP.with(|stamp| bindings.end_turn(stamp));
+}
+
+/// How many jobs one microtask drain may run before the executor refuses more (H19c).
+///
+/// The cap exists so a runaway promise recursion cannot hang the page. It is 100 000 always, and
+/// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
+/// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
+/// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
+/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
+/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+fn microtask_job_cap(config: &EngineConfig) -> u64 {
+    config.script_loop_iteration_limit.min(100_000)
+}
+
+/// The cap while a turn is armed: the loop limit when the engine arms turns at all
+/// (`interrupt_scripts_at_budget`), else no raise (0).
+fn armed_microtask_job_cap(config: &EngineConfig) -> u64 {
+    if config.interrupt_scripts_at_budget {
+        config.script_loop_iteration_limit
+    } else {
+        0
+    }
 }
 
 /// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
@@ -3019,7 +3324,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -3138,7 +3445,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -3274,7 +3583,9 @@ impl Engine {
             held_fixed: None,
             display_list: None,
             devtools_highlight: None,
-            input_pending: None,
+            input_pending: Vec::new(),
+            inputs_unpresented: 0,
+            visit_host: Arc::from("-"),
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
@@ -3515,7 +3826,7 @@ impl Engine {
                         };
                         inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5235,7 +5546,7 @@ impl Engine {
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
         view.script_log.extend(stopped);
         answer
     }
@@ -5393,6 +5704,20 @@ impl Engine {
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
             self.refresh_layout_for_script(id, &bindings);
+            // E54: the images that have settled hear `load` or `error`
+            // before the window's `load` (the live turns since the yield
+            // told most of them already). Nothing is waited for here.
+            self.note_image_writes_of(id, &bindings);
+            let (_, events) = self.image_events_due(id, false);
+            if !events.is_empty() {
+                let (caught, _) = with_script_js(&bindings, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::fire_image_events(&bindings, &events)))
+                });
+                stopped = caught.is_err();
+                self.refresh_layout_for_script(id, &bindings);
+            }
+        }
+        if !stopped {
             // The same lines the blocking load logs. A yielded tail used to
             // fire `load` without them, so a live run never showed
             // `source=event:load`.
@@ -5410,21 +5735,21 @@ impl Engine {
                 }))
             });
             if load_stopped {
-                log_script_stopped("event:load", 0, take_script_js_overrun());
+                log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "event:load".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "event:load".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5436,7 +5761,7 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -5452,21 +5777,21 @@ impl Engine {
                 }))
             });
             if timer_stopped {
-                log_script_stopped("timers", 0, take_script_js_overrun());
+                log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "timers".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "timers".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5478,7 +5803,7 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -5580,7 +5905,7 @@ impl Engine {
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
-                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                        view.live_images.extend(Self::start_planned_images(plan));
                     }
                 }
                 Ok(_) => {}
@@ -5635,6 +5960,7 @@ impl Engine {
     }
 
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        debug_assert!(!serving(), "a live turn ran at a load's safe point");
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -6004,14 +6330,18 @@ impl Engine {
             .views
             .get(&id)
             .is_some_and(|v| v.images_planned_for != v.frame_generation);
-        if out.relaid_out || unplanned {
+        // A `src` script wrote starts that image's load over (E54), also
+        // with no layout to show for it: the same value again, or an image
+        // that is in no document.
+        let rewritten = self.note_image_writes(id);
+        if out.relaid_out || unplanned || rewritten {
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
             }
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
-                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                        view.live_images.extend(Self::start_planned_images(plan));
                     }
                 }
                 Ok(_) => {}
@@ -6069,7 +6399,7 @@ impl Engine {
         };
         let mut arrived = 0;
         for images in fetched {
-            arrived += self.keep_fetched_images(images);
+            arrived += self.keep_fetched_images(id, images);
         }
         if arrived > 0 {
             info!(count = arrived, "Loaded images added by live page scripts");
@@ -6080,6 +6410,31 @@ impl Engine {
             // An arrival shows no image the page did not already ask for.
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
+            }
+        }
+        // Images that settled (E54, LAT9-r1): each `<img>` whose image is
+        // in hears `load`; for one that failed, the old image of a swapped
+        // `src` goes and the element hears `error`. What a listener wrote
+        // may name images of its own (the real `src`, a fallback).
+        let (image_layout, more_image_events) = self.settle_image_events(id);
+        if more_image_events {
+            // The rest are due at once, after the frame this turn made.
+            out.yielded_for_frame = true;
+            out.next_timer_ms = Some(0);
+        }
+        if image_layout {
+            out.relaid_out = true;
+            if let Some(view) = self.views.get_mut(&id) {
+                view.images_planned_for = view.frame_generation;
+            }
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.extend(Self::start_planned_images(plan));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -6904,6 +7259,12 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether a page's script navigation is followed (and, on the content
+    /// thread, ends the load that asked for it; LAT17).
+    pub(crate) fn follows_script_navigation(&self) -> bool {
+        self.config.follows_script_navigation
+    }
+
     /// Load a URL in a view.
     /// What the current document's scripts did on load: one record per
     /// `<script>` in execution order, then any exception that escaped a
@@ -6933,17 +7294,19 @@ impl Engine {
     }
 
     /// Collect the document's `<script>`s in document order and start
-    /// fetching the external ones. The returned future borrows nothing from
-    /// the engine, so `load_url` polls it alongside `load_subresources`:
+    /// fetching the external ones. The returned feed borrows nothing from
+    /// the engine, so `load_url` drives it alongside `load_subresources`:
     /// script bytes arrive while stylesheets, images and fonts do, instead
-    /// of after them. A fetch that is still waiting when the network cap
-    /// runs out fails; that cap is not the script budget.
+    /// of after them. Each script lands in its own slot as it arrives, and
+    /// the run takes it from there (LAT17). A fetch that is still waiting
+    /// when the network cap runs out fails; that cap is not the script
+    /// budget.
     fn fetch_page_scripts(
         &self,
         id: EngineViewId,
         base: &Url,
         policy: Option<Arc<FetchPolicy>>,
-    ) -> Option<futures::future::LocalBoxFuture<'static, (Vec<FetchedScript>, module_prefetch::ModulePrefetch)>> {
+    ) -> Option<ScriptFeed> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
         // Collect in document order.
@@ -7038,7 +7401,27 @@ impl Engine {
             }
             _ => None,
         };
-        let scripts = futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
+        // What the run needs before anything arrives: the label (for a
+        // cancel record), the kind, and the pass the script runs in.
+        let meta: Vec<(String, &'static str, u8)> = entries
+            .iter()
+            .map(|(label, _, entry, is_module, kind)| {
+                let pass = match entry {
+                    Ok((ScriptTiming::Classic, _)) => 0,
+                    Ok((ScriptTiming::Defer, _)) => 1,
+                    Ok((ScriptTiming::Async, _)) => 2,
+                    // A module that cannot be fetched keeps its place so
+                    // its `error` fires in order; a classic one is logged
+                    // in its place.
+                    Err(_) if *is_module => 1,
+                    Err(_) => 0,
+                };
+                (label.clone(), *kind, pass)
+            })
+            .collect();
+        let slots: Rc<std::cell::RefCell<Vec<Option<FetchedScript>>>> =
+            Rc::new(std::cell::RefCell::new((0..meta.len()).map(|_| None).collect()));
+        let scripts = futures::stream::iter(entries.into_iter().enumerate().map(move |(position, (label, node_id, entry, is_module, kind))| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
@@ -7175,25 +7558,32 @@ impl Engine {
                             });
                         }
                     }
-                    (label, node_id, result, is_module, fetched)
+                    (position, (label, node_id, result, is_module, fetched))
                 }
             }))
-            .buffered(MAX_CONCURRENT_SCRIPT_LOADS);
-        Some(
-            async move {
-                // The stream (and with it every sender) is gone once
-                // collected, which is what lets the walker finish.
-                let collect = async move { scripts.collect::<Vec<_>>().await };
-                let walk = async move {
-                    if let Some(walker) = walker {
-                        walker.await;
-                    }
-                };
-                let (scripts, ()) = futures::join!(collect, walk);
-                (scripts, prefetch)
-            }
-            .boxed_local(),
-        )
+            // Started in document order, at most this many at once. A
+            // fetch that lands frees its place at once: a slow early script
+            // does not hold back the later fetches.
+            .buffer_unordered(MAX_CONCURRENT_SCRIPT_LOADS);
+        let filled = slots.clone();
+        let driver = async move {
+            // The stream (and with it every sender) is gone once drained,
+            // which is what lets the walker finish.
+            let fill = async move {
+                let mut scripts = std::pin::pin!(scripts);
+                while let Some((position, fetched)) = scripts.next().await {
+                    filled.borrow_mut()[position] = Some(fetched);
+                }
+            };
+            let walk = async move {
+                if let Some(walker) = walker {
+                    walker.await;
+                }
+            };
+            futures::join!(fill, walk);
+        }
+        .boxed_local();
+        Some(ScriptFeed { entries: meta, slots, driver: Some(driver), prefetch })
     }
 
     /// Fetch and run external scripts the page inserted.
@@ -7324,16 +7714,18 @@ impl Engine {
     /// waits are not part of that budget.
     ///
     /// The document is fully parsed before any script runs, so a script
-    /// sees the whole tree rather than the part above it.
+    /// sees the whole tree rather than the part above it. A script does not
+    /// wait for the fetches of the scripts after it (LAT17): each runs once
+    /// it and every script before it in its pass are in.
     async fn run_page_scripts(
         &mut self,
         id: EngineViewId,
-        fetched: Vec<FetchedScript>,
-        prefetch: module_prefetch::ModulePrefetch,
+        mut feed: ScriptFeed,
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
         yield_inserted: bool,
+        serve: Option<&mut ServeFn<'_>>,
     ) {
         // The page's scripts run on the view's bindings and log, taken out of
         // the view for the run so that the engine can lay the page out again
@@ -7355,16 +7747,20 @@ impl Engine {
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+        // Out of the view, except while a safe point lends the engine out
+        // between two scripts (LAT15): then the view holds them again, so
+        // the window's input reaches the page's listeners.
+        let mut slot = Some(bindings);
         self.run_page_scripts_with(
             id,
-            fetched,
-            &prefetch,
+            &mut feed,
             budget,
             policy,
-            &bindings,
+            &mut slot,
             &mut log,
             watch,
             yield_inserted,
+            serve,
         )
         .await;
         let parked = script_net::take_parked_deliveries();
@@ -7377,22 +7773,105 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
             view.script_log = log;
-            view.bindings = Some(bindings);
+            if let Some(bindings) = slot {
+                view.bindings = Some(bindings);
+            }
         }
+    }
+
+    /// Safe point (c) and its kin while a script's fetch is awaited
+    /// (LAT15, LAT17): the bindings go back to the view so the window's
+    /// input reaches the listeners the scripts so far added, and come back
+    /// after. Without `serve` (or a watch) the load only yields.
+    async fn lend_at_safe_point(
+        &mut self,
+        id: EngineViewId,
+        watch: Option<&NavWatch>,
+        serve: &mut Option<&mut ServeFn<'_>>,
+        slot: &mut Option<DomBindings>,
+        log: &mut Vec<ScriptRecord>,
+    ) {
+        match (serve.is_some(), watch) {
+            (true, Some(watch)) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.bindings = slot.take();
+                }
+                self.safe_point(id, watch, serve).await;
+                // What the served commands logged (a listener that threw,
+                // one the budget stopped) follows the scripts already run,
+                // in time order.
+                if let Some(view) = self.views.get_mut(&id) {
+                    log.append(&mut view.script_log);
+                }
+                *slot = self.views.get_mut(&id).and_then(|view| view.bindings.take());
+            }
+            _ => tokio::task::yield_now().await,
+        }
+    }
+
+    /// The load ended because its page asked to navigate: the requests the
+    /// page made before that still go out, as in Chromium, with nobody to
+    /// answer (LAT17). Not when the load goes on (the window did not take
+    /// the navigation): the page then gets its answers as usual.
+    ///
+    /// `queued` was taken from the page before the safe point. If the load
+    /// goes on after all, they start as live requests and the page gets its
+    /// answers from the live loop, after the load.
+    fn send_leaving_requests(
+        &mut self,
+        id: EngineViewId,
+        queued: Vec<rustkit_bindings::NetRequest>,
+        policy: &Option<Arc<FetchPolicy>>,
+        loader: &Arc<ResourceLoader>,
+        inspector: &Arc<Inspector>,
+        watch: Option<&NavWatch>,
+    ) {
+        let Some(policy) = policy.as_ref() else {
+            return;
+        };
+        if queued.is_empty() {
+            return;
+        }
+        if nav_cancel::cancelled(watch) {
+            let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+            let sent = script_net::send_for_leaving_page(policy, loader, queued, deadline, inspector);
+            debug!(sent, "The page left with requests out: sent, unanswered");
+            return;
+        }
+        let Some(view) = self.views.get_mut(&id) else { return };
+        let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
+        for request in queued {
+            let out = view.live_requests.len();
+            view.live_requests.push(script_net::start_live(
+                policy.clone(),
+                loader.clone(),
+                request,
+                deadline,
+                inspector.clone(),
+                out,
+            ));
+        }
+    }
+
+    /// What the page has queued for the network and not yet sent.
+    fn take_queued_requests(slot: &Option<DomBindings>) -> Vec<rustkit_bindings::NetRequest> {
+        let Some(bindings) = slot.as_ref() else { return Vec::new() };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())).unwrap_or_default()
     }
 
     async fn run_page_scripts_with(
         &mut self,
         id: EngineViewId,
-        fetched: Vec<FetchedScript>,
-        prefetch: &module_prefetch::ModulePrefetch,
+        feed: &mut ScriptFeed,
         _budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
-        bindings: &DomBindings,
+        slot: &mut Option<DomBindings>,
         log: &mut Vec<ScriptRecord>,
         watch: Option<&NavWatch>,
         yield_inserted: bool,
+        mut serve: Option<&mut ServeFn<'_>>,
     ) {
+        let Some(bindings) = slot.as_ref() else { return };
         let horizon_ms = self.config.timer_horizon_ms;
         let post_load_live = self.config.post_load_requests_live;
         let loop_limit = self.config.script_loop_iteration_limit;
@@ -7405,39 +7884,25 @@ impl Engine {
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
         // whose fetch failed keeps its place so its `error` event fires in
-        // order; a classic script failure is only logged.
-        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool, ScriptFetched);
-        let mut runnable: Vec<Job> = Vec::new();
-        for (label, node_id, result, is_module, facts) in fetched {
-            match result {
-                Ok((timing, text)) => {
-                    let key = match timing {
-                        ScriptTiming::Classic => 0,
-                        ScriptTiming::Defer => 1,
-                        ScriptTiming::Async => 2,
-                    };
-                    runnable.push((label, key, Ok(text), node_id, is_module, facts));
-                }
-                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true, facts)),
-                Err(outcome) => {
-                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
-                    facts.ended(&inspector, &record, None, None);
-                    inspector_glue::log_script(log, &inspector, record);
-                }
-            }
-        }
-        runnable.sort_by_key(|(_, key, _, _, _, _)| *key);
+        // order; a classic script failure is only logged, in its place.
+        // Each is taken from the feed when its turn comes, waiting for its
+        // fetch only then (LAT17).
+        let prefetch = feed.prefetch.clone();
+        let prefetch = &prefetch;
+        let mut order: Vec<usize> = (0..feed.entries.len()).collect();
+        order.sort_by_key(|&position| feed.entries[position].2);
 
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
         let poisoned = Cell::new(false);
         // `f` is given the source's label.
-        let run = |source: String, bytes: usize, f: &dyn Fn(&str) -> Result<(), String>| {
+        let run = |bindings: &DomBindings, source: String, bytes: usize, f: &dyn Fn(&str) -> Result<(), String>| {
             // Lifecycle steps (`DOMContentLoaded`, `load`, timers) still run
             // after the budget is spent. Only a script not yet started is
             // skipped; that check is at the script loop. With interruption
@@ -7514,30 +7979,106 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
-        let mut jobs = runnable.into_iter().enumerate();
         // A cancelled load runs none of the rest; each still gets its one
-        // Inspector record.
-        let cancel_rest = |jobs: &mut dyn Iterator<Item = (usize, Job)>| {
-            for (_, (label, _, _, _, _, facts)) in jobs {
-                facts.cancelled(&inspector, &label);
+        // Inspector record, arrived or not.
+        let cancel_rest = |feed: &mut ScriptFeed, rest: &mut dyn Iterator<Item = usize>| {
+            for position in rest {
+                let taken = feed.slots.borrow_mut()[position].take();
+                match taken {
+                    Some((label, _, _, _, facts)) => facts.cancelled(&inspector, &label),
+                    None => {
+                        let (label, kind, _) = &feed.entries[position];
+                        ScriptFetched { kind, fetch: None, arrived: None }.cancelled(&inspector, label);
+                    }
+                }
             }
         };
-        while let Some((index, (label, _, source, node_id, is_module, facts))) = jobs.next() {
+        let follows = self.config.follows_script_navigation;
+        // The leave boundary is offered once per load: a navigation the
+        // window does not take (nothing reported it) does not turn every
+        // later boundary into a safe point, and the requests later scripts
+        // make stay with the load's own pump.
+        let mut offered = false;
+        let mut rest = order.into_iter();
+        // Counts the scripts that reach their run, as before LAT17.
+        let mut index = 0usize;
+        while let Some(position) = rest.next() {
             // Between scripts, on the same cadence as a live turn: the load
             // stays pending and the poll loop publishes the frame.
-            if frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
-                tokio::task::yield_now().await;
+            //
+            // Safe point (c) (LAT15): the bindings go back to the view for
+            // it, so a click reaches the listeners the scripts so far added.
+            // At once when the last script asked to leave the page: the
+            // safe point reports it, and the window's navigation ends this
+            // load (LAT17).
+            let leaving = follows
+                && !offered
+                && serve.is_some()
+                && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested());
+            offered |= leaving;
+            if leaving || frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                // Taken before the safe point: once the window takes the
+                // navigation it raises the interrupt word, and the old
+                // page's queue can no longer be read.
+                let queued = if leaving { Self::take_queued_requests(slot) } else { Vec::new() };
+                feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
                 frame_at = std::time::Instant::now();
+                self.send_leaving_requests(id, queued, &policy, &loader, &inspector, watch);
             }
+            // Its fetch, if it is still out. The others keep arriving
+            // meanwhile, and the window is served every frame (LAT17).
+            let fetched = loop {
+                if nav_cancel::cancelled(watch) {
+                    debug!("Navigation cancelled: the rest of its scripts do not run");
+                    cancel_rest(feed, &mut std::iter::once(position).chain(&mut rest));
+                    return;
+                }
+                if let Some(fetched) = feed.take(position) {
+                    break fetched;
+                }
+                let waiting = wgate::bucket(wgate::HoldBucket::ScriptFetch);
+                // Served every frame while it waits; with nothing to serve
+                // (the same-thread load) it waits for the slot alone.
+                let serving = serve.is_some() && watch.is_some();
+                let tick = async move {
+                    match serving {
+                        true => tokio::time::sleep(std::time::Duration::from_millis(LIVE_FRAME_MS)).await,
+                        false => std::future::pending::<()>().await,
+                    }
+                };
+                let arrived = nav_cancel::unless_cancelled(watch, feed.wait_for(position, tick)).await;
+                drop(waiting);
+                if arrived == Some(false) {
+                    feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
+                    frame_at = std::time::Instant::now();
+                }
+            };
+            let (label, node_id, result, is_module, facts) = fetched;
+            let source = match result {
+                Ok((_, text)) => Ok(text),
+                Err(outcome) if is_module => Err(outcome),
+                Err(outcome) => {
+                    // A classic script that will not run: logged in its place.
+                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    facts.ended(&inspector, &record, None, None);
+                    inspector_glue::log_script(log, &inspector, record);
+                    continue;
+                }
+            };
+            let Some(bindings) = slot.as_ref() else {
+                debug!(source = %label, "The page's bindings went away at a safe point: the rest of its scripts do not run");
+                facts.cancelled(&inspector, &label);
+                cancel_rest(feed, &mut rest);
+                return;
+            };
             // Between two scripts: a cancelled load runs none of the rest.
             #[cfg(test)]
             load_phase(&format!("script:{index}"));
-            #[cfg(not(test))]
-            let _ = index;
+            index += 1;
             if nav_cancel::cancelled(watch) {
                 debug!(source = %label, "Navigation cancelled: the rest of its scripts do not run");
                 facts.cancelled(&inspector, &label);
-                cancel_rest(&mut jobs);
+                cancel_rest(feed, &mut rest);
                 return;
             }
             let text = match source {
@@ -7625,7 +8166,7 @@ impl Engine {
                             if let (Some(policy), Some(document)) = (&policy, &document_url) {
                                 let mut count = modules_fetched.get();
                                 let importing = wgate::bucket(wgate::HoldBucket::ScriptNet);
-                                let found = nav_cancel::unless_cancelled(
+                                let found = feed.alongside(nav_cancel::unless_cancelled(
                                     watch,
                                     script_net::pump_modules(
                                         bindings,
@@ -7637,14 +8178,14 @@ impl Engine {
                                         &inspector,
                                         Some(prefetch),
                                     ),
-                                )
+                                ))
                                 .await;
                                 drop(importing);
                                 let Some(found) = found else {
                                     // Cancelled while its imports were fetched:
                                     // the graph never runs.
                                     facts.cancelled(&inspector, &label);
-                                    cancel_rest(&mut jobs);
+                                    cancel_rest(feed, &mut rest);
                                     return;
                                 };
                                 modules_fetched.set(count);
@@ -7755,7 +8296,7 @@ impl Engine {
                 Some(name)
             };
             let began = std::time::Instant::now();
-            let record = run(label, text.len(), &|label| {
+            let record = run(bindings, label, text.len(), &|label| {
                 let name = external.as_deref().unwrap_or(label);
                 // `document.currentScript` is this element while it runs.
                 let _ = bindings.set_current_script(Some(node_id));
@@ -7771,9 +8312,22 @@ impl Engine {
             // keeps it for the next lifecycle step (`carried`).
             inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &source);
         }
+        // The last script (or a promise reaction it queued, drained with
+        // it) asked to leave: the same boundary as between two scripts, so
+        // the page fires no DOMContentLoaded or `load` (LAT17).
+        if follows
+            && !offered
+            && serve.is_some()
+            && slot.as_ref().is_some_and(|bindings| bindings.navigation_requested())
+        {
+            let queued = Self::take_queued_requests(slot);
+            feed.alongside(self.lend_at_safe_point(id, watch, &mut serve, slot, log)).await;
+            self.send_leaving_requests(id, queued, &policy, &loader, &inspector, watch);
+        }
         if poisoned.get() || nav_cancel::cancelled(watch) {
             return;
         }
+        let Some(bindings) = slot.as_ref() else { return };
 
         info!(
             elapsed_ms = scripts_started.elapsed().as_millis() as u64,
@@ -7887,24 +8441,61 @@ impl Engine {
             // with those the load handler and the timers add.
             let after_load = post_load_live && source != "event:DOMContentLoaded";
             let leaving = self.config.follows_script_navigation && bindings.navigation_requested();
-            if after_load && source == "event:load" && !leaving {
-                match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
-                    None => return,
-                    Some(Ok(0)) => {}
-                    Some(Ok(count)) => {
-                        info!(count, "Loaded images added by page scripts before load");
-                        if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
-                            warn!(?e, "relayout after images added before load failed");
+            // E54: before the window's `load`, every image that has settled
+            // hears its own `load` or `error`. The images of the markup
+            // arrived before the scripts ran; what the scripts added is
+            // waited for here (as the app loads a page), one subresource
+            // budget at most, and an image still out then goes on as live
+            // work and hears its event when it arrives. A handler may name
+            // another image (a placeholder's `onload` setting the real
+            // `src`): that one gets one more wait of the same length, and
+            // no further round, so the window's `load` is at most two
+            // budgets behind the scripts whatever the handlers do.
+            let mut round = 0;
+            while source == "event:load" {
+                round += 1;
+                self.note_image_writes_of(id, bindings);
+                if after_load && !leaving {
+                    match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
+                        None => return,
+                        Some(Ok(0)) => {}
+                        Some(Ok(count)) => {
+                            info!(count, "Loaded images added by page scripts before load");
+                            if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
+                                warn!(?e, "relayout after images added before load failed");
+                            }
                         }
+                        Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
                     }
-                    Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
+                }
+                let (_, events) = self.image_events_due(id, false);
+                if events.is_empty() {
+                    break;
+                }
+                info!(count = events.len(), "Images settled before load: firing load/error");
+                // Not sliced like the live turn's events: the whole batch
+                // runs here under the load's one script budget, which can
+                // stop it (R1 probe e).
+                let record = run(bindings, "event:image".to_string(), 0, &|_| {
+                    Self::fire_image_events(bindings, &events);
+                    Ok(())
+                });
+                if record.outcome != ScriptOutcome::Ran {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                if poisoned.get() || nav_cancel::cancelled(watch) {
+                    return;
+                }
+                self.refresh_layout_for_script(id, bindings);
+                if round == 2 {
+                    break;
                 }
             }
             info!(%source, "Running page lifecycle step");
             load_phase(source);
             inspector.lifecycle(if index == 0 { "DOMContentLoaded" } else { "load" });
             let step_started = std::time::Instant::now();
-            let record = run(source.to_string(), 0, &|_| step());
+            let record = run(bindings, source.to_string(), 0, &|_| step());
             info!(
                 %source,
                 elapsed_ms = step_started.elapsed().as_millis() as u64,
@@ -7929,7 +8520,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::Threw(message),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -7938,7 +8529,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -7949,11 +8540,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -8008,6 +8599,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // The script time of every slice, for the errors the timers reported (H19c).
+            let mut timers_ms: u64 = 0;
             loop {
                 if nav_cancel::cancelled(watch) {
                     return;
@@ -8020,6 +8613,7 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
+                timers_ms += step_started.elapsed().as_millis() as u64;
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
@@ -8050,7 +8644,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::Threw(strip(e)),
                             },
                         );
@@ -8064,7 +8658,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                             },
                         );
@@ -8113,7 +8707,7 @@ impl Engine {
                     return;
                 }
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, "timers");
+            inspector_glue::drain_reports(bindings, &inspector, log, "timers", timers_ms);
         }
         if yielded {
             return;
@@ -8141,10 +8735,48 @@ impl Engine {
         }
     }
 
+    /// A load's safe point (LAT15): lend the engine to `serve`, then yield
+    /// so the load's poll loop publishes what that changed.
+    ///
+    /// The load reaches one after its first layout, once a frame while its
+    /// images arrive, and between page scripts. No script of the load is
+    /// running and the view holds its document, bindings and layout, so the
+    /// window's input, resizes, evals and devtools reads run as they would
+    /// on a live turn, each as its own W-gate entry. A cancelled load serves
+    /// nothing. A command that asked to leave the page cancels this load:
+    /// the window loads the page asked for, and this one fires no `load`.
+    ///
+    /// The style memo spans two of the load's builds on the promise that
+    /// no script runs between them; anything served breaks that promise,
+    /// so the memo is put aside while serving and dropped if anything ran.
+    async fn safe_point(&mut self, id: EngineViewId, watch: &NavWatch, serve: &mut Option<&mut ServeFn<'_>>) {
+        let Some(serve) = serve.as_deref_mut() else {
+            return;
+        };
+        if self.nav_superseded(id, watch.nav_id) {
+            return;
+        }
+        let served = {
+            let _hold = wgate::suspend_hold();
+            let mut memo = StyleMemoAside::take();
+            let _serving = ServingScope::enter();
+            let served = serve(self);
+            if served.ran {
+                memo.0 = None;
+            }
+            served
+        };
+        if served.leave {
+            debug!(?id, nav_id = watch.nav_id, "A command at a safe point left the page: the load ends");
+            watch.canceller.cancel_nav(watch.nav_id);
+        }
+        tokio::task::yield_now().await;
+    }
+
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
-        wgate::begin_visit(id.raw(), url.host_str());
+        self.begin_view_visit(id, url.host_str());
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false, false, None)
+        self.load_url_with_disposition(id, url, false, false, None, None)
             .await
             .map(|_| ())
     }
@@ -8167,9 +8799,9 @@ impl Engine {
         id: EngineViewId,
         url: Url,
     ) -> Result<LoadYield, EngineError> {
-        wgate::begin_visit(id.raw(), url.host_str());
+        self.begin_view_visit(id, url.host_str());
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false, true, None)
+        self.load_url_with_disposition(id, url, false, true, None, None)
             .await
     }
 
@@ -8182,9 +8814,27 @@ impl Engine {
         url: Url,
         nav_id: u64,
     ) -> Result<LoadYield, EngineError> {
+        self.begin_view_visit(id, url.host_str());
+        let _hold = wgate::hold("load");
+        self.load_url_with_disposition(id, url, false, true, Some(nav_id), None)
+            .await
+    }
+
+    /// [`Engine::load_url_yielding`] (`nav_id` `None`) or
+    /// [`Engine::load_url_yielding_as`], lending the engine to `serve` at
+    /// the load's safe points (LAT15; see [`Engine::safe_point`]). The
+    /// content thread passes the half of its endpoint that applies the
+    /// window's commands.
+    pub(crate) async fn load_url_serving(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        nav_id: Option<u64>,
+        serve: Option<&mut ServeFn<'_>>,
+    ) -> Result<LoadYield, EngineError> {
         wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false, true, Some(nav_id))
+        self.load_url_with_disposition(id, url, false, true, nav_id, serve)
             .await
     }
 
@@ -8205,9 +8855,10 @@ impl Engine {
         replace: bool,
         yield_inserted: bool,
         preset_nav: Option<u64>,
+        serve: Option<&mut ServeFn<'_>>,
     ) -> Result<LoadYield, EngineError> {
         let result = self
-            .load_url_with_disposition_inner(id, url, replace, yield_inserted, preset_nav)
+            .load_url_with_disposition_inner(id, url, replace, yield_inserted, preset_nav, serve)
             .await;
         // The load's own layouts had their images looked for by the load,
         // or were cancelled with it: not the live loop's to fetch. A yielded
@@ -8225,7 +8876,9 @@ impl Engine {
         replace: bool,
         yield_inserted: bool,
         preset_nav: Option<u64>,
+        serve: Option<&mut ServeFn<'_>>,
     ) -> Result<LoadYield, EngineError> {
+        debug_assert!(!serving(), "a load started at another load's safe point");
         let _turn = rustkit_js::DiagTurn::enter("load");
         if let Some(nav_id) = preset_nav {
             let newest = self.nav_seq.load(Ordering::Acquire);
@@ -8288,7 +8941,7 @@ impl Engine {
             LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);
         // Boxed: the load's state is large, and the debug build's stack
         // is not.
-        let result = Box::pin(self.load_url_for_nav(id, url, &watch, yield_inserted)).await;
+        let result = Box::pin(self.load_url_for_nav(id, url, &watch, yield_inserted, serve)).await;
         if !self.nav_superseded(id, watch.nav_id)
             && self
                 .views
@@ -8321,6 +8974,7 @@ impl Engine {
         url: Url,
         watch: &NavWatch,
         yield_inserted: bool,
+        mut serve: Option<&mut ServeFn<'_>>,
     ) -> Result<(), EngineError> {
         let generation = watch.nav_id;
 
@@ -8562,7 +9216,7 @@ impl Engine {
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -8571,6 +9225,7 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -8595,6 +9250,10 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+            // The document is `loading` until its scripts have run and
+            // DOMContentLoaded fires. Script reads it before then only at a
+            // safe point (LAT15): a click's listener, the app's evals.
+            let _ = bindings.set_ready_state("loading");
             // `document.cookie` is the jar the document's own requests use.
             if let Some(jar) = self.loader.cookie_jar() {
                 let (read, read_url, write_url) = (jar.clone(), url.clone(), url.clone());
@@ -8689,38 +9348,36 @@ impl Engine {
             // a beacon the script sends. A fast answer must not be the
             // first thing the window can show.
             tokio::task::yield_now().await;
+            // Safe point (a): what the window sent meanwhile runs on the
+            // page now shown, before any of its scripts.
+            self.safe_point(id, watch, &mut serve).await;
         }
 
         // Load external resources (stylesheets, images, fonts), and fetch
         // the page's scripts at the same time. Scripts still run after the
-        // subresources; only their network time overlaps.
-        let script_fetch = if self.config.javascript_enabled {
+        // subresources. They do not wait for each other's fetches: each runs
+        // once it and the scripts before it are in (LAT17), so the feed is
+        // driven here and handed over part-filled.
+        let mut scripts = if self.config.javascript_enabled {
             self.fetch_page_scripts(id, &url, script_policy.clone())
         } else {
             None
         };
-        let subresources = async {
-            let result = self.load_subresources_for(id, Some(watch)).await;
-            (result, std::time::Instant::now())
-        };
-        let scripts = async move {
-            match script_fetch {
-                Some(fetch) => Some((fetch.await, std::time::Instant::now())),
-                None => None,
-            }
-        };
+        let subresources = self.load_subresources_serving(id, Some(watch), serve.as_deref_mut());
         // A cancel drops every fetch still out, the page's scripts too.
-        // The subresources' buckets take the time while they run; what is
-        // left is the page's scripts still arriving after them.
-        let script_fetching = wgate::bucket(wgate::HoldBucket::ScriptFetch);
-        let Some(((subresources, _subresources_done), scripts)) = watch
-            .unless_cancelled(Box::pin(async { futures::join!(subresources, scripts) }))
+        let feed = &mut scripts;
+        let Some(subresources) = watch
+            .unless_cancelled(Box::pin(async move {
+                match feed.as_mut() {
+                    Some(feed) => feed.alongside(subresources).await,
+                    None => subresources.await,
+                }
+            }))
             .await
         else {
             debug!(?id, %url, "Navigation cancelled during its subresources");
             return Ok(());
         };
-        drop(script_fetching);
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
@@ -8739,6 +9396,7 @@ impl Engine {
             }
             self.relayout_for(id, RelayoutCause::InitialLoad)?;
             tokio::task::yield_now().await;
+            self.safe_point(id, watch, &mut serve).await;
         }
 
         // Subresource loading awaited the network too: a stop during a
@@ -8756,16 +9414,16 @@ impl Engine {
         // The script budget is JavaScript time only. How long the fetches
         // took, including a fetch that outlasted the subresources, does
         // not spend it.
-        if let Some(((fetched, prefetch), _fetch_done)) = scripts {
+        if let Some(feed) = scripts {
             let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
             self.run_page_scripts(
                 id,
-                fetched,
-                prefetch,
+                feed,
                 budget,
                 script_policy,
                 Some(watch),
                 yield_inserted,
+                serve.as_deref_mut(),
             )
             .await;
             if self.nav_superseded(id, generation) {
@@ -8822,7 +9480,7 @@ impl Engine {
                 match self.plan_image_loads(id, true) {
                     Ok(Some(plan)) if !plan.is_empty() => {
                         if let Some(view) = self.views.get_mut(&id) {
-                            view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                            view.live_images.extend(Self::start_planned_images(plan));
                         }
                     }
                     Ok(_) => {}
@@ -8848,6 +9506,11 @@ impl Engine {
                     }
                 }
                 Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+            }
+            // Those images hear `load` or `error` now (E54); with
+            // `post_load_requests_live` the live loop tells them.
+            if !post_load_live && !leaving && !self.nav_superseded(id, generation) {
+                self.settle_image_events(id);
             }
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after script-added images");
@@ -8917,7 +9580,7 @@ impl Engine {
         html: &str,
         preset_nav: Option<u64>,
     ) -> Result<(), EngineError> {
-        wgate::begin_visit(id.raw(), None);
+        self.begin_view_visit(id, None);
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
@@ -9011,7 +9674,7 @@ impl Engine {
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9028,6 +9691,7 @@ impl Engine {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9154,7 +9818,8 @@ impl Engine {
         };
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
 
@@ -9293,7 +9958,7 @@ impl Engine {
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source);
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source, 0);
         }
 
         if let Some(view) = self.views.get_mut(&id) {
@@ -9385,7 +10050,15 @@ impl Engine {
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
-        let dirty = dirty.unwrap_or_else(|| restyle_invalidation::DirtySet::full("no_dom_record"));
+        // No script-write set: an animation frame that needed a layout says
+        // so (LAT14); anything else nobody computed a set for.
+        let dirty = dirty.unwrap_or_else(|| {
+            restyle_invalidation::DirtySet::full(if causes.counts.get("animation") > 0 {
+                "animation"
+            } else {
+                "no_dom_record"
+            })
+        });
         let mut would = format!("dirty_nodes={} would_path={}", dirty.nodes.len(), dirty.would_path());
         if let Some(reason) = dirty.full {
             would.push_str(&format!(" full_reason={reason}"));
@@ -9398,6 +10071,14 @@ impl Engine {
             }
             Some(false) => would.push_str(" restyle_miss=\"not tried\""),
             _ => {}
+        }
+        // LAT14: why an animation frame took the full path (the live log
+        // runs at info; the frame's own line is debug).
+        if causes.counts.get("animation") > 0 {
+            let why = LAST_ANIMATION_MISS.with(|why| std::mem::take(&mut *why.borrow_mut()));
+            if !why.is_empty() {
+                would.push_str(&format!(" anim_miss={why:?}"));
+            }
         }
         let cause = causes
             .first
@@ -9608,6 +10289,14 @@ impl Engine {
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
+        // The list shapes every line of text, and shaping resolves family
+        // names: THIS view's declared faces must be the ones that resolve.
+        // A relayout installed them when it started; the frames that build
+        // a list over the boxes already laid out (a paint-only animation
+        // frame, an element scroll) come here with whatever the last view
+        // to paint left installed, and shaped the page's text in the
+        // fallback font when that was another view (E52).
+        self.install_web_fonts(id);
         let selected = self.selection_paint(id, root_box);
         let caret = self.caret_paint(id, root_box);
         let text_caret = match caret {
@@ -10532,6 +11221,7 @@ impl Engine {
         }
         let miss = |why: &str| {
             debug!(?id, why, "Animation frame needs a layout");
+            LAST_ANIMATION_MISS.with(|last| *last.borrow_mut() = why.to_string());
             Ok(false)
         };
         let Some(view) = self.views.get(&id) else {
@@ -11418,6 +12108,18 @@ impl layout_ctx::LayoutCtx {
             Some((w, h)),
         ) = (&mut layout_box.box_type, hints)
         {
+            // The box may paint an `<img>`'s previous image while its new
+            // `src` loads (LAT9): once the new one is in, it paints that.
+            if let Some(node) = layout_box.node_id {
+                let wanted = self
+                    .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted.clone()))
+                    .flatten();
+                if let Some(wanted) = wanted {
+                    if let Some(paint) = self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted)) {
+                        *url = paint;
+                    }
+                }
+            }
             (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h);
         }
         1 + layout_box
@@ -11425,6 +12127,42 @@ impl layout_ctx::LayoutCtx {
             .iter_mut()
             .map(|child| self.refresh_image_sizes(child, images))
             .sum::<usize>()
+    }
+
+    /// The URL an `<img>` paints (LAT9): its `src` once that image is
+    /// loaded; until then, after a `src` swap, the image it last painted, as
+    /// Chrome keeps the current image up while the new request is pending.
+    /// Once the new image's load has settled as failed
+    /// ([`layout_ctx::FailedImages`]) the old one goes and the box paints
+    /// `src`, the broken image a failed first load gives (LAT9-r1, as
+    /// Chrome). An empty `src` takes nothing over. Records `src` as the
+    /// element's wanted URL, which a reused tree resolves again
+    /// ([`Self::refresh_image_sizes`]).
+    fn img_src_to_paint(&self, lay: &layout_ctx::ViewLayout, node: usize, src: &str) -> String {
+        let ready = |url: &str| {
+            Url::parse(url).is_ok_and(|u| {
+                u.scheme() == "data" || self.image_manager.is_cached(&u) || self.svg_cache.borrow().contains_key(u.as_str())
+            })
+        };
+        let mut images = lay.shown_images.borrow_mut();
+        let entry = images.entry(node).or_default();
+        if entry.wanted != src {
+            entry.wanted = src.to_string();
+        }
+        if ready(src) {
+            if entry.shown.as_deref() != Some(src) {
+                entry.shown = Some(src.to_string());
+            }
+            return src.to_string();
+        }
+        if lay.failed_images.borrow().urls.contains(src) {
+            entry.shown = None;
+            return src.to_string();
+        }
+        match &entry.shown {
+            Some(shown) if !src.is_empty() && shown != src && ready(shown) => shown.clone(),
+            _ => src.to_string(),
+        }
     }
 
     /// An `<img>`'s natural size, from what is loaded at layout time.
@@ -11565,14 +12303,20 @@ impl Engine {
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
-    /// and stops the walk at `body`, so the body element reports `html > body`.
+    /// and stops the walk at `body`, so the body element reports `html > body`
+    /// (`html > body.<class>` when body is classed: its own segment is built
+    /// before the walk reaches `html`).
     /// Neither affects descendant paths — a child of an id'd element still
     /// reports the full tag/class path — which is why the reported selector and
     /// the path used to build children are computed separately.
     fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
         match attributes.get("id") {
             Some(id) if !id.is_empty() => format!("#{}", id),
-            _ if selector_path == "body" => "html > body".to_string(),
+            // Body's own segment carries its class (`html > body.focus-mode`);
+            // only its descendants hang off a bare `body`.
+            _ if selector_path == "body" => {
+                format!("html > {}", Self::selector_segment("body", attributes, 1, 1, false))
+            }
             _ => selector_path.to_string(),
         }
     }
@@ -11927,6 +12671,9 @@ impl layout_ctx::LayoutCtx {
                     let src = self
                         .resolve_resource_url(&src)
                         .map(|u| u.to_string())
+                        .unwrap_or(src);
+                    let src = self
+                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src))
                         .unwrap_or(src);
 
                     let (natural_width, natural_height) =
@@ -13037,6 +13784,11 @@ impl layout_ctx::LayoutCtx {
                         s.overflow_wrap = parent.overflow_wrap;
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
+                        // How the glyphs are rasterized (dilated or not):
+                        // read off the run's own style at paint.
+                        s.font_smoothing = parent.font_smoothing;
+                        s.text_rendering_geometric_precision =
+                            parent.text_rendering_geometric_precision;
                         s.visibility = parent.visibility;
                         s.pointer_events = parent.pointer_events;
                         s.cursor = parent.cursor;
@@ -13463,6 +14215,9 @@ impl layout_ctx::LayoutCtx {
             pseudo_style.overflow_wrap = parent.overflow_wrap;
             pseudo_style.line_break = parent.line_break;
             pseudo_style.text_transform = parent.text_transform;
+            pseudo_style.font_smoothing = parent.font_smoothing;
+            pseudo_style.text_rendering_geometric_precision =
+                parent.text_rendering_geometric_precision;
             pseudo_style.visibility = parent.visibility;
             pseudo_style.pointer_events = parent.pointer_events;
             pseudo_style.cursor = parent.cursor;
@@ -13719,6 +14474,8 @@ impl layout_ctx::LayoutCtx {
             style.overflow_wrap = parent.overflow_wrap;
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
+            style.font_smoothing = parent.font_smoothing;
+            style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision;
             style.visibility = parent.visibility;
             style.pointer_events = parent.pointer_events;
             style.cursor = parent.cursor;
@@ -13753,47 +14510,51 @@ impl layout_ctx::LayoutCtx {
             // on a <p> kept 16px margins where Chromium has 14.4px: settings
             // and report shifted 1.6px below their header (chrome board
             // re-rank 2026-11-07, ua_em_margin_tests). The 40px inline
-            // margins/paddings are px in html.css and stay px. Heading
-            // FONT-SIZES are still px here (2em/1.5em/… of the parent in
-            // Chromium) — a separate change.
+            // margins/paddings are px in html.css and stay px. The heading
+            // FONT-SIZES are em of the PARENT's font-size too (CH2.B31): Em
+            // here is absolutized against the parent after the cascade, like
+            // an author em, so a heading under a 10px parent is 20/15/11.7/
+            // 10/8.3/6.7px as in Chromium (ua_heading_font_size_tests). They
+            // were px at 16px. Chromium 148 has no sectioning-h1 rule (an h1
+            // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(32.0); // 2em
+                style.font_size = rustkit_css::Length::Em(2.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.67);
                 style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(24.0); // 1.5em
+                style.font_size = rustkit_css::Length::Em(1.5);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.83);
                 style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(18.72); // 1.17em
+                style.font_size = rustkit_css::Length::Em(1.17);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.0);
                 style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(16.0); // 1em
+                style.font_size = rustkit_css::Length::Em(1.0);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
                 style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(13.28); // 0.83em
+                style.font_size = rustkit_css::Length::Em(0.83);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
                 style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Px(10.72); // 0.67em
+                style.font_size = rustkit_css::Length::Em(0.67);
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
                 style.margin_bottom = rustkit_css::Length::Em(2.33);
@@ -13900,6 +14661,22 @@ impl layout_ctx::LayoutCtx {
                 };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
+                }
+                // html.css: `input[type=checkbox] { margin: 3px 3px 3px 4px }`,
+                // `input[type=radio] { margin: 3px 3px 0px 5px }` (Chromium
+                // 148 computes exactly these; ua_control_margin_tests).
+                if tag_name == "input" {
+                    let margins = match attributes.get("type").map(|t| t.to_ascii_lowercase()) {
+                        Some(t) if t == "checkbox" => Some((3.0, 3.0, 3.0, 4.0)),
+                        Some(t) if t == "radio" => Some((3.0, 3.0, 0.0, 5.0)),
+                        _ => None,
+                    };
+                    if let Some((t, r, b, l)) = margins {
+                        style.margin_top = rustkit_css::Length::Px(t);
+                        style.margin_right = rustkit_css::Length::Px(r);
+                        style.margin_bottom = rustkit_css::Length::Px(b);
+                        style.margin_left = rustkit_css::Length::Px(l);
+                    }
                 }
             }
             "small" => {
@@ -14429,7 +15206,19 @@ impl layout_ctx::LayoutCtx {
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
-                hints: hints.clone(),
+                // The UA defaults above read an <input>'s `type` (checkbox
+                // and radio margins, the button-like background), so two
+                // inputs of different types never share a style.
+                hints: {
+                    let mut h = hints.clone();
+                    if lower_tag(tag_name) == "input" {
+                        h.push((
+                            "ua-input-type",
+                            attributes.get("type").map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
+                        ));
+                    }
+                    h
+                },
                 ua_hidden: style.display == rustkit_css::Display::None,
             }),
             _ => StyleShared::Untracked,
@@ -14556,6 +15345,14 @@ impl layout_ctx::LayoutCtx {
                         );
                     }
                     ch_pending.note(&decl.property, &resolved_value);
+                    // What the author's `!important` rules set of the border:
+                    // an important `revert-layer` in the style attribute
+                    // rolls back to these (`revert_border`).
+                    if important_pass {
+                        if let Some((sides, parts)) = border_property_parts(&decl.property) {
+                            AUTHOR_IMPORTANT_BORDER_MASK.with(|m| m.set(m.get() | border_longhand_mask(sides, parts)));
+                        }
+                    }
                     self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
                     if recording {
                         records.push(DeclarationRecord {
@@ -14750,6 +15547,32 @@ impl layout_ctx::LayoutCtx {
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
+        // The author stylesheets have applied: `revert-layer` in the
+        // attribute rolls a border back to this (`revert_border`): the
+        // normal rules' state before the normal pass, the important rules'
+        // before the `!important` pass.
+        if important_pass {
+            AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        } else {
+            AUTHOR_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
+        }
+        let was_inline = INLINE_STYLE_PASS.with(|c| c.replace(true));
+        let was_important = INLINE_IMPORTANT_PASS.with(|c| c.replace(important_pass));
+        self.apply_inline_declarations(style, parent_style, style_attr, css_vars, ch_pending, important_pass);
+        INLINE_STYLE_PASS.with(|c| c.set(was_inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(was_important));
+    }
+
+    /// [`Self::apply_inline_style`]'s declarations, one importance level.
+    fn apply_inline_declarations(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        style_attr: &str,
+        css_vars: &dyn VarSource,
+        ch_pending: &mut ChPending,
+        important_pass: bool,
+    ) {
         for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
@@ -14859,6 +15682,10 @@ impl Engine {
             "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
             "text-align" => style.text_align = parent.text_align,
             "text-transform" => style.text_transform = parent.text_transform,
+            "-webkit-font-smoothing" | "font-smooth" => style.font_smoothing = parent.font_smoothing,
+            "text-rendering" => {
+                style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision
+            }
             "white-space" => style.white_space = parent.white_space,
             "word-break" => style.word_break = parent.word_break,
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
@@ -14996,6 +15823,12 @@ impl layout_ctx::LayoutCtx {
                     return;
                 } else {
                     self.apply_initial_value(style, property);
+                    return;
+                }
+            }
+            "revert" | "revert-layer" => {
+                if let Some((sides, parts)) = border_property_parts(property) {
+                    revert_border(style, sides, parts, value == "revert-layer");
                     return;
                 }
             }
@@ -16088,6 +16921,26 @@ impl layout_ctx::LayoutCtx {
             // css-overflow-3 §5.1. Not inherited (a block owns its line
             // boxes). The two-value form and `<string>` fallback are
             // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "-webkit-font-smoothing" | "font-smooth" => {
+                let v = value.trim().to_ascii_lowercase();
+                style.font_smoothing = match v.as_str() {
+                    "antialiased" | "grayscale" => rustkit_css::FontSmoothing::Antialiased,
+                    "none" | "never" => rustkit_css::FontSmoothing::None,
+                    "subpixel-antialiased" | "always" => rustkit_css::FontSmoothing::SubpixelAntialiased,
+                    _ => rustkit_css::FontSmoothing::Auto,
+                };
+            }
+            "text-rendering" => {
+                style.text_rendering_geometric_precision =
+                    value.trim().eq_ignore_ascii_case("geometricprecision");
+            }
+            "appearance" | "-webkit-appearance" => {
+                style.appearance = if value.trim().eq_ignore_ascii_case("none") {
+                    rustkit_css::Appearance::None
+                } else {
+                    rustkit_css::Appearance::Auto
+                };
+            }
             "text-overflow" => {
                 style.text_overflow = if value
                     .split_whitespace()
@@ -16587,6 +17440,13 @@ impl layout_ctx::LayoutCtx {
             // Not inherited either: `initial` and `unset` undo a reset's
             // `* { box-sizing: inherit }`.
             "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,
+            "-webkit-font-smoothing" | "font-smooth" => {
+                style.font_smoothing = rustkit_css::FontSmoothing::Auto
+            }
+            "text-rendering" => style.text_rendering_geometric_precision = false,
+            "appearance" | "-webkit-appearance" => {
+                style.appearance = rustkit_css::Appearance::Auto
+            }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
@@ -16697,6 +17557,12 @@ impl Engine {
     /// This is deliberately NOT the `DownloadManager` cancel path in
     /// rustkit-net — that one cancels FILE DOWNLOADS and has nothing to do
     /// with page loads. Conflating them was the first wrong turn on this unit.
+    /// After a Stop (LAT15 R1): the document left on screen reads
+    /// `complete`, as Chrome's does, once its interrupt word is lowered.
+    pub(crate) fn settle_ready_state(&self, id: EngineViewId) {
+        settle_ready_state(self.views.get(&id).and_then(|view| view.bindings.as_ref()));
+    }
+
     pub fn stop(&mut self, id: EngineViewId) -> bool {
         match self.views.get_mut(&id) {
             Some(view) => {
@@ -16866,6 +17732,11 @@ impl Engine {
         if committed {
             view.control.stop_cancelled();
         }
+        // The document this load committed stays on screen. It read
+        // `loading` from the commit (LAT15); stopped, it reads `complete`.
+        if committed {
+            settle_ready_state(view.bindings.as_ref());
+        }
         // A cancel during a render-blocking sheet (or before the first
         // layout) leaves the committed document never laid out: lay it out
         // as it is, unstyled as Chrome shows a stopped one, so the frame and
@@ -16938,7 +17809,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false, None)
+                self.load_url_with_disposition(id, url, true, false, None, None)
                     .await?;
                 Ok(true)
             }
@@ -16954,7 +17825,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false, None)
+                self.load_url_with_disposition(id, url, true, false, None, None)
                     .await?;
                 Ok(true)
             }
@@ -16972,7 +17843,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false, None)
+                self.load_url_with_disposition(id, url, true, false, None, None)
                     .await?;
                 Ok(true)
             }
@@ -17023,8 +17894,9 @@ impl Engine {
 
 impl layout_ctx::LayoutCtx {
     /// The parsed sheet of each `<style>` element the document has, with
-    /// the element, in tree order. Parsing is a function of the text alone (no base URL,
-    /// no `media` attribute, nothing from the element), so a sheet whose
+    /// the element, in tree order, less those script disabled. Parsing is a
+    /// function of the text alone (no base URL; a `media` attribute is
+    /// folded into the text by `style_sheet_text`), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
@@ -17039,14 +17911,13 @@ impl layout_ctx::LayoutCtx {
             if !sheet_element_counts(javascript_enabled, &style_el) {
                 continue;
             }
-            let mut css_text = String::new();
-            for child in style_el.children() {
-                if let NodeType::Text(text) = &child.node_type {
-                    css_text.push_str(text);
-                }
+            // `sheet.disabled = true` from script (CH2.E17).
+            if document.style_sheet_disabled(&style_el) {
+                continue;
             }
+            let css_text = rustkit_dom::style_element_text(&style_el);
             if !css_text.is_empty() {
-                texts.push((style_el.id, css_text));
+                texts.push((style_el.id, style_sheet_text(&style_el, css_text)));
             }
         }
 
@@ -17076,6 +17947,117 @@ impl layout_ctx::LayoutCtx {
         self.with_building_lay(|lay| lay.sheet_cache.borrow_mut().take_parsed())
             .unwrap_or_else(|| ADHOC_SHEET_CACHE.with(|cache| cache.borrow_mut().take_parsed()))
     }
+}
+
+/// The CSS text a `<style>` element contributes: `css_text`, inside
+/// `@media <list> { ... }` when the element has a `media` attribute
+/// (HTML 4.2.6: the sheet applies only where the list matches). The list is
+/// serialized first, so a query Chrome rejects (`foo bar`) becomes
+/// `not all` and matches nothing; an empty list applies everywhere. The
+/// engine has no `@import`, so wrapping the text changes nothing else, and
+/// the wrapped rules carry the list as their outermost `@media` condition,
+/// which the cascade re-evaluates on every resize.
+pub(crate) fn style_sheet_text(element: &Node, css_text: String) -> String {
+    let media = match &element.node_type {
+        NodeType::Element { attributes, .. } => attributes.get("media"),
+        _ => None,
+    };
+    let list = media.map(|m| rustkit_css::media_query_list_serialize(m)).unwrap_or_default();
+    if list.is_empty() {
+        css_text
+    } else {
+        let css_text = drop_brace_broken_statements(&css_text);
+        format!("@media {list} {{\n{css_text}\n}}")
+    }
+}
+
+/// `css_text` less each top-level statement whose prelude holds a stray
+/// `}`. At the top level of a sheet that `}` is part of the statement's
+/// prelude, which then fails, so dropping the statement changes nothing
+/// there (CSS Syntax 3 "consume a qualified rule" / "consume an at-rule";
+/// Chromium drops it). Inside `@media <list> { ... }` the same `}` would
+/// close the wrapper and every rule after it would apply wherever the list
+/// does not match, so [`style_sheet_text`] drops the statement before
+/// wrapping. A qualified rule runs to the end of its `{}` block, an at-rule
+/// to its `;` or block; comments, strings, escapes and `()`/`[]` blocks are
+/// skipped, as the tokenizer does. Only ASCII bytes are compared, so every
+/// cut is on a char boundary.
+fn drop_brace_broken_statements(css_text: &str) -> std::borrow::Cow<'_, str> {
+    let b = css_text.as_bytes();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut closers: Vec<u8> = Vec::new();
+    // The current top-level statement: where it starts, whether it is an
+    // at-rule, and whether its prelude met a stray `}`.
+    let mut start: Option<usize> = None;
+    let mut at_rule = false;
+    let mut broken = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            i = css_text[i + 2..].find("*/").map_or(b.len(), |n| i + 2 + n + 2);
+            continue;
+        }
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if closers.is_empty() && start.is_none() {
+            start = Some(i);
+            at_rule = c == b'@';
+            broken = false;
+        }
+        let mut end = None;
+        match c {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'"' | b'\'' => {
+                i += 1;
+                while i < b.len() && b[i] != c && b[i] != b'\n' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                continue;
+            }
+            b'{' => closers.push(b'}'),
+            b'(' => closers.push(b')'),
+            b'[' => closers.push(b']'),
+            _ if closers.last() == Some(&c) => {
+                closers.pop();
+                if c == b'}' && closers.is_empty() {
+                    end = Some(i + 1);
+                }
+            }
+            b'}' if closers.is_empty() => broken = true,
+            b';' if closers.is_empty() && at_rule => end = Some(i + 1),
+            _ => {}
+        }
+        if let Some(end) = end {
+            if broken {
+                cuts.push((start.unwrap_or(end), end));
+            }
+            start = None;
+        }
+        i += 1;
+    }
+    if broken {
+        if let Some(start) = start {
+            cuts.push((start, b.len()));
+        }
+    }
+    if cuts.is_empty() {
+        return std::borrow::Cow::Borrowed(css_text);
+    }
+    let mut out = String::with_capacity(css_text.len());
+    let mut at = 0;
+    for (from, to) in cuts {
+        out.push_str(&css_text[at..from]);
+        at = to;
+    }
+    out.push_str(&css_text[at..]);
+    std::borrow::Cow::Owned(out)
 }
 
 /// [`Engine::sheet_element_counts`] for a given scripting setting.
@@ -17907,6 +18889,15 @@ impl Engine {
     }
 
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
+        Self::img_elements(document, base_url)
+            .into_iter()
+            .map(|(_, src, url)| (src, url))
+            .collect()
+    }
+
+    /// Every `<img>` that names an image: its raw NodeId, the source as
+    /// written, and that resolved.
+    fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
         let mut images = Vec::new();
 
         // Find all <img> elements, shadow trees included
@@ -17930,8 +18921,7 @@ impl Engine {
                     };
 
                     if let Some(url) = resolved {
-                        debug!(%url, "Discovered image");
-                        images.push((src.clone(), url));
+                        images.push((img_el.id.raw(), src.clone(), url));
                     }
                 }
             }
@@ -18200,12 +19190,44 @@ impl Engine {
         self.load_images_pass(id, true).await
     }
 
+    /// The load's image pass with safe point (b) (LAT15): while the images
+    /// arrive the engine is lent to `serve` once a frame. The fetch is one
+    /// future, pinned for the whole wait, raced with each frame's tick; a
+    /// tick never starts it again. `None`: the navigation was cancelled.
+    async fn load_images_serving(
+        &mut self,
+        id: EngineViewId,
+        watch: &NavWatch,
+        serve: &mut Option<&mut ServeFn<'_>>,
+    ) -> Option<Result<usize, EngineError>> {
+        let plan = match self.plan_image_loads(id, false) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Some(Ok(0)),
+            Err(e) => return Some(Err(e)),
+        };
+        let until = plan.wait_until;
+        let mut fetch = std::pin::pin!(Self::collect_images_until(Self::start_planned_images(plan), until));
+        loop {
+            let tick = std::pin::pin!(tokio::time::sleep(std::time::Duration::from_millis(LIVE_FRAME_MS)));
+            let raced = futures::future::select(fetch.as_mut(), tick);
+            match nav_cancel::unless_cancelled(Some(watch), raced).await? {
+                futures::future::Either::Left(((fetched, late), _)) => {
+                    self.keep_late_images(id, late);
+                    return Some(Ok(self.keep_fetched_images(id, fetched)));
+                }
+                futures::future::Either::Right(((), _)) => self.safe_point(id, watch, serve).await,
+            }
+        }
+    }
+
     async fn load_images_pass(&mut self, id: EngineViewId, only_new: bool) -> Result<usize, EngineError> {
         let Some(plan) = self.plan_image_loads(id, only_new)? else {
             return Ok(0);
         };
-        let fetched = Self::fetch_planned_images(plan).await;
-        Ok(self.keep_fetched_images(fetched))
+        let until = plan.wait_until;
+        let (fetched, late) = Self::collect_images_until(Self::start_planned_images(plan), until).await;
+        self.keep_late_images(id, late);
+        Ok(self.keep_fetched_images(id, fetched))
     }
 
     /// The first part of an image pass, which waits for nothing: find the
@@ -18219,13 +19241,61 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let mut images = self.discover_images(document.as_ref(), base_url);
+        let mut elements = Self::img_elements(document.as_ref(), base_url);
+        // The URLs the document itself shows, when an `<img>` outside it
+        // asks for one too (E54): what only such an element asks for is
+        // fetched, and no layout follows its arrival.
+        let detached = Self::detached_img_elements(document.as_ref(), base_url, &view.lay.loaded_images.borrow().detached, &elements);
+        let shown: std::collections::HashSet<Url> = match detached.is_empty() {
+            true => Default::default(),
+            false => elements.iter().map(|(_, _, url)| url.clone()).collect(),
+        };
+        let mut offscreen: std::collections::HashSet<Url> =
+            detached.iter().map(|(_, _, url)| url.clone()).filter(|url| !shown.contains(url)).collect();
+        elements.extend(detached);
+        // An `<img>` showing a loaded image it has not heard `load` for
+        // (E54): events are due. One that has heard costs a map lookup.
+        {
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.due {
+                let failed = view.lay.failed_images.borrow();
+                loaded.due = elements.iter().any(|(node, _, url)| {
+                    loaded.heard.get(node) != Some(&layout_ctx::LoadedImages::key(url.as_str()))
+                        && !failed.urls.contains(url.as_str())
+                        && (self.lctx.image_manager.is_cached(url) || self.lctx.svg_cache.borrow().contains_key(url.as_str()))
+                });
+            }
+        }
+        // The `<img>` elements asking for a URL that has failed: who is
+        // owed an `error` (LAT9-r1). Nothing is collected on a page with
+        // no failed image.
+        let wants_failed: Vec<(usize, String)> = {
+            let failed = view.lay.failed_images.borrow();
+            match failed.urls.is_empty() {
+                true => Vec::new(),
+                false => elements
+                    .iter()
+                    .filter(|(_, _, url)| failed.urls.contains(url.as_str()))
+                    .map(|(node, _, url)| (*node, url.to_string()))
+                    .collect(),
+            }
+        };
+        let mut images: Vec<(String, Url)> = elements
+            .into_iter()
+            .map(|(_, src, url)| {
+                debug!(%url, "Discovered image");
+                (src, url)
+            })
+            .collect();
         let backgrounds = Self::discover_background_images(view.display_list.as_deref());
         let css_urls = match view.inspector.is_active() {
             true => backgrounds.iter().map(|(_, url)| url.clone()).collect(),
             false => std::collections::HashSet::new(),
         };
         let inspector = view.inspector.clone();
+        for (_, url) in &backgrounds {
+            offscreen.remove(url);
+        }
         images.extend(backgrounds);
         if only_new {
             images.retain(|(_, url)| !view.images_attempted.contains(url));
@@ -18269,12 +19339,52 @@ impl Engine {
                 pending.push(url);
             }
         }
+        if let Some(view) = self.views.get(&id) {
+            // Nor given up on: its elements hear what this request brings.
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.gave_up.is_empty() {
+                for url in pending.iter().chain(&svg_urls) {
+                    loaded.gave_up.remove(url.as_str());
+                }
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
+            let mut failed = view.lay.failed_images.borrow_mut();
+            if !failed.urls.is_empty() {
+                // A URL asked for again is in flight again, not failed.
+                // If it fails again, its elements hear so again.
+                let mut again = false;
+                for url in pending.iter().chain(&svg_urls) {
+                    again |= failed.urls.remove(url.as_str());
+                }
+                if again {
+                    let layout_ctx::FailedImages { urls, heard, .. } = &mut *failed;
+                    heard.retain(|_, url| urls.contains(url));
+                }
+                // An `<img>` may have been pointed at a URL that already
+                // failed, or away from one. Events are due only then: a
+                // page that lays out every turn while it holds failed
+                // images walks nothing more for them.
+                let owed = wants_failed
+                    .iter()
+                    .filter(|(_, url)| failed.urls.contains(url))
+                    .collect::<Vec<_>>();
+                if owed.len() != failed.heard.len() || owed.iter().any(|(node, url)| failed.heard.get(node) != Some(url)) {
+                    failed.due = true;
+                }
+            }
+        }
 
+        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
+        let now = tokio::time::Instant::now();
         Ok(Some(ImagePlan {
             pending,
             svg_urls,
             already_loaded: loaded,
-            deadline: self.subresource_deadline(),
+            offscreen,
+            budget,
+            wait_until: now + budget,
+            start_by: now + budget * IMAGE_PASS_START_BUDGETS,
             referrer: self.subresource_referrer(id),
             loader: self.loader.clone(),
             image_manager,
@@ -18285,23 +19395,29 @@ impl Engine {
         }))
     }
 
-    /// The second part: fetch and decode what the plan lists. It borrows
-    /// nothing from the engine, so the load awaits it in place and the live
-    /// loop keeps it across turns.
-    async fn fetch_planned_images(plan: ImagePlan) -> FetchedImages {
-        // Fetch concurrently with bounded parallelism. The serial loop cost
-        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
-        // a sequential round-trip failing (2026-08-05 live session);
-        // buffer_unordered polls the futures on this thread, so no Send
-        // bounds are required and the engine stays single-threaded.
-        use futures::stream::StreamExt;
-        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
-
+    /// The second part: start every image the plan lists, each its own
+    /// future, so a live turn puts in each image as it arrives. It borrows
+    /// nothing from the engine.
+    ///
+    /// LAT9 (a real-window session, 2026-11-09): the pass had one deadline,
+    /// set when it was planned, and ran its SVG images before any raster.
+    /// One slow SVG spent the clock, and 78 rasters queued behind it failed
+    /// on their first poll without a request. Now SVG and raster images
+    /// share [`MAX_CONCURRENT_IMAGE_LOADS`] slots, each image's budget
+    /// starts when it takes a slot, and the fetch and decode run on the
+    /// network runtime, so live turns that hold the page thread for seconds
+    /// (the session's ran 1.5 to 4.7 s, with 2 ms of image polling each)
+    /// no longer starve them. A `data:` image decodes on the page, as
+    /// before; so does every image when the network runtime is off.
+    fn start_planned_images(plan: ImagePlan) -> Vec<script_net::LiveFuture<FetchedImages>> {
         let ImagePlan {
             pending,
             svg_urls,
             already_loaded,
-            deadline,
+            offscreen,
+            budget,
+            wait_until: _,
+            start_by,
             referrer,
             loader,
             image_manager,
@@ -18310,165 +19426,560 @@ impl Engine {
             initiator,
             css_urls,
         } = plan;
-        let initiator_of = |url: &Url| if css_urls.contains(url) { "css" } else { initiator };
-        let inspector = &inspector;
-        let mut loaded = already_loaded;
-        let mut svgs = Vec::new();
-
-        // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
-        // serial while images were parallelized). Parsing happens inside the
-        // futures; the engine's cache insert comes afterwards, in
-        // `keep_fetched_images`.
-        {
-            let loader = loader.clone();
-            let referrer = &referrer;
-            let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
-                futures::stream::iter(svg_urls.into_iter().map(|url| {
-                    let loader = loader.clone();
-                    let initiator = initiator_of(&url);
-                    async move {
-                        info!(url = %url_for_log(&url), "Loading SVG image");
-                        let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
-                        let fetched = match tokio::time::timeout_at(
-                            deadline,
-                            loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
-                        )
-                        .await
-                        {
-                            Ok(fetched) => fetched,
-                            Err(_) => {
-                                if let Some(guard) = guard {
-                                    guard.fail(FailureStage::OverBudget, "subresource budget spent");
-                                }
-                                warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
-                                return None;
-                            }
-                        };
-                        match fetched {
-                            Ok(response) if response.ok() => {
-                                let received = guard.map(|g| g.received(&response));
-                                match response.text().await {
-                                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                                        Ok(doc) => {
-                                            if let Some(received) = received {
-                                                received.read(xml.len());
-                                            }
-                                            Some((url.to_string(), image_svg(doc)))
-                                        }
-                                        Err(e) => {
-                                            if let Some(received) = received {
-                                                received.fail(FailureStage::Decode, "SVG did not parse");
-                                            }
-                                            warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
-                                            None
-                                        }
-                                    },
-                                    Err(e) => {
-                                        if let Some(received) = received {
-                                            received.fail(FailureStage::Decode, "body is not UTF-8");
-                                        }
-                                        warn!(?e, url = %url_for_log(&url), "Failed to read SVG body");
-                                        None
-                                    }
-                                }
-                            }
-                            Ok(response) => {
-                                if let Some(guard) = guard {
-                                    guard.received(&response).unread();
-                                }
-                                warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch SVG image");
-                                None
-                            }
-                            Err(e) => {
-                                inspector::fail_net(guard, &e);
-                                warn!(?e, url = %url_for_log(&url), "Failed to fetch SVG image");
-                                None
-                            }
-                        }
-                    }
-                }))
-                .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
-                .collect()
-                .await;
-
-            for (url, doc) in parsed.into_iter().flatten() {
-                svgs.push((url, doc));
-                loaded += 1;
-            }
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_IMAGE_LOADS));
+        let referrer = Arc::new(referrer);
+        let mut started: Vec<script_net::LiveFuture<FetchedImages>> = Vec::new();
+        if already_loaded > 0 {
+            started.push(Box::pin(std::future::ready(FetchedImages::loaded(already_loaded, Vec::new()))));
         }
+        let svgs = svg_urls.into_iter().map(|url| (url, true));
+        let rasters = pending.into_iter().map(|url| (url, false));
+        for (url, svg) in svgs.chain(rasters) {
+            let job = ImageJob {
+                initiator: if css_urls.contains(&url) { "css" } else { initiator },
+                url,
+                svg,
+                slots: slots.clone(),
+                start_by,
+                budget,
+                referrer: referrer.clone(),
+                loader: loader.clone(),
+                image_manager: image_manager.clone(),
+                nav,
+                inspector: inspector.clone(),
+            };
+            let on_page = job.url.scheme() == "data";
+            let url = job.url.clone();
+            let unshown = offscreen.contains(&url);
+            let work = async move {
+                let mut fetched = Self::fetch_one_image(job).await;
+                if unshown {
+                    fetched.offscreen += std::mem::take(&mut fetched.loaded);
+                }
+                fetched
+            };
+            let fetch: script_net::LiveFuture<FetchedImages> = if on_page {
+                Box::pin(work)
+            } else {
+                match script_net::spawn_on_net(work) {
+                    Ok(on_net) => Box::pin(async move {
+                        // No outcome: the task panicked. The image is not coming.
+                        on_net.await.unwrap_or_else(|| FetchedImages::failed(&url))
+                    }),
+                    Err(work) => Box::pin(work),
+                }
+            };
+            started.push(fetch);
+        }
+        started
+    }
 
-        // Each raster load is loaded (true), failed (false), or turned out to
-        // be SVG by its type and parsed here for the SVG cache.
-        type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
-        let referrer = &referrer;
-        let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
-            let image_manager = image_manager.clone();
-            let loader = loader.clone();
-            let initiator = initiator_of(&url);
-            async move {
-                info!(url = %url_for_log(&url), "Loading image");
-                let load = fetch_raster_image(
-                    &loader,
-                    &image_manager,
-                    referrer,
-                    url.clone(),
-                    nav,
-                    Some((inspector, initiator, deadline)),
-                );
-                let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
-                    warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
-                    return (false, None);
-                };
-                match loaded {
-                    Ok(image) => {
-                        debug!(
-                            %url,
-                            width = image.natural_width,
-                            height = image.natural_height,
-                            "Image loaded and cached"
-                        );
-                        (true, None)
+    /// One image: wait for a slot (until the pass's `start_by`), then fetch
+    /// and decode it within its own budget.
+    async fn fetch_one_image(job: ImageJob) -> FetchedImages {
+        let failed = FetchedImages::failed(&job.url);
+        let ImageJob {
+            url,
+            svg,
+            slots,
+            start_by,
+            budget,
+            referrer,
+            loader,
+            image_manager,
+            nav,
+            inspector,
+            initiator,
+        } = job;
+        let Ok(Ok(_slot)) = tokio::time::timeout_at(start_by, slots.acquire_owned()).await else {
+            warn!(url = %url_for_log(&url), "Image not started within its image pass's cap; rendering without it");
+            return FetchedImages::gave_up(&url);
+        };
+        let deadline = tokio::time::Instant::now() + budget;
+        let inspector = &inspector;
+        let referrer = &*referrer;
+        if svg {
+            info!(url = %url_for_log(&url), "Loading SVG image");
+            let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
+            let fetched = match tokio::time::timeout_at(
+                deadline,
+                loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)),
+            )
+            .await
+            {
+                Ok(fetched) => fetched,
+                Err(_) => {
+                    if let Some(guard) = guard {
+                        guard.fail(FailureStage::OverBudget, "subresource budget spent");
                     }
-                    Err(rustkit_image::ImageError::Svg(xml)) => {
-                        match rustkit_svg::SvgDocument::parse(&xml) {
+                    warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
+                    return FetchedImages::gave_up(&url);
+                }
+            };
+            return match fetched {
+                Ok(response) if response.ok() => {
+                    let received = guard.map(|g| g.received(&response));
+                    match response.text().await {
+                        Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
-                                info!(url = %url_for_log(&url), "Image served as image/svg+xml; using the SVG lane");
-                                (true, Some((url.to_string(), image_svg(doc))))
+                                if let Some(received) = received {
+                                    received.read(xml.len());
+                                }
+                                FetchedImages::loaded(1, vec![(url.to_string(), image_svg(doc))])
                             }
                             Err(e) => {
+                                if let Some(received) = received {
+                                    received.fail(FailureStage::Decode, "SVG did not parse");
+                                }
                                 warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
-                                (false, None)
+                                failed
                             }
+                        },
+                        Err(e) => {
+                            if let Some(received) = received {
+                                received.fail(FailureStage::Decode, "body is not UTF-8");
+                            }
+                            warn!(?e, url = %url_for_log(&url), "Failed to read SVG body");
+                            failed
                         }
-                    }
-                    Err(rustkit_image::ImageError::Superseded) => {
-                        debug!(%url, "Image decoded for a superseded navigation; dropped");
-                        (false, None)
-                    }
-                    Err(e) => {
-                        warn!(?e, url = %url_for_log(&url), "Failed to load image");
-                        (false, None)
                     }
                 }
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
-        .collect()
-        .await;
-
-        for (ok, svg) in results {
-            svgs.extend(svg);
-            loaded += usize::from(ok);
+                Ok(response) => {
+                    if let Some(guard) = guard {
+                        guard.received(&response).unread();
+                    }
+                    warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch SVG image");
+                    failed
+                }
+                Err(e) => {
+                    inspector::fail_net(guard, &e);
+                    warn!(?e, url = %url_for_log(&url), "Failed to fetch SVG image");
+                    failed
+                }
+            };
         }
 
-        FetchedImages { loaded, svgs }
+        info!(url = %url_for_log(&url), "Loading image");
+        let load = fetch_raster_image(
+            &loader,
+            &image_manager,
+            referrer,
+            url.clone(),
+            nav,
+            Some((inspector, initiator, deadline)),
+        );
+        let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
+            warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
+            return FetchedImages::gave_up(&url);
+        };
+        match loaded {
+            Ok(image) => {
+                debug!(
+                    %url,
+                    width = image.natural_width,
+                    height = image.natural_height,
+                    "Image loaded and cached"
+                );
+                FetchedImages::loaded(1, Vec::new())
+            }
+            Err(rustkit_image::ImageError::Svg(xml)) => match rustkit_svg::SvgDocument::parse(&xml) {
+                Ok(doc) => {
+                    info!(url = %url_for_log(&url), "Image served as image/svg+xml; using the SVG lane");
+                    FetchedImages::loaded(1, vec![(url.to_string(), image_svg(doc))])
+                }
+                Err(e) => {
+                    warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
+                    failed
+                }
+            },
+            Err(rustkit_image::ImageError::Superseded) => {
+                debug!(%url, "Image decoded for a superseded navigation; dropped");
+                FetchedImages::gave_up(&url)
+            }
+            Err(e) => {
+                warn!(?e, url = %url_for_log(&url), "Failed to load image");
+                failed
+            }
+        }
+    }
+
+    /// What a load waits for of a pass: every image that arrives by
+    /// `until`, summed. What is still out then is returned, for the live
+    /// loop to put in when it arrives (as a late stylesheet is, S6).
+    async fn collect_images_until(
+        started: Vec<script_net::LiveFuture<FetchedImages>>,
+        until: tokio::time::Instant,
+    ) -> (FetchedImages, Vec<script_net::LiveFuture<FetchedImages>>) {
+        use futures::stream::StreamExt;
+        let mut out = FetchedImages::loaded(0, Vec::new());
+        let mut pending: futures::stream::FuturesUnordered<_> = started.into_iter().collect();
+        let stop = tokio::time::sleep_until(until);
+        tokio::pin!(stop);
+        loop {
+            tokio::select! {
+                next = pending.next() => match next {
+                    Some(fetched) => {
+                        out.loaded += fetched.loaded;
+                        out.offscreen += fetched.offscreen;
+                        out.svgs.extend(fetched.svgs);
+                        out.failed.extend(fetched.failed);
+                        out.gave_up.extend(fetched.gave_up);
+                    }
+                    None => break,
+                },
+                () = &mut stop => break,
+            }
+        }
+        (out, pending.into_iter().collect())
+    }
+
+    /// Hand the fetches a load stopped waiting for to the live loop.
+    fn keep_late_images(&mut self, id: EngineViewId, late: Vec<script_net::LiveFuture<FetchedImages>>) {
+        if late.is_empty() {
+            return;
+        }
+        info!(count = late.len(), "Images still loading at the budget; they are shown when they arrive");
+        if let Some(view) = self.views.get_mut(&id) {
+            view.live_images.extend(late);
+        }
     }
 
     /// The last part: keep what a fetch brought. Returns how many images
     /// the pass loaded.
-    fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
+    fn keep_fetched_images(&mut self, id: EngineViewId, fetched: FetchedImages) -> usize {
+        if fetched.loaded + fetched.offscreen > 0 || !fetched.svgs.is_empty() {
+            // Their elements hear `load` (E54).
+            if let Some(view) = self.views.get(&id) {
+                view.lay.loaded_images.borrow_mut().due = true;
+            }
+        }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
+        if !fetched.gave_up.is_empty() {
+            // Not failures: the elements keep what they paint and hear no
+            // event; only a `decode()` waiting on them is settled (E54 R1).
+            debug!(count = fetched.gave_up.len(), "Images given up on (budget or pass cap)");
+            if let Some(view) = self.views.get(&id) {
+                let mut loaded = view.lay.loaded_images.borrow_mut();
+                loaded.gave_up.extend(fetched.gave_up);
+                loaded.due = true;
+            }
+        }
+        if !fetched.failed.is_empty() {
+            if let Some(view) = self.views.get(&id) {
+                let mut failed = view.lay.failed_images.borrow_mut();
+                failed.urls.extend(fetched.failed);
+                failed.due = true;
+            }
+        }
         fetched.loaded
+    }
+
+    /// The `<img>` elements script gave a `src` outside the document
+    /// (`detached`, raw NodeIds) that still are outside it and name an
+    /// image, as [`Self::img_elements`] lists those inside. One that is in
+    /// `listed` (it has been inserted since, or sits in a shadow tree) is
+    /// left to that list.
+    fn detached_img_elements(
+        document: &Document,
+        base_url: Option<&Url>,
+        detached: &[usize],
+        listed: &[(usize, String, Url)],
+    ) -> Vec<(usize, String, Url)> {
+        if detached.is_empty() {
+            return Vec::new();
+        }
+        let listed: std::collections::HashSet<usize> = listed.iter().map(|(node, _, _)| *node).collect();
+        detached
+            .iter()
+            .filter(|node| !listed.contains(node))
+            .filter_map(|&raw| {
+                let node = document.get_node(rustkit_dom::NodeId::new(raw))?;
+                let NodeType::Element { attributes, .. } = &node.node_type else {
+                    return None;
+                };
+                let src = attributes
+                    .get("srcset")
+                    .and_then(|ss| Self::pick_from_srcset(ss))
+                    .or_else(|| attributes.get("src").cloned())?;
+                let url = match base_url {
+                    Some(base) => base.join(&src).ok()?,
+                    None => Url::parse(&src).ok()?,
+                };
+                Some((raw, src, url))
+            })
+            .collect()
+    }
+
+    /// Whether `node` is in the document's own tree.
+    fn in_document_tree(document: &Document, node: &Rc<Node>) -> bool {
+        let mut top = node.clone();
+        while let Some(parent) = top.parent() {
+            top = parent;
+        }
+        Rc::ptr_eq(&top, document.root())
+    }
+
+    /// E54: script wrote these `<img>` elements' `src` or `srcset`
+    /// (`DomBindings::take_image_writes`). Each one's load starts over: it
+    /// hears `load` or `error` again for what it names now, also when the
+    /// value is the one it had (Chrome fires `load` again). One that is in
+    /// no document tree is remembered, so that its image is fetched.
+    /// Returns whether there was a write.
+    fn note_image_writes_of(&mut self, id: EngineViewId, bindings: &DomBindings) -> bool {
+        self.note_image_writes_list(id, bindings.take_image_writes())
+    }
+
+    /// [`Self::note_image_writes_of`] with the view's own bindings.
+    fn note_image_writes(&mut self, id: EngineViewId) -> bool {
+        let writes = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map(|bindings| bindings.take_image_writes())
+            .unwrap_or_default();
+        self.note_image_writes_list(id, writes)
+    }
+
+    fn note_image_writes_list(&mut self, id: EngineViewId, writes: Vec<usize>) -> bool {
+        if writes.is_empty() {
+            return false;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        for raw in writes {
+            loaded.heard.remove(&raw);
+            loaded.gave_up_heard.remove(&raw);
+            failed.heard.remove(&raw);
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(raw))
+                .is_some_and(|node| !Self::in_document_tree(document.as_ref(), &node));
+            if outside && !loaded.detached.contains(&raw) {
+                loaded.detached.push(raw);
+            }
+        }
+        loaded.due = true;
+        failed.due = true;
+        true
+    }
+
+    /// An image's own size once it is in: the decoded raster, or an SVG's
+    /// width and height. `None` while it is not loaded.
+    fn loaded_image_size(&self, url: &Url) -> Option<(u32, u32)> {
+        if let Some(image) = self.lctx.image_manager.get_cached(url) {
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        if let Some(svg) = self.lctx.svg_cache.borrow().get(url.as_str()) {
+            let (width, height) = svg.get_size(300.0, 150.0);
+            return Some((width.round() as u32, height.round() as u32));
+        }
+        if url.scheme() == "data" {
+            let image = self.lctx.image_manager.load_blocking(url.clone()).ok()?;
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        None
+    }
+
+    /// E54, LAT9-r1: the events the document's images are owed, once a
+    /// load has settled. Each `<img>` whose image is in is owed `load`,
+    /// once for that image (Chrome for Testing 148.0.7778.216: `load` once
+    /// per successful load, at the element; inside it `complete` is true
+    /// and `naturalWidth` the image's own). Each whose image failed is owed
+    /// `error`, once for that `src` (after a failed swap the old image is
+    /// gone, `complete` is true, `naturalWidth` 0); with `relayout`, an
+    /// `<img>` still painting its previous image for a `src` that has now
+    /// failed is laid out again first, as the broken image a failed first
+    /// load gives. An image the engine gave up on is owed nothing. The
+    /// list is made before any listener runs: a listener may write the
+    /// DOM, and what it wrote is the next round's. Returns whether it laid
+    /// out, and the events in document order.
+    fn image_events_due(&mut self, id: EngineViewId, relayout: bool) -> (bool, Vec<ImageEvent>) {
+        let Some(view) = self.views.get(&id) else {
+            return (false, Vec::new());
+        };
+        {
+            let mut failed = view.lay.failed_images.borrow_mut();
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !failed.due && !loaded.due {
+                return (false, Vec::new());
+            }
+            failed.due = false;
+            loaded.due = false;
+        }
+        let stale = relayout && {
+            let failed = view.lay.failed_images.borrow();
+            view.lay.shown_images.borrow().values().any(|image| {
+                image.shown.as_ref().is_some_and(|shown| *shown != image.wanted) && failed.urls.contains(&image.wanted)
+            })
+        };
+        let mut relaid_out = false;
+        if stale {
+            match self.relayout_for(id, RelayoutCause::Other("image_failed")) {
+                Ok(()) => relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after a failed image failed"),
+            }
+        }
+        let Some(view) = self.views.get(&id) else {
+            return (relaid_out, Vec::new());
+        };
+        let Some(document) = view.document.as_ref() else {
+            return (relaid_out, Vec::new());
+        };
+        let mut events = Vec::new();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut elements = Self::img_elements(document.as_ref(), view.url.as_ref());
+        let detached = Self::detached_img_elements(document.as_ref(), view.url.as_ref(), &loaded.detached, &elements);
+        elements.extend(detached);
+        let mut still_failed = std::collections::HashSet::new();
+        let mut still_loaded = std::collections::HashSet::new();
+        let mut still_gave_up = std::collections::HashSet::new();
+        for (node, _, url) in elements {
+            let name = url.to_string();
+            if loaded.gave_up.contains(&name) {
+                still_gave_up.insert(node);
+                let key = layout_ctx::LoadedImages::key(&name);
+                if loaded.gave_up_heard.get(&node) != Some(&key) {
+                    loaded.gave_up_heard.insert(node, key);
+                    events.push(ImageEvent::GaveUp { node });
+                }
+                continue;
+            }
+            if failed.urls.contains(&name) {
+                still_failed.insert(node);
+                if failed.heard.get(&node) != Some(&name) {
+                    failed.heard.insert(node, name);
+                    events.push(ImageEvent::Error { node });
+                }
+            } else if loaded.heard.get(&node) == Some(&layout_ctx::LoadedImages::key(&name)) {
+                still_loaded.insert(node);
+            } else if let Some((width, height)) = self.loaded_image_size(&url) {
+                still_loaded.insert(node);
+                loaded.heard.insert(node, layout_ctx::LoadedImages::key(&name));
+                // A `data:` URL is the element's own `src`: script reads
+                // it from there, and it is not sent a second time.
+                let url = if url.scheme() == "data" { String::new() } else { name };
+                events.push(ImageEvent::Load { node, width, height, url });
+            }
+        }
+        failed.heard.retain(|node, _| still_failed.contains(node));
+        loaded.heard.retain(|node, _| still_loaded.contains(node));
+        loaded.gave_up_heard.retain(|node, _| still_gave_up.contains(node));
+        // An image outside the document that has heard, or that the engine
+        // gave up on, is done with; so is one whose node is gone (R1 nit 2).
+        loaded.detached.retain(|node| {
+            !still_failed.contains(node)
+                && !still_loaded.contains(node)
+                && !still_gave_up.contains(node)
+                && document.get_node(rustkit_dom::NodeId::new(*node)).is_some()
+        });
+        (relaid_out, events)
+    }
+
+    /// Tell the elements. A listener's exception is queued in the bindings
+    /// like any other listener's.
+    fn fire_image_events(bindings: &DomBindings, events: &[ImageEvent]) {
+        for event in events {
+            let _ = match event {
+                ImageEvent::Load { node, width, height, url } => bindings.fire_image_load(*node, *width, *height, url),
+                ImageEvent::Error { node } => bindings.fire_image_error(*node),
+                ImageEvent::GaveUp { node } => bindings.fire_image_gave_up(*node),
+            };
+        }
+    }
+
+    /// [`Self::image_events_due`], fired at the view's own bindings on a
+    /// live turn, and what the listeners wrote laid out. Returns whether it
+    /// laid out, and whether events are left for the next turn.
+    ///
+    /// The handlers are the turn's script like its timers: each is charged
+    /// to the turn's budget of JavaScript time (`live_turn_budget_ms`) and
+    /// can be stopped by it. Once the budget is spent the rest keep their
+    /// turn and go out on the next one, after this one's frame. They are
+    /// not spread thinner than that: on a recorded search page the image
+    /// handlers wrote a style and read a rect, a forced layout each (0.7 s
+    /// there), and a turn per handler paid for a second layout between
+    /// every two.
+    fn settle_image_events(&mut self, id: EngineViewId) -> (bool, bool) {
+        let (mut relaid_out, events) = self.image_events_due(id, true);
+        if events.is_empty() {
+            return (relaid_out, false);
+        }
+        let Some(bindings) = self.views.get(&id).and_then(|view| view.bindings.as_ref()) else {
+            return (relaid_out, false);
+        };
+        let mut fired = 0;
+        for event in &events {
+            if fired > 0 && script_js_exhausted() {
+                break;
+            }
+            // As the yielded tail does: a panic in the engine while a
+            // listener runs is caught here and ends this turn's events; the
+            // rest are owed to the next turn (R1 nit 7).
+            let (caught, _) = with_script_js(bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::fire_image_events(bindings, std::slice::from_ref(event))
+                }))
+            });
+            fired += 1;
+            if caught.is_err() {
+                warn!(?id, "An image listener's turn panicked; its other events wait for the next turn");
+                break;
+            }
+        }
+        info!(count = fired, left = events.len() - fired, "Images settled: firing load/error");
+        let more = fired < events.len();
+        if more {
+            self.owe_image_events(id, &events[fired..]);
+        }
+        match self.flush_script_dom_writes(id, Some(RelayoutCause::Other("image_event"))) {
+            Ok(wrote) => relaid_out |= wrote,
+            Err(e) => debug!(?id, error = %e, "relayout after image listeners failed"),
+        }
+        (relaid_out, more)
+    }
+
+    /// Events [`Self::image_events_due`] listed that were not fired: their
+    /// elements have not heard, and are due again.
+    fn owe_image_events(&mut self, id: EngineViewId, unfired: &[ImageEvent]) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(document) = view.document.as_ref() else {
+            return;
+        };
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        for event in unfired {
+            let node = match event {
+                ImageEvent::Load { node, .. } => {
+                    loaded.heard.remove(node);
+                    *node
+                }
+                ImageEvent::Error { node } => {
+                    failed.heard.remove(node);
+                    *node
+                }
+                ImageEvent::GaveUp { node } => {
+                    loaded.gave_up_heard.remove(node);
+                    *node
+                }
+            };
+            // One outside the document was dropped from the list as heard.
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(node))
+                .is_some_and(|n| !Self::in_document_tree(document.as_ref(), &n));
+            if outside && !loaded.detached.contains(&node) {
+                loaded.detached.push(node);
+            }
+        }
+        failed.due = true;
+        loaded.due = true;
     }
 
     /// Who a subresource request comes from: the document URL and the
@@ -18521,6 +20032,17 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         watch: Option<&NavWatch>,
+    ) -> Result<(), EngineError> {
+        self.load_subresources_serving(id, watch, None).await
+    }
+
+    /// [`Engine::load_subresources_for`], lending the engine to `serve`
+    /// while the images arrive (LAT15 safe point (b)).
+    async fn load_subresources_serving(
+        &mut self,
+        id: EngineViewId,
+        watch: Option<&NavWatch>,
+        mut serve: Option<&mut ServeFn<'_>>,
     ) -> Result<(), EngineError> {
         // Load external stylesheets.
         //
@@ -18617,8 +20139,11 @@ impl Engine {
             return Ok(());
         }
         let images = wgate::bucket(wgate::HoldBucket::Images);
-        let Some(image_count) = nav_cancel::unless_cancelled(watch, self.load_images(id)).await
-        else {
+        let image_count = match (serve.is_some(), watch) {
+            (true, Some(watch)) => self.load_images_serving(id, watch, &mut serve).await,
+            _ => nav_cancel::unless_cancelled(watch, self.load_images(id)).await,
+        };
+        let Some(image_count) = image_count else {
             return Ok(());
         };
         drop(images);
@@ -19385,7 +20910,7 @@ impl layout_ctx::LayoutCtx {
             if let Some(r) = rest.strip_prefix('[') {
                 // The matcher's first check after the tag: the element must
                 // carry the attribute match_attribute_selector looks up.
-                let end = r.find(']').unwrap_or(r.len());
+                let end = SelectorMatcher::attr_bracket_end(r);
                 key.attr = Some(SelectorMatcher::attr_selector_name(&r[..end]).to_string());
             } else if key.tag.is_none() {
                 if let Some(r) = rest.strip_prefix(':') {
@@ -19550,20 +21075,29 @@ impl SelectorMatcher {
             out
         };
 
-        // ancestors[0] is the parent, as in the cascade.
+        // ancestors[0] is the parent, as in the cascade. Each carries its
+        // attributes, as the cascade's do (`ancestor_entry_attributes`): an
+        // ancestor without them leaves a compound's `[...]`, `:not()` and
+        // `:is()` parts permissive, and `#tabs .tab[data-id="1"] .title`
+        // matched every tab's title (CH2.E50). Only a compound with `[` or
+        // `:` reads them; a selector without either does not pay the copy.
+        let carry = selector.contains(['[', ':']);
         let mut ancestors = Vec::new();
         let mut current = node.parent();
         while let Some(n) = current {
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else {
                 break;
             };
-            // The root element's attributes, as in the cascade.
+            // The root element's attributes are always carried, as in the
+            // cascade (`html[dir=rtl] .x`).
             let root = n.parent().is_none_or(|p| !matches!(p.node_type, NodeType::Element { .. }));
             ancestors.push(Rc::new((
                 tag_name.to_lowercase(),
                 marked_classes(n.id.raw(), attributes),
                 attributes.get("id").cloned(),
-                root.then(|| Rc::new(attributes.clone())),
+                (carry || root).then(|| {
+                    Rc::new(live(n.id.raw(), attributes).unwrap_or_else(|| attributes.clone()))
+                }),
             )));
             current = n.parent();
         }
@@ -19709,7 +21243,7 @@ impl SelectorMatcher {
             compound.matches_ancestor_in_chain(ancestors, idx)
         };
         let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
-            let _relational = compound.needs_node().then(|| {
+            let _relational = compound.needs_node_as_sibling().then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
             });
             compound.matches_sibling_in_chain(prev, ancestors)
@@ -19782,8 +21316,9 @@ impl SelectorMatcher {
                             let Some(key) = dom_sibling_key(node) else {
                                 return false;
                             };
-                            let _relational =
-                                compound.needs_node().then(|| RelationalNodeScope::enter(Some(node.clone())));
+                            let _relational = compound
+                                .needs_node_as_sibling()
+                                .then(|| RelationalNodeScope::enter(Some(node.clone())));
                             compound.matches_sibling_in_chain(&key, above)
                         };
                         let matched = match combinator.as_str() {
@@ -20111,7 +21646,7 @@ impl SelectorMatcher {
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
                 // Attribute selector with operators
-                let bracket_end = rest.find(']').unwrap_or(rest.len());
+                let bracket_end = SelectorMatcher::attr_bracket_end(rest);
                 let attr_selector = &rest[..bracket_end];
                 remaining = if bracket_end < rest.len() {
                     &rest[bracket_end + 1..]
@@ -20155,7 +21690,7 @@ impl SelectorMatcher {
         match Self::attr_selector_test(attr_selector) {
             Some((op, attr_value)) => attributes
                 .get(attr_name)
-                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+                .is_some_and(|el_attr| Self::attr_test_passes(op, &attr_value, el_attr)),
             // Just [attr] - check presence
             None => attributes.contains_key(attr_name),
         }
@@ -20183,20 +21718,33 @@ impl SelectorMatcher {
     /// The operator of an `[...]` selector and the value it compares with
     /// (trimmed, quotes removed); with an `i` flag after the value, the
     /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
-    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, Cow<'_, str>)> {
         let (start, end) = Self::attr_operator(attr_selector)?;
         let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
         let rest = attr_selector[end..].trim();
-        let (attr_value, flag) = match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
-                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+        // The value's escapes resolve as a string token's or an ident's
+        // (CSS Syntax §4.3.7): `CSS.escape("0.1.1")` is `\30 \.1\.1`, and
+        // the Inspector's `[data-path="…"]` query matched nothing while
+        // the raw text was compared. An escaped quote does not close the
+        // string; an escape's trailing space does not end an ident.
+        let (attr_value, flag): (Cow<'_, str>, &str) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match Self::string_close(&rest[1..], q) {
+                Some(close) => (
+                    rustkit_css::css_string_value(&rest[1..1 + close]),
+                    rest[2 + close..].trim(),
+                ),
                 // CSS Syntax: EOF closes a string.
-                None => (&rest[1..], ""),
+                None => (rustkit_css::css_string_value(&rest[1..]), ""),
             },
-            _ => match rest.find(char::is_whitespace) {
-                Some(space) => (&rest[..space], rest[space..].trim()),
-                None => (rest, ""),
-            },
+            _ => {
+                let token_end = Self::ident_end(rest);
+                let token = rustkit_css::css_ident(&rest[..token_end]);
+                let value = match token {
+                    Cow::Borrowed(t) => rustkit_css::css_string_value(t),
+                    Cow::Owned(t) => Cow::Owned(rustkit_css::css_string_value(&t).into_owned()),
+                };
+                (value, rest[token_end..].trim())
+            }
         };
         let op = match flag {
             "" => Self::ATTR_OPERATORS[at],
@@ -20204,6 +21752,75 @@ impl SelectorMatcher {
             _ => Self::ATTR_INVALID_FLAG,
         };
         Some((op, attr_value))
+    }
+
+    /// Byte offset of the quote that closes a string whose contents start
+    /// `s` (the opening quote already consumed); an escaped quote is part
+    /// of the string. None when EOF closes it.
+    fn string_close(s: &str, quote: char) -> Option<usize> {
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Byte length of the ident token at the start of `s`: up to the first
+    /// unescaped whitespace, where a hex escape owns one whitespace after
+    /// its digits (`\30 \.1` is one ident).
+    fn ident_end(s: &str) -> usize {
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c.is_whitespace() {
+                return i;
+            }
+            if c != '\\' {
+                continue;
+            }
+            let mut digits = 0;
+            while digits < 6 && chars.peek().is_some_and(|(_, d)| d.is_ascii_hexdigit()) {
+                chars.next();
+                digits += 1;
+            }
+            if digits > 0 {
+                if chars.peek().is_some_and(|(_, d)| d.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                chars.next();
+            }
+        }
+        s.len()
+    }
+
+    /// Byte offset of the `]` that ends an attribute selector whose
+    /// contents start `s` (the `[` already consumed), skipping quoted
+    /// strings and escaped characters; `s.len()` when EOF closes it.
+    fn attr_bracket_end(s: &str) -> usize {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+            } else if c == ']' {
+                return i;
+            }
+        }
+        s.len()
     }
 
     /// Whether an `[...]` selector's flag is one the engine takes.
@@ -20400,6 +22017,12 @@ impl SelectorMatcher {
         let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
+            // An escaped character (`\"` in a string, `\]` in a value) has
+            // no syntax of its own here.
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -20507,7 +22130,16 @@ impl SelectorMatcher {
         let mut in_brackets = false;
         let mut quote: Option<char> = None;
         let mut start = 0;
+        let mut escaped = false;
         for (i, c) in selector.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -21089,14 +22721,48 @@ impl Engine {
         self.render_views(true)
     }
 
-    /// An input event for view `id` arrived at the app's queue at
-    /// `at` (W-gate: input-to-present). The earliest since the last commit
-    /// is kept; it rides the next commit the view makes, and is dropped at
-    /// the next `render_changed_views` if the frame did not move.
+    /// The user made an input on view `id` (LAT1c: input-to-present),
+    /// noted before it is dispatched. Every one rides the next commit the
+    /// view makes, except moves, which are sampled: the earliest since the
+    /// last commit. Inputs whose turn moves no frame are counted
+    /// `no_frame` at the next `render_changed_views`.
     pub fn note_input(&mut self, id: EngineViewId, mark: InputMark) {
         if let Some(view) = self.views.get_mut(&id) {
-            if view.input_pending.is_none() {
-                view.input_pending = Some(mark);
+            if mark.kind.sampled() && view.input_pending.iter().any(|m| m.kind.sampled()) {
+                return;
+            }
+            if view.input_pending.len() >= MAX_PENDING_INPUTS {
+                // A page that commits nothing for this long: what is past
+                // the cap is not measured, and said so.
+                view.inputs_unpresented = view.inputs_unpresented.saturating_add(1);
+                return;
+            }
+            view.input_pending.push(mark);
+        }
+    }
+
+    /// The inputs pending on view `id` will present no frame of their own
+    /// (its frame did not move, or a navigation replaces the document):
+    /// they are counted `no_frame` on the next commit.
+    fn retire_pending_inputs(&mut self, id: EngineViewId) {
+        if let Some(view) = self.views.get_mut(&id) {
+            let n = view.input_pending.len() as u32;
+            view.input_pending.clear();
+            view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+        }
+    }
+
+    /// A navigation of view `id` to `host` begins (LAT1b/LAT1c): the hold
+    /// summary starts a new visit, the commits are tagged with the host,
+    /// and inputs made on the document being left are not charged to the
+    /// new document's first frame.
+    fn begin_view_visit(&mut self, id: EngineViewId, host: Option<&str>) {
+        wgate::begin_visit(id.raw(), host);
+        self.retire_pending_inputs(id);
+        if let Some(view) = self.views.get_mut(&id) {
+            let host = host.unwrap_or("-");
+            if &*view.visit_host != host {
+                view.visit_host = Arc::from(host);
             }
         }
     }
@@ -21144,9 +22810,7 @@ impl Engine {
             if only_changed && self.frame_is_current(id) {
                 // The drain that noted an input is over and the frame did
                 // not move: that input is not charged to a later frame.
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.input_pending = None;
-                }
+                self.retire_pending_inputs(id);
                 continue;
             }
             drawn += 1;
@@ -21370,6 +23034,8 @@ impl Engine {
                     advances,
                     ascent,
                     run,
+                    faces: _,
+                    undilated: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint
@@ -21914,7 +23580,14 @@ impl Engine {
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
-                input: view.input_pending.take(),
+                inputs: std::mem::take(&mut view.input_pending),
+                inputs_unpresented: std::mem::take(&mut view.inputs_unpresented),
+                visit: wgate::VisitTag {
+                    view: id.raw(),
+                    host: Arc::clone(&view.visit_host),
+                    chrome: view.app_owned,
+                    nav: view.nav_id,
+                },
                 canvas,
                 modal_popup: view.lay.select_popup.borrow().is_some(),
             };
@@ -21950,6 +23623,11 @@ impl Engine {
         });
         if !moved {
             // A draw for any other reason presents the commit already held.
+            // The inputs this commit took moved no frame (LAT1c).
+            let n = (commit.inputs.len() as u32).saturating_add(commit.inputs_unpresented);
+            if let Some(view) = self.views.get_mut(&id) {
+                view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+            }
         } else if self.presenter.is_none() {
             // The window thread presents. This thread only publishes.
             // The event is how a load still in progress hands the frame
@@ -21957,6 +23635,13 @@ impl Engine {
             // can read the channel while that future is pending.
             if commit.list.is_some() {
                 let _ = self.event_tx.send(EngineEvent::FrameCommitted(commit.clone()));
+            } else {
+                // Not laid out, so never drawn: its inputs go to the next
+                // commit as `no_frame` (LAT1c).
+                let n = (commit.inputs.len() as u32).saturating_add(commit.inputs_unpresented);
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.inputs_unpresented = view.inputs_unpresented.saturating_add(n);
+                }
             }
             self.page_commits.insert(id, commit);
             return Ok(());
@@ -23980,13 +25665,15 @@ fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
     }
 }
 
-/// The border style a `border` / `border-<side>` shorthand names; a
-/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+/// The style a `border` / `border-<side>` shorthand sets. One with no style
+/// keyword sets the initial value, `none` (CSS Backgrounds 3 §3.6: a
+/// shorthand resets what it leaves out), so `border: 5px` paints nothing,
+/// as in Chromium 143 (CH2.B18b). It used to keep RustKit's default `Solid`.
 fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
     value
         .split_whitespace()
-        .find_map(rustkit_css::BorderStyle::from_keyword)
-        .unwrap_or_default()
+        .find_map(|token| rustkit_css::BorderStyle::from_keyword(&token.to_ascii_lowercase()))
+        .unwrap_or(rustkit_css::BorderStyle::None)
 }
 
 /// An `outline-color` value, lowercase: `Some(None)` for `currentcolor`.
@@ -24082,25 +25769,270 @@ thread_local! {
     /// The sides (`BORDER_SIDE_*`) of the element being cascaded that some
     /// origin gave a `border-style` (`zero_width_of_styleless_sides`).
     static BORDER_STYLE_DECLARED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// The element's border longhands as the UA sheet left them, taken by
+    /// `note_ua_border_sides` before any author rule: what `revert` (and
+    /// `revert-layer` in a stylesheet rule) rolls a border property back
+    /// to (CH2.B18b).
+    static UA_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// The border longhands as the author's stylesheet rules left them,
+    /// taken before the element's `style` attribute applies: what
+    /// `revert-layer` in that attribute rolls back to (CSS Cascade 5 §7.3:
+    /// the style attribute is a layer above every author layer, so
+    /// `border: revert-layer` there keeps a stylesheet's `border: 40px`,
+    /// as Chromium 148 does).
+    static AUTHOR_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// Whether the declarations being applied are the `style` attribute's.
+    static INLINE_STYLE_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether they are its `!important` ones (the second inline pass).
+    static INLINE_IMPORTANT_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The border longhands as the author stylesheets' `!important` rules
+    /// left them, taken before the attribute's `!important` pass, and the
+    /// longhands those rules wrote (`border_longhand_mask`). A `border:
+    /// revert-layer !important` in the attribute rolls each longhand back
+    /// to this where an important rule set it, else to `AUTHOR_BORDER`:
+    /// the attribute's normal declarations are the same layer and go
+    /// too (CSS Cascade 5 §7.3; #987 second HOLD: the normal pass's
+    /// snapshot was reused and an important stylesheet border was lost).
+    static AUTHOR_IMPORTANT_BORDER: std::cell::RefCell<Option<BorderSnapshot>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_IMPORTANT_BORDER_MASK: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
-/// Holds `BORDER_STYLE_DECLARED` for one element's (or pseudo-element's)
-/// cascade and restores the previous value on drop. A form control starts
-/// with every side declared: Chromium's UA sheet gives input, textarea,
-/// button and select a border style, so `border-width` alone applies there.
-struct BorderStyleDeclaredScope(u8);
+/// The bits of a longhand mask (`AUTHOR_IMPORTANT_BORDER_MASK`) for the
+/// `BORDER_SIDE_*` sides and `BORDER_PART_*` parts a property covers: side
+/// bits in the low nibble for widths, the next for styles, the next for
+/// colours.
+fn border_longhand_mask(sides: u8, parts: u8) -> u16 {
+    let mut mask = 0u16;
+    for (part, shift) in [(BORDER_PART_WIDTH, 0), (BORDER_PART_STYLE, 4), (BORDER_PART_COLOR, 8)] {
+        if parts & part != 0 {
+            mask |= (sides as u16) << shift;
+        }
+    }
+    mask
+}
+
+/// One element's border longhands (top, right, bottom, left) and which
+/// sides had a declared style at that point, as `revert` restores them.
+#[derive(Clone)]
+struct BorderSnapshot {
+    widths: [rustkit_css::Length; 4],
+    styles: [rustkit_css::BorderStyle; 4],
+    colors: [rustkit_css::Color; 4],
+    declared: u8,
+}
+
+impl BorderSnapshot {
+    fn take(style: &ComputedStyle) -> Self {
+        Self {
+            widths: [
+                style.border_top_width.clone(),
+                style.border_right_width.clone(),
+                style.border_bottom_width.clone(),
+                style.border_left_width.clone(),
+            ],
+            styles: [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            colors: [
+                style.border_top_color,
+                style.border_right_color,
+                style.border_bottom_color,
+                style.border_left_color,
+            ],
+            declared: BORDER_STYLE_DECLARED.with(std::cell::Cell::get),
+        }
+    }
+}
+
+/// The parts of a border side a property covers (`border_property_parts`).
+const BORDER_PART_WIDTH: u8 = 1;
+const BORDER_PART_STYLE: u8 = 2;
+const BORDER_PART_COLOR: u8 = 4;
+const BORDER_PARTS_ALL: u8 = 7;
+
+/// Holds `BORDER_STYLE_DECLARED`, the border snapshots and the inline flag for one
+/// element's (or pseudo-element's) cascade and restores the previous values
+/// on drop. A form control starts with every side declared: Chromium's UA
+/// sheet gives input, textarea, button and select a border style, so
+/// `border-width` alone applies there.
+struct BorderStyleDeclaredScope {
+    declared: u8,
+    ua: Option<BorderSnapshot>,
+    author: Option<BorderSnapshot>,
+    author_important: Option<BorderSnapshot>,
+    author_important_mask: u16,
+    inline: bool,
+    inline_important: bool,
+}
 
 impl BorderStyleDeclaredScope {
     fn enter(tag_name: &str) -> Self {
         let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
         let start = if control { BORDER_SIDES_ALL } else { 0 };
-        Self(BORDER_STYLE_DECLARED.with(|c| c.replace(start)))
+        Self {
+            declared: BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
+            ua: UA_BORDER.with(|c| c.replace(None)),
+            author: AUTHOR_BORDER.with(|c| c.replace(None)),
+            author_important: AUTHOR_IMPORTANT_BORDER.with(|c| c.replace(None)),
+            author_important_mask: AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.replace(0)),
+            inline: INLINE_STYLE_PASS.with(|c| c.replace(false)),
+            inline_important: INLINE_IMPORTANT_PASS.with(|c| c.replace(false)),
+        }
     }
 }
 
 impl Drop for BorderStyleDeclaredScope {
     fn drop(&mut self) {
-        BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
+        BORDER_STYLE_DECLARED.with(|c| c.set(self.declared));
+        UA_BORDER.with(|c| *c.borrow_mut() = self.ua.take());
+        AUTHOR_BORDER.with(|c| *c.borrow_mut() = self.author.take());
+        AUTHOR_IMPORTANT_BORDER.with(|c| *c.borrow_mut() = self.author_important.take());
+        AUTHOR_IMPORTANT_BORDER_MASK.with(|c| c.set(self.author_important_mask));
+        INLINE_STYLE_PASS.with(|c| c.set(self.inline));
+        INLINE_IMPORTANT_PASS.with(|c| c.set(self.inline_important));
+    }
+}
+
+/// The `BORDER_SIDE_*` bits and `BORDER_PART_*` bits a border property
+/// covers, or `None` for any other property: the `border` shorthand is
+/// every side and part, `border-top` one side's three parts, `border-width`
+/// every side's width, `border-top-width` one side's width.
+fn border_property_parts(property: &str) -> Option<(u8, u8)> {
+    let rest = property.strip_prefix("border")?;
+    if rest.is_empty() {
+        return Some((BORDER_SIDES_ALL, BORDER_PARTS_ALL));
+    }
+    let rest = rest.strip_prefix('-')?;
+    let (sides, part) = match rest.split_once('-') {
+        Some((side @ ("top" | "right" | "bottom" | "left"), part)) => (border_side_bit(side_property(side)), part),
+        None if matches!(rest, "top" | "right" | "bottom" | "left") => {
+            return Some((border_side_bit(side_property(rest)), BORDER_PARTS_ALL));
+        }
+        _ => (BORDER_SIDES_ALL, rest),
+    };
+    let parts = match part {
+        "width" => BORDER_PART_WIDTH,
+        "style" => BORDER_PART_STYLE,
+        "color" => BORDER_PART_COLOR,
+        _ => return None,
+    };
+    Some((sides, parts))
+}
+
+/// `border-<side>`, for `border_side_bit`.
+fn side_property(side: &str) -> &'static str {
+    match side {
+        "top" => "border-top",
+        "right" => "border-right",
+        "bottom" => "border-bottom",
+        _ => "border-left",
+    }
+}
+
+/// CH2.B18b: `revert` / `revert-layer` on a border property rolls every
+/// longhand it covers back to an earlier cascade state (CSS Cascade 5
+/// §7.3): `revert` to the UA sheet's (`UA_BORDER`, taken before any
+/// author rule), `revert-layer` in the `style` attribute to the author
+/// stylesheets' (`AUTHOR_BORDER`, taken before the attribute applies), and
+/// `revert-layer` in a stylesheet rule to the UA sheet's too, which is
+/// right for an unlayered rule and an approximation inside `@layer`
+/// (there is no per-layer snapshot). Widths and colours come back with the
+/// style: an `<input>` given `border: 40px solid red` by a rule and
+/// `border: revert` inline is back to its UA frame, 58×16 in Chromium 148
+/// (#987 R1 HOLD: only the style came back and the 40px red frame stayed).
+/// A side whose snapshot had no declared style loses its declared bit, so
+/// `zero_width_of_styleless_sides` makes it `none` with a 0 width, as the
+/// UA leaves a div. The declaration was dropped before this row, so an
+/// author's frame stayed.
+fn revert_border(style: &mut ComputedStyle, sides: u8, parts: u8, layer: bool) {
+    let from = if layer && INLINE_STYLE_PASS.with(std::cell::Cell::get) {
+        let author = AUTHOR_BORDER.with(|c| c.borrow().clone());
+        if INLINE_IMPORTANT_PASS.with(std::cell::Cell::get) {
+            // The attribute's `!important` pass: the author stylesheets'
+            // important rules are the layers below; where they set a
+            // longhand, their value, else the normal rules' (the
+            // attribute's own normal declarations are the same layer and
+            // roll back with it).
+            let important = AUTHOR_IMPORTANT_BORDER.with(|c| c.borrow().clone());
+            let mask = AUTHOR_IMPORTANT_BORDER_MASK.with(std::cell::Cell::get);
+            match (author, important) {
+                (Some(mut merged), Some(important)) => {
+                    for i in 0..4 {
+                        let bit = 1u8 << i;
+                        if mask & border_longhand_mask(bit, BORDER_PART_WIDTH) != 0 {
+                            merged.widths[i] = important.widths[i].clone();
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_STYLE) != 0 {
+                            merged.styles[i] = important.styles[i];
+                            merged.declared = (merged.declared & !bit) | (important.declared & bit);
+                        }
+                        if mask & border_longhand_mask(bit, BORDER_PART_COLOR) != 0 {
+                            merged.colors[i] = important.colors[i];
+                        }
+                    }
+                    Some(merged)
+                }
+                (author, important) => important.or(author),
+            }
+        } else {
+            author
+        }
+    } else {
+        UA_BORDER.with(|c| c.borrow().clone())
+    };
+    let Some(from) = from else {
+        return;
+    };
+    let widths = [
+        &mut style.border_top_width,
+        &mut style.border_right_width,
+        &mut style.border_bottom_width,
+        &mut style.border_left_width,
+    ];
+    let styles = [
+        &mut style.border_top_style,
+        &mut style.border_right_style,
+        &mut style.border_bottom_style,
+        &mut style.border_left_style,
+    ];
+    let colors = [
+        &mut style.border_top_color,
+        &mut style.border_right_color,
+        &mut style.border_bottom_color,
+        &mut style.border_left_color,
+    ];
+    for (i, (width, (side_style, color))) in widths.into_iter().zip(styles.into_iter().zip(colors)).enumerate() {
+        let bit = 1u8 << i;
+        if sides & bit == 0 {
+            continue;
+        }
+        if parts & BORDER_PART_WIDTH != 0 {
+            *width = from.widths[i].clone();
+        }
+        if parts & BORDER_PART_COLOR != 0 {
+            *color = from.colors[i];
+        }
+        if parts & BORDER_PART_STYLE != 0 {
+            *side_style = from.styles[i];
+            BORDER_STYLE_DECLARED.with(|c| {
+                let declared = c.get() & !bit;
+                c.set(declared | (from.declared & bit));
+            });
+        }
+        // A UA width of `Zero` is "unset" on an element the UA gave no
+        // style (a div): with a declared style the side is `medium`, as
+        // `border-style` alone makes it (`div { border: 5px solid }` then
+        // `border-width: revert` is 3px in Chromium). On a control the UA
+        // declared the style and `Zero` is its own frame: left alone.
+        if parts & BORDER_PART_WIDTH != 0
+            && from.declared & bit == 0
+            && BORDER_STYLE_DECLARED.with(|c| c.get() & bit != 0)
+        {
+            medium_if_unset(width, *side_style);
+        }
     }
 }
 
@@ -24133,6 +26065,9 @@ fn note_ua_border_sides(style: &ComputedStyle) {
             note_border_style(bit);
         }
     }
+    // Author rules come after this point: what the border is now is the
+    // UA's, which `revert` restores.
+    UA_BORDER.with(|c| *c.borrow_mut() = Some(BorderSnapshot::take(style)));
 }
 
 /// CH2.B18 R1 hold 2: a side no origin gave a `border-style` is `none`
@@ -24140,17 +26075,21 @@ fn note_ua_border_sides(style: &ComputedStyle) {
 /// said, a keyword or a length (CSS Backgrounds 3 §3.3; Chromium 143:
 /// `div { border-width: thick }` is 0px). RustKit's initial `BorderStyle`
 /// is `Solid`, so the cascade tracks which sides were declared instead.
-/// The `border` shorthands count as declaring a style (RustKit keeps
-/// `Solid` for one without a style keyword).
+/// The `border` shorthands count as declaring a style; one without a style
+/// keyword declares `none` (`border_style_keyword`).
 fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
     let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
-    for (bit, width) in [
-        (BORDER_SIDE_TOP, &mut style.border_top_width),
-        (BORDER_SIDE_RIGHT, &mut style.border_right_width),
-        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_width),
-        (BORDER_SIDE_LEFT, &mut style.border_left_width),
+    for (bit, side_style, width) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_style, &mut style.border_top_width),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_style, &mut style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_style, &mut style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &mut style.border_left_style, &mut style.border_left_width),
     ] {
         if declared & bit == 0 {
+            // CH2.B18b: the style too, so a width written after the
+            // cascade (an animation or transition, `on_style`) is zeroed
+            // again by `zero_width_of_borderless_sides`.
+            *side_style = rustkit_css::BorderStyle::None;
             *width = rustkit_css::Length::Zero;
         }
     }
@@ -27237,63 +29176,240 @@ fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
-/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+/// The TIGHT geometry bbox of a path, in user units, as Chrome's
+/// `getBBox()` / `getBoundingClientRect()` report it (stroke excluded).
 ///
-/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
-/// bbox of its control points — that is a superset, and Chrome reports the
-/// tight bbox — so bounding one from its control points would report a box
-/// larger than the shape and call the difference a geometry defect. Refusing
-/// leaves the element UNMEASURED, which is the honest reading; the tight
-/// extrema of a cubic are a separate unit.
-fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+/// A Bezier's bbox is NOT the bbox of its control points — that is a
+/// superset — so curves contribute their endpoints plus the interior
+/// extrema where the derivative is zero, and arcs are converted to center
+/// parameterization (SVG 2 Appendix B.2.4, radii scaled up when too small
+/// for the chord) and contribute their endpoints plus every axis extremum
+/// the swept angle crosses. Matches Chrome for Testing 148 on the chrome
+/// board's logo wave and the inspector's arc icons
+/// (`curved_and_arc_paths_report_chromes_tight_bbox`).
+fn path_tight_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
     use rustkit_svg::PathCommand as C;
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let (mut cx, mut cy) = (0.0f32, 0.0f32);
-    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    // The previous segment's last control point, for S/T reflection: Some
+    // only right after a cubic (for S) or a quad (for T).
+    let mut last_cubic_ctrl: Option<(f64, f64)> = None;
+    let mut last_quad_ctrl: Option<(f64, f64)> = None;
+
+    fn cubic_extrema(p0: f64, p1: f64, p2: f64, p3: f64) -> Vec<f64> {
+        // B'(t)/3 = a t^2 + b t + c
+        let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+        let b = 2.0 * (p0 - 2.0 * p1 + p2);
+        let c = p1 - p0;
+        let mut ts = Vec::new();
+        if a.abs() < 1e-12 {
+            if b.abs() > 1e-12 {
+                ts.push(-c / b);
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let r = disc.sqrt();
+                ts.push((-b + r) / (2.0 * a));
+                ts.push((-b - r) / (2.0 * a));
+            }
+        }
+        ts.into_iter().filter(|t| *t > 0.0 && *t < 1.0).collect()
+    }
+    fn cubic_at(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+        let u = 1.0 - t;
+        u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+    }
+    fn push_cubic(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+    ) {
+        let mut ts = cubic_extrema(p0.0, p1.0, p2.0, p3.0);
+        ts.extend(cubic_extrema(p0.1, p1.1, p2.1, p3.1));
+        for t in ts {
+            points.push((cubic_at(p0.0, p1.0, p2.0, p3.0, t), cubic_at(p0.1, p1.1, p2.1, p3.1, t)));
+        }
+        points.push(p3);
+    }
+    fn push_quad(points: &mut Vec<(f64, f64)>, p0: (f64, f64), p1: (f64, f64), p2: (f64, f64)) {
+        // A quad is the cubic with control points p0 + 2/3 (p1 - p0), p2 + 2/3 (p1 - p2).
+        let c1 = (p0.0 + 2.0 / 3.0 * (p1.0 - p0.0), p0.1 + 2.0 / 3.0 * (p1.1 - p0.1));
+        let c2 = (p2.0 + 2.0 / 3.0 * (p1.0 - p2.0), p2.1 + 2.0 / 3.0 * (p1.1 - p2.1));
+        push_cubic(points, p0, c1, c2, p2);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push_arc(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        rx: f64,
+        ry: f64,
+        phi_deg: f64,
+        large: bool,
+        sweep: bool,
+        p1: (f64, f64),
+    ) {
+        points.push(p1);
+        let (mut rx, mut ry) = (rx.abs(), ry.abs());
+        if rx == 0.0 || ry == 0.0 || p0 == p1 {
+            return; // a straight line (or nothing): the endpoints bound it
+        }
+        let phi = phi_deg.to_radians();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let dx = (p0.0 - p1.0) / 2.0;
+        let dy = (p0.1 - p1.1) / 2.0;
+        let x1p = cos_phi * dx + sin_phi * dy;
+        let y1p = -sin_phi * dx + cos_phi * dy;
+        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lambda > 1.0 {
+            let s = lambda.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut coef = if den == 0.0 { 0.0 } else { (num / den).max(0.0).sqrt() };
+        if large == sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1p / ry;
+        let cyp = -coef * ry * x1p / rx;
+        let ccx = cos_phi * cxp - sin_phi * cyp + (p0.0 + p1.0) / 2.0;
+        let ccy = sin_phi * cxp + cos_phi * cyp + (p0.1 + p1.1) / 2.0;
+        let angle = |ux: f64, uy: f64, vx: f64, vy: f64| -> f64 {
+            (ux * vy - uy * vx).atan2(ux * vx + uy * vy)
+        };
+        let ux = (x1p - cxp) / rx;
+        let uy = (y1p - cyp) / ry;
+        let theta1 = angle(1.0, 0.0, ux, uy);
+        let mut dtheta = angle(ux, uy, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+        let tau = std::f64::consts::TAU;
+        if !sweep && dtheta > 0.0 {
+            dtheta -= tau;
+        } else if sweep && dtheta < 0.0 {
+            dtheta += tau;
+        }
+        let at = |t: f64| -> (f64, f64) {
+            let (s, c) = t.sin_cos();
+            (
+                ccx + rx * cos_phi * c - ry * sin_phi * s,
+                ccy + rx * sin_phi * c + ry * cos_phi * s,
+            )
+        };
+        // dx/dθ = 0 and dy/dθ = 0, each with its antipode.
+        let tx = (-ry * sin_phi).atan2(rx * cos_phi);
+        let ty = (ry * cos_phi).atan2(rx * sin_phi);
+        let (lo, hi) = if dtheta >= 0.0 {
+            (theta1, theta1 + dtheta)
+        } else {
+            (theta1 + dtheta, theta1)
+        };
+        for base in [tx, tx + std::f64::consts::PI, ty, ty + std::f64::consts::PI] {
+            // Every representative of `base` inside [lo, hi].
+            let mut t = base + ((lo - base) / tau).ceil() * tau;
+            while t <= hi {
+                points.push(at(t));
+                t += tau;
+            }
+        }
+    }
+
     for cmd in commands {
+        let mut cubic_ctrl = None;
+        let mut quad_ctrl = None;
         match *cmd {
             C::MoveTo(x, y) => {
-                (cx, cy) = (x, y);
-                (sx, sy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
+                (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::MoveToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::LineTo(x, y) => {
-                (cx, cy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
                 points.push((cx, cy));
             }
             C::LineToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 points.push((cx, cy));
             }
             C::HorizontalTo(x) => {
-                cx = x;
+                cx = x as f64;
                 points.push((cx, cy));
             }
             C::HorizontalToRel(dx) => {
-                cx += dx;
+                cx += dx as f64;
                 points.push((cx, cy));
             }
             C::VerticalTo(y) => {
-                cy = y;
+                cy = y as f64;
                 points.push((cx, cy));
             }
             C::VerticalToRel(dy) => {
-                cy += dy;
+                cy += dy as f64;
                 points.push((cx, cy));
+            }
+            C::CubicTo(x1, y1, x2, y2, x, y) | C::CubicToRel(x1, y1, x2, y2, x, y) => {
+                let rel = matches!(cmd, C::CubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = (ox + x1 as f64, oy + y1 as f64);
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::SmoothCubicTo(x2, y2, x, y) | C::SmoothCubicToRel(x2, y2, x, y) => {
+                let rel = matches!(cmd, C::SmoothCubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = last_cubic_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::QuadTo(x1, y1, x, y) | C::QuadToRel(x1, y1, x, y) => {
+                let rel = matches!(cmd, C::QuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = (ox + x1 as f64, oy + y1 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::SmoothQuadTo(x, y) | C::SmoothQuadToRel(x, y) => {
+                let rel = matches!(cmd, C::SmoothQuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = last_quad_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::ArcTo(rx, ry, rot, large, sweep, x, y)
+            | C::ArcToRel(rx, ry, rot, large, sweep, x, y) => {
+                let rel = matches!(cmd, C::ArcToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let end = (ox + x as f64, oy + y as f64);
+                push_arc(&mut points, (cx, cy), rx as f64, ry as f64, rot as f64, large, sweep, end);
+                (cx, cy) = end;
             }
             C::Close => {
                 (cx, cy) = (sx, sy);
             }
-            // Any curve or arc: refuse the whole path.
-            _ => return None,
         }
+        last_cubic_ctrl = cubic_ctrl;
+        last_quad_ctrl = quad_ctrl;
     }
-    bounds_of_points(&points)
+    let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    bounds_of_points(&pts)
 }
 
 /// The user-space geometry bbox of one SVG shape element, or `None` where the
@@ -27345,7 +29461,7 @@ fn svg_shape_user_bbox(
         }
         "path" => {
             let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
-            straight_path_bbox(&commands)
+            path_tight_bbox(&commands)
         }
         // Everything else is UNMODELLED and stays unmeasured, deliberately:
         // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
@@ -28312,6 +30428,43 @@ mod tests {
         }
     }
 
+    /// Curved and arc paths get their TIGHT geometry bbox, as Chrome reports
+    /// it. Expected values are Chrome for Testing 148 `getBBox()` on the same
+    /// `d` strings (impl-board2 probe, 2026-11-08); they include the chrome
+    /// board's logo wave and the inspector's refresh and warning icons, which
+    /// were `missing_box` join failures on every chrome and inspector row.
+    #[test]
+    fn curved_and_arc_paths_report_chromes_tight_bbox() {
+        let cases: [(&str, [f32; 4]); 9] = [
+            ("M10 10 C 20 20, 40 20, 50 10", [10.0, 10.0, 40.0, 7.5]),
+            ("M2 13C4 13 6 9 9 9C12 9 14 13 17 13C20 13 22 9 22 9", [2.0, 9.0, 20.0, 4.0]),
+            ("M10 50 C 10 70 30 70 30 50 S 50 30 50 50", [10.0, 35.0, 40.0, 30.0]),
+            ("M10 80 Q 30 100 50 80 T 90 80", [10.0, 70.0, 80.0, 20.0]),
+            ("m10 30 q 20 -20 40 0 t 40 0", [10.0, 20.0, 80.0, 20.0]),
+            (
+                "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+                [1.0, 3.002364, 22.0, 17.995272],
+            ),
+            (
+                "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+                [1.551981, 2.897256, 20.896038, 18.102745],
+            ),
+            ("M60 60 A 20 10 30 1 1 90 70", [55.914055, 45.310505, 36.05552, 24.689495]),
+            // Radii too small for the chord are scaled up (SVG 2 §9.5.1 step 3).
+            ("M60 20 A 5 5 0 0 1 80 20", [60.0, 10.0, 20.0, 10.0]),
+        ];
+        for (d, want) in cases {
+            let attrs: HashMap<String, String> =
+                [("d".to_string(), d.to_string())].into_iter().collect();
+            let got = svg_shape_user_bbox("path", &attrs)
+                .unwrap_or_else(|| panic!("{d}: refused, Chrome reports {want:?}"));
+            let got = [got.0, got.1, got.2, got.3];
+            for (axis, (g, w)) in ["x", "y", "width", "height"].iter().zip(got.iter().zip(want)) {
+                assert!((g - w).abs() < 1e-3, "{d} {axis}: {g} vs Chrome {w}");
+            }
+        }
+    }
+
     /// The refusals, which are the load-bearing half: a shape this exporter
     /// does not model EXACTLY must produce NO box, leaving Gate A to file it
     /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
@@ -28333,12 +30486,12 @@ mod tests {
             }
         };
 
-        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
-        // bbox Chrome reports), an element carrying a transform this walk does
-        // not compose, a <text> needing shaped glyph extents, and a <use>
-        // rustkit-svg's renderer does not resolve. Plus one straight-line
-        // path and one rect, which MUST still come through — a refusal that
-        // refuses everything would pass this test vacuously.
+        // An element carrying a transform this walk does not compose, a
+        // <text> needing shaped glyph extents, and a <use> rustkit-svg's
+        // renderer does not resolve. Plus one cubic Bezier (exported with its
+        // TIGHT bbox, which is not its control points' bbox), one
+        // straight-line path and one rect, which MUST come through — a
+        // refusal that refuses everything would pass this test vacuously.
         let html = r##"<!DOCTYPE html><html><body>
             <svg width="100" height="100" viewBox="0 0 100 100">
               <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
@@ -28366,10 +30519,15 @@ mod tests {
             selectors.contains(&"rect:nth-of-type(2)"),
             "the untransformed rect must be exported; got {selectors:?}"
         );
-        assert!(
-            !selectors.contains(&"path:nth-of-type(1)"),
-            "a path with a cubic Bezier must be REFUSED, not bounded by its \
-             control points; got {selectors:?}"
+        let curve = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(1)")
+            .unwrap_or_else(|| panic!("the cubic path must be exported; got {selectors:?}"));
+        // Chrome 148 getBBox(): 10,10 40x7.5 (control points would say 40x10).
+        assert_eq!(
+            (curve.x, curve.y, curve.width, curve.height),
+            (10.0, 10.0, 40.0, 7.5)
         );
         assert!(
             !selectors.contains(&"rect:nth-of-type(1)"),
@@ -28386,8 +30544,8 @@ mod tests {
         );
         assert_eq!(
             entry.shapes.len(),
-            2,
-            "exactly the two modelled shapes; got {selectors:?}"
+            3,
+            "exactly the three modelled shapes; got {selectors:?}"
         );
 
         // The straight path's bbox is the tight one: M10 10 L30 40 spans
@@ -31594,6 +33752,27 @@ mod element_identity_tests {
         });
         assert_eq!(b.element_id(), Some(42));
         assert_eq!(b.identity().map(|i| i.element_id), Some(42));
+    }
+
+    /// Chrome's `getSelector()` builds body's OWN segment (tag + class) before it
+    /// reaches `html`, so a classed body reports `html > body.focus-mode`
+    /// (chrome board, focus_mode rows: Chrome `html > body.focus-mode`, RustKit
+    /// `html > body`, one missing_box + one phantom_box on every size). Its
+    /// descendants still hang off a bare `body`.
+    #[test]
+    fn reported_selector_keeps_the_class_of_a_classed_body() {
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "focus-mode")])),
+            "html > body.focus-mode"
+        );
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("class", "  a  b ")])),
+            "html > body.a b"
+        );
+        assert_eq!(
+            Engine::reported_selector("body > div.x", &attrs(&[("class", "x")])),
+            "body > div.x"
+        );
     }
 
     /// The join key is only worth anything if it actually JOINS. This walks the
@@ -39796,7 +41975,7 @@ impl SubjectCompound {
                 parts.push(SubjectPart::Id(css_ident(&rest[..end]).into_owned()));
                 remaining = &rest[end..];
             } else if let Some(rest) = remaining.strip_prefix('[') {
-                let end = rest.find(']').unwrap_or(rest.len());
+                let end = SelectorMatcher::attr_bracket_end(rest);
                 parts.push(SubjectPart::Attr(rest[..end].to_string()));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
@@ -39917,6 +42096,10 @@ thread_local! {
     /// NodeId: a frame's document built inside the build numbers its nodes
     /// from 1 too, and every node outlives the build.
     static HAS_MEMO: std::cell::RefCell<Option<HashMap<(usize, String), bool>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Where each element the walk named sits among its siblings, by node address, for
+    /// one build (CH2.E51; installed and cleared with [`HAS_MEMO`] by `HasMemoScope`).
+    static STRUCTURAL_CONTEXT: std::cell::RefCell<Option<HashMap<usize, SiblingContext>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -40193,6 +42376,7 @@ impl HasMemoScope {
             let fresh = m.is_none();
             if fresh {
                 *m = Some(HashMap::new());
+                STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = Some(HashMap::new()));
             }
             fresh
         }))
@@ -40203,8 +42387,49 @@ impl Drop for HasMemoScope {
     fn drop(&mut self) {
         if self.0 {
             HAS_MEMO.with(|m| *m.borrow_mut() = None);
+            STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = None);
         }
     }
+}
+
+/// The tree-structural pseudo-classes (Selectors 4 §14), by name.
+const STRUCTURAL_PSEUDOS: &[&str] = &[
+    "first-child",
+    "last-child",
+    "only-child",
+    "nth-child",
+    "nth-last-child",
+    "first-of-type",
+    "last-of-type",
+    "only-of-type",
+    "nth-of-type",
+    "nth-last-of-type",
+];
+
+/// Whether the structural pseudo-class `name(arg)` holds for `node`, its
+/// position read from the tree by the one evaluator the subject uses
+/// (`match_pseudo_class`). The position (`SiblingContext`, which costs a scan
+/// of the parent's children) is memoised per node for the build, in
+/// [`STRUCTURAL_CONTEXT`] (the DOM does not change inside a build):
+/// `tr:nth-child(even) td` asks about the same `tr` once for every cell in
+/// it, and does not allocate to ask.
+fn structural_holds(node: &Rc<Node>, name: &str, arg: Option<&str>) -> bool {
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return true;
+    };
+    let address = Rc::as_ptr(node) as usize;
+    let tag = lower_tag(tag_name);
+    let known = STRUCTURAL_CONTEXT.with(|m| m.borrow().as_ref().and_then(|m| m.get(&address).copied()));
+    let sib = known.unwrap_or_else(|| {
+        let sib = dom_sibling_context(node, &tag, Engine::node_has_children(node));
+        STRUCTURAL_CONTEXT.with(|m| {
+            if let Some(m) = m.borrow_mut().as_mut() {
+                m.insert(address, sib);
+            }
+        });
+        sib
+    });
+    SelectorMatcher.match_pseudo_class(name, arg, &tag, sib, attributes)
 }
 
 /// Whether the element the compound under test is for matches
@@ -40501,6 +42726,16 @@ struct AncestorCompound {
     /// One entry per `:is()`/`:where()` in the compound: some alternative
     /// must match.
     any_of: Vec<AnyOf>,
+    /// The tree-structural pseudo-classes (`:first-child`, `:nth-child(2)`,
+    /// ...), as (name, argument). The chain carries no sibling position, so
+    /// they are decided against the DOM element the walk names
+    /// (`RELATIONAL_NODE`), with the position read from the tree and
+    /// memoised for the build (CH2.E51). Without a named element they stay
+    /// permissive, as before.
+    structural: Vec<(String, Option<String>)>,
+    /// `:not(<one structural pseudo-class>)` members (`:not(:first-child)`):
+    /// decided the same way, and none may hold. `undecided` too, as `structural`.
+    not_structural: Vec<(String, Option<String>)>,
     /// The `[...]` parts, brackets off. Tested only against an ancestor
     /// that carries its attributes (`AncestorKey`).
     attrs: Vec<String>,
@@ -40663,6 +42898,13 @@ impl AncestorCompound {
                                         false => Some(AncestorCompound::parse(member.trim())),
                                     };
                                     match parsed {
+                                        // `:not(:first-child)`: a member that is one structural
+                                        // pseudo-class and nothing else is decided against the
+                                        // DOM element the walk names (CH2.E51).
+                                        Some(m) if m.is_one_structural_pseudo() => {
+                                            out.not_structural.extend(m.structural);
+                                            out.undecided = true;
+                                        }
                                         // `:not(:hover)`: nothing is, so it excludes nothing.
                                         Some(m) if m.never => {}
                                         Some(m) if !m.undecided => {
@@ -40694,8 +42936,19 @@ impl AncestorCompound {
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
-                            // Structural and the rest need context the tuple
-                            // does not carry: permissive.
+                            // Structural pseudo-classes: the position is not in
+                            // the tuple, so it is read from the DOM element
+                            // the walk names (CH2.E51). Still `undecided`
+                            // (inside `:not()` a maybe excludes nothing),
+                            // and `:nth-child(.. of S)` stays permissive.
+                            (n, a) if STRUCTURAL_PSEUDOS.contains(&n)
+                                && !a.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(" of ")) =>
+                            {
+                                out.structural.push((name.clone(), arg.clone()));
+                                out.undecided = true;
+                            }
+                            // The rest need context the tuple does not
+                            // carry: permissive.
                             _ => out.undecided = true,
                         }
                         i = next;
@@ -40765,19 +43018,23 @@ impl AncestorCompound {
     /// `:is()` members decided against that ancestor's own chain.
     fn matches_ancestor_in_chain(&self, ancestors: &[Ancestor], idx: usize) -> bool {
         let ancestor = &ancestors[idx];
-        self.matches_ancestor(ancestor) && {
-            let (tag, classes, id, attributes) = &**ancestor;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
-        }
+        self.matches_ancestor(ancestor)
+            && self.structural_hold_for_the_named_node()
+            && {
+                let (tag, classes, id, attributes) = &**ancestor;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
+            }
     }
 
     /// [`Self::matches_sibling`], with the complex `:is()` members decided
     /// against the sibling's chain, which is the subject's.
     fn matches_sibling_in_chain(&self, prev: &SiblingKey, ancestors: &[Ancestor]) -> bool {
-        self.matches_sibling(prev) && {
-            let (tag, classes, id, _) = prev;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
-        }
+        self.matches_sibling(prev)
+            && self.node_parts_hold(prev, true)
+            && {
+                let (tag, classes, id, _) = prev;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
+            }
     }
 
     /// Every `:is()` with a complex member holds for the element known by
@@ -40875,7 +43132,80 @@ impl AncestorCompound {
     /// [`RELATIONAL_NODE`]: a `:has()` reads its subtree, and a complex
     /// `:is()` member's own walk reads its DOM siblings.
     fn needs_node(&self) -> bool {
-        self.relational || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+        self.relational || self.has_structural() || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+    }
+
+    /// The structural pseudo-classes against the DOM element the walk
+    /// named for this ancestor (`RELATIONAL_NODE`); permissive without one.
+    fn structural_hold_for_the_named_node(&self) -> bool {
+        if !self.has_structural() {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        self.structural_holds_for(&node)
+    }
+
+    /// A structural pseudo-class, or a `:not()` of one, is in the compound.
+    fn has_structural(&self) -> bool {
+        !self.structural.is_empty() || !self.not_structural.is_empty()
+    }
+
+    /// Every structural pseudo-class holds for `node` and no `:not()` one does.
+    fn structural_holds_for(&self, node: &Rc<Node>) -> bool {
+        self.structural.iter().all(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+            && !self.not_structural.iter().any(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+    }
+
+    /// The compound is exactly one structural pseudo-class: no tag, class,
+    /// id, attribute, state, `:is()`, `:not()` or `:has()`.
+    fn is_one_structural_pseudo(&self) -> bool {
+        self.structural.len() == 1
+            && !self.never
+            && self.tag.is_none()
+            && self.classes.is_empty()
+            && self.id.is_none()
+            && self.attrs.is_empty()
+            && self.state.is_empty()
+            && self.not_state.is_empty()
+            && self.any_of.is_empty()
+            && self.none_of.is_empty()
+            && self.not_structural.is_empty()
+            && self.has.is_empty()
+            && !self.relational
+    }
+
+    /// [`Self::needs_node`] for a compound left of `+` / `~`: an earlier
+    /// sibling's key carries no attributes either (`SiblingKey`), so its
+    /// `[...]` and `:not([...])` parts are read from the DOM element too.
+    fn needs_node_as_sibling(&self) -> bool {
+        self.needs_node() || !self.attrs.is_empty() || !self.none_of.is_empty()
+    }
+
+    /// The parts of the compound a key tuple cannot decide, for the DOM
+    /// element the walk names (`RELATIONAL_NODE`): its structural
+    /// pseudo-classes and, for an earlier sibling (`attrs_too`), its
+    /// attribute selectors. Permissive where no element is named.
+    fn node_parts_hold(&self, key: &SiblingKey, attrs_too: bool) -> bool {
+        if !self.has_structural() && !(attrs_too && (!self.attrs.is_empty() || !self.none_of.is_empty())) {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        if !self.structural_holds_for(&node) {
+            return false;
+        }
+        if !attrs_too || (self.attrs.is_empty() && self.none_of.is_empty()) {
+            return true;
+        }
+        let NodeType::Element { attributes, .. } = &node.node_type else {
+            return true;
+        };
+        let (tag, classes, id, _) = key;
+        self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id.as_ref(), Some(attributes)))
     }
 }
 
@@ -42219,9 +44549,13 @@ impl SelectorReads {
                         "" => {}
                         // `:has()` on an ancestor reads its subtree, which
                         // the chain key does not hold.
+                        // A structural pseudo-class on an ancestor reads
+                        // that ancestor's place among its siblings (CH2.E51),
+                        // which the chain key does not hold either: elements
+                        // alike in every key can differ in it.
                         " " | ">" => {
                             self.note_ancestor(compound);
-                            positional |= compound.relational;
+                            positional |= compound.relational || compound.has_structural();
                         }
                         _ => positional = true,
                     }
@@ -42237,8 +44571,8 @@ impl SelectorReads {
             let name = SelectorMatcher::attr_selector_name(attr).to_string();
             if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                 let tests = self.attribute_tests.entry(name.clone()).or_default();
-                if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                    tests.push((op, value.to_string()));
+                if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                    tests.push((op, value.into_owned()));
                 }
             }
             self.ancestor_attributes.insert(name);
@@ -42307,8 +44641,8 @@ impl SelectorReads {
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                            tests.push((op, value.to_string()));
+                        if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                            tests.push((op, value.into_owned()));
                         }
                     }
                 }
@@ -42961,6 +45295,12 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
+}
+
+thread_local! {
+    /// LAT14: why the last animation frame on this thread needed a layout
+    /// (`Engine::paint_animation_frame`'s miss), for the relayout line.
+    static LAST_ANIMATION_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 thread_local! {
@@ -43944,7 +46284,7 @@ mod style_share_tests {
             assert_eq!(keyed.len(), kept.len());
             for test in tests {
                 let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
-                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                let at = kept.iter().position(|(o, v)| *o == op && *v == *operand).expect("kept");
                 assert_eq!(
                     keyed[at],
                     SelectorMatcher.match_attribute_selector(test, &attributes),
@@ -45008,9 +47348,12 @@ mod windows_engine_pins {
             .iter()
             .map(|t| {
                 let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                // The UA heading sizes are em of the parent (CH2.B31); the
+                // cascade absolutizes them, here against the 16px default.
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
-                    other => panic!("<{t}> font-size is {other:?}, expected Px"),
+                    rustkit_css::Length::Em(em) => em * 16.0,
+                    other => panic!("<{t}> font-size is {other:?}, expected Px or Em"),
                 }
             })
             .collect();

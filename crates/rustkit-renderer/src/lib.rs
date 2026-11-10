@@ -56,6 +56,8 @@ mod glyph_grid;
 mod scroll_cost_tests;
 #[cfg(test)]
 mod layer_cost_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod face_cache_tests;
 pub use frame_stats::FrameStats;
 mod glyph;
 mod pipeline;
@@ -65,6 +67,21 @@ pub use screenshot::CaptureMetadata;
 mod shaders;
 
 pub use glyph::*;
+/// The smoothing probe the glyph-mask law follows (`glyph::coverage_for`).
+#[cfg(target_os = "macos")]
+pub use rustkit_text::macos::{smooth_behavior, smooth_behavior_of, SmoothBehavior};
+
+/// Log the CoreGraphics smoothing probe the glyph-mask law follows, once
+/// per process (a `None` from a font that failed to load is otherwise
+/// silent: every glyph would take the undilated outline).
+#[cfg(target_os = "macos")]
+fn log_smooth_probe_once() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        let (behavior, how) = rustkit_text::macos::smooth_probe();
+        tracing::info!(?behavior, how, "CoreGraphics font smoothing probe (glyph-mask law)");
+    });
+}
 pub use pipeline::*;
 pub use screenshot::*;
 
@@ -611,6 +628,8 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RendererError> {
+        #[cfg(target_os = "macos")]
+        log_smooth_probe_once();
         // Create uniform buffer
         let uniforms = Uniforms {
             viewport_size: [800.0, 600.0],
@@ -2842,6 +2861,68 @@ impl Renderer {
 
     /// Process a single display command.
     fn process_command(&mut self, cmd: &DisplayCommand) {
+        // The vector primitives push their triangles straight into the
+        // color batch, so the clip in force is applied to what they pushed
+        // (CB1a: the Mode select's arrow, a `Polyline`, painted over the
+        // toolbar from inside chrome.html's collapsed, `overflow: hidden`
+        // sidebar; radios leaked the same way). Rects and glyphs clip as
+        // they are emitted. `Polyline` and `StrokePolygon` clip through the
+        // `Line`s they become.
+        if matches!(
+            cmd,
+            DisplayCommand::Line { .. }
+                | DisplayCommand::FillPolygon { .. }
+                | DisplayCommand::FillCircle { .. }
+                | DisplayCommand::StrokeCircle { .. }
+                | DisplayCommand::FillEllipse { .. }
+        ) {
+            let (v0, i0) = (self.color_vertices.len(), self.color_indices.len());
+            self.process_command_unclipped(cmd);
+            self.clip_pushed_triangles(v0, i0);
+            return;
+        }
+        self.process_command_unclipped(cmd);
+    }
+
+    /// Clip the color triangles pushed since `(v0, i0)` (vertices, indices)
+    /// to the clip rect in force, in screen space, where those primitives
+    /// put their vertices. A rounded clip's corners are not applied (its
+    /// rect is): no vector primitive reached a rounded clip on the board.
+    fn clip_pushed_triangles(&mut self, v0: usize, i0: usize) {
+        let Some(clip) = self.clip_stack.last().map(|e| e.rect) else {
+            return;
+        };
+        let new = &self.color_vertices[v0..];
+        if new.is_empty() {
+            return;
+        }
+        let inside = new.iter().all(|v| {
+            let [x, y] = v.position;
+            x >= clip.x && x <= clip.x + clip.width && y >= clip.y && y <= clip.y + clip.height
+        });
+        if inside {
+            return;
+        }
+        let vertices: Vec<ColorVertex> = self.color_vertices.drain(v0..).collect();
+        let indices: Vec<u32> = self.color_indices.drain(i0..).collect();
+        for tri in indices.chunks_exact(3) {
+            let poly: Vec<ColorVertex> = tri
+                .iter()
+                .map(|&i| vertices[i as usize - v0])
+                .collect();
+            let kept = clip_polygon_to_rect(&poly, clip);
+            if kept.len() < 3 {
+                continue;
+            }
+            let base = self.color_vertices.len() as u32;
+            self.color_vertices.extend_from_slice(&kept);
+            for k in 1..kept.len() as u32 - 1 {
+                self.color_indices.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+        }
+    }
+
+    fn process_command_unclipped(&mut self, cmd: &DisplayCommand) {
         match cmd {
             DisplayCommand::SolidColor(color, rect) => {
                 self.draw_solid_rect(*rect, *color);
@@ -2883,14 +2964,17 @@ impl Renderer {
                 advances,
                 ascent,
                 run,
+                faces,
+                undilated,
             } => {
                 // SHAPED-RUN CONTRACT (S0): a command that carries its run
                 // is painted from the run. The family-list path below is
                 // for commands without one, and for a run whose face the
-                // rasterizer no longer holds.
+                // rasterizer no longer holds; it reads the FACE CONTRACT's
+                // record (`faces`) for which face draws each character.
                 let painted_from_run = run
                     .as_deref()
-                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent, *undilated));
                 if !painted_from_run {
                     self.draw_text_with_metrics(
                         text,
@@ -2903,6 +2987,8 @@ impl Renderer {
                         *font_style,
                         advances.as_deref(),
                         *ascent,
+                        faces.as_deref(),
+                        *undilated,
                     );
                 }
             }
@@ -3326,6 +3412,7 @@ impl Renderer {
                 rect,
                 advances,
                 ascent,
+                faces,
             } => {
                 // Glyph quads are alpha-textured and tinted per VERTEX, so
                 // gradient text needs no offscreen mask: each glyph's left
@@ -3349,6 +3436,7 @@ impl Renderer {
                     *font_style,
                     advances.as_deref(),
                     *ascent,
+                    faces.as_deref(),
                 );
             }
         }
@@ -5512,6 +5600,8 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
+                false,
             );
         }
 
@@ -5606,6 +5696,8 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
+                false,
             );
         }
         self.pop_clip();
@@ -5683,6 +5775,8 @@ impl Renderer {
                 0,
                 None,
                 Some(ascent),
+                None,
+                false,
             );
         }
         
@@ -5746,7 +5840,11 @@ impl Renderer {
         font_style: u8,
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
+        layout_faces: Option<&[rustkit_text::GlyphFace]>,
     ) {
+        // Skia's luminance for a non-plain paint, once per command.
+        let gradient_coverage =
+            crate::glyph::coverage_for(crate::glyph::GRADIENT_TEXT_LUMINANCE, false);
         let stops = match gradient {
             rustkit_css::Gradient::Linear(g) => &g.stops,
             rustkit_css::Gradient::Radial(g) => &g.stops,
@@ -5824,7 +5922,21 @@ impl Renderer {
         let baseline = y
             + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
 
-        for (char_idx, ch) in text.chars().enumerate() {
+        // FACE CONTRACT, as for `Text`: layout's record of the face each
+        // character was measured in when the command carries one, else the
+        // same decision (`select_face`) made in the glyph cache on this
+        // font from the selector after the character. The face's glyph is
+        // taken as a coverage mask (a colour face's artwork by its alpha)
+        // and tinted; nothing here decides a face or keys an entry by the
+        // undecided selector.
+        let chars: Vec<char> = text.chars().collect();
+        let faces = layout_faces.filter(|faces| faces.len() == chars.len());
+        for (char_idx, &ch) in chars.iter().enumerate() {
+            let next = chars.get(char_idx + 1).copied();
+            let face = match faces {
+                Some(faces) => FaceKey::Recorded(faces[char_idx]),
+                None => FaceKey::Auto(rustkit_text::Variation::after(next)),
+            };
             let key = GlyphKey {
                 // FROZEN AT 0 until the rasterizer can draw at a phase --
                 // see GlyphKey::subpixel_phase. Pixels are bit-identical to
@@ -5836,9 +5948,31 @@ impl Renderer {
                 font_weight,
                 font_style,
                 web_face,
+                face,
+                coverage: gradient_coverage,
             };
+            let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
-            if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
+            #[cfg(target_os = "macos")]
+            let drawn = self
+                .glyph_cache
+                .get_or_rasterize_faced_mask(&self.queue, &key);
+            #[cfg(not(target_os = "macos"))]
+            let drawn = self
+                .glyph_cache
+                .get_or_rasterize(&self.device, &self.queue, &key);
+
+            let Some(entry) = drawn else {
+                // Nothing to draw (a selector, or a character no face has):
+                // the advance is still owed, as on the `Text` path.
+                cursor_x += layout_advance.unwrap_or(if rustkit_text::is_default_ignorable(ch) {
+                    0.0
+                } else {
+                    font_size * 0.6
+                });
+                continue;
+            };
+            {
                 let glyph_x = cursor_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
@@ -5884,9 +6018,7 @@ impl Renderer {
                     base + 3,
                 ]);
 
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
+                cursor_x += layout_advance.unwrap_or(entry.advance);
             }
         }
     }
@@ -5975,13 +6107,17 @@ impl Renderer {
         y: f32,
         color: Color,
         layout_ascent: Option<f32>,
+        undilated: bool,
     ) -> bool {
         // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        // The glyph-mask law for the run's colour (`glyph::coverage_for`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let key_for = |glyph_id: u16| RunGlyphKey {
             face: run.face.id,
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage,
         };
 
         // Every glyph's bitmap first, so a missing face is known before a
@@ -6076,8 +6212,13 @@ impl Renderer {
         font_style: u8,
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
+        layout_faces: Option<&[rustkit_text::GlyphFace]>,
+        undilated: bool,
     ) {
         let mut cursor_x = x;
+        // The glyph-mask law for this colour, once per command
+        // (`glyph::coverage_for` costs three `powf`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let c = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
@@ -6119,7 +6260,19 @@ impl Renderer {
         let atlas_size = self.glyph_cache.atlas_size() as f32;
         let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
-        for (char_idx, ch) in text.chars().enumerate() {
+        let chars: Vec<char> = text.chars().collect();
+        // FACE CONTRACT: layout's record of the face each character was
+        // measured in, when the command carries one for this text. Paint
+        // draws from it and decides nothing; a legacy command without one
+        // gets the same decision (`select_face`) made in the rasterizer on
+        // its own font, from the selector after the character.
+        let faces = layout_faces.filter(|faces| faces.len() == chars.len());
+        for (char_idx, &ch) in chars.iter().enumerate() {
+            let next = chars.get(char_idx + 1).copied();
+            let face = match faces {
+                Some(faces) => FaceKey::Recorded(faces[char_idx]),
+                None => FaceKey::Auto(rustkit_text::Variation::after(next)),
+            };
             let key = GlyphKey {
                 // FROZEN AT 0 until the rasterizer can draw at a phase --
                 // see GlyphKey::subpixel_phase. Pixels are bit-identical to
@@ -6131,131 +6284,144 @@ impl Renderer {
                 font_weight,
                 font_style,
                 web_face,
+                face,
+                coverage,
+            };
+            // ADVANCE CONTRACT: layout's advance wins when present so
+            // painted ink tracks measured width 1:1; the atlas advance is
+            // the fallback for legacy callers.
+            let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
+
+            // The glyph, and whether it is colour artwork (the RGBA atlas +
+            // blit pipeline, untinted) or a coverage mask (the grayscale
+            // atlas the text pipeline tints). On macOS the face in the key
+            // decides the path (`get_or_rasterize_faced`): a colour face's
+            // glyph is colour, any other a mask, whatever the character.
+            #[cfg(target_os = "macos")]
+            let drawn = self.glyph_cache.get_or_rasterize_faced(&self.queue, &key);
+            #[cfg(windows)]
+            let drawn = {
+                let _ = &face;
+                let colour = if rustkit_text::is_emoji(ch) {
+                    self.glyph_cache
+                        .get_or_rasterize_color(&self.device, &self.queue, &key)
+                        .map(|entry| (entry, true))
+                } else {
+                    None
+                };
+                colour.or_else(|| {
+                    self.glyph_cache
+                        .get_or_rasterize(&self.device, &self.queue, &key)
+                        .map(|entry| (entry, false))
+                })
+            };
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let drawn = {
+                let _ = &face;
+                self.glyph_cache
+                    .get_or_rasterize(&self.device, &self.queue, &key)
+                    .map(|entry| (entry, false))
             };
 
-            // Color-glyph (emoji) path: paint the real color-bitmap artwork via
-            // the RGBA atlas + blit pipeline, not the grayscale coverage mask
-            // the normal path would tint into a flat blob. Falls through to the
-            // grayscale path if the char isn't a color glyph or has no color
-            // artwork (e.g. non-macOS).
-            #[cfg(any(target_os = "macos", windows))]
-            let is_color = rustkit_text::is_emoji(ch);
-            #[cfg(not(any(target_os = "macos", windows)))]
-            let is_color = false;
-            if is_color {
-                if let Some(entry) =
-                    self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key)
-                {
-                    let glyph_x = cursor_x + entry.offset[0];
-                    let glyph_y = baseline + entry.offset[1];
-                    let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
-                    let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+            let Some((entry, colour)) = drawn else {
+                // Nothing to draw (a selector, or a character no face has):
+                // the advance is still owed — layout's, else nothing for a
+                // selector and an estimate for anything else.
+                cursor_x += layout_advance.unwrap_or(if rustkit_text::is_default_ignorable(ch) {
+                    0.0
+                } else {
+                    font_size * 0.6
+                });
+                continue;
+            };
 
-                    // The advance is owed whether or not the glyph survives
-                    // the clip — a clipped-away glyph still occupies its run.
-                    cursor_x += layout_advances
-                        .and_then(|a| a.get(char_idx).copied())
-                        .unwrap_or(entry.advance);
+            let glyph_x = cursor_x + entry.offset[0];
+            let glyph_y = baseline + entry.offset[1];
+            let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+            let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
-                    for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
-                        .textured_pieces(
-                            Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                            entry.tex_coords,
-                        )
-                    {
-                        // White vertex color: the blit pipeline multiplies, so this
-                        // passes the emoji's own colors through untinted. Preserve
-                        // the run's alpha for opacity/fade. The emoji is
-                        // premultiplied, so a rounded clip's partial coverage
-                        // scales every channel.
-                        let cw = [coverage, coverage, coverage, color.a * coverage];
-                        let base = self.color_glyph_vertices.len() as u32;
-                        self.color_glyph_vertices.extend_from_slice(&[
-                            TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
-                            TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
-                            TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
-                            TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
-                        ]);
-                        self.color_glyph_indices.extend_from_slice(&[
-                            base, base + 1, base + 2,
-                            base, base + 2, base + 3,
-                        ]);
-                    }
-                    continue;
-                }
-            }
+            // The advance is owed whether or not the glyph survives the
+            // clip — a clipped-away glyph still occupies its run.
+            cursor_x += layout_advance.unwrap_or(entry.advance);
 
-            // Clone the entry to avoid borrow issues
-            if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
-                let glyph_y = baseline + entry.offset[1];
-
-                // PAINT-0: sample chars only — x (ex-height), H (cap), g
-                // (descender) cover the three seating regimes.
-                if matches!(ch, 'x' | 'H' | 'g') && crate::paint0_probe() {
-                    eprintln!(
-                        "PAINT0 glyph ch={:?} fs={} baseline={} bearing_y={} glyph_y={}",
-                        ch,
-                        font_size,
-                        baseline,
-                        -entry.offset[1],
-                        glyph_y
-                    );
-                }
-                let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
-                let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
-
-                // ADVANCE CONTRACT: layout's advance wins when present so
-                // painted ink tracks measured width 1:1; the atlas advance
-                // is the fallback for legacy callers. Owed before the clip
-                // check — a clipped-away glyph still occupies its run.
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
-
-                // `overflow: hidden` clips glyphs like everything else.
+            if colour {
                 for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
                     .textured_pieces(
                         Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
                         entry.tex_coords,
                     )
                 {
-                    let c = [c[0], c[1], c[2], c[3] * coverage];
-                    let base = self.texture_vertices.len() as u32;
-
-                    self.texture_vertices.extend_from_slice(&[
-                        TextureVertex {
-                            position: [x0, y0],
-                            tex_coords: [tex[0], tex[1]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x1, y1],
-                            tex_coords: [tex[2], tex[1]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x2, y2],
-                            tex_coords: [tex[2], tex[3]],
-                            color: c,
-                        },
-                        TextureVertex {
-                            position: [x3, y3],
-                            tex_coords: [tex[0], tex[3]],
-                            color: c,
-                        },
+                    // White vertex color: the blit pipeline multiplies, so this
+                    // passes the emoji's own colors through untinted. Preserve
+                    // the run's alpha for opacity/fade. The emoji is
+                    // premultiplied, so a rounded clip's partial coverage
+                    // scales every channel.
+                    let cw = [coverage, coverage, coverage, color.a * coverage];
+                    let base = self.color_glyph_vertices.len() as u32;
+                    self.color_glyph_vertices.extend_from_slice(&[
+                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
                     ]);
-
-                    self.texture_indices.extend_from_slice(&[
+                    self.color_glyph_indices.extend_from_slice(&[
                         base, base + 1, base + 2,
                         base, base + 2, base + 3,
                     ]);
                 }
-            } else {
-                // Fallback: advance by estimated width (or layout's, if given)
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(font_size * 0.6);
+                continue;
+            }
+
+            // PAINT-0: sample chars only — x (ex-height), H (cap), g
+            // (descender) cover the three seating regimes.
+            if matches!(ch, 'x' | 'H' | 'g') && crate::paint0_probe() {
+                eprintln!(
+                    "PAINT0 glyph ch={:?} fs={} baseline={} bearing_y={} glyph_y={}",
+                    ch,
+                    font_size,
+                    baseline,
+                    -entry.offset[1],
+                    glyph_y
+                );
+            }
+
+            // `overflow: hidden` clips glyphs like everything else.
+            for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in self
+                .textured_pieces(
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                )
+            {
+                let c = [c[0], c[1], c[2], c[3] * coverage];
+                let base = self.texture_vertices.len() as u32;
+
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [tex[0], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [tex[2], tex[1]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [tex[2], tex[3]],
+                        color: c,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [tex[0], tex[3]],
+                        color: c,
+                    },
+                ]);
+
+                self.texture_indices.extend_from_slice(&[
+                    base, base + 1, base + 2,
+                    base, base + 2, base + 3,
+                ]);
             }
         }
     }
@@ -9983,6 +10149,55 @@ const LIST_BOX_SELECTED_TEXT: Color = Color {
     a: 1.0,
 };
 
+/// Sutherland-Hodgman: the part of convex polygon `poly` inside `clip`,
+/// colours interpolated along the cut edges.
+fn clip_polygon_to_rect(poly: &[ColorVertex], clip: Rect) -> Vec<ColorVertex> {
+    let lerp = |a: &ColorVertex, b: &ColorVertex, t: f32| {
+        let mut v = *a;
+        for i in 0..2 {
+            v.position[i] = a.position[i] + (b.position[i] - a.position[i]) * t;
+        }
+        for i in 0..4 {
+            v.color[i] = a.color[i] + (b.color[i] - a.color[i]) * t;
+        }
+        v
+    };
+    // (axis, bound, keep the side >= bound)
+    let edges = [
+        (0, clip.x, true),
+        (0, clip.x + clip.width, false),
+        (1, clip.y, true),
+        (1, clip.y + clip.height, false),
+    ];
+    let mut out: Vec<ColorVertex> = poly.to_vec();
+    for (axis, bound, keep_above) in edges {
+        if out.is_empty() {
+            break;
+        }
+        let inside = |v: &ColorVertex| {
+            if keep_above {
+                v.position[axis] >= bound
+            } else {
+                v.position[axis] <= bound
+            }
+        };
+        let input = std::mem::take(&mut out);
+        for i in 0..input.len() {
+            let cur = &input[i];
+            let prev = &input[(i + input.len() - 1) % input.len()];
+            let (ci, pi) = (inside(cur), inside(prev));
+            if ci != pi {
+                let t = (bound - prev.position[axis]) / (cur.position[axis] - prev.position[axis]);
+                out.push(lerp(prev, cur, t));
+            }
+            if ci {
+                out.push(*cur);
+            }
+        }
+    }
+    out
+}
+
 /// Centre of a drop-down's arrow in its border box `rect`.
 fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
     (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
@@ -10016,6 +10231,25 @@ mod select_paint_tests {
         let (bx, by) = menu_list_arrow_centre(big);
         assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
         assert_eq!(by, 187.0);
+    }
+
+    fn v(x: f32, y: f32) -> ColorVertex {
+        ColorVertex { position: [x, y], color: [1.0, 1.0, 1.0, 1.0] }
+    }
+
+    /// CB1a: a primitive wholly outside the clip keeps nothing; one cut by
+    /// it keeps only the inside part.
+    #[test]
+    fn a_vector_triangle_is_cut_to_the_clip_rect() {
+        let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let outside = [v(20.0, 0.0), v(30.0, 0.0), v(20.0, 5.0)];
+        assert!(clip_polygon_to_rect(&outside, clip).is_empty());
+        let inside = [v(1.0, 1.0), v(5.0, 1.0), v(1.0, 5.0)];
+        assert_eq!(clip_polygon_to_rect(&inside, clip).len(), 3);
+        let cut = clip_polygon_to_rect(&[v(5.0, 2.0), v(15.0, 2.0), v(5.0, 8.0)], clip);
+        assert!(cut.len() >= 3);
+        assert!(cut.iter().all(|p| p.position[0] <= 10.0 + 1e-4));
+        assert!(cut.iter().any(|p| (p.position[0] - 10.0).abs() < 1e-4));
     }
 
     /// Chrome's option rows stack from the inside of the frame: 16px rows
@@ -10182,6 +10416,7 @@ mod shaped_run_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
@@ -10283,6 +10518,7 @@ mod shaped_run_measured_face_tests {
             glyph_id: run.glyphs[0].glyph_id,
             font_size: 140,
             subpixel_phase: 0,
+            coverage: 0,
         };
         let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
         assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
@@ -10313,6 +10549,7 @@ mod shaped_run_windows_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 

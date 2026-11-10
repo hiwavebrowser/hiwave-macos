@@ -21,7 +21,7 @@ it:
    lane that scored that green would be the instrument lie this campaign
    exists to end — a did-not-run wearing a green check.
 3. A red suite is reported RED.
-4. It runs on macos-14, and F1's whole-workspace compile falsifier survives.
+4. It runs on macos-15, and F1's whole-workspace compile falsifier survives.
 
 Property 4 is static (there is nothing to execute); 1-3 are behavioural.
 
@@ -185,8 +185,8 @@ def test_the_lane_is_blocking():
 
 
 def test_the_lane_runs_where_coretext_is():
-    assert _lane()["runs-on"] == "macos-14", (
-        "the unit suites must run on macos-14: two of #199's justify tests are "
+    assert _lane()["runs-on"] == "macos-15", (
+        "the unit suites must run on macos-15: two of #199's justify tests are "
         "green on CoreText and red on a Linux font stack (measured 09-17), so "
         "a ubuntu lane would red-lock on font substitution"
     )

@@ -244,6 +244,55 @@ def set_tab_urls(node, url):
 
 # ── frames ─────────────────────────────────────────────────────────────────
 
+def resize_ack(out):
+    """The acknowledgement `hwdrive resize` measured itself, from its JSON
+    line: (ack_ms, ax_ms). ack_ms is request to the window server showing
+    the asked size; None if the window did not reach it within hwdrive's
+    2 s, or if this hwdrive predates the field (it then slept a fixed
+    400 ms and timed nothing)."""
+    def ms(key):
+        v = out.get(key) if isinstance(out, dict) else None
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return ms("ack_ms"), ms("ax_ms")
+
+
+def resize_request_epoch(out):
+    """hwdrive's own wall-clock time of the resize request (`req_epoch`,
+    Unix seconds, the clock the app log's UTC stamps use), or None."""
+    v = out.get("req_epoch") if isinstance(out, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def page_view_id(log, base):
+    """The engine view the fixture page was loaded into: the first
+    `Loading URL id=EngineViewId(N) url=<fixture base>/...` line. The
+    chrome is another view and loads no fixture URL."""
+    m = re.search(r"Loading URL id=EngineViewId\((\d+)\) url=%s/" % re.escape(base), log)
+    return int(m.group(1)) if m else None
+
+
+RELAYOUT_RESIZE = re.compile(
+    r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b.*?"
+    r"relayout\{id=EngineViewId\((\d+)\).*\brelayout cause=resize\b", re.M)
+
+
+def resize_relayouts(log, t0):
+    """For information: each engine view's first `relayout cause=resize`
+    line stamped at or after `t0` (epoch seconds), as {view id: ms after t0},
+    from the app log's own UTC timestamps. That is when the view laid its
+    page out at the new size, which is a separate figure from the window's
+    acknowledgement: a page whose thread is busy (a load, a runaway script)
+    lays out later."""
+    import datetime
+    got = {}
+    for m in RELAYOUT_RESIZE.finditer(log):
+        when = datetime.datetime.fromisoformat(m.group(1)[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+        view = int(m.group(2))
+        if when >= t0 and view not in got:
+            got[view] = round((when - t0) * 1000, 1)
+    return got
+
+
 def count_colours(png_path, colours, tolerance=48):
     """How many pixels of the frame are within `tolerance` of each colour."""
     from PIL import Image
@@ -875,6 +924,9 @@ class Driver:
             (self.out / ("%s.inline.app.log" % c)).write_text(self.app.log_text())
         self.close_page()
 
+    # The engine's line for a script the budget stopped (load or live turn).
+    STOP_LINE = r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)"
+
     def h19_spin(self):
         """H19: a script that does not end is stopped at the app's script budget (15 s) and the page is shown."""
         c = "h19_spin"
@@ -886,23 +938,30 @@ class Driver:
         self.expect(c, "the engine started the page's script", bool(running))
         if not running:
             return
+        # The page's own stop, then its load's end. Not the first
+        # `Navigation finished`: the RustKit chrome loads its own page beside
+        # this one, on its own thread, and writes that line too (batch 44:
+        # 0 s after the page's script started, 15 s before its stop).
         started = time.time()
-        m = self.app.wait_log(r"Navigation finished", 45, running.end())
+        stopped = self.app.wait_log(self.STOP_LINE, 45, running.end())
+        m = stopped and self.app.wait_log(r"Navigation finished", 5, running.end() + stopped.end())
         took = time.time() - started
         self.expect(c, "the load finished within 45 s of the script's start", bool(m),
                     "%.0f s; app alive: %s" % (took, self.app.alive()))
         if not m:
             return
-        self.expect(c, "the script was given its budget before it was stopped", took > 10, "%.0f s" % took)
-        # The window is frozen while the script runs, so the budget is also
-        # the longest freeze a page can cause: it must not creep back up.
-        self.expect(c, "the window was not held much past the 15 s budget", took < 25, "%.0f s" % took)
-        # The log says so itself: which script, how long the window was held.
-        stopped = self.app.wait_log(r"Script stopped at the script budget source=(\S+) elapsed_ms=(\d+) late_ms=(\d+)",
-                                    2, running.end())
+        # How long the script ran is the engine's own figure: the page runs
+        # on the content thread, and the wall clock here also counts the
+        # driver's polling.
+        ran = int(stopped.group(2)) / 1000
+        self.expect(c, "the script was given its budget before it was stopped", ran > 10, "%.1f s" % ran)
+        # The page's thread is held while the script runs, so the budget is
+        # also the longest a page can hold it: it must not creep back up.
+        self.expect(c, "the window was not held much past the 15 s budget", ran < 25, "%.1f s" % ran)
+        # The log says so itself: which script, how long it ran.
         self.expect(c, "the app log names the stopped script and how long it ran",
-                    bool(stopped) and 10000 < int(stopped.group(2)) < 25000,
-                    stopped.group(0) if stopped else "no 'Script stopped at the script budget' line")
+                    stopped.group(1).startswith("inline#") and 10000 < int(stopped.group(2)) < 25000,
+                    stopped.group(0))
         time.sleep(1.0)
         frame = self.frame(c, "after", [GREEN])
         if frame is None:
@@ -944,13 +1003,33 @@ class Driver:
         self.expect(c, "%s: the window thread was never held %d ms or more" % (during, self.LIMIT_MS),
                     not holds, "holds (ms): %s" % (holds or "none"))
 
-    def expect_controls(self, c, during, close=False):
-        """A new tab, a resize and (if asked) closing the tab, each answered
-        within LIMIT_MS. Written without a seat that can post input: expect to
-        fix these the first time they run."""
+    def expect_controls(self, c, during, close=False, new_tab=True, frame="info"):
+        """A resize, a new tab and (if asked) closing the tab, each answered
+        within LIMIT_MS.
+
+        The resize is answered when the window server shows the new size, as
+        `hwdrive resize` times it itself (ack_ms); until T36 this timed the
+        whole hwdrive subprocess, which ended in a fixed 400 ms sleep and so
+        could never pass (TRIAGE-i0a-2026-11-09). The page view's first frame
+        laid out at the new size (its first `relayout cause=resize` in the
+        app log, timed from hwdrive's own request time) is asserted against
+        the same limit when `frame="assert"` (i0a_layout) and reported for
+        information otherwise: a runaway script or a load in progress holds
+        the page's thread, and that is LAT15/LAT17's to fix, not a resize
+        bug.
+
+        The resize comes first: Cmd+T loads the start page into the same
+        content view, and the frame must be the page under test's.
+
+        `new_tab=False` leaves out Cmd+T: a check that goes on measuring the
+        page cannot open one (i0a_script, i0a_nav; i0a_layout and i0a_close
+        keep it)."""
         if not self.can_input:
-            for what in ["a new tab (Cmd+T)", "a resize"] + (["closing the tab (Cmd+W)"] if close else []):
+            for what in ["a resize"] + (["a new tab (Cmd+T)"] if new_tab else []) + (["closing the tab (Cmd+W)"] if close else []):
                 self.not_run(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
+                             self.why_not("Accessibility"))
+            if frame == "assert":
+                self.not_run(c, "%s: the page is laid out at the new size within %d ms" % (during, self.LIMIT_MS),
                              self.why_not("Accessibility"))
             return
         pid, limit = self.app.proc.pid, self.LIMIT_MS / 1000
@@ -963,22 +1042,60 @@ class Driver:
             self.expect(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
                         bool(m) and took < limit, "%.0f ms" % (took * 1000) if m else "no log line in 3 s")
 
-        key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
         if self.can_resize:
-            code, win = self.hw("window", pid)
-            w, h = int(win.get("w", 1200)) - 120, int(win.get("h", 800)) - 80
-            t0 = time.time()
-            code, out = self.hw("resize", pid, w, h)
-            took = time.time() - t0
-            code2, now = self.hw("window", pid)
-            self.expect(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
-                        code == 0 and took < limit and abs(now.get("w", 0) - w) < 4,
-                        "%.0f ms; asked %dx%d, window %s" % (took * 1000, w, h, json.dumps(now)))
+            self.expect_resize(c, during, pid, frame)
         else:
             self.not_run(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
                          self.why_not("Accessibility"))
+            if frame == "assert":
+                self.not_run(c, "%s: the page is laid out at the new size within %d ms" % (during, self.LIMIT_MS),
+                             self.why_not("Accessibility"))
+        if new_tab:
+            key(17, r"New tab - navigating to start page", "a new tab (Cmd+T)")
         if close:
             key(13, r"Closed tab", "closing the tab (Cmd+W)")
+
+    def expect_resize(self, c, during, pid, frame):
+        code, win = self.hw("window", pid)
+        w, h = int(win.get("w", 1200)) - 120, int(win.get("h", 800)) - 80
+        t0 = time.time()
+        code, out = self.hw("resize", pid, w, h)
+        took = time.time() - t0
+        # The answer is hwdrive's own figure (request to the window server
+        # showing the new size). The subprocess's wall time also counts its
+        # spawn and window lookup, and it is kept for information only.
+        ack, ax = resize_ack(out)
+        has_ack = isinstance(out, dict) and "ack_ms" in out
+        code2, now = self.hw("window", pid)
+        # The page view's first frame laid out at the new size, timed from
+        # hwdrive's request (req_epoch), not from before hwdrive was spawned.
+        req = resize_request_epoch(out)
+        view = page_view_id(self.app.log_text(), self.fixture.base)
+        wait = 2.0 if frame == "assert" else 0.3
+        end = time.time() + wait
+        laid = resize_relayouts(self.app.log_text(), req) if req is not None else {}
+        while req is not None and view is not None and view not in laid and time.time() < end:
+            time.sleep(0.05)
+            laid = resize_relayouts(self.app.log_text(), req)
+        ms = laid.get(view) if view is not None else None
+        others = ", ".join("view %d +%.0f ms" % kv for kv in sorted(laid.items()) if kv[0] != view)
+        detail = "%s; page view %s%s" % (
+            "%.0f ms after the request" % ms if ms is not None
+            else "no req_epoch from hwdrive" if req is None
+            else "no fixture load in the log" if view is None
+            else "no relayout cause=resize in %.1f s" % wait,
+            view if view is not None else "?", "; other views (info): " + others if others else "")
+        ack_detail = ("ack %s (AX set %s); subprocess wall %.0f ms; asked %dx%d, window %s"
+                      % ("%.1f ms" % ack if ack is not None else "none in 2 s" if has_ack else "not reported",
+                         "%.1f ms" % ax if ax is not None else "-", took * 1000, w, h, json.dumps(now)))
+        if frame != "assert":
+            ack_detail += "; info, not asserted: the page's first frame at the new size: " + detail
+        self.expect(c, "%s: a resize is answered within %d ms" % (during, self.LIMIT_MS),
+                    code == 0 and ack is not None and ack < self.LIMIT_MS and abs(now.get("w", 0) - w) < 4,
+                    ack_detail)
+        if frame == "assert":
+            self.expect(c, "%s: the page is laid out at the new size within %d ms" % (during, self.LIMIT_MS),
+                        ms is not None and ms < self.LIMIT_MS, detail)
 
     def start_spin(self, c):
         """Opens the page whose timer starts an endless script and returns the
@@ -1002,27 +1119,34 @@ class Driver:
         return len(self.app.log_text()) if log_from is not None else None
 
     def i0a_script(self):
-        """I0(a): a script that does not end leaves the window usable."""
+        """I0(a): a script that does not end leaves the window usable, is stopped at the turn budget (5 s), and the page carries on."""
         c = "i0a_script"
         log_from = self.start_spin(c)
         if self.app is None or not self.app.alive():
             return
-        self.expect_controls(c, "while the script runs")
+        spin_from = len(self.app.log_text())
+        # No Cmd+T here: the new tab would take the content view this check
+        # goes on measuring (batch 44: its start page loaded the moment the
+        # stop freed the page's thread). i0a_close presses it during the
+        # same spin.
+        self.expect_controls(c, "while the script runs", new_tab=False)
         time.sleep(5)
         self.expect_no_hold(c, "5 s of the script running", log_from)
-        # The lesser claim, while script still runs on the window's thread:
-        # the hold ends. The app stops the script at its turn budget (5 s).
-        if log_from is not None:
-            ended = self.app.wait_log(r"Window thread held ms=(\d+)", 5, log_from)
-            self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
-                        ended.group(0) if ended else "still held: %s ms" % self.holds(log_from))
-            mark = self.fixture.mark()
-            self.expect(c, "the page ticks again afterwards",
-                        bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
-            asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
-            self.expect(c, "a request made in the turn that was stopped is answered to the page",
-                        bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
-                        "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
+        # The page's script runs on the content thread, so the window thread
+        # is never held and its stall log has no hold to end: the hold that
+        # ends is the page thread's, at the live turn budget (5 s), and the
+        # engine says so.
+        stopped = self.app.wait_log(self.STOP_LINE, 5, spin_from)
+        ended = stopped if stopped and stopped.group(1) == "timers" else None
+        self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
+                    ended.group(0) if ended else "no 'Script stopped at the script budget source=timers' line")
+        mark = self.fixture.mark()
+        self.expect(c, "the page ticks again afterwards",
+                    bool(ended) and self.fixture.wait("beacon?i0a-spin-tick-", 3, mark))
+        asked = self.fixture.seen("beacon?i0a-spin-asked", self.since)
+        self.expect(c, "a request made in the turn that was stopped is answered to the page",
+                    bool(asked) and self.fixture.wait("beacon?i0a-spin-answered", 3, self.since),
+                    "asked %d, onload %d" % (len(asked), len(self.fixture.seen("beacon?i0a-spin-answered", self.since))))
         frame = self.frame(c, "during", [GREEN])
         if frame is None:
             return self.not_run(c, "the window still shows the page's green image", self.why_not("Screen Recording"))
@@ -1039,7 +1163,9 @@ class Driver:
         turned = self.fixture.wait("beacon?i0a-layout-turn-", 60, self.since, count=6)
         self.expect(c, "the page changed every box's width six times", turned,
                     "%d turns" % len(self.fixture.seen("beacon?i0a-layout-turn-", self.since)))
-        self.expect_controls(c, "while the page lays out")
+        # The one I0(a) page whose thread is not knowingly held: its first
+        # frame at the new size is asserted, not only reported.
+        self.expect_controls(c, "while the page lays out", frame="assert")
         self.expect_no_hold(c, "the load and six layouts", log_from)
 
     def i0a_nav(self):
@@ -1048,7 +1174,12 @@ class Driver:
         if not self.open_page(c, "i0a_nav.html?n=1", self.STALL_ENV):
             return
         log_from = self.stall_log_on(c)
-        self.expect_controls(c, "while the first page loads")
+        # No Cmd+T here, as in i0a_script: the new tab's start page goes into
+        # the content view this check goes on measuring, and in batch 47 it
+        # cancelled page 1 before its first script ran, so no visit, no
+        # leaving and no green frame could be seen (TRIAGE-i0a-2026-11-09).
+        # i0a_layout and i0a_close still press it.
+        self.expect_controls(c, "while the first page loads", new_tab=False)
         last = self.fixture.wait("beacon?i0a-nav-last", 40, self.since)
         starts = [p.rsplit("-", 1)[1] for p in self.fixture.seen("beacon?i0a-nav-start-", self.since)]
         self.expect(c, "the five visits happened in order and the last one finished", last and starts == list("12345"),
@@ -2010,6 +2141,131 @@ class Driver:
             code, win = self.hw("window", pid)
             subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)])
 
+    # ── M1: Cmd+W closes the active tab every time ─────────────────────────
+
+    CLOSE_IPC = r'RustKit chrome IPC body=\{"cmd":"close_tab","id":"(\d+)"\}'
+
+    def m1_tabs(self, c, n):
+        """Cmd+T until `n` more tabs exist. Returns the new tab ids, in order."""
+        pid, made = self.app.proc.pid, []
+        for _ in range(n):
+            log_from = len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")
+            m = self.app.wait_log(r"Created tab: TabId\((\d+)\)", 5, log_from)
+            if m:
+                made.append(m.group(1))
+            time.sleep(0.8)
+        self.expect(c, "Cmd+T made %d tabs" % n, len(made) == n, "made %s" % made)
+        return made
+
+    def m1_cmd_w(self, c, what, want=None):
+        """One Cmd+W: the chrome posts close_tab (for tab `want` if given) and the app closes it.
+        Returns the id it closed, or None."""
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("key", pid, 13, "cmd")
+        ipc = self.app.wait_log(self.CLOSE_IPC, 3, log_from)
+        closed = self.app.wait_log(r"Closed tab: TabId\((\d+)\)", 3, log_from) if ipc else None
+        ok = bool(ipc) and bool(closed) and (want is None or ipc.group(1) == want)
+        self.expect(c, "%s: the chrome sent close_tab%s and the app closed it" % (
+            what, " for tab %s" % want if want else ""), ok,
+            ("close_tab %s, closed %s" % (ipc.group(1), closed.group(1) if closed else "nothing")) if ipc
+            else ("menu event logged, no close_tab in 3 s" if self.app.wait_log(r'menu event id="close_tab"', 0, log_from)
+                  else "no menu event in 3 s"))
+        time.sleep(0.8)
+        return ipc.group(1) if ok else None
+
+    def m1_saved_tabs(self):
+        """How many tabs the app's saved state holds (it saves on each close)."""
+        try:
+            return len(tab_urls(json.loads(self.app.state_file.read_text())))
+        except (OSError, ValueError):
+            return None
+
+    def m1_cmd_w_repeat(self):
+        """M1: three tabs, Cmd+W three times: each press closes the active tab and no tab is left."""
+        c = "m1_cmd_w_repeat"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "Cmd+W three times", self.why_not("Accessibility"))
+        restored = self.m1_saved_tabs()
+        self.expect(c, "the app was restored on one tab", restored == 1, "saved tabs %s" % restored)
+        self.m1_tabs(c, 2)
+        for press in (1, 2, 3):
+            self.m1_cmd_w(c, "Cmd+W #%d" % press)
+        left = self.m1_saved_tabs()
+        self.expect(c, "no tab is left after three Cmd+W", left == 0, "saved tabs %s" % left)
+        self.expect(c, "the app is still running", self.app.alive())
+
+    def m1_cmd_w_after_clicks(self):
+        """M1: Cmd+W after clicking a background tab closes that tab; after a tab's close button, Cmd+W closes the active tab of the rest."""
+        c = "m1_cmd_w_after_clicks"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "clicks on tabs, then Cmd+W", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        made = self.m1_tabs(c, 3)
+        # Cmd+T left the last new tab active. Walk the strip's row left to
+        # right (6 px steps; a tab is 100-180 px wide) until a click
+        # activates another tab: where a tab sits is not fixed, the strip
+        # scrolls its active tab to the centre and clips the tab at its left
+        # edge. A tab's close button shows under the pointer, so the walk
+        # can close a tab (a clipped tab's button can be the first thing it
+        # meets): then Cmd+T makes a known active tab again and the walk
+        # starts over, at most three times.
+        act, got, active = None, None, made[-1] if made else None
+        for _ in range(3):
+            for x in range(232, 1000, 6):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1] - 9)
+                got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
+                if got and (got.group(1) == "close_tab" or got.group(2) != active):
+                    break
+            if got and got.group(1) == "activate_tab":
+                act = got
+                break
+            time.sleep(0.8)
+            again = self.m1_tabs(c, 1)
+            active = again[-1] if again else active
+        self.expect(c, "a click on a background tab activates it", bool(act),
+                    act.group(0) if act else ("last: %s" % got.group(0) if got else "no other tab on the row"))
+        time.sleep(0.8)
+        if act:
+            self.m1_cmd_w(c, "Cmd+W after the click", act.group(2))
+        # A tab's close button shows on the active tab and under the
+        # pointer. Walk the strip's row left to right (4 px steps, the
+        # button is 16 px) until a click closes a tab. Each click on a tab
+        # activates it and the strip scrolls it to the centre, so the row
+        # moves under the walk: up to three walks.
+        # The tab's block button (block the site and close the tab) sits
+        # left of it and shows the same way: a walk that meets it first
+        # stops there and the step is NOT RUN, not a fail.
+        hit = blocked = None
+        for _ in range(3):
+            for x in range(232, 1000, 4):
+                at = len(self.app.log_text())
+                self.hw("click", pid, x, self.E4_TAB[1])
+                hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
+                blocked = self.app.wait_log(r'"cmd":"block_and_close"', 0, at)
+                if hit or blocked:
+                    break
+            if hit or blocked:
+                break
+        if blocked and not hit:
+            return self.not_run(c, "a click on a tab's close button closes it, then Cmd+W",
+                                "the walk met the tab's block button first (x=%d)" % x)
+        self.expect(c, "a click on a tab's close button closes it", bool(hit),
+                    hit.group(0) if hit else "no close_tab while walking the strip")
+        time.sleep(0.8)
+        if hit:
+            self.m1_cmd_w(c, "Cmd+W after the close button")
+        self.expect(c, "the app is still running", self.app.alive())
+
     # ── CH3.A4: the shelf, the Inspector and settings as RustKit views ──────
 
     # The panel probe reports shapes only (#910 R1): per selector the first
@@ -2783,6 +3039,323 @@ class Driver:
         self.expect(c, "once it is closed, a click on the page reaches the page",
                     self.fixture.wait("beacon?a3-click-", 5, mark))
 
+    # ── M1d: tab shortcuts from a focused page, exactly once ───────────────
+
+    ACTIVATE_IPC = r'RustKit chrome IPC body=\{"cmd":"activate_tab","id":"(\d+)"\}'
+
+    def m1d_press(self, c, what, keycode, mods, want, menu_id):
+        """One chord; within 2 s the chrome posts exactly one activate_tab
+        (for tab `want` if given). `menu_id`: the menu item that must (a
+        string) or must not (False) take it. Returns the activated id."""
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("key", pid, keycode, *mods)
+        self.app.wait_log(self.ACTIVATE_IPC, 3, log_from)
+        time.sleep(2.0)
+        log = self.app.log_text()[log_from:]
+        got = re.findall(self.ACTIVATE_IPC, log)
+        detail = "activate_tab %s" % (got or "none")
+        ok = len(got) == 1 and (want is None or got[0] == want)
+        if menu_id:
+            took = 'menu event id="%s"' % menu_id in log
+            ok = ok and took
+            detail += ", menu %s" % ("took it" if took else "did not take it")
+        elif menu_id is False:
+            menu = re.findall(r'menu event id="(select_[a-z_0-9]+)"', log)
+            ok = ok and not menu
+            detail += ", menu events %s" % (menu or "none")
+        self.expect(c, "%s: switched exactly once%s" % (what, " to tab %s" % want if want else ""), ok, detail)
+        return got[0] if len(got) == 1 else None
+
+    def m1d_beacons(self, mark, needle):
+        return [urllib.parse.unquote(p) for p in self.fixture.seen(needle, mark)]
+
+    def m1d_tab_shortcuts(self):
+        """M1d: five tabs, focus in a page text field: Cmd+3 the third tab, Cmd+9 the last, Ctrl+Tab the next (its Tab release swallowed even with Ctrl let go first; Ctrl+Option+Tab is the page's); with the address bar focused Cmd+2 the second, each exactly once."""
+        c = "m1d_tab_shortcuts"
+        started = self.e3_start(c, page="m1d_keys.html")
+        if not started:
+            return
+        pid, w, h = started
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        made = self.m1_tabs(c, 4)
+        if len(made) != 4:
+            return
+        # The fifth tab onto the keys page, through the address bar (a new
+        # tab's is empty and focused after Cmd+T).
+        mark = self.fixture.mark()
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.4)
+        self.hw("type", pid, "%s/m1d_keys.html?tab=5" % self.fixture.base)
+        self.hw("key", pid, 36)
+        self.expect(c, "the fifth tab loaded the keys page", self.fixture.wait("beacon?m1d-t5-ready", 10, mark))
+        time.sleep(1.0)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        self.m1d_press(c, "Cmd+3 in a page text field", 20, ["cmd"], made[1], "select_tab_3")
+        self.m1d_press(c, "Cmd+9", 25, ["cmd"], made[3], "select_last_tab")
+        time.sleep(1.0)
+        self.e3_focus(c, pid, w, h)
+        # Ctrl let go before Tab: the release carries no Ctrl (R1 nit 1).
+        mark = self.fixture.mark()
+        first = self.m1d_press(c, "Ctrl+Tab in a page text field, Ctrl released first (from the last: wraps to the first)",
+                               48, ["ctrl", "bareup"], None, None)
+        self.expect(c, "Ctrl+Tab's tab is the first (not one Cmd+T made)", first is not None and first not in made,
+                    str(first))
+        heard = self.m1d_beacons(mark, "beacon?m1d-t") 
+        tabs = [b for b in heard if "-Tab-" in b]
+        self.expect(c, "no page heard the Ctrl+Tab press or its release", not tabs, str(tabs))
+        # Ctrl+Option+Tab is not the chord (R1 nit 2): no switch, the page hears it.
+        self.fixture.wait("beacon?m1d-t0-ready", 5, mark)
+        time.sleep(0.8)
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 48, "ctrl", "alt")
+        time.sleep(2.0)
+        switched = re.findall(self.ACTIVATE_IPC, self.app.log_text()[log_from:])
+        down = [b for b in self.m1d_beacons(mark, "beacon?m1d-t0-keydown-Tab") if "-c1-a1" in b]
+        self.expect(c, "Ctrl+Option+Tab: no switch, and the page heard its keydown", not switched and bool(down),
+                    "activate_tab %s, page %s" % (switched or "none", down or "heard nothing"))
+        self.m1d_press(c, "Cmd+Shift+]", 30, ["cmd", "shift"], made[0], "select_next_tab")
+        self.m1d_press(c, "Ctrl+Shift+Tab", 48, ["ctrl", "shift"], first, None)
+        # The address bar focused: the chrome's listener switches and claims
+        # the chord, so the menu does not switch again.
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.6)
+        self.m1d_press(c, "Cmd+2 in the address bar", 19, ["cmd"], made[0], False)
+        self.expect(c, "the app is still running", self.app.alive())
+
+    def m1d_page_keeps_cmd_digits(self):
+        """M1d R1 nit 4: a page that cancels Cmd+1..9 keeps them (Chromium does not reserve them): Cmd+2 in it switches nothing and the page hears it."""
+        c = "m1d_page_keeps_cmd_digits"
+        started = self.e3_start(c, page="m1d_keys.html?prevent")
+        if not started:
+            return
+        pid, w, h = started
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        made = self.m1_tabs(c, 1)
+        if len(made) != 1:
+            return
+        # From the address bar (the chrome's, which switches), back to the page.
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.6)
+        first = self.m1d_press(c, "Cmd+1 in the address bar", 18, ["cmd"], None, False)
+        if first is None:
+            return
+        self.fixture.wait("beacon?m1d-t0-ready", 5, self.since)
+        time.sleep(1.0)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 19, "cmd")  # Cmd+2
+        time.sleep(2.0)
+        log = self.app.log_text()[log_from:]
+        switched = re.findall(self.ACTIVATE_IPC, log)
+        heard = self.m1d_beacons(mark, "beacon?m1d-t0-keydown-2")
+        self.expect(c, "Cmd+2 in a page that cancels it: no switch, no menu event, the page heard it",
+                    not switched and 'menu event id="select_tab_2"' not in log and bool(heard),
+                    "activate_tab %s, page %s" % (switched or "none", heard or "heard nothing"))
+
+    CHORD_TO_MENU = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*Cmd chord went to the menu[^\n]*\bsince_press_ms=(\d+)", re.M)
+    FOCUS_URL_EVENT = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*menu event id=\"focus_url\"", re.M)
+
+    @staticmethod
+    def log_epoch(stamp):
+        import datetime
+        return datetime.datetime.fromisoformat(stamp[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+
+    def m1d_cmd_l_while_loading(self):
+        """M1e (Handtest 11-09): Cmd+L with focus in a page still loading (an image the server holds 8 s; then a page whose thread is busy) takes the address bar within 250 ms of the press, once; Escape then stops the load."""
+        c = "m1d_cmd_l_while_loading"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for query, what in (("slowimg", "an image still loading"), ("busy", "the page's thread busy")):
+            if not self.open_page(c, "m1d_keys.html?" + query, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            # A click into #a: the content view takes the keyboard at once;
+            # the page may hear the click only when its thread is free.
+            self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
+            time.sleep(0.4)
+            # The server holds the image 8 s from its request: still held
+            # with a second to spare. ("Navigation finished" is no guide:
+            # the chrome's own load logs it too.)
+            held = [t for (t, p) in self.fixture.requests[self.since:] if "/slowimg/" in p]
+            age = (time.time() - self.fixture.t0 - held[0]) if held else None
+            loading = age is not None and age < 7.0
+            if query == "slowimg" and not self.expect(c, "%s: the image is still held when Cmd+L is pressed" % what, loading,
+                                                      "requested %s s ago" % (round(age, 1) if age is not None else "never")):
+                self.close_page()
+                continue
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', 3, log_from)
+            log = self.app.log_text()[log_from:]
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            # From the press (the key event's own timestamp, logged by the
+            # view as since_press_ms when the chord went to the menu) to
+            # the menu's focus_url.
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            self.expect(c, "%s: Cmd+L took the address bar within 250 ms of the press" % what,
+                        bool(took) and ms is not None and ms < 250,
+                        "%s ms from the press (driver wall clock %.0f ms); %s" % (
+                            ms, (time.time() - t) * 1000, chord.group(0)[-160:] if chord else "no chord-to-menu line"))
+            if query == "slowimg":
+                # The address bar has the keyboard: Escape there is the
+                # chrome's stop. The chrome's Escape closes an open sidebar
+                # first (chrome.html's keydown, older than M1e), so a
+                # second Escape is the stop then; the note says which.
+                stop_from = len(self.app.log_text())
+                self.hw("key", pid, 53)
+                stopped = self.app.wait_log(r"Stopping load", 1.5, stop_from)
+                presses = 1
+                if not stopped and re.search(r'"cmd":"set_sidebar_width"', self.app.log_text()[stop_from:]):
+                    self.note(c, "%s: the first Escape closed the sidebar" % what, "INFO")
+                    self.hw("key", pid, 53)
+                    presses = 2
+                    stopped = self.app.wait_log(r"Stopping load", 3, stop_from)
+                time.sleep(0.5)
+                after = self.app.log_text()[stop_from:]
+                self.expect(c, "%s: Escape then stopped the load" % what,
+                            bool(stopped) and "Stop: nothing loading" not in after,
+                            "%d Escape; stop: %s; %s" % (presses, bool(stopped),
+                                                         "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+            # The page's late answer (its thread freed by the stop or between
+            # busy spells) is dropped: the menu ran once.
+            self.app.wait_log(r"late answer for a Cmd chord dropped", 4, log_from)
+            time.sleep(0.3)
+            log = self.app.log_text()[log_from:]
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one Cmd+L, one focus_url (the late answer did not run it again)" % what, runs == 1,
+                        "%d focus_url; late answer %s" % (runs, "dropped" if "late answer for a Cmd chord dropped" in log else "not seen"))
+            # Both runs write the check's one log: keep each.
+            (self.out / ("%s.%s.app.log" % (c, query))).write_text(self.app.log_text())
+            self.close_page()
+
+    def m1e_page_keeps_cmd_l(self):
+        """M1e: a page that cancels Cmd+L's keydown in time keeps it, as in Chromium (IDC_FOCUS_LOCATION is not in kReservedCommandIds): the address bar does not take it and the page hears it."""
+        c = "m1e_page_keeps_cmd_l"
+        started = self.e3_start(c, page="m1d_keys.html?preventl")
+        if not started:
+            return
+        pid, w, h = started
+        self.fixture.wait("beacon?m1d-t0-ready", 5, self.since)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(1.5)
+        log = self.app.log_text()[log_from:]
+        heard = self.m1d_beacons(mark, "beacon?m1d-t0-keydown-l")
+        self.expect(c, "Cmd+L in a page that cancels it: no focus_url, the page heard it",
+                    'menu event id="focus_url"' not in log and bool(heard),
+                    "menu %s, page %s" % ("took it" if 'menu event id="focus_url"' in log else "did not take it",
+                                          heard or "heard nothing"))
+
+    def m1f_escape_stops_with_sidebar(self):
+        """M1f: with the sidebar open and a page still loading (an image the server holds 8 s), one Escape in the address bar stops the load and leaves the sidebar open; typed text is reverted first."""
+        c = "m1f_escape_stops_with_sidebar"
+        # The sidebar opened explicitly by the chrome's own toggle once it
+        # boots (#1022 R1 nit 6), not left to the seed profile's default.
+        env = {"HIWAVE_RUSTKIT_CHROME_EVAL": "sidebarOpen = false; sidebar.classList.add('collapsed'); toggleSidebar();"}
+        if not self.open_page(c, "m1d_keys.html?slowimg", env=env):
+            return
+        if not self.can_input:
+            return self.not_run(c, "Escape", self.why_not("Accessibility"))
+        self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        widths = re.findall(r'"cmd":"set_sidebar_width","width":(\d+)', self.app.log_text())
+        self.expect(c, "the sidebar is open (opened by the chrome's toggle)", bool(widths) and int(widths[-1]) > 0,
+                    "last set_sidebar_width: %s" % (widths[-1] if widths else "none"))
+        loading = not re.search(r"Navigation finished[^\n]*m1d_keys", self.app.log_text())
+        # The address bar, right of the sidebar and the nav buttons (as
+        # a2_chrome_typed_url clicks it).
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the address bar", bool(clicked))
+        time.sleep(0.4)
+        # Typed text first: Escape reverts it and does not stop the load.
+        self.hw("type", pid, "zz")
+        time.sleep(0.3)
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        time.sleep(0.6)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "Escape over typed text reverted it: no stop, sidebar untouched",
+                    "Stopping load" not in after and "set_sidebar_width" not in after,
+                    "stop: %s; sidebar posts: %d" % ("Stopping load" in after, after.count("set_sidebar_width")))
+        # Nothing typed now: one Escape stops the load; the sidebar stays.
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        stopped = self.app.wait_log(r"Stopping load", 1.5, esc_from)
+        time.sleep(0.5)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "one Escape stopped the load",
+                    bool(stopped) and "Stop: nothing loading" not in after,
+                    "page was loading at the start: %s; stop: %s; %s" % (
+                        loading, bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+        self.expect(c, "the sidebar stayed open", "set_sidebar_width" not in after,
+                    "sidebar posts after Escape: %d" % after.count("set_sidebar_width"))
+        self.close_page()
+
+    def m1g_cmd_l_slow_listener(self):
+        """M1g (#1023 R1 item 5): a page whose Cmd+L keydown listener runs 300 ms, then one whose listener runs 2 s (neither cancels): Cmd+L reaches the address bar once, after the listener; the time from the press is reported."""
+        c = "m1g_cmd_l_slow_listener"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for ms_listen in (300, 2000):
+            what = "a %d ms listener" % ms_listen
+            if not self.open_page(c, "m1d_keys.html?slowl=%d" % ms_listen, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
+            time.sleep(0.6)
+            mark = self.fixture.mark()
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', ms_listen / 1000.0 + 5, log_from)
+            wall = (time.time() - t) * 1000
+            time.sleep(0.8)
+            log = self.app.log_text()[log_from:]
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            heard = len(self.fixture.seen("beacon?m1g-slowl-heard", mark)) > 0
+            done = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
+            why = re.search(r'why="([^"]*)"', chord.group(0)) if chord else None
+            self.expect(c, "%s: the page heard Cmd+L" % what, heard)
+            self.expect(c, "%s: the listener finished" % what, done)
+            self.expect(c, "%s: Cmd+L took the address bar after the listener, from the page's answer" % what,
+                        bool(took) and ms is not None and ms >= ms_listen and why is not None
+                        and why.group(1) == "the page did not claim it",
+                        "%s ms from the press (driver wall clock %.0f ms); why: %s" % (
+                            ms, wall, why.group(1) if why else "no chord-to-menu line"))
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one focus_url" % what, runs == 1, "%d focus_url" % runs)
+            # The page answered: nothing was given up (#1023 delta HOLD).
+            self.expect(c, "%s: no chord was given up" % what, "never answered" not in log,
+                        "a give-up line appeared" if "never answered" in log else "none")
+            self.note(c, "%s: press to address bar" % what, "INFO", "%s ms" % ms)
+            (self.out / ("%s.%d.app.log" % (c, ms_listen))).write_text(self.app.log_text())
+            self.close_page()
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
@@ -2794,7 +3367,10 @@ class Driver:
               "e4_chrome_tab", "e19_icon_hover", "e22_focus_ring",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
-              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
+              "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l", "m1f_escape_stops_with_sidebar",
+              "m1g_cmd_l_slow_listener"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

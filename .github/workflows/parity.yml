@@ -8,10 +8,13 @@ on:
     - cron: "0 9 * * *"
 
 # A new push to a PR supersedes the run for its previous head, so cancel it
-# instead of finishing eight macos-14 jobs for a commit nobody will merge.
-# Non-PR events get a per-run group and are never cancelled.
+# instead of finishing the macOS jobs for a commit nobody will merge.
+# Only pull_request runs share a group (parity-pr-<number>); push to
+# master/main and the daily schedule get parity-<run_id>, a group of one,
+# and cancel-in-progress is false for them, so they are never cancelled.
+# (T42; syntax per GitHub's workflow-syntax docs, `concurrency` section.)
 concurrency:
-  group: parity-${{ github.event.pull_request.number || github.run_id }}
+  group: parity-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -29,7 +32,7 @@ jobs:
   # conflict markers, and the lib build alone is blind to it. --no-run
   # compiles every test target without executing the suite.
   f1-test-compile:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -55,16 +58,17 @@ jobs:
   # window server and rustkit-media needs an audio device, so a workspace run
   # would red-lock on the environment rather than on the engine.
   #
-  # macos-14 on purpose. Two of #199's justify tests are green on CoreText and
-  # red on a Linux font stack (measured 2026-09-17), so a ubuntu lane would
-  # red-lock on font substitution and teach everyone to ignore it.
+  # macos-15 on purpose (macos-14 was retired 2026-11-02). Two of #199's
+  # justify tests are green on CoreText and red on a Linux font stack
+  # (measured 2026-09-17), so a ubuntu lane would red-lock on font
+  # substitution and teach everyone to ignore it.
   #
   # BLOCKING. It entered advisory-first so its colour on macos-14 could be
   # established; it has been green on every PR run since, so the flip deleted
   # the one `continue-on-error` line. The receipt still goes to the job
   # summary, including did-not-run.
   unit-suites:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +115,7 @@ jobs:
   # an outside review found the threads-plan work in these crates (P3, D1, M2)
   # was compiled on PRs but never executed. Same did-not-run guard as F2.
   render-suites:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -160,7 +164,7 @@ jobs:
   # again (Yahoo-class blind diagnoses). Same did-not-run guard as F2/F2b.
   # Binary crate: `cargo test -p parity-capture` (no --lib).
   capture-suites:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -208,7 +212,7 @@ jobs:
   # BLOCKING: these crates are headless, fast, and verify the Boa 0.22 engine
   # and web bindings invariants.
   js-suites:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -323,6 +327,23 @@ jobs:
         # installed, and died on ModuleNotFoundError the first time CI ran it.
         run: python3 -m pip install --disable-pip-version-check pyyaml
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: tools/parity_oracle
+        # CI2: test_wpt_tier1's fonts-ready pin launches the oracle's
+        # Playwright (headless: true, so chrome-headless-shell). `npm ci`
+        # installs the package, not its browser; without this the pin can only
+        # skip here (it skips on a missing executable, for local seats) and is
+        # live on the Mac alone. Same recipe as the selector-key job above.
+        run: npx playwright install --with-deps chromium-headless-shell
+
       - name: Run every instrument guard
         run: |
           set -euo pipefail
@@ -347,12 +368,12 @@ jobs:
   # ===========================================================================
   pr-swarm:
     if: github.event_name == 'pull_request'
-    runs-on: macos-14
+    runs-on: macos-15
     # 20 -> 35 alongside the scout going 1 -> 3 iterations. Per shard that is
     # ~7 scout units -> ~21, against a fixed 12 exploit units: roughly 1.7x
     # the work. A shard killed by the timeout is a red PR with no receipt at
     # all, which reads the same as a real failure, so the headroom is
-    # deliberate and generous. Wall-clock has NOT been measured on macos-14
+    # deliberate and generous. Wall-clock has NOT been measured on macos-15
     # from this seat (no macOS runner available) — the first PR run after this
     # lands is the measurement.
     timeout-minutes: 35
@@ -408,7 +429,7 @@ jobs:
   pr-aggregate:
     if: github.event_name == 'pull_request'
     needs: pr-swarm
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -657,7 +678,7 @@ jobs:
   # ===========================================================================
   commit-gate:
     if: github.event_name == 'push'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -761,7 +782,7 @@ jobs:
   # ===========================================================================
   nightly-swarm:
     if: github.event_name == 'schedule'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -817,7 +838,7 @@ jobs:
   nightly-aggregate:
     if: github.event_name == 'schedule'
     needs: nightly-swarm
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

@@ -25,7 +25,7 @@ use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, Scr
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(crate) mod editing;
@@ -341,6 +341,11 @@ pub(crate) struct DomHost {
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
+    /// The `<img>` elements (by NodeId) whose `src` or `srcset` script has
+    /// written since the engine last took them, in or out of the document
+    /// and whether or not the value changed: writing either starts the
+    /// image's load over (`DomBindings::take_image_writes`).
+    pub(crate) image_writes: RefCell<HashSet<usize>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -615,6 +620,7 @@ impl DomHost {
         self.submit_requests.clear();
         self.navigation_requests.clear();
         self.inserted_scripts.clear();
+        self.image_writes.get_mut().clear();
         self.generation
     }
 
@@ -990,6 +996,18 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             } else {
                 name.to_string()
             };
+            // An `<img>` in a template's contents is in an inert document:
+            // Chrome does not fetch it, so the engine is not told of it.
+            if op == "setAttr" && tag_name == "img" && matches!(name.as_str(), "src" | "srcset") {
+                let mut top = node.clone();
+                while let Some(parent) = top.parent() {
+                    top = parent;
+                }
+                let in_template = host.templates.borrow().values().any(|content| Rc::ptr_eq(content, &top));
+                if !in_template {
+                    host.image_writes.borrow_mut().insert(node.id.raw());
+                }
+            }
             let mut attributes = attributes.clone();
             let changed = if op == "setAttr" {
                 let value = string_arg(args, 4).unwrap_or("").to_string();
@@ -1725,6 +1743,9 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
             }
         },
         "parent" => node_id(node.parent()),
+        // web_cssom.js: the lifetime of a <style>'s sheet (new children or
+        // a move make a new one); a sheet's `disabled` belongs to one.
+        "sheetGen" => JsValue::Number(node.sheet_generation() as f64),
         "first" => node_id(node.first_child()),
         "last" => node_id(node.last_child()),
         "next" => node_id(node.next_sibling()),
@@ -2437,6 +2458,29 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `set_sheet_disabled(gen, id, on)`: `<style>.sheet.disabled`. The
+    // engine leaves the element's sheet out of the cascade while its text
+    // is the text it had now (web_cssom.js calls again after a CSSOM edit).
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_sheet_disabled",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+                return JsValue::Null;
+            };
+            let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
+            document.set_style_sheet_disabled(&node, on);
+            d.mark(DomDirty::Style, "sheet");
+            JsValue::Null
+        }),
+    )?;
+
     // Its listener and handler errors go to the host natives (`__rk`).
     runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
@@ -2459,12 +2503,13 @@ const WRAPPERS_JS: &str = r#"
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
         hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -3263,14 +3308,25 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
     Element.prototype.hasAttribute = function (name) { return this.getAttribute(name) !== null; };
+    // A write to an `<img>`'s `src` or `srcset` starts its load over
+    // (E54): the marks script reads `complete` and `decode()` from are
+    // updated at once, not on the next event.
+    function imageWritten(el, name) {
+        var n = String(name).toLowerCase();
+        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && document.__rkImageWritten) {
+            document.__rkImageWritten(el);
+        }
+    }
     Element.prototype.setAttribute = function (name, value) {
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
         setData(this, 'setAttr', String(name), String(value), 'setAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.removeAttribute = function (name) {
         setData(this, 'removeAttr', String(name), null, 'removeAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -4323,8 +4379,9 @@ const WRAPPERS_JS: &str = r#"
         if (r.start.node === r.end.node) {
             if (n.nodeType === 3 || n.nodeType === 8) {
                 var data = n.data.slice(r.start.offset, r.end.offset);
-                if (!cutting) frag.appendChild(g.document.createTextNode(data));
-                else n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
+                // Cutting hands the removed text back too (extractContents, surroundContents).
+                frag.appendChild(g.document.createTextNode(data));
+                if (cutting) n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
             } else {
                 var kids = Array.prototype.slice.call(n.childNodes, r.start.offset, r.end.offset);
                 kids.forEach(function (k) {
@@ -4363,6 +4420,74 @@ const WRAPPERS_JS: &str = r#"
     }
     Range.prototype.cloneContents = function () { return contentsOf(this, false); };
     Range.prototype.deleteContents = function () { contentsOf(this, true); };
+    // DOM §5.5 extractContents: what deleteContents removes, handed back.
+    Range.prototype.extractContents = function () { return contentsOf(this, true); };
+    function isInclusiveAncestor(ancestor, node) {
+        for (; node; node = node.parentNode) if (node === ancestor) return true;
+        return false;
+    }
+    // DOM §5.5 insertNode: split a Text start node, insert before the reference
+    // node, and (for a collapsed range) put the end after what went in.
+    Range.prototype.insertNode = function (node) {
+        var r = slots(this, 'insertNode');
+        if (node == null || !node[SLOT]) {
+            throw new TypeError("Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        var s = r.start.node;
+        if (s.nodeType === 8 || (s.nodeType === 3 && !s.parentNode) || s === node) {
+            throw new DOMException("Failed to execute 'insertNode' on 'Range': The node to be inserted cannot be placed at the range start.", 'HierarchyRequestError');
+        }
+        var wasCollapsed = r.start.node === r.end.node && r.start.offset === r.end.offset;
+        var ref;
+        var parent;
+        if (s.nodeType === 3) {
+            var off = r.start.offset;
+            parent = s.parentNode;
+            ref = g.document.createTextNode(s.data.slice(off));
+            s.data = s.data.slice(0, off);
+            parent.insertBefore(ref, s.nextSibling);
+            // The end boundary that sat in the cut-off tail moves with it.
+            if (!wasCollapsed && r.end.node === s && r.end.offset > off) {
+                r.end = { node: ref, offset: r.end.offset - off };
+            }
+        } else {
+            ref = r.start.offset < s.childNodes.length ? s.childNodes[r.start.offset] : null;
+            parent = s;
+        }
+        if (node === ref) ref = ref.nextSibling;
+        var newOffset = (ref ? childIndex(parent, ref) : nodeLength(parent)) + (node.nodeType === 11 ? node.childNodes.length : 1);
+        parent.insertBefore(node, ref);
+        if (wasCollapsed) r.end = { node: parent, offset: newOffset };
+    };
+    // DOM §5.5 surroundContents: refuse a range that cuts an element in two,
+    // empty `newParent`, move the contents into it, and select it.
+    Range.prototype.surroundContents = function (newParent) {
+        var r = slots(this, 'surroundContents');
+        if (newParent == null || !newParent[SLOT]) {
+            throw new TypeError("Failed to execute 'surroundContents' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        function partiallyContained(node) {
+            return node.nodeType !== 3 && isInclusiveAncestor(node, r.start.node) !== isInclusiveAncestor(node, r.end.node);
+        }
+        for (var a = r.start.node; a; a = a.parentNode) {
+            if (partiallyContained(a)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        for (var b = r.end.node; b; b = b.parentNode) {
+            if (partiallyContained(b)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        if (newParent.nodeType === 9 || newParent.nodeType === 10 || newParent.nodeType === 11) {
+            throw new DOMException("Failed to execute 'surroundContents' on 'Range': The node provided is of an invalid type.", 'InvalidNodeTypeError');
+        }
+        var fragment = contentsOf(this, true);
+        while (newParent.firstChild) newParent.removeChild(newParent.firstChild);
+        this.insertNode(newParent);
+        newParent.appendChild(fragment);
+        this.selectNode(newParent);
+    };
     function rangeContext(node) {
         if (node.nodeType === 1) return node;
         if (node.nodeType === 3 || node.nodeType === 8) return node.parentElement;
@@ -4908,6 +5033,113 @@ const WRAPPERS_JS: &str = r#"
             var target = typeof id === 'number' ? wrap(id) : null;
             if (target) target.dispatchEvent(new Event(type));
         },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The engine reports that an `<img>`'s image failed to load (a 404, a
+    // failed connection, bytes that do not decode, its budget spent): the
+    // element is marked with the `src`/`srcset` that failed, which is what
+    // `img.complete` reads (web_reflect.js), and hears `error`.
+    var failedImages = new WeakMap();
+    Object.defineProperty(Document.prototype, '__rkImageFailed', {
+        value: function (id) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            loadedImages.delete(target);
+            failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+            var ev = new Event('error');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+            settleDecodes(target, false);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The engine reports that an `<img>`'s image is in (E54): the element
+    // is marked with the `src`/`srcset` that loaded, the image's own size
+    // and the URL it came from, which `complete`, `naturalWidth`,
+    // `naturalHeight` and `currentSrc` read (web_reflect.js), and then
+    // hears `load`: trusted, at the element only. The mark and the event
+    // are one step, so a handler never runs for an image that reads as
+    // still loading.
+    var loadedImages = new WeakMap();
+    Object.defineProperty(Document.prototype, '__rkImageLoaded', {
+        value: function (id, width, height, url) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            failedImages.delete(target);
+            // No URL: a `data:` image, which is its own `src`.
+            loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+            var ev = new Event('load');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+            settleDecodes(target, true);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // `decode()` promises waiting on an `<img>` (web_reflect.js): each with
+    // the `src`/`srcset` it waits for. They settle with the image's event,
+    // and resolve when the engine gives up on it (E54 R1: a slow image the
+    // engine stopped loading hears nothing, and a decode waiting on it
+    // would wait for good). A `src` change rejects them, as in Chrome.
+    var pendingDecodes = new WeakMap();
+    var gaveUpImages = new WeakMap();
+    function decodeError() {
+        var E = g.DOMException;
+        return E ? new E('The source image cannot be decoded.', 'EncodingError') : new Error('The source image cannot be decoded.');
+    }
+    function sameSource(img, mark) {
+        return !!mark && mark[0] === img.getAttribute('src') && mark[1] === img.getAttribute('srcset');
+    }
+    function settleDecodes(img, ok) {
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        pendingDecodes.delete(img);
+        list.forEach(function (p) { if (ok) p[2](); else p[3](decodeError()); });
+    }
+    Object.defineProperty(Document.prototype, '__rkDecodeWait', {
+        value: function (img, resolve, reject) {
+            if (sameSource(img, gaveUpImages.get(img))) return resolve();
+            var list = pendingDecodes.get(img) || [];
+            list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
+            pendingDecodes.set(img, list);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageGaveUp', {
+        value: function (id) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+            settleDecodes(target, true);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageWritten', {
+        value: function (img) {
+            // A failure is not held against the restarted load, nor is a
+            // give-up; a successful image stays readable while the same
+            // `src` reloads (its mark is checked against `src`).
+            failedImages.delete(img);
+            gaveUpImages.delete(img);
+            var list = pendingDecodes.get(img);
+            if (!list) return;
+            var keep = list.filter(function (p) { return sameSource(img, p); });
+            list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
+            if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The mark of the image an `<img>` shows now: null while its current
+    // `src`/`srcset` has not loaded.
+    Object.defineProperty(Document.prototype, '__rkImageLoadedFor', {
+        value: function (img) {
+            var mark = loadedImages.get(img);
+            if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+            return mark;
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageFailedFor', {
+        value: function (img) { return failedImages.get(img) || null; },
         configurable: true, enumerable: false, writable: true
     });
     // The engine's CSS transitions report their phases (css-transitions-2
@@ -5544,6 +5776,20 @@ const WRAPPERS_JS: &str = r#"
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
+    };
+    // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
+    g.__rkSetSheetDisabled = function (node, on) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setSheetDisabled(s.gen, s.id, !!on);
+    };
+    // web_cssom.js: which sheet a <style> owns now (a number that changes
+    // when its children change or it moves); -1 for a node of another
+    // document.
+    g.__rkSheetGeneration = function (node) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return -1;
+        return N.info(s.gen, s.id, 'sheetGen');
     };
 
     // For dom/editing.js, which deletes it.

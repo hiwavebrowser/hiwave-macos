@@ -110,6 +110,32 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Load as the app does: what the page asks of the network after its
+    /// `load` event is the live loop's (`--live-ms`), not the load's
+    /// (`EngineConfig::post_load_requests_live`).
+    #[arg(long)]
+    post_load_live: bool,
+
+    /// Run the page's CSS animations and transitions as the app does (the
+    /// parity config holds them still so a frame is reproducible). For
+    /// `--live-ms` measurements of animation frames; a frame taken with it
+    /// is not comparable with the board.
+    #[arg(long)]
+    animations: bool,
+
+    /// Before the `--url` load, load this URL in the same view and turn the
+    /// live loop for `--prelude-live-ms`, as a page visited earlier in a
+    /// browsing session would have been; then navigate to `--url`. For
+    /// measuring what one document leaves to the next (LAT14: a Web
+    /// Animation of the previous page). A frame taken with it is not
+    /// comparable with the board.
+    #[arg(long)]
+    prelude_url: Option<String>,
+
+    /// How long the prelude page's live loop turns, in milliseconds [default: 500]
+    #[arg(long)]
+    prelude_live_ms: Option<u64>,
+
     /// Write the view's Inspector event log for the whole capture to this
     /// file, as JSON Lines (one record per line; see
     /// docs/INSPECTOR_EVENT_LOG.md). URLs lose their query and fragment.
@@ -721,6 +747,16 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             Ok(rt) => rt,
             Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
         };
+        if let Some(prelude) = &args.prelude_url {
+            let prelude = match Url::parse(prelude) {
+                Ok(u) => u,
+                Err(e) => return result.failed("error", format!("Invalid prelude URL: {}", e)),
+            };
+            if let Err(e) = rt.block_on(engine.load_url(view_id, prelude)) {
+                return result.failed("error", format!("Failed to load prelude URL: {:?}", e));
+            }
+            run_live(&rt, &mut engine, view_id, args.prelude_live_ms.unwrap_or(500));
+        }
         let load_began = Instant::now();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
@@ -1895,6 +1931,10 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
         config.script_budget_ms = budget;
     }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    config.post_load_requests_live = args.post_load_live;
+    if args.animations {
+        config.disable_animations = false;
+    }
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -1974,6 +2014,8 @@ mod tests {
     fn the_live_loop_is_turned_only_when_asked() {
         assert_eq!(parsed(&[]).live_ms, None);
         assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
+        assert!(!capture_config(&parsed(&[]), None).post_load_requests_live);
+        assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
     }
 
     // The board is measured at the engine's 5 s script budget, and the live
@@ -1991,6 +2033,24 @@ mod tests {
             config.timer_horizon_ms,
             EngineConfig::for_parity_testing().timer_horizon_ms
         );
+    }
+
+    /// LAT14: animations run in a capture only with `--animations`; the
+    /// board's frames stay still.
+    #[test]
+    fn animations_run_only_with_the_flag() {
+        assert!(capture_config(&parsed(&[]), None).disable_animations);
+        assert!(capture_config(&parsed(&["--live-ms", "1000"]), None).disable_animations);
+        assert!(!capture_config(&parsed(&["--animations"]), None).disable_animations);
+    }
+
+    /// LAT14: the prelude page and how long it runs live before the
+    /// `--url` load (the fixture path has no live loop and ignores it).
+    #[test]
+    fn a_prelude_is_parsed_with_its_live_time() {
+        assert_eq!(parsed(&["--prelude-url", "http://p/"]).prelude_url.as_deref(), Some("http://p/"));
+        assert_eq!(parsed(&[]).prelude_live_ms, None);
+        assert_eq!(parsed(&["--prelude-live-ms", "250"]).prelude_live_ms, Some(250));
     }
 
     #[test]

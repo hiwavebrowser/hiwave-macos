@@ -267,6 +267,8 @@ pub fn render_input(
             advances: None,
             ascent: None,
             run: None,
+            faces: None,
+            undilated: false,
         });
     }
 
@@ -343,6 +345,8 @@ pub fn render_button(
         advances: None,
         ascent: None,
         run: None,
+        faces: None,
+        undilated: false,
     });
 
     commands

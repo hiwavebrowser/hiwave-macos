@@ -111,11 +111,30 @@ fn console_record(
 /// which the engine marks where it raises them, are recorded from here,
 /// with a fixed message. What page script threw is never one of them,
 /// whatever its text.
+///
+/// A script the loop-iteration limit ended gets a log line of its own, as a
+/// budget stop does (`Script stopped at the script budget`): in the app a
+/// bare `while (true) {}` reaches the limit long before the budget, and
+/// until H19 nothing in the log said why it ended.
 pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
-    if let ScriptOutcome::EngineFailed(failure) = &record.outcome {
-        engine_error(inspector, failure, &record.source);
+    match &record.outcome {
+        ScriptOutcome::EngineFailed(failure) => engine_error(inspector, failure, &record.source),
+        ScriptOutcome::Threw(message) if is_loop_limit(message) => {
+            tracing::warn!(
+                source = %record.source,
+                elapsed_ms = record.elapsed_ms,
+                "Script stopped at the loop-iteration limit"
+            );
+        }
+        _ => {}
     }
     log.push(record);
+}
+
+/// The error Boa raises at the loop-iteration limit, as the script log
+/// holds it.
+fn is_loop_limit(message: &str) -> bool {
+    message.contains("RuntimeLimitError: reached the maximum number of iteration loops")
 }
 
 /// The engine's own `failure` as a `script_error` with a fixed message.
@@ -181,13 +200,22 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
 
 /// After `source` ran: the errors its listeners and timers reported go onto
 /// the log (as before), then, for a listening Inspector only, the page's
-/// error reports and unimplemented members.
-pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: &mut Vec<ScriptRecord>, source: &str) {
+/// error reports and unimplemented members. `elapsed_ms` is the wall time of the step that ran
+/// (its listeners or timer callbacks): the report does not say which callback threw, so each record
+/// carries the step's time, as the step's own record does (H19c). 0 only where the caller has no
+/// step timer.
+pub(crate) fn drain_reports(
+    bindings: &DomBindings,
+    inspector: &Inspector,
+    log: &mut Vec<ScriptRecord>,
+    source: &str,
+    elapsed_ms: u64,
+) {
     for message in bindings.take_reported_errors() {
         log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
-            elapsed_ms: 0,
+            elapsed_ms,
             outcome: ScriptOutcome::Threw(message),
         });
     }
