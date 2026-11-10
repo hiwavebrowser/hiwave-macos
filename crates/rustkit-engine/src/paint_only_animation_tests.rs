@@ -634,6 +634,8 @@ fn lat7_an_unseen_write_in_a_web_animation_frame_still_takes_the_full_path() {
         (forced0.0, forced0.1 + 1),
         "the first read places one frame (the layer write); the read after the hidden write forces none"
     );
+    let now = forced(&engine);
+    assert_eq!(now.0 + now.1, forced0.0 + forced0.1 + 1, "one read brought up to date, as before LAT19");
     assert_eq!(skipped(&engine, view), skip, "the frame with the unseen write is not paint-only");
     assert!(relayouts(&engine, view) > relaid, "it lays out");
     let painted = list(&engine, view);

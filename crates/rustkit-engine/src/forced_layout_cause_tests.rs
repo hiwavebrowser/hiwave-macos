@@ -310,12 +310,16 @@ fn reads_that_see_a_web_animation_value_still_force_a_layout() {
     let (_, forced, framed) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "getComputedStyle(s).opacity");
     assert!(framed >= 3, "the computed opacity reads the animated value: {framed}");
     assert_eq!(forced, 0, "from a frame, not a build");
+    // The count before LAT19 (a forced layout per read) moved, it did not
+    // vanish: neither path absorbs the other.
+    assert!(forced + framed >= 3, "{forced} + {framed}");
     let (_, forced, framed) = waapi_frames(
         "[{transform: 'translateX(0px)'}, {transform: 'translateX(50px)'}]",
         "s.getBoundingClientRect().left",
     );
     assert!(framed >= 3, "a transformed rect reads the animated value: {framed}");
     assert_eq!(forced, 0, "from a frame, not a build");
+    assert!(forced + framed >= 3, "every such read is brought up to date one way or the other");
     let (_, forced, framed) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "s.getBoundingClientRect().left");
     assert_eq!((forced, framed), (0, 0), "opacity moves no rect");
 }

@@ -23709,11 +23709,20 @@ impl Engine {
         // LAT19: the boxes the view last painted, for a read after a
         // paint-only layer write. Weak: a paint-only frame patches them in
         // place (`Rc::make_mut`), and the closure set after it holds the
-        // new ones; a stale handle falls back to a build.
+        // new ones; a stale handle falls back to a build. Boxes laid out at
+        // another size (a resize not painted since) are not a base either:
+        // the read takes the full build.
         let published = match (view.layout.as_ref(), view.laid_with.as_ref()) {
             (Some(layout), Some(with)) if with.size == bounds => Some(Rc::downgrade(layout)),
             _ => None,
         };
+        // #1057 R1: a full forced build since that paint laid out writes the
+        // painted boxes do not show (`style.width` then a read), and cleared
+        // the bindings' `since_layout`; a later layer-only read must not be
+        // answered from the painted boxes, which would give the old width
+        // with the new transform. Until the next publish installs a new
+        // closure (and a fresh flag), every read takes the full build.
+        let built_since_publish = Rc::new(Cell::new(false));
         Some(Rc::new(move |writes: &mut rustkit_bindings::ControlWrites| {
             let restyling = RESTYLE_BUILD.with(|b| b.try_borrow().map_or(true, |b| b.is_some()));
             let memo_held = STYLE_MEMO.with(|m| m.try_borrow_mut().is_err());
@@ -23726,7 +23735,7 @@ impl Engine {
                 debug!(?id, busy, "Forced layout skipped: build state in use");
                 return None;
             }
-            if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() {
+            if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
                     let view = layout_ctx::BuildView {
@@ -23752,6 +23761,7 @@ impl Engine {
             // Re-captured here, the frame found nothing that moved and
             // painted nothing (reddit: no frame for as long as the loop ran).
             let baseline = AnimationBaseline::save(&lay);
+            built_since_publish.set(true);
             Engine::apply_control_writes(
                 &mut lay.edit_states.borrow_mut(),
                 &mut lay.checked_states.borrow_mut(),
@@ -45006,6 +45016,10 @@ fn forced_animation_frame(
         let by_node: HashMap<usize, &layout_ctx::FrameChange> = changes.iter().map(|c| (c.node, c)).collect();
         check_frame_over(&built, document, &changes, &by_node)?;
         apply_animation_frame(&mut built, &by_node);
+        // A read writes the frame's pseudo-element values into the view's
+        // shared `pseudo_styles` (as the paint-only frame does): the values
+        // of this clock, which the frame painted when script settles writes
+        // again; a full relayout instead rebuilds them all.
         apply_pseudo_frame(lay, &changes);
     }
     stamp_element_scrolls(&built, &lay.element_scrolls);
