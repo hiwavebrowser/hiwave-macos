@@ -67,7 +67,7 @@ use tracing::error;
 
 #[cfg(windows)]
 use rustkit_core::{
-    FocusEvent, FocusEventType, InputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
+    FocusEvent, FocusEventType, InputEvent as CoreInputEvent, KeyCode, KeyEvent, KeyEventType, KeyboardState,
     Modifiers, MouseButton, MouseEvent, MouseEventType, MouseState, Point,
 };
 
@@ -206,7 +206,7 @@ pub enum ViewEvent {
     Destroyed { view_id: ViewId },
     /// Input event from the view (Windows only).
     #[cfg(windows)]
-    Input { view_id: ViewId, event: InputEvent },
+    Input { view_id: ViewId, event: CoreInputEvent },
 }
 
 /// Callback for view events.
@@ -1418,7 +1418,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1468,7 +1468,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1503,7 +1503,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1542,7 +1542,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1566,7 +1566,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Mouse(event),
+                        event: CoreInputEvent::Mouse(event),
                     });
                 }
             }
@@ -1595,7 +1595,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1622,7 +1622,7 @@ impl ViewHost {
 
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Key(event),
+                        event: CoreInputEvent::Key(event),
                     });
                 }
             }
@@ -1646,7 +1646,7 @@ impl ViewHost {
 
                         emit(ViewEvent::Input {
                             view_id,
-                            event: InputEvent::Key(event),
+                            event: CoreInputEvent::Key(event),
                         });
                     }
                 }
@@ -1672,7 +1672,7 @@ impl ViewHost {
                     emit(ViewEvent::Focused { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }
@@ -1696,7 +1696,7 @@ impl ViewHost {
                     emit(ViewEvent::Blurred { view_id });
                     emit(ViewEvent::Input {
                         view_id,
-                        event: InputEvent::Focus(event),
+                        event: CoreInputEvent::Focus(event),
                     });
                 }
             }

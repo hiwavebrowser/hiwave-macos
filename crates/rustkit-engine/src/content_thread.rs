@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use url::Url;
 
 use crate::nav_cancel::NavCanceller;
-use crate::page_protocol::{adopt, coalesce};
+use crate::page_protocol::{adopt, coalesce, runs_mid_load};
 use crate::devtools_service::{
     ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
 };
@@ -1526,6 +1526,70 @@ mod tests {
             .expect("recovery")
             .expect("eval");
         assert!(recovered.contains('2'), "{recovered}");
+    }
+
+    /// LAT15 / #1006: mid-load safe points may apply input/eval/render, never
+    /// navigate/stop/close/live turns. The headless load_turns suite covers
+    /// the yield loop; this pins the filter itself on default `--lib`.
+    #[test]
+    fn runs_mid_load_allows_input_and_refuses_navigation() {
+        assert!(runs_mid_load(&PageCmd::Input(PageInput::MouseLeave)));
+        assert!(runs_mid_load(&PageCmd::Render { every: false }));
+        assert!(runs_mid_load(&PageCmd::Relayout));
+        assert!(runs_mid_load(&PageCmd::SetVisible { visible: true }));
+        assert!(runs_mid_load(&PageCmd::GrabKeyboard));
+        assert!(runs_mid_load(&PageCmd::NoteInput {
+            at: Instant::now(),
+            seq: 1,
+            kind: crate::InputClass::Move,
+        }));
+
+        let (eval_reply, _) = oneshot::channel();
+        assert!(runs_mid_load(&PageCmd::Eval {
+            script: "1".into(),
+            reply: eval_reply,
+        }));
+        let (resize_reply, _) = oneshot::channel();
+        assert!(runs_mid_load(&PageCmd::Resize {
+            bounds: Bounds {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            scale: 1.0,
+            reply: resize_reply,
+        }));
+
+        assert!(!runs_mid_load(&PageCmd::Navigate {
+            url: Url::parse("https://example.test/").unwrap(),
+            nav_id: 1,
+        }));
+        assert!(!runs_mid_load(&PageCmd::Close));
+        let (stop_reply, _) = oneshot::channel();
+        assert!(!runs_mid_load(&PageCmd::Stop { reply: stop_reply }));
+        let (reload_reply, _) = oneshot::channel();
+        assert!(!runs_mid_load(&PageCmd::Reload {
+            nav_id: 1,
+            reply: reload_reply,
+        }));
+        let (html_reply, _) = oneshot::channel();
+        assert!(!runs_mid_load(&PageCmd::LoadHtml {
+            html: "<p>x</p>".into(),
+            nav_id: 1,
+            reply: html_reply,
+        }));
+        let (live_reply, _) = oneshot::channel();
+        assert!(!runs_mid_load(&PageCmd::PumpLive {
+            elapsed_ms: 0,
+            reply: live_reply,
+        }));
+        assert!(!runs_mid_load(&PageCmd::SetAppOwned { owned: true }));
+        assert!(!runs_mid_load(&PageCmd::SetHostReentry { limit: 8 }));
+        let (probe_reply, _) = oneshot::channel();
+        assert!(!runs_mid_load(&PageCmd::InstallReentryProbe {
+            reply: probe_reply,
+        }));
     }
 
     #[test]
