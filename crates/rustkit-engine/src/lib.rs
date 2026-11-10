@@ -18406,15 +18406,6 @@ impl Engine {
             .collect()
     }
 
-    /// Each `<img>` (raw NodeId) and the absolute URL of the image it asks
-    /// for, by the rule [`Self::discover_images`] fetches by.
-    fn img_sources(document: &Document, base_url: Option<&Url>) -> Vec<(usize, Url)> {
-        Self::img_elements(document, base_url)
-            .into_iter()
-            .map(|(node, _, url)| (node, url))
-            .collect()
-    }
-
     /// Every `<img>` that names an image: its raw NodeId, the source as
     /// written, and that resolved.
     fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
