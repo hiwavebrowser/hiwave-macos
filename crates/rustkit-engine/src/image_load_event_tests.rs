@@ -411,6 +411,25 @@ fn the_load_handler_measures_the_image() {
     assert_eq!(page.log(), "DCL | box=40x30 wh=40x30 | winload");
 }
 
+/// A load handler that writes the image's style and reads `img.width`
+/// (a page's "is this the 80 x 80 placeholder" check, run for every result
+/// card of a recorded search page) must not lay the page out for it: with
+/// no `width`/`height` attribute the engine answers with the image's own
+/// size. Chrome lays out and answers the rendered size, which is the same
+/// for an image CSS does not size; the engine's forced layout of a large
+/// page costs it far more than Chrome's.
+#[test]
+fn reading_img_width_in_a_load_handler_does_not_force_a_layout() {
+    let body = "<img id=a src=/a.png><img id=b src=/b.png><script>[$('a'),$('b')].forEach(function(i){i.addEventListener('load',function(){\
+        this.setAttribute('style','width:auto');ev(this.id+'='+this.width+'x'+this.height);});});</script>";
+    for mode in BOTH {
+        let mut page = load(body, vec![a("/a.png"), b("/b.png")], mode, 5_000);
+        assert_eq!(page.log(), "DCL | a=40x30 | b=60x20 | winload", "{mode:?}");
+        let forced = page.engine.relayout_stats(page.view).expect("view").forced_layouts;
+        assert_eq!(forced, 0, "{mode:?}: the handlers laid the page out {forced} times");
+    }
+}
+
 /// An image that never enters the document (`new Image()`, a created
 /// element) is fetched and hears `load` or `error`: the preloader and the
 /// pixel. It is not painted.
