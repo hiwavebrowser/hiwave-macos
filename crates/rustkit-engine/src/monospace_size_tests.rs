@@ -107,3 +107,73 @@ fn size_keywords_use_the_fixed_font_table() {
         &[("small", "12px"), ("large", "16px"), ("monolarge", "16px")],
     );
 }
+
+/// Like `assert_sizes`, comparing px values within 0.01 (RustKit writes the
+/// control font as 13.333px, Chrome serializes 13.3333px).
+fn assert_px(body: &str, expected: &[(&str, f32)]) {
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    let got = sizes(body, &ids);
+    for ((id, want), have) in expected.iter().zip(&got) {
+        let px: f32 = have.trim_end_matches("px").parse().unwrap_or(f32::NAN);
+        assert!((px - want).abs() <= 0.01, "#{id}: {have}, Chrome 148 {want}px");
+    }
+}
+
+/// #1053 R1 HOLD: the UA's own sizes are not keywords. A heading's `2em`
+/// (32px) gives its <code> 32 x 13/16 = 26px, not the fixed table's 13px;
+/// h2 24 -> 19.5, h3 18.72 -> 15.21. CfT 148.
+#[test]
+fn code_in_a_heading_scales_the_headings_size() {
+    assert_px(
+        r#"<h1><code id=h1code>x</code></h1><h2><code id=h2code>x</code></h2><h3><code id=h3code>x</code></h3>"#,
+        &[("h1code", 26.0), ("h2code", 19.5), ("h3code", 15.21)],
+    );
+}
+
+/// <small>, <sub> and <sup> are `font-size: smaller` (x 1/1.2) and <big>
+/// `larger` (x 1.2) in Chrome's UA sheet: in a 16px paragraph a <code> in
+/// them is 13.333 x 13/16 = 10.8333px, and 19.2 x 13/16 = 15.6px. CfT 148.
+#[test]
+fn code_in_small_and_big_scales_their_size() {
+    assert_px(
+        r#"<p><small><code id=smallcode>x</code></small><sub><code id=subcode>x</code></sub><sup><code id=supcode>x</code></sup><big><code id=bigcode>x</code></big></p>"#,
+        &[("smallcode", 10.8333), ("subcode", 10.8333), ("supcode", 10.8333), ("bigcode", 15.6)],
+    );
+}
+
+/// The control font is absolute: textarea (monospace), input, button and
+/// select all compute 13.3333px. CfT 148.
+#[test]
+fn the_control_font_is_absolute() {
+    assert_px(
+        r#"<textarea id=ta></textarea><input id=inp><button id=btn>x</button><select id=sel><option>x</option></select>"#,
+        &[("ta", 13.3333), ("inp", 13.3333), ("btn", 13.3333), ("sel", 13.3333)],
+    );
+}
+
+/// A keyword on a monospace element under a monospace parent reads the
+/// fixed row (Blink looks the keyword up with the element's own
+/// monospace-ness): <pre><span small> 12px, large 16px. `smaller`/`larger`
+/// are x 1/1.2 and x 1.2 of the parent: 10.8333 / 15.6 in <pre>, 13.3333 /
+/// 19.2 in a 16px block. CfT 148.
+#[test]
+fn keywords_and_relative_keywords_inside_monospace() {
+    assert_px(
+        r#"<pre><span id=presmall style="font-size:small">x</span><span id=prelarge style="font-size:large">x</span><span id=presmaller style="font-size:smaller">x</span><span id=prelarger style="font-size:larger">x</span></pre>
+           <div><span id=smaller style="font-size:smaller">x</span><span id=larger style="font-size:larger">x</span></div>"#,
+        &[
+            ("presmall", 12.0),
+            ("prelarge", 16.0),
+            ("presmaller", 10.8333),
+            ("prelarger", 15.6),
+            ("smaller", 13.3333),
+            ("larger", 19.2),
+        ],
+    );
+}
+
+/// A quoted "monospace" is a family name, not the generic: 16px. CfT 148.
+#[test]
+fn a_quoted_monospace_is_a_family_name() {
+    assert_px(r#"<div id=quoted style='font-family:"monospace"'>x</div>"#, &[("quoted", 16.0)]);
+}
