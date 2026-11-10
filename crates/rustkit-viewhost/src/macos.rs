@@ -4,6 +4,8 @@
 //! using NSView for rendering surfaces and TAO window handles.
 
 use crate::{Bounds, ViewHostError, ViewId};
+#[cfg(target_os = "macos")]
+use crate::chord_wait::{ChordFate, HeldChords, CHORD_ANSWER_TIMEOUT};
 use raw_window_handle::RawWindowHandle;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -145,9 +147,10 @@ pub(crate) fn forget_marked(view: ViewId) {
 }
 
 /// Cmd chords the view took for the page, by token: the retained `NSEvent`
-/// that goes on to the menu when the page does not claim it.
+/// that goes on to the menu when the page does not claim it, or does not
+/// answer within `CHORD_ANSWER_TIMEOUT` (M1e).
 #[cfg(target_os = "macos")]
-static KEY_EQUIVALENTS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+static KEY_EQUIVALENTS: Mutex<HeldChords<usize>> = Mutex::new(HeldChords::new());
 #[cfg(target_os = "macos")]
 static NEXT_KEY_EQUIVALENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -219,26 +222,102 @@ pub fn is_reserved_chord(chars: &str, keycode: u16, cmd: bool, shift: bool, alt:
 
 /// The page did (`claimed`) or did not take the Cmd chord `token`
 /// (`InputKind::KeyEquivalent`). One it did not goes on to the main menu,
-/// Chromium's order: page first, then the menu. Call on the main thread.
+/// Chromium's order: page first, then the menu. An answer that comes after
+/// the chord's wait ran out (`CHORD_ANSWER_TIMEOUT`, M1e) is dropped: the
+/// chord already went to the menu. Call on the main thread.
 #[cfg(target_os = "macos")]
 pub fn finish_key_equivalent(token: u64, claimed: bool) {
-    let event = {
-        let mut held = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(at) = held.iter().position(|(t, _)| *t == token) else {
-            return;
-        };
-        held.remove(at).1 as id
-    };
-    unsafe {
-        if !claimed {
-            let app: id = msg_send![objc::runtime::Class::get("NSApplication").expect("NSApplication"), sharedApplication];
-            let menu: id = msg_send![app, mainMenu];
-            if menu != nil {
-                let taken: bool = msg_send![menu, performKeyEquivalent: event];
-                debug!(token, taken, "Cmd chord the page did not claim went to the menu");
-            }
+    let answered = KEY_EQUIVALENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .answer(token, claimed, std::time::Instant::now());
+    match answered {
+        None => debug!(token, claimed, "late answer for a Cmd chord dropped: it already went to the menu"),
+        Some((ChordFate::ToMenu(event), waited)) => unsafe {
+            chord_to_menu(event as id, token, "the page did not claim it", waited);
+        },
+        Some((ChordFate::PageKept(event), waited)) => unsafe {
+            debug!(token, waited_ms = waited.as_millis() as u64, "Cmd chord the page claimed");
+            let _: () = msg_send![event as id, release];
+        },
+    }
+}
+
+/// The page, from its own thread, before it runs the default of the Cmd
+/// chord `token` (the edit in a focused text field): whether the chord is
+/// still the page's. False once the chord's wait ran out and it went to the
+/// menu (M1e, #1015 R1 nit 1): the menu's Paste or Undo is then the one
+/// edit, and the page's late keydown must not paste or undo again. True
+/// makes the chord the page's: it no longer goes to the menu at the
+/// deadline. Any thread.
+#[cfg(target_os = "macos")]
+pub fn claim_key_equivalent(token: u64) -> bool {
+    KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).claim(token)
+}
+
+/// A held chord goes on to the main menu, and its retain is dropped.
+#[cfg(target_os = "macos")]
+unsafe fn chord_to_menu(event: id, token: u64, why: &'static str, waited: std::time::Duration) {
+    let app: id = msg_send![objc::runtime::Class::get("NSApplication").expect("NSApplication"), sharedApplication];
+    let menu: id = msg_send![app, mainMenu];
+    if menu != nil {
+        let taken: bool = msg_send![menu, performKeyEquivalent: event];
+        // From the press as the window server stamped it, for the
+        // real-window gate (m1d_cmd_l_while_loading).
+        let since_press_ms = native_event_instant(event).elapsed().as_millis() as u64;
+        debug!(token, taken, why, waited_ms = waited.as_millis() as u64, since_press_ms, "Cmd chord went to the menu");
+    }
+    let _: () = msg_send![event, release];
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    static _dispatch_main_q: std::ffi::c_void;
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_after_f(
+        when: u64,
+        queue: *const std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+/// Arm `token`'s wait (M1e): on the main queue, at the chord's deadline
+/// (`CHORD_ANSWER_TIMEOUT` from when the view took it), a chord the page
+/// has not answered or taken goes to the menu. The main
+/// run loop serves the main queue in its common modes, so the timer fires
+/// while the app's event loop waits, whatever the page's thread is doing.
+#[cfg(target_os = "macos")]
+fn arm_chord_wait(token: u64) {
+    extern "C" fn ran_out(context: *mut std::ffi::c_void) {
+        let token = context as usize as u64;
+        let fate = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).expire(token);
+        match fate {
+            // Answered first: nothing is held.
+            None => {}
+            // One debug line a timeout (R1 nit 5), from `chord_to_menu`.
+            Some(ChordFate::ToMenu(event)) => unsafe {
+                chord_to_menu(event as id, token, "the page did not answer in time", CHORD_ANSWER_TIMEOUT);
+            },
+            // The page is already running the chord's default; its answer
+            // is on the way and finds nothing held.
+            Some(ChordFate::PageKept(event)) => unsafe {
+                debug!(token, "Cmd chord the page took before its wait ran out");
+                let _: () = msg_send![event as id, release];
+            },
         }
-        let _: () = msg_send![event, release];
+    }
+    const DISPATCH_TIME_NOW: u64 = 0;
+    // The rest of the wait, from when the chord was taken (`deadline`).
+    let left = KEY_EQUIVALENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .deadline(token)
+        .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or(CHORD_ANSWER_TIMEOUT);
+    unsafe {
+        let when = dispatch_time(DISPATCH_TIME_NOW, left.as_nanos() as i64);
+        dispatch_after_f(when, std::ptr::addr_of!(_dispatch_main_q), token as usize as *mut std::ffi::c_void, ran_out);
     }
 }
 
@@ -517,6 +596,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             }
         }
         extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
+            let keycode: u16 = unsafe { msg_send![event, keyCode] };
+            if crate::take_tab_up(view_id_of(this).raw(), keycode) {
+                return; // a claimed Ctrl+Tab's release: not the page's
+            }
             record_key(this, event, true, None);
         }
         // ---- NSTextInputClient (CH2.E3) ----
@@ -694,13 +777,34 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let pass = |event: id| -> bool { msg_send![super(this, superclass), performKeyEquivalent: event] };
                 let kind: u64 = msg_send![event, type];
                 let flags: u64 = msg_send![event, modifierFlags];
-                if kind != 10 || flags & (1 << 20) == 0 {
+                let cmd = flags & (1 << 20) != 0;
+                // Ctrl+Tab and its Shift/Option forms (M1d): AppKit offers
+                // them here and, unclaimed, the window takes them for its
+                // key-view loop, so keyDown: never sees them. They go to
+                // the key stream: Ctrl+Tab / Ctrl+Shift+Tab are the app's
+                // (next/previous tab, `is_tab_cycle_chord`, as Chromium
+                // reserves them); Ctrl+Option+Tab is the page's (#1012 R1
+                // nit 2), as in Chrome.
+                // keyCode is read only for a Ctrl keyDown: it raises on
+                // other events (`ctrl_tab_route`).
+                let route = crate::ctrl_tab_route(kind, flags, || msg_send![event, keyCode]);
+                let ctrl_tab = route != crate::CtrlTabRoute::NotCtrlTab;
+                let cycle = route == crate::CtrlTabRoute::Cycle;
+                if kind != 10 || !(cmd || ctrl_tab) {
                     return pass(event);
                 }
                 let window: id = msg_send![this, window];
                 let responder: id = if window == nil { nil } else { msg_send![window, firstResponder] };
                 if responder != this as *const Object as id {
                     return pass(event);
+                }
+                if ctrl_tab {
+                    record_key(this, event, false, None);
+                    if cycle {
+                        // The app's: its release is not the page's either.
+                        crate::owe_tab_up(view_id_of(this).raw());
+                    }
+                    return true;
                 }
                 let key = pending_key(event, false, None);
                 let plain = text_of(msg_send![event, charactersIgnoringModifiers]);
@@ -712,7 +816,8 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 KEY_EQUIVALENTS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((token, event as usize));
+                    .hold(token, event as usize, std::time::Instant::now());
+                arm_chord_wait(token);
                 push_input_at(view_id_of(this), InputKind::KeyEquivalent { key, token }, native_event_instant(event));
                 true
             }

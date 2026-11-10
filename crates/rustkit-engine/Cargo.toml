@@ -86,3 +86,8 @@ harness = false
 [[test]]
 name = "macos_window_surface_drop"
 harness = false
+
+# M1e: a Cmd edit chord whose wait ran out edits once (NSWindow, no harness).
+[[test]]
+name = "macos_chord_timeout_edit"
+harness = false

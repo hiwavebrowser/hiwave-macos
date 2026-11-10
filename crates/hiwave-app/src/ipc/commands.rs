@@ -434,6 +434,7 @@ fn handle_activate_tab(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse {
         Ok(Some(tab)) => {
             let url = tab.url.to_string();
             info!("Activated tab: {:?}, navigating to {}", tab_id, crate::page_url_for_log(&url));
+            crate::tab_shortcuts::activation_landed(&mut state, tab_id);
             if let Err(e) = state.save_workspace_state() {
                 warn!("Failed to persist workspace state: {}", e);
             }
