@@ -406,6 +406,70 @@ mod tests {
         assert_eq!(page_origin("file:///etc/hosts"), None);
     }
 
+    /// A row saved for an https host is not offered to that host over http.
+    #[test]
+    fn an_http_page_gets_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        let now = Instant::now();
+        let page = "http://a.example/login";
+        arm_autofill(&mut state, VIEW, page, now);
+        assert!(answer_content_autofill_request(&mut state, VIEW, page, None, now).is_empty());
+    }
+
+    /// Nor on another port of the same host.
+    #[test]
+    fn another_port_gets_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        let now = Instant::now();
+        let page = "https://a.example:8443/login";
+        arm_autofill(&mut state, VIEW, page, now);
+        assert!(answer_content_autofill_request(&mut state, VIEW, page, None, now).is_empty());
+    }
+
+    /// The same https origin, default port spelled out or not, is offered.
+    #[test]
+    fn the_same_https_origin_is_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        let now = Instant::now();
+        for page in ["https://a.example/", "https://a.example:443/login", "https://A.EXAMPLE/x"] {
+            arm_autofill(&mut state, VIEW, page, now);
+            let entries = answer_content_autofill_request(&mut state, VIEW, page, None, now);
+            assert_eq!(entries.len(), 1, "{page}: {entries:?}");
+            assert!(autofill_fill_script(&mut state, VIEW, page, &entries[0].id, now).is_some(), "{page}");
+        }
+    }
+
+    #[test]
+    fn an_offer_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        let now = Instant::now();
+        arm_autofill(&mut state, VIEW, PAGE, now);
+        let entries = answer_content_autofill_request(&mut state, VIEW, PAGE, None, now);
+        let later = now + AUTOFILL_ARM_TTL + Duration::from_secs(1);
+        assert!(autofill_fill_script(&mut state, VIEW, PAGE, &entries[0].id, later).is_none());
+    }
+
+    /// An id from an earlier offer does nothing after a re-arm on the same
+    /// view and origin.
+    #[test]
+    fn an_old_id_after_a_rearm_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        let now = Instant::now();
+        arm_autofill(&mut state, VIEW, PAGE, now);
+        let first = answer_content_autofill_request(&mut state, VIEW, PAGE, None, now);
+        arm_autofill(&mut state, VIEW, PAGE, now);
+        let second = answer_content_autofill_request(&mut state, VIEW, PAGE, None, now);
+        assert_ne!(first[0].id, second[0].id);
+        assert!(autofill_fill_script(&mut state, VIEW, PAGE, &first[0].id, now).is_none());
+        // ...and the mismatched pick cleared the offer (fail-safe).
+        assert!(autofill_fill_script(&mut state, VIEW, PAGE, &second[0].id, now).is_none());
+    }
+
     const HELPER: &str = include_str!("../ui/autofill.js");
 
     /// The helper takes its list only from the app: no window message
