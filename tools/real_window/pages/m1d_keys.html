@@ -15,6 +15,7 @@
   // M1d. The page reports, as beacons the driver reads, the Tab and Cmd
   // keys it hears (tagged with the tab it was opened as, ?tab=N). Options:
   //   prevent  cancel the keydown of Cmd+1..9 (a page that keeps them)
+  //   preventl cancel the keydown of Cmd+L (a page that keeps it, M1e)
   //   slowimg  add an image the server holds 8 s, so the page is still loading
   //   busy     hold the page's thread 1.5 s of every 1.6 s
   var q = location.search;
@@ -30,6 +31,9 @@
                '-c' + (e.ctrlKey ? 1 : 0) + '-a' + (e.altKey ? 1 : 0) + '-m' + (e.metaKey ? 1 : 0));
       }
       if (type === 'keydown' && q.indexOf('prevent') >= 0 && e.metaKey && e.key >= '1' && e.key <= '9') {
+        e.preventDefault();
+      }
+      if (type === 'keydown' && q.indexOf('preventl') >= 0 && e.metaKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
       }
     });

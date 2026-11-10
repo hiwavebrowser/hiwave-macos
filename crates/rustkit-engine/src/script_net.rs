@@ -328,6 +328,40 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// Runs `work` on the network runtime (LAT9: an image's fetch and decode),
+/// so it makes progress while the page thread is busy; the page side only
+/// takes the outcome. Aborted when the returned future is dropped; `None`
+/// from it when the task ended without an outcome (it panicked). Without
+/// the runtime, `work` comes back for the page to poll itself.
+pub(crate) fn spawn_on_net<T, F>(work: F) -> Result<LiveFuture<Option<T>>, F>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let Some(net) = net_runtime() else {
+        return Err(work);
+    };
+    let (deliver, outcome) = tokio::sync::oneshot::channel();
+    // The work logs under the caller's tracing subscriber, as it did when
+    // the page thread polled it: a subscriber scoped to that thread (a
+    // test's log capture, `resource_url_log_tests`) would otherwise never
+    // see an image's lines.
+    use tracing::instrument::WithSubscriber;
+    let task = AbortOnDrop(net.spawn(
+        DiagContext::new(async move {
+            let value = work.await;
+            if deliver.send(value).is_ok() {
+                poke_live_turn();
+            }
+        })
+        .with_current_subscriber(),
+    ));
+    Ok(Box::pin(async move {
+        let _task = task;
+        outcome.await.ok()
+    }))
+}
+
 /// Runs `inner` with the page's diagnostic nav id (and, in tests, the
 /// `HIWAVE_CONSOLE_LOG` switch and sink) set around every poll, restoring
 /// the thread's own after, also when the poll panics: the one `rustkit-net`

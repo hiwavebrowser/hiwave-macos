@@ -199,6 +199,26 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) -> bool {
+        self.handle_command_key_if(id, key_code, key, shift, alt, &mut || true)
+    }
+
+    /// [`handle_command_key`](Self::handle_command_key), with the chord's
+    /// editing default run only if `default_is_ours` says so. It is asked
+    /// once, after the keydown went uncancelled and only when there is an
+    /// edit to run. The window stops waiting for the page's answer after
+    /// 100 ms and gives the chord to the menu (M1e); the menu's Paste or
+    /// Undo then edits the field, and a page that reaches the chord late
+    /// must not edit again (#1015 R1 nit 1). The keydown is heard either
+    /// way. A refused default is not a claim.
+    pub fn handle_command_key_if(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        shift: bool,
+        alt: bool,
+        default_is_ours: &mut dyn FnMut() -> bool,
+    ) -> bool {
         let _hold = wgate::hold("key");
         let focused = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
         if !self.fire_key_mods(id, focused, "keydown", key_code, key, (false, shift, alt, true)) {
@@ -216,8 +236,17 @@ impl Engine {
             if command.is_none() && !CMD_EDIT_KEYS.contains(&key_code) {
                 return false;
             }
+            if !default_is_ours() {
+                return false;
+            }
             self.editable_key(id, node, key_code, key, true);
             return true;
+        }
+        if command.is_none() && !CMD_EDIT_KEYS.contains(&key_code) {
+            return false;
+        }
+        if !default_is_ours() {
+            return false;
         }
         if let Some(command) = command {
             if self.user_edit_command(id, node, &command).is_none() {
@@ -225,11 +254,8 @@ impl Engine {
             }
             return true;
         }
-        if CMD_EDIT_KEYS.contains(&key_code) {
-            self.text_key_default(id, node, key_code, key, true, shift, alt);
-            return true;
-        }
-        false
+        self.text_key_default(id, node, key_code, key, true, shift, alt);
+        true
     }
 
     /// An Edit menu item (`copy:`, `cut:`, `paste:`, `undo:`, `redo:`,
