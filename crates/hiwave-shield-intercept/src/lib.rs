@@ -659,8 +659,22 @@ mod tests {
             }
         };
         use hiwave_shield::ResourceType as R;
+        // A list really loaded (Prometheus #1058 nit 1): `READY` is also set when no list was on
+        // disk and the engine fell back to the built-in rules alone, which would make the rest of
+        // this test prove nothing. `track.adform.net` is blocked by EasyList and by no built-in
+        // rule, so when the lists are cached it must be blocked here. (Nothing cached: say so.)
+        let cached = dirs::data_local_dir()
+            .map(|d| d.join("hiwave").join("filter-lists").join("easylist.txt"))
+            .is_some_and(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 100_000));
+        if cached {
+            assert!(ask("https://track.adform.net/x.js", R::Script).is_some(), "EasyList is cached, so the engine must have loaded it");
+        } else {
+            eprintln!("NOTE: no cached EasyList: this run proves the defaults-only fallback, not the union");
+        }
         assert!(ask("https://doubleclick.net/pagead.js", R::Script).is_some(), "the bare floor host is blocked");
         assert!(ask("https://www.google.com/recaptcha/api2/aframe", R::Other).is_none(), "a captcha frame is allowed");
+        assert!(ask("https://www.google.com/recaptcha/api2/anchor?k=1", R::Other).is_none(), "the reCAPTCHA anchor is allowed");
+        assert!(ask("https://hcaptcha.com/1/api.js", R::Script).is_none(), "hCaptcha is allowed");
         assert!(ask("https://connect.facebook.net/en_US/sdk.js", R::Script).is_none(), "the Facebook SDK is allowed");
         assert!(ask("https://news.example/app.js", R::Script).is_none(), "a first-party script is allowed");
     }

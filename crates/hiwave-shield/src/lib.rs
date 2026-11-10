@@ -233,6 +233,12 @@ impl AdBlocker {
     /// after, even when EasyList only names its subdomains (`doubleclick.net` bare). One engine,
     /// so a list's exception (`@@||cdn.segment.com/analytics-next/`) still beats a built-in rule.
     /// The built-in rules come last, so a rule both have is named for the list.
+    ///
+    /// POLICY (Atlas, #1058): list exceptions WIN over built-in blocks. EasyList/EasyPrivacy `@@`
+    /// rules are curated site-unbreak fixes and honouring them is what every mainstream blocker
+    /// does; the built-in rules fill gaps the lists leave, they are not an override. A future
+    /// list that excepts a built-in host therefore unblocks it. The control is the real-list walk
+    /// (`the_cached_real_lists_leave_every_built_in_rule_blocking`), which fails if a list ever does.
     fn filter_engine(lists: &[(&'static str, &str)], names_rules: bool) -> Self {
         let defaults = Self::DEFAULT_RULES.join("
 ");
@@ -407,14 +413,25 @@ mod tests {
     use super::*;
 
     /// A small stand-in for EasyList/EasyPrivacy: third-party-only rules for some hosts, the
-    /// captcha allow EasyList carries (`@@||google.com/recaptcha/api2/`), and its allow for the
-    /// segment analytics bundle. It names none of the built-in floor hosts below.
-    const LIST: &str = "! stand-in
-||ads.example.com^$third-party
-@@||google.com/recaptcha/api2/
-        @@||cdn.segment.com/analytics-next/
-||connect.facebook.net/signals/$third-party
-";
+    /// captcha allow EasyList carries (`@@||google.com/recaptcha/api2/`), its allow for the
+    /// segment analytics bundle, and its three narrow Facebook rules. It names none of the
+    /// built-in floor hosts below.
+    const LIST: &str = concat!(
+        "! stand-in
+",
+        "||ads.example.com^$third-party
+",
+        "@@||google.com/recaptcha/api2/
+",
+        "@@||cdn.segment.com/analytics-next/
+",
+        "||connect.facebook.net/signals/$third-party
+",
+        "||connect.facebook.net^*/fbds.js$third-party
+",
+        "||connect.facebook.net^*/pcm.js$third-party
+",
+    );
 
     fn page() -> Url {
         Url::parse("https://news.example/").unwrap()
@@ -451,6 +468,8 @@ mod tests {
         let allowed = [
             ("https://www.google.com/recaptcha/api2/aframe", ResourceType::Other),
             ("https://www.google.com/recaptcha/api2/anchor?k=1", ResourceType::Other),
+            ("https://hcaptcha.com/1/api.js", ResourceType::Script),
+            ("https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html", ResourceType::Other),
             ("https://connect.facebook.net/en_US/sdk.js", ResourceType::Script),
             ("https://news.example/app.js", ResourceType::Script),
         ];
@@ -458,6 +477,70 @@ mod tests {
             let url = Url::parse(url).unwrap();
             assert!(!before.should_block(&url, &page(), kind), "allowed before ready: {url}");
             assert!(!after.should_block(&url, &page(), kind), "allowed after ready: {url}");
+        }
+    }
+
+    /// Dropping the `connect.facebook.net` default left the lists' three narrow rules to block
+    /// its tracking scripts; they must still block once the engine is ready.
+    #[test]
+    fn the_facebook_tracking_scripts_still_block_and_the_sdk_does_not() {
+        let after = AdBlocker::filter_engine(&[("EasyList", LIST)], false);
+        for blocked in [
+            "https://connect.facebook.net/signals/config/1",
+            "https://connect.facebook.net/en_US/fbds.js",
+            "https://connect.facebook.net/en_US/pcm.js",
+        ] {
+            assert!(after.should_block(&Url::parse(blocked).unwrap(), &page(), ResourceType::Script), "{blocked}");
+        }
+    }
+
+    /// The lists as the app has them on disk, read WITHOUT downloading (`None` when nothing is
+    /// cached, which is the case on a fresh checkout: the test then says so and does nothing).
+    fn cached_lists() -> Option<Vec<(&'static str, String)>> {
+        let dir = dirs::data_local_dir()?.join("hiwave").join("filter-lists");
+        let lists: Vec<(&'static str, String)> = FILTER_LISTS
+            .iter()
+            .filter_map(|source| {
+                std::fs::read_to_string(dir.join(source.filename)).ok().map(|content| (source.name, content))
+            })
+            .filter(|(_, content)| content.lines().count() > 1000)
+            .collect();
+        (!lists.is_empty()).then_some(lists)
+    }
+
+    /// SH1 against the REAL lists (Prometheus #1058 nit 1, Atlas policy: exceptions win): every
+    /// remaining built-in host is still blocked with EasyList and EasyPrivacy loaded, so no real
+    /// list exception unblocks one today; a captcha frame stays allowed; the Facebook tracking
+    /// scripts block. `track.adform.net` is blocked by EasyList and by no built-in rule: if it is
+    /// not blocked here, no list was loaded and the rest of the test would be proving the
+    /// defaults alone.
+    #[test]
+    fn the_cached_real_lists_leave_every_built_in_rule_blocking() {
+        let Some(lists) = cached_lists() else {
+            eprintln!("SKIP: no cached EasyList/EasyPrivacy on this machine (run the app once)");
+            return;
+        };
+        let named: Vec<(&'static str, &str)> = lists.iter().map(|(n, c)| (*n, c.as_str())).collect();
+        let after = AdBlocker::filter_engine(&named, false);
+        let adform = Url::parse("https://track.adform.net/x.js").unwrap();
+        assert!(!AdBlocker::new().should_block(&adform, &page(), ResourceType::Script), "no built-in rule covers adform");
+        assert!(after.should_block(&adform, &page(), ResourceType::Script), "a list really loaded");
+        for rule in AdBlocker::DEFAULT_RULES {
+            let url = url_for_rule(rule);
+            for kind in [ResourceType::Script, ResourceType::Xhr, ResourceType::Image] {
+                assert!(after.should_block(&url, &page(), kind), "{rule}: a real list unblocks {url} ({kind:?})");
+            }
+        }
+        for allowed in [
+            "https://hcaptcha.com/1/api.js",
+            "https://www.google.com/recaptcha/api2/anchor?k=1",
+            "https://connect.facebook.net/en_US/sdk.js",
+            "https://cdn.segment.com/analytics-next/bundle.js",
+        ] {
+            assert!(!after.should_block(&Url::parse(allowed).unwrap(), &page(), ResourceType::Script), "{allowed}");
+        }
+        for blocked in ["https://connect.facebook.net/signals/config/1", "https://connect.facebook.net/en_US/fbds.js"] {
+            assert!(after.should_block(&Url::parse(blocked).unwrap(), &page(), ResourceType::Script), "{blocked}");
         }
     }
 
