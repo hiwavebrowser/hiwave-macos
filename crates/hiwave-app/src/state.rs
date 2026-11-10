@@ -1919,3 +1919,156 @@ mod tests {
         );
     }
 }
+
+/// M4: the session file must survive a crash, a full disk and an unreadable state. These
+/// pin the behaviour; they do not name the fix's internals (see `workspace_state_internals`).
+#[cfg(test)]
+mod workspace_state_file_tests {
+    use super::*;
+
+    fn fresh(name: &str) -> AppState {
+        let dir = std::env::temp_dir().join(format!("hiwave_wsfile_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = AppConfig::default();
+        config.data_dir = dir.clone();
+        config.download_dir = dir.join("downloads");
+        AppState::new(config).expect("state")
+    }
+
+    fn file(s: &AppState) -> PathBuf {
+        s.config.data_dir.join("workspace_state.json")
+    }
+
+    fn tmp_files(s: &AppState) -> Vec<String> {
+        std::fs::read_dir(&s.config.data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_save_leaves_the_file_and_no_temp_file_and_loads_back() {
+        let mut s = fresh("roundtrip");
+        s.shell.create_workspace("Work".to_string());
+        s.save_workspace_state().unwrap();
+        assert!(file(&s).exists());
+        assert!(tmp_files(&s).is_empty(), "no temp file is left behind: {:?}", tmp_files(&s));
+        let mut again = AppState::new(s.config.clone()).unwrap();
+        assert!(again.load_workspace_state().unwrap());
+        assert_eq!(again.shell.list_workspaces().len(), 2);
+    }
+
+    #[test]
+    fn an_empty_session_file_is_kept_aside_not_overwritten() {
+        let mut s = fresh("empty");
+        std::fs::write(file(&s), "").unwrap();
+        assert!(s.load_workspace_state().is_err());
+        assert!(!file(&s).exists(), "moved out of the way");
+        assert!(s.config.data_dir.join("workspace_state.json.corrupt").exists());
+        s.save_workspace_state().unwrap();
+        assert!(file(&s).exists(), "the first save writes a fresh file");
+        assert_eq!(std::fs::read_to_string(s.config.data_dir.join("workspace_state.json.corrupt")).unwrap(), "");
+    }
+
+    #[test]
+    fn a_corrupt_session_file_keeps_its_bytes_and_each_one_gets_its_own_name() {
+        let mut s = fresh("corrupt");
+        std::fs::write(file(&s), "{ this is not json").unwrap();
+        assert!(s.load_workspace_state().is_err());
+        let first = s.config.data_dir.join("workspace_state.json.corrupt");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "{ this is not json");
+        std::fs::write(file(&s), "[1, 2").unwrap();
+        assert!(s.load_workspace_state().is_err());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "{ this is not json");
+        assert_eq!(
+            std::fs::read_to_string(s.config.data_dir.join("workspace_state.json.corrupt-1")).unwrap(),
+            "[1, 2"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_kept_aside_too() {
+        let mut s = fresh("binary");
+        std::fs::write(file(&s), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
+        assert!(s.load_workspace_state().is_err());
+        assert_eq!(
+            std::fs::read(s.config.data_dir.join("workspace_state.json.corrupt")).unwrap(),
+            vec![0xff, 0xfe, 0x00, 0x9f]
+        );
+    }
+
+    #[test]
+    fn a_truncated_real_snapshot_is_kept_aside_with_its_bytes() {
+        let mut s = fresh("truncated");
+        s.shell.create_workspace("Work".to_string());
+        s.save_workspace_state().unwrap();
+        let whole = std::fs::read(file(&s)).unwrap();
+        let cut = whole[..whole.len() / 2].to_vec();
+        std::fs::write(file(&s), &cut).unwrap();
+        let mut again = AppState::new(s.config.clone()).unwrap();
+        assert!(again.load_workspace_state().is_err());
+        assert_eq!(std::fs::read(s.config.data_dir.join("workspace_state.json.corrupt")).unwrap(), cut);
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_error_and_a_good_one_is_not_moved() {
+        let mut s = fresh("missing");
+        assert!(!s.load_workspace_state().unwrap());
+        s.save_workspace_state().unwrap();
+        let before = std::fs::read(file(&s)).unwrap();
+        assert!(s.load_workspace_state().unwrap());
+        assert_eq!(std::fs::read(file(&s)).unwrap(), before, "a readable file is left as it was");
+        assert!(!s.config.data_dir.join("workspace_state.json.corrupt").exists());
+    }
+
+    #[test]
+    fn the_legacy_shell_only_snapshot_still_loads() {
+        let mut s = fresh("legacy");
+        s.shell.create_workspace("Legacy".to_string());
+        std::fs::write(file(&s), serde_json::to_string(&s.shell.snapshot()).unwrap()).unwrap();
+        let mut again = AppState::new(s.config.clone()).unwrap();
+        assert!(again.load_workspace_state().unwrap());
+        assert_eq!(again.shell.list_workspaces().len(), 2);
+        assert!(!s.config.data_dir.join("workspace_state.json.corrupt").exists());
+    }
+
+    #[test]
+    fn a_read_error_keeps_the_file_and_blocks_saving() {
+        // A directory where the file should be: metadata succeeds, reading fails with an I/O
+        // error that says nothing about the content. Nothing may be moved or overwritten.
+        let mut s = fresh("read_error");
+        std::fs::create_dir_all(file(&s)).unwrap();
+        assert!(s.load_workspace_state().is_err());
+        assert!(file(&s).is_dir(), "the session path is left where it was");
+        assert!(!s.config.data_dir.join("workspace_state.json.corrupt").exists(), "not treated as corruption");
+        assert!(s.save_workspace_state().is_err(), "and nothing is saved over it");
+    }
+
+    #[test]
+    fn a_save_that_cannot_create_its_temp_file_leaves_the_good_file() {
+        let mut s = fresh("failed_save");
+        s.shell.create_workspace("Kept".to_string());
+        s.save_workspace_state().unwrap();
+        let good = std::fs::read(file(&s)).unwrap();
+        // The temp file cannot be created: a directory sits at its name.
+        let tmp = s.config.data_dir.join(format!("workspace_state.json.{}.tmp", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        s.shell.create_workspace("Lost".to_string());
+        assert!(s.save_workspace_state().is_err());
+        assert_eq!(std::fs::read(file(&s)).unwrap(), good, "the old file is untouched");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_save_whose_rename_fails_removes_its_temp_file() {
+        // A directory where the session file should be: the temp file is written and synced,
+        // then the rename over a directory fails. The temp file must not be left behind.
+        let mut s = fresh("rename_cleanup");
+        std::fs::create_dir_all(file(&s)).unwrap();
+        assert!(s.save_workspace_state().is_err());
+        assert!(file(&s).is_dir(), "what was at the path is untouched");
+        assert!(tmp_files(&s).is_empty(), "no temp file left after the failed rename: {:?}", tmp_files(&s));
+    }
+}
