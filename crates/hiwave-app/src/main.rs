@@ -2160,7 +2160,10 @@ fn dispatch_view_input(
         // page hears its keydown (metaKey) first, as in Chromium; the page
         // answers whether it claimed it, and one it did not goes on to the
         // menu (`rustkit_viewhost::finish_key_equivalent`). Chromium's
-        // reserved chords (Cmd+T/N/W/Q, ...) never reach here.
+        // reserved chords (Cmd+T/N/W/Q, ...) never reach here. The view
+        // waits `CHORD_ANSWER_TIMEOUT` (100 ms) for the answer, then sends
+        // the chord to the menu and drops a late answer (M1e): a load
+        // holding the page's thread no longer holds Cmd+L.
         rustkit_viewhost::InputKind::KeyEquivalent { key, token } => {
             let (vk, text) = mac_key_to_vk(&key);
             info!(keycode = key.mac_keycode, token, "Cmd chord to the page first");

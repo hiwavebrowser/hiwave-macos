@@ -737,7 +737,12 @@ impl EndpointSide {
                 }
             }
             PageInput::CommandKey { key_code, key, shift, alt, token } => {
-                let claimed = engine.handle_command_key(view, key_code, &key, shift, alt);
+                // The chord's edit runs only while the window still holds
+                // the chord for this page: one whose wait ran out went to
+                // the menu, whose Paste/Undo is the edit (M1e).
+                let claimed = engine.handle_command_key_if(view, key_code, &key, shift, alt, &mut || {
+                    rustkit_viewhost::claim_key_equivalent(token)
+                });
                 self.emit(PageEvent::KeyEquivalentDone { token, claimed });
             }
             PageInput::Ime(input) => {

@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 # Every develop landing must be compiled, so runs never cancel each other.
-# They share one group so rapid landings take one macos-14 runner at a time
+# They share one group so rapid landings take one macos-15 runner at a time
 # instead of several; `queue: max` keeps every pending run (the default
 # `queue: single` would cancel an older pending run when a newer one queues).
 concurrency:
@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   compile:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

@@ -3156,8 +3156,18 @@ class Driver:
                     not switched and 'menu event id="select_tab_2"' not in log and bool(heard),
                     "activate_tab %s, page %s" % (switched or "none", heard or "heard nothing"))
 
+    CHORD_TO_MENU = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*Cmd chord went to the menu[^\n]*\bsince_press_ms=(\d+)", re.M)
+    FOCUS_URL_EVENT = re.compile(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b[^\n]*menu event id=\"focus_url\"", re.M)
+
+    @staticmethod
+    def log_epoch(stamp):
+        import datetime
+        return datetime.datetime.fromisoformat(stamp[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+
     def m1d_cmd_l_while_loading(self):
-        """Handtest 11-09: Cmd+L, the first press of the app's life, with focus in a page that is still loading (an image the server holds 8 s; then a page whose thread is busy) reaches the menu and focuses the address bar."""
+        """M1e (Handtest 11-09): Cmd+L with focus in a page still loading (an image the server holds 8 s; then a page whose thread is busy) takes the address bar within 250 ms of the press, once; Escape then stops the load."""
         c = "m1d_cmd_l_while_loading"
         env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
         for query, what in (("slowimg", "an image still loading"), ("busy", "the page's thread busy")):
@@ -3170,27 +3180,86 @@ class Driver:
             code, win = self.hw("window", pid)
             # A click into #a: the content view takes the keyboard at once;
             # the page may hear the click only when its thread is free.
-            focus_mark = self.fixture.mark()
             self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
             time.sleep(0.4)
+            # The server holds the image 8 s from its request: still held
+            # with a second to spare. ("Navigation finished" is no guide:
+            # the chrome's own load logs it too.)
+            held = [t for (t, p) in self.fixture.requests[self.since:] if "/slowimg/" in p]
+            age = (time.time() - self.fixture.t0 - held[0]) if held else None
+            loading = age is not None and age < 7.0
+            if query == "slowimg" and not self.expect(c, "%s: the image is still held when Cmd+L is pressed" % what, loading,
+                                                      "requested %s s ago" % (round(age, 1) if age is not None else "never")):
+                self.close_page()
+                continue
             log_from, t = len(self.app.log_text()), time.time()
             self.hw("key", pid, 37, "cmd")
-            took = self.app.wait_log(r'menu event id="focus_url"', 15, log_from)
+            took = self.app.wait_log(r'menu event id="focus_url"', 3, log_from)
             log = self.app.log_text()[log_from:]
-            sent = "Cmd chord to the page first" in log
-            answer = re.search(r"went to the menu[^\n]*", log)
-            loading = len(self.fixture.seen("/slowimg/", self.since)) > 0 and \
-                not re.search(r"Navigation finished", self.app.log_text())
-            focused = self.fixture.seen("beacon?e3-a-focus", focus_mark)
-            self.expect(c, "%s: the first Cmd+L reached the menu" % what, bool(took),
-                        "after %.1f s; to the page first: %s; answer: %s; still loading: %s; page heard the click: %s" % (
-                            time.time() - t, sent, answer.group(0) if answer else "none", loading, bool(focused)))
-            # Not a gate (yet): with the slow image the page's thread is
-            # held by the load and the chord waits for it (reported 11-09,
-            # to be filed). INFO, so the check stays green for M1d.
-            self.note(c, "%s: how long the chord waited for the page" % what, "INFO",
-                      "%.1f s" % (time.time() - t))
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            # From the press (the key event's own timestamp, logged by the
+            # view as since_press_ms when the chord went to the menu) to
+            # the menu's focus_url.
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            self.expect(c, "%s: Cmd+L took the address bar within 250 ms of the press" % what,
+                        bool(took) and ms is not None and ms < 250,
+                        "%s ms from the press (driver wall clock %.0f ms); %s" % (
+                            ms, (time.time() - t) * 1000, chord.group(0)[-160:] if chord else "no chord-to-menu line"))
+            if query == "slowimg":
+                # The address bar has the keyboard: Escape there is the
+                # chrome's stop. The chrome's Escape closes an open sidebar
+                # first (chrome.html's keydown, older than M1e), so a
+                # second Escape is the stop then; the note says which.
+                stop_from = len(self.app.log_text())
+                self.hw("key", pid, 53)
+                stopped = self.app.wait_log(r"Stopping load", 1.5, stop_from)
+                presses = 1
+                if not stopped and re.search(r'"cmd":"set_sidebar_width"', self.app.log_text()[stop_from:]):
+                    self.note(c, "%s: the first Escape closed the sidebar" % what, "INFO")
+                    self.hw("key", pid, 53)
+                    presses = 2
+                    stopped = self.app.wait_log(r"Stopping load", 3, stop_from)
+                time.sleep(0.5)
+                after = self.app.log_text()[stop_from:]
+                self.expect(c, "%s: Escape then stopped the load" % what,
+                            bool(stopped) and "Stop: nothing loading" not in after,
+                            "%d Escape; stop: %s; %s" % (presses, bool(stopped),
+                                                         "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+            # The page's late answer (its thread freed by the stop or between
+            # busy spells) is dropped: the menu ran once.
+            self.app.wait_log(r"late answer for a Cmd chord dropped", 4, log_from)
+            time.sleep(0.3)
+            log = self.app.log_text()[log_from:]
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one Cmd+L, one focus_url (the late answer did not run it again)" % what, runs == 1,
+                        "%d focus_url; late answer %s" % (runs, "dropped" if "late answer for a Cmd chord dropped" in log else "not seen"))
+            # Both runs write the check's one log: keep each.
+            (self.out / ("%s.%s.app.log" % (c, query))).write_text(self.app.log_text())
             self.close_page()
+
+    def m1e_page_keeps_cmd_l(self):
+        """M1e: a page that cancels Cmd+L's keydown in time keeps it, as in Chromium (IDC_FOCUS_LOCATION is not in kReservedCommandIds): the address bar does not take it and the page hears it."""
+        c = "m1e_page_keeps_cmd_l"
+        started = self.e3_start(c, page="m1d_keys.html?preventl")
+        if not started:
+            return
+        pid, w, h = started
+        self.fixture.wait("beacon?m1d-t0-ready", 5, self.since)
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(1.5)
+        log = self.app.log_text()[log_from:]
+        heard = self.m1d_beacons(mark, "beacon?m1d-t0-keydown-l")
+        self.expect(c, "Cmd+L in a page that cancels it: no focus_url, the page heard it",
+                    'menu event id="focus_url"' not in log and bool(heard),
+                    "menu %s, page %s" % ("took it" if 'menu event id="focus_url"' in log else "did not take it",
+                                          heard or "heard nothing"))
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
@@ -3205,7 +3274,7 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
               "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
-              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading"]
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

@@ -15,7 +15,7 @@ This guard verifies that:
 3. It does NOT pass `--lib`, ensuring all integration test targets execute.
 4. It does NOT pass `--no-run`.
 5. It is BLOCKING: no `continue-on-error: true`.
-6. It runs on macos-14 with Rust toolchain and cache.
+6. It runs on macos-15 with Rust toolchain and cache.
 7. It publishes receipts to `$GITHUB_STEP_SUMMARY`.
 8. It is not conditioned away on pull requests.
 
@@ -78,8 +78,8 @@ def test_the_lane_is_blocking():
     )
 
 
-def test_the_lane_runs_on_macos14():
-    assert _lane()["runs-on"] == "macos-14", "js-suites must run on macos-14"
+def test_the_lane_runs_on_macos15():
+    assert _lane()["runs-on"] == "macos-15", "js-suites must run on macos-15"
 
 
 def test_the_receipt_reaches_the_job_summary():

@@ -2346,6 +2346,18 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Tell an `<img>` (by node id) that the image its `src`/`srcset` names
+    /// now has failed to load: `complete` reads true for it from here until
+    /// those attributes change, and `error` fires at it (it does not
+    /// bubble). Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_image_error(&self, node: usize) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkImageFailed({node});"
+        ))?;
+        Ok(())
+    }
+
     /// Fire the user's mouse input at an element (by node id) as a trusted,
     /// bubbling, cancelable `MouseEvent` (a `PointerEvent` for `pointer*`
     /// and `click`; the enter and leave events neither bubble nor can be
