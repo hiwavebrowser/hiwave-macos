@@ -1,12 +1,16 @@
-//! Incremental layout, stage 1 (`docs/design/INCREMENTAL_LAYOUT_PLAN.md`).
+//! Incremental layout, stages 1 and 2 (`docs/design/INCREMENTAL_LAYOUT_PLAN.md`).
 //!
 //! Given the box tree the last layout started from (unlaid), the tree it
-//! produced (laid out), and a freshly built unlaid tree, find the one block
-//! box whose content changed, lay out only that box where the full pass put
-//! it, and move what follows it by its height delta, growing every ancestor
-//! up to the root.
+//! produced (laid out), and a freshly built unlaid tree, find the boxes
+//! whose content changed. Each is hoisted to a relayout root R: the nearest
+//! box at or above it that can be laid out alone (in flow, its margins
+//! closed off or its edge children inline-level, nothing in it anchored
+//! outside it) and whose ancestors up to a boundary only grow by R's
+//! height delta. R is laid out alone where the full pass put it; what
+//! follows it moves by the delta, and every ancestor up to the boundary
+//! grows by it. A boundary is the root or a block whose height cannot
+//! depend on its content; boxes after it do not move.
 //!
-//! Only the simplest case is taken: see [`relayout`] for the conditions.
 //! Everything else returns a [`Fallback`] reason and the caller lays the
 //! whole tree out, which is always correct. The engine's verify mode runs
 //! both and compares every box rect ([`compare_rects`]).
@@ -14,7 +18,7 @@
 use crate::{
     BoxType, Dimensions, EdgeSizes, FloatContext, LayoutBox, MarginCollapseContext, Position, Rect,
 };
-use rustkit_css::{Clear, ContainerType, Display, Float, Length, Overflow, WritingMode};
+use rustkit_css::{Clear, ContainerType, Display, Float, Length, WritingMode};
 use std::cell::Cell;
 
 thread_local! {
@@ -38,89 +42,94 @@ pub type Fallback = &'static str;
 /// What an incremental relayout did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Relaid {
-    /// Child-index path from the root to the box laid out again; `None`
-    /// when nothing changed and the old layout stands as it is.
-    pub path: Option<Vec<usize>>,
+    /// Child-index paths from the root to each relayout root laid out
+    /// again, in document order; empty when nothing changed and the old
+    /// layout stands as it is.
+    pub roots: Vec<Vec<usize>>,
     /// Boxes laid out (the entry-point count across the relayout).
     pub visits: u64,
-    /// Boxes moved by the delta, after the changed box.
+    /// Boxes moved by a delta, after a relayout root.
     pub moved: u64,
     /// Boxes compared by the diff (no layout).
     pub compared: u64,
-    /// The changed box's border-box bottom, new minus old.
+    /// Levels the changed boxes were hoisted, in all.
+    pub hoists: u32,
+    /// Relayout roots whose delta stopped at a boundary below the root.
+    pub bounded: u32,
+    /// The sum of the roots' border-box bottom deltas.
     pub delta: f32,
+}
+
+/// One relayout root and where its delta stops.
+#[derive(Debug, Clone)]
+struct Plan {
+    root: Vec<usize>,
+    /// Depth of the boundary on the root's path, if one is below the
+    /// tree's root. Ancestors deeper than it grow by the delta; it and they
+    /// move the children after the path. `None`: every ancestor grows.
+    stop: Option<usize>,
+    hoists: u32,
 }
 
 /// Lay `fresh` out by updating `laid` (the layout of `old_unlaid`) in place.
 ///
-/// On `Ok`, `laid` is what a full layout of `fresh` gives. On `Err`, `laid` is
-/// unchanged and the caller must lay `fresh` out in full.
-///
-/// Taken only when the trees differ under one block box B and:
-/// - B is an in-flow, static, unfloated, uncleared `display: block` box with
-///   visible overflow and no percentage in its heights;
-/// - no margin collapses through B's top or bottom edge (each is closed by a
-///   border or padding, or the child next to it is inline-level, before and
-///   after), and B is not empty before or after;
-/// - B's subtree, old and new, holds no float, `clear`, non-static box or
-///   percentage height;
-/// - every ancestor is a plain auto-height block in flow (no table, flex,
-///   grid, columns, `-webkit-box`, size container, transform, filter,
-///   min/max height, non-visible overflow, vertical writing mode);
-/// - no float before B reaches below B's top;
-/// - every absolute box outside B has a positioned ancestor off the path
-///   from the root to B, and no fixed box comes after B.
+/// On `Ok`, `laid` is what a full layout of `fresh` gives. On `Err`, `laid`
+/// may be partly updated and must be dropped; the caller lays `fresh` out in
+/// full.
 pub fn relayout(
     old_unlaid: &LayoutBox,
     fresh: &LayoutBox,
     laid: &mut LayoutBox,
 ) -> Result<Relaid, Fallback> {
     let mut out = Relaid::default();
-    let path = match changed_path(old_unlaid, fresh, &mut out.compared)? {
-        None => return Ok(out),
-        Some(path) => path,
-    };
-    if path.is_empty() {
-        return Err("root_box");
+    let changed = nest_free(changed_roots(old_unlaid, fresh, &mut out.compared)?);
+    if changed.is_empty() {
+        return Ok(out);
     }
-    let old_b = at(laid, &path).ok_or("shape")?;
-    let new_b = at(fresh, &path).ok_or("shape")?;
-    let old_unlaid_b = at(old_unlaid, &path).ok_or("shape")?;
+    let mut plans = Vec::new();
+    for path in changed {
+        plans.push(plan_for(laid, fresh, old_unlaid, path)?);
+    }
+    let roots = nest_free(plans.iter().map(|p| p.root.clone()).collect());
+    plans.retain(|p| roots.contains(&p.root));
+    plans.dedup_by(|a, b| a.root == b.root);
+    plans.sort_by(|a, b| a.root.cmp(&b.root));
+    // Last first: a root's delta then moves the later roots already laid
+    // out, and each is laid out at its own old position.
+    for plan in plans.iter().rev() {
+        let (nb, delta) = lay_out_root(laid, fresh, plan, &mut out.visits)?;
+        out.moved += splice(laid, &plan.root, 0, plan.stop, nb, delta)?;
+        out.delta += delta;
+        out.hoists += plan.hoists;
+        out.bounded += u32::from(plan.stop.is_some());
+    }
+    out.roots = plans.into_iter().map(|p| p.root).collect();
+    Ok(out)
+}
 
-    changed_box_ok(new_b)?;
-    subtree_ok(new_b)?;
-    subtree_ok(old_b)?;
-    let top_closed = edge_closed_top(old_b);
-    let bottom_closed = edge_closed_bottom(old_b);
-    for b in [new_b, old_unlaid_b] {
-        if !top_closed && !b.children.first().is_some_and(is_inline_level) {
-            return Err("margin_collapse_top");
-        }
-        if !bottom_closed && !b.children.last().is_some_and(is_inline_level) {
-            return Err("margin_collapse_bottom");
-        }
-    }
-    ancestors_ok(laid, &path)?;
-    let b_top = old_b.dimensions.border_box().y;
-    let mut scan = Scan {
-        b_top,
-        failure: None,
-    };
-    scan.walk(laid, &path, 0, false, false, false);
-    if let Some(why) = scan.failure {
-        return Err(why);
-    }
-
-    // Lay B out alone where the full pass put it: its top margin counts as
-    // already adjoined (the context resolves to 0), so its content edge
-    // lands at the old one.
+/// Lay the box at `plan.root` out alone, from `fresh`, where the full pass
+/// put it in `laid`. Returns the laid-out box and its border-box delta.
+fn lay_out_root(
+    laid: &LayoutBox,
+    fresh: &LayoutBox,
+    plan: &Plan,
+    visits: &mut u64,
+) -> Result<(LayoutBox, f32), Fallback> {
+    let path = &plan.root;
+    let old_b = at(laid, path).ok_or("shape")?;
+    let new_b = at(fresh, path).ok_or("shape")?;
     let parent = at(laid, &path[..path.len() - 1]).ok_or("shape")?;
     let mut nb = new_b.clone();
     nb.set_viewport(old_b.viewport.0, old_b.viewport.1);
     nb.percent_height_is_auto = old_b.percent_height_is_auto;
+    // Its parent's child loop hands an in-flow block that shares its
+    // formatting context the floats so far; none reach it (`scan`).
     let shares_floats = matches!(nb.box_type, BoxType::Block | BoxType::AnonymousBlock)
+        && !nb.style.display.is_atomic_inline()
         && !crate::margin_collapse::establishes_bfc(&nb.style, nb.float);
     nb.context_floats = shares_floats.then(FloatContext::new);
+    // Its top margin counts as already adjoined (the context resolves to
+    // 0), so its content edge lands at the old one.
     let d = &old_b.dimensions;
     let mut cb = parent.dimensions.clone();
     cb.content.x = d.content.x - d.margin.left - d.border_with_gutter().left - d.padding.left;
@@ -130,16 +139,25 @@ pub fn relayout(
     margins.first_child_top_adjoined = true;
     let before = layout_visits();
     nb.layout_with_collapse_in(&cb, &mut margins, &mut FloatContext::new(), None);
-    out.visits = layout_visits() - before;
+    // The root pass's relative offsets, for what is under the box (its own
+    // is in the old position it took).
+    if !matches!(
+        nb.box_type,
+        BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak
+    ) {
+        let inner = nb.dimensions.clone();
+        for child in &mut nb.children {
+            LayoutBox::shift_relative_subtree(child, &inner);
+        }
+    }
+    *visits += layout_visits() - before;
     nb.context_floats = None;
     if margins.child_collapsed_through {
         return Err("collapse_through");
     }
-    let (old_h, new_h) = (
-        old_b.dimensions.border_box().height,
-        nb.dimensions.border_box().height,
-    );
-    if (old_h <= 0.0 || new_h <= 0.0) && !(top_closed && bottom_closed) {
+    let closed = edge_closed_top(old_b) && edge_closed_bottom(old_b);
+    let (old_h, new_h) = (d.border_box().height, nb.dimensions.border_box().height);
+    if (old_h <= 0.0 || new_h <= 0.0) && !closed {
         return Err("collapse_through");
     }
     let nd = &nb.dimensions;
@@ -150,10 +168,20 @@ pub fn relayout(
     {
         return Err("geometry_moved");
     }
-    out.delta = nb.dimensions.border_box().bottom() - old_b.dimensions.border_box().bottom();
-    out.moved = splice(laid, &path, nb, out.delta);
-    out.path = Some(path);
-    Ok(out)
+    let delta = nb.dimensions.border_box().bottom() - d.border_box().bottom();
+    Ok((nb, delta))
+}
+
+/// Drop every path that has another (or an equal one) as a prefix, sorted.
+fn nest_free(mut paths: Vec<Vec<usize>>) -> Vec<Vec<usize>> {
+    paths.sort();
+    let mut kept: Vec<Vec<usize>> = Vec::new();
+    for p in paths {
+        if !kept.iter().any(|k| p.starts_with(k)) {
+            kept.push(p);
+        }
+    }
+    kept
 }
 
 fn close(a: f32, b: f32) -> bool {
@@ -175,75 +203,110 @@ fn at<'a>(root: &'a LayoutBox, path: &[usize]) -> Option<&'a LayoutBox> {
     Some(b)
 }
 
-/// Replace the box at `path` with `nb`, move every later sibling subtree at
-/// each level by `delta`, and grow each ancestor by it. Returns how many
-/// boxes moved.
-fn splice(node: &mut LayoutBox, path: &[usize], nb: LayoutBox, delta: f32) -> u64 {
+/// Replace the box at `path` with `nb`. At every level from the boundary
+/// (`stop`) down, move the children after the path by `delta`; below the
+/// boundary, grow the box by it. Returns how many boxes moved.
+fn splice(
+    node: &mut LayoutBox,
+    path: &[usize],
+    depth: usize,
+    stop: Option<usize>,
+    nb: LayoutBox,
+    delta: f32,
+) -> Result<u64, Fallback> {
     let (&i, rest) = path.split_first().expect("non-empty path");
     let mut moved = if rest.is_empty() {
         node.children[i] = nb;
         0
     } else {
-        splice(&mut node.children[i], rest, nb, delta)
+        splice(&mut node.children[i], rest, depth + 1, stop, nb, delta)?
     };
-    if delta != 0.0 {
+    if delta != 0.0 && stop.map_or(true, |s| depth >= s) {
         for later in &mut node.children[i + 1..] {
             moved += count(later);
             LayoutBox::shift_subtree(later, 0.0, delta);
         }
-        node.dimensions.content.height += delta;
+        if stop.map_or(true, |s| depth > s) {
+            let (old, new) = (
+                node.dimensions.content.height,
+                node.dimensions.content.height + delta,
+            );
+            let (min, max) = content_height_clamps(node);
+            if min.is_some_and(|m| old <= m + 0.01 || new < m - 0.01)
+                || max.is_some_and(|m| old >= m - 0.01 || new > m + 0.01)
+            {
+                return Err("ancestor_min_max");
+            }
+            node.dimensions.content.height = new;
+        }
     }
-    moved
+    Ok(moved)
+}
+
+/// A growing ancestor's `min-height` and `max-height` as content heights
+/// (`None` when unset). Percentages were refused by `classify_ancestor`.
+fn content_height_clamps(b: &LayoutBox) -> (Option<f32>, Option<f32>) {
+    let s = &b.style;
+    let frame = if s.box_sizing == rustkit_css::BoxSizing::BorderBox {
+        b.dimensions.padding.vertical() + b.dimensions.border_with_gutter().vertical()
+    } else {
+        0.0
+    };
+    let resolve = |l: &Length| match l {
+        Length::Auto | Length::Zero => None,
+        l => Some(b.length_to_px(l, 0.0) - frame),
+    };
+    (resolve(&s.min_height), resolve(&s.max_height))
 }
 
 fn count(b: &LayoutBox) -> u64 {
     1 + b.children.iter().map(count).sum::<u64>()
 }
 
-/// The child-index path to the box whose children changed, `None` when the
-/// trees are equal, or a fallback when the root itself changed.
-fn changed_path(
+/// The child-index paths to the boxes whose children changed, or a
+/// fallback when the root itself changed. Empty when the trees are equal.
+fn changed_roots(
     old: &LayoutBox,
     new: &LayoutBox,
     compared: &mut u64,
-) -> Result<Option<Vec<usize>>, Fallback> {
+) -> Result<Vec<Vec<usize>>, Fallback> {
     *compared += 1;
     if !own_inputs_equal(old, new) {
         return Err("root_changed");
     }
-    let mut path = Vec::new();
-    let (mut a, mut b) = (old, new);
-    loop {
-        if a.children.len() != b.children.len() {
-            return Ok(Some(path));
+    let mut out = Vec::new();
+    collect_changed(old, new, &mut Vec::new(), &mut out, compared);
+    Ok(out)
+}
+
+fn collect_changed(
+    a: &LayoutBox,
+    b: &LayoutBox,
+    path: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+    compared: &mut u64,
+) {
+    if a.children.len() != b.children.len() {
+        out.push(path.clone());
+        return;
+    }
+    let mut changed_here = false;
+    for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
+        if subtree_equal(ca, cb, compared) {
+            continue;
         }
-        let mut differing = None;
-        let mut several = false;
-        for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
-            if !subtree_equal(ca, cb, compared) {
-                if differing.is_some() {
-                    several = true;
-                    break;
-                }
-                differing = Some(i);
-            }
-        }
-        let Some(i) = differing else {
-            return Ok(if path.is_empty() { None } else { Some(path) });
-        };
-        if several {
-            return Ok(Some(path));
-        }
-        let (ca, cb) = (&a.children[i], &b.children[i]);
         if matches!(cb.box_type, BoxType::Block | BoxType::AnonymousBlock)
             && own_inputs_equal(ca, cb)
         {
             path.push(i);
-            a = ca;
-            b = cb;
-            continue;
+            collect_changed(ca, cb, path, out, compared);
+            path.pop();
+        } else {
+            changed_here = true;
         }
-        return Ok(Some(path));
+    }
+    if changed_here {
+        out.push(path.clone());
     }
 }
 
@@ -392,70 +455,138 @@ fn percent(l: &Length) -> bool {
     crate::flex::has_percentage(l)
 }
 
-fn changed_box_ok(b: &LayoutBox) -> Result<(), Fallback> {
-    if !matches!(b.box_type, BoxType::Block | BoxType::AnonymousBlock)
-        || b.style.display != Display::Block
+/// Hoist the changed box at `path` to a relayout root and find its
+/// boundary. Each failed condition moves the root one level up; at the
+/// tree's root, or its first level, the full layout is cheaper.
+fn plan_for(
+    laid: &LayoutBox,
+    fresh: &LayoutBox,
+    old_unlaid: &LayoutBox,
+    path: Vec<usize>,
+) -> Result<Plan, Fallback> {
+    let mut root = path;
+    let mut hoists = 0;
+    let mut why: Fallback = if root.len() == 1 {
+        "body_box"
+    } else {
+        "root_box"
+    };
+    'hoist: loop {
+        if root.len() <= 1 {
+            return Err(if root.is_empty() { "root_box" } else { why });
+        }
+        let (Some(l), Some(n), Some(u)) =
+            (at(laid, &root), at(fresh, &root), at(old_unlaid, &root))
+        else {
+            return Err("shape");
+        };
+        if let Err(w) = root_ok(l, n, u) {
+            why = w;
+            root.pop();
+            hoists += 1;
+            continue;
+        }
+        let mut stop = None;
+        for depth in (0..root.len()).rev() {
+            let a = at(laid, &root[..depth]).ok_or("shape")?;
+            let parent = depth.checked_sub(1).and_then(|p| at(laid, &root[..p]));
+            match classify_ancestor(a, parent) {
+                Ancestor::Grows => {}
+                Ancestor::Boundary => {
+                    stop = Some(depth);
+                    break;
+                }
+                Ancestor::Hoist(w) => {
+                    why = w;
+                    hoists += (root.len() - depth) as u32;
+                    root.truncate(depth);
+                    continue 'hoist;
+                }
+            }
+        }
+        if let Err(w) = scan(laid, &root, stop) {
+            why = w;
+            root.pop();
+            hoists += 1;
+            continue;
+        }
+        return Ok(Plan { root, stop, hoists });
+    }
+}
+
+/// Whether the box at a root's path can be laid out alone: `l` laid out,
+/// `n` as built now, `u` as built last time.
+fn root_ok(l: &LayoutBox, n: &LayoutBox, u: &LayoutBox) -> Result<(), Fallback> {
+    let s = &n.style;
+    if !matches!(n.box_type, BoxType::Block | BoxType::AnonymousBlock)
+        || !matches!(s.display, Display::Block | Display::Flex | Display::Grid)
     {
         return Err("changed_not_block");
     }
-    if b.position != Position::Static || b.style.position != rustkit_css::Position::Static {
+    if l.position != Position::Static
+        || !matches!(
+            s.position,
+            rustkit_css::Position::Static | rustkit_css::Position::Relative
+        )
+    {
         return Err("changed_position");
     }
-    if b.float != Float::None {
+    if [&s.top, &s.bottom, &s.left, &s.right]
+        .into_iter()
+        .flatten()
+        .any(percent)
+    {
+        return Err("changed_position");
+    }
+    if n.float != Float::None {
         return Err("changed_float");
     }
-    if b.clear != Clear::None {
+    if n.clear != Clear::None {
         return Err("changed_clear");
     }
-    if percent(&b.style.height) || percent(&b.style.min_height) || percent(&b.style.max_height) {
+    if percent(&s.height) || percent(&s.min_height) || percent(&s.max_height) {
         return Err("changed_percent_height");
     }
-    if b.style.overflow_x != Overflow::Visible || b.style.overflow_y != Overflow::Visible {
-        return Err("changed_overflow");
-    }
-    plain_container(b).map_err(|_| "changed_not_block")
-}
-
-/// A block whose children flow as plain blocks and lines.
-fn plain_container(b: &LayoutBox) -> Result<(), Fallback> {
-    let s = &b.style;
-    if s.display != Display::Block
-        || s.column_count.is_some()
+    if s.column_count.is_some()
         || s.columns_declared
         || s.webkit_box.is_some()
         || s.writing_mode != WritingMode::HorizontalTb
-        || s.container_type != ContainerType::Normal
     {
-        return Err("ancestor_not_block");
+        return Err("changed_not_block");
     }
-    Ok(())
+    let bfc = crate::margin_collapse::establishes_bfc(s, n.float);
+    if !bfc {
+        let top = edge_closed_top(l);
+        let bottom = edge_closed_bottom(l);
+        for b in [n, u] {
+            if !top && !b.children.first().is_some_and(is_inline_level) {
+                return Err("margin_collapse_top");
+            }
+            if !bottom && !b.children.last().is_some_and(is_inline_level) {
+                return Err("margin_collapse_bottom");
+            }
+        }
+    }
+    subtree_ok(n, bfc)?;
+    subtree_ok(l, bfc)
 }
 
-fn subtree_ok(b: &LayoutBox) -> Result<(), Fallback> {
+/// What is under a relayout root must lay out inside it: no fixed box, and
+/// no float or `clear` unless the root contains them (a formatting root).
+/// An absolute box anchors to its parent's padding box
+/// (`reanchor_absolute_children`), which is inside the root.
+fn subtree_ok(b: &LayoutBox, contains_floats: bool) -> Result<(), Fallback> {
     for child in &b.children {
-        if matches!(child.position, Position::Absolute | Position::Fixed)
-            || matches!(
-                child.style.position,
-                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
-            )
+        if child.position == Position::Fixed || child.style.position == rustkit_css::Position::Fixed
         {
-            return Err("subtree_out_of_flow");
+            return Err("subtree_fixed");
         }
-        if child.float != Float::None || child.clear != Clear::None {
+        if (child.float != Float::None || child.clear != Clear::None) && !contains_floats {
             return Err("subtree_float");
         }
-        if child.position != Position::Static
-            || child.style.position != rustkit_css::Position::Static
-        {
-            return Err("subtree_positioned");
-        }
-        if percent(&child.style.height)
-            || percent(&child.style.min_height)
-            || percent(&child.style.max_height)
-        {
-            return Err("subtree_percent_height");
-        }
-        subtree_ok(child)?;
+        let inner =
+            contains_floats || crate::margin_collapse::establishes_bfc(&child.style, child.float);
+        subtree_ok(child, inner)?;
     }
     Ok(())
 }
@@ -476,134 +607,157 @@ fn edge_closed_bottom(b: &LayoutBox) -> bool {
         )
 }
 
-fn ancestors_ok(root: &LayoutBox, path: &[usize]) -> Result<(), Fallback> {
-    let mut b = root;
-    for &i in path {
-        ancestor_ok(b)?;
-        b = &b.children[i];
-    }
-    Ok(())
+enum Ancestor {
+    /// An auto-height block in flow: grows by the delta.
+    Grows,
+    /// A block in flow whose height cannot depend on its content: the
+    /// delta moves its later children and stops there.
+    Boundary,
+    /// Neither: the relayout root moves up to it.
+    Hoist(Fallback),
 }
 
-fn ancestor_ok(b: &LayoutBox) -> Result<(), Fallback> {
-    if !matches!(b.box_type, BoxType::Block | BoxType::AnonymousBlock) {
-        return Err("ancestor_not_block");
+fn classify_ancestor(a: &LayoutBox, parent: Option<&LayoutBox>) -> Ancestor {
+    let s = &a.style;
+    if !matches!(a.box_type, BoxType::Block | BoxType::AnonymousBlock) {
+        return Ancestor::Hoist("ancestor_not_block");
     }
-    plain_container(b)?;
-    let s = &b.style;
-    if b.float != Float::None
-        || !matches!(b.position, Position::Static | Position::Relative)
-        || matches!(
-            s.position,
-            rustkit_css::Position::Absolute
-                | rustkit_css::Position::Fixed
-                | rustkit_css::Position::Sticky
-        )
-    {
-        return Err("ancestor_out_of_flow");
+    if s.display != Display::Block {
+        return Ancestor::Hoist(match s.display {
+            Display::Flex | Display::InlineFlex => "ancestor_flex",
+            Display::Grid | Display::InlineGrid => "ancestor_grid",
+            d if d.is_table() => "ancestor_table",
+            _ => "ancestor_not_block",
+        });
     }
-    if [&s.top, &s.bottom].into_iter().flatten().any(percent) {
-        return Err("ancestor_out_of_flow");
-    }
-    let unset = |l: &Length| matches!(l, Length::Auto) || matches!(l, Length::Zero);
-    if !matches!(s.height, Length::Auto)
-        || !unset(&s.min_height)
-        || !matches!(s.max_height, Length::Auto)
-    {
-        return Err("ancestor_sized");
-    }
-    if s.overflow_x != Overflow::Visible
-        || s.overflow_y != Overflow::Visible
+    if s.column_count.is_some()
+        || s.columns_declared
+        || s.webkit_box.is_some()
         || s.line_clamp().is_some()
     {
-        return Err("ancestor_overflow");
+        return Ancestor::Hoist("ancestor_columns");
     }
-    if holds_fixed(s) {
-        return Err("ancestor_holds_fixed");
+    if s.writing_mode != WritingMode::HorizontalTb {
+        return Ancestor::Hoist("ancestor_not_block");
+    }
+    if s.container_type != ContainerType::Normal {
+        return Ancestor::Hoist("ancestor_container");
+    }
+    let out_of_flow = a.float != Float::None
+        || matches!(a.position, Position::Absolute | Position::Fixed)
+        || matches!(
+            s.position,
+            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+        );
+    if out_of_flow {
+        return Ancestor::Hoist("ancestor_out_of_flow");
+    }
+    if [&s.top, &s.bottom].into_iter().flatten().any(percent) {
+        return Ancestor::Hoist("ancestor_out_of_flow");
+    }
+    // In flow with its width from its containing block: a height that does
+    // not read its content makes it a boundary.
+    let fixed_height = match &s.height {
+        Length::Auto | Length::FitContent => false,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => false,
+        l if percent(l) => {
+            !a.percent_height_computes_to_auto()
+                && matches!(s.height, Length::Percent(_))
+                && parent
+                    .is_some_and(|p| p.definite_content_height_for_children(0.0, false).is_some())
+        }
+        _ => true,
+    };
+    if fixed_height {
+        return Ancestor::Boundary;
+    }
+    let auto_height = matches!(s.height, Length::Auto) || a.percent_height_computes_to_auto();
+    if !auto_height {
+        return Ancestor::Hoist("ancestor_sized");
+    }
+    // A min- or max-height clamps the content height; `splice` checks the
+    // old and new heights are both on the content side of it.
+    let keyword = |l: &Length| {
+        matches!(
+            l,
+            Length::FitContent | Length::Min(_) | Length::Max(_) | Length::Clamp(_)
+        )
+    };
+    if percent(&s.min_height)
+        || percent(&s.max_height)
+        || keyword(&s.min_height)
+        || keyword(&s.max_height)
+    {
+        return Ancestor::Hoist("ancestor_min_max");
+    }
+    Ancestor::Grows
+}
+
+/// The laid-out tree outside the root `r`, against its boundary at depth
+/// `stop`: no float before the root reaches below its top; no absolute or
+/// fixed box is a child of a growing ancestor, or follows the path in a
+/// box whose later children move; no fixed box is among what moves; no
+/// box that moves or sits in a growing box has percentage offsets.
+fn scan(laid: &LayoutBox, r: &[usize], stop: Option<usize>) -> Result<(), Fallback> {
+    let grows = |depth: usize| stop.map_or(true, |s| depth > s);
+    let r_top = at(laid, r).ok_or("shape")?.dimensions.border_box().y;
+    floats_before(laid, r, r_top)?;
+    for depth in stop.unwrap_or(0)..r.len() {
+        let node = at(laid, &r[..depth]).ok_or("shape")?;
+        let on_path = r[depth];
+        for (i, c) in node.children.iter().enumerate() {
+            if i == on_path {
+                continue;
+            }
+            let oof = matches!(c.position, Position::Absolute | Position::Fixed)
+                || matches!(
+                    c.style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                );
+            if oof && (grows(depth) || i > on_path) {
+                return Err("abspos_on_path");
+            }
+            if grows(depth)
+                && [&c.style.top, &c.style.bottom]
+                    .into_iter()
+                    .flatten()
+                    .any(percent)
+            {
+                return Err("relative_percent");
+            }
+            if i > on_path && contains_fixed(c) {
+                return Err("fixed_after");
+            }
+        }
     }
     Ok(())
 }
 
-/// Whatever makes a box the containing block of fixed descendants.
-fn holds_fixed(s: &rustkit_css::ComputedStyle) -> bool {
-    s.transform != rustkit_css::TransformList::default()
-        || s.translate.is_some()
-        || s.rotate.is_some()
-        || s.scale.is_some()
-        || !s.filter.is_empty()
-        || !s.backdrop_filter.is_empty()
-        || s.will_change_holds_fixed
-        || s.contain_holds_fixed
+fn contains_fixed(b: &LayoutBox) -> bool {
+    b.position == Position::Fixed
+        || b.style.position == rustkit_css::Position::Fixed
+        || b.children.iter().any(contains_fixed)
 }
 
-/// The scan of the laid-out tree outside B: floats before B that reach it,
-/// absolute boxes anchored on the path, fixed boxes after B.
-struct Scan {
-    b_top: f32,
-    failure: Option<Fallback>,
-}
-
-impl Scan {
-    /// `rest` is the path below `b` while `b` is on it (empty once off it).
-    fn walk(
-        &mut self,
-        b: &LayoutBox,
-        rest: &[usize],
-        _depth: usize,
-        off_path: bool,
-        after: bool,
-        held: bool,
-    ) {
-        if self.failure.is_some() {
-            return;
-        }
-        let on_path = !off_path;
-        if off_path {
-            if b.float != Float::None
-                && !after
-                && b.dimensions.margin_box().bottom() > self.b_top + 0.01
-            {
-                self.failure = Some("float_beside");
-                return;
-            }
-            match b.position {
-                Position::Absolute if !held => {
-                    self.failure = Some("abspos_on_path");
-                    return;
-                }
-                Position::Fixed if after => {
-                    self.failure = Some("fixed_after");
-                    return;
-                }
-                _ => {}
-            }
-        }
-        // Positioned off the path: what is under it is anchored off the path.
-        let held_below = held || (off_path && b.position != Position::Static);
-        if on_path && rest.is_empty() {
-            // B itself: its subtree was checked on its own.
-            return;
-        }
-        for (i, child) in b.children.iter().enumerate() {
-            let (child_off, child_after, child_rest): (bool, bool, &[usize]) = if on_path {
-                match i.cmp(&rest[0]) {
-                    std::cmp::Ordering::Equal => (false, false, &rest[1..]),
-                    std::cmp::Ordering::Less => (true, false, &[]),
-                    std::cmp::Ordering::Greater => (true, true, &[]),
-                }
-            } else {
-                (true, after, &[])
-            };
-            self.walk(
-                child,
-                child_rest,
-                _depth + 1,
-                child_off,
-                child_after,
-                held_below,
-            );
-        }
+/// No float before the root in document order (outside its ancestors)
+/// reaches below its top edge.
+fn floats_before(b: &LayoutBox, rest: &[usize], r_top: f32) -> Result<(), Fallback> {
+    let Some((&i, below)) = rest.split_first() else {
+        return Ok(());
+    };
+    for c in &b.children[..i] {
+        any_float_below(c, r_top)?;
     }
+    floats_before(&b.children[i], below, r_top)
+}
+
+fn any_float_below(b: &LayoutBox, r_top: f32) -> Result<(), Fallback> {
+    if b.float != Float::None && b.dimensions.margin_box().bottom() > r_top + 0.01 {
+        return Err("float_beside");
+    }
+    b.children
+        .iter()
+        .try_for_each(|c| any_float_below(c, r_top))
 }
 
 /// Where two laid-out trees differ, in shapes only: each entry is the child
@@ -675,7 +829,19 @@ fn compare_into(
                 BoxType::FormControl(_) => "control",
                 BoxType::LineBreak => "br",
             };
-            shown.push(format!("{path:?} {kind} {}", what.join("+")));
+            let (c, d) = (da.content, db.content);
+            shown.push(format!(
+                "{path:?} {kind} {} ({:.1},{:.1} {:.1}x{:.1} vs {:.1},{:.1} {:.1}x{:.1})",
+                what.join("+"),
+                c.x,
+                c.y,
+                c.width,
+                c.height,
+                d.x,
+                d.y,
+                d.width,
+                d.height
+            ));
         }
     }
     if a.children.len() == b.children.len() {

@@ -206,16 +206,24 @@ fn an_absolute_box_anchored_on_the_path_falls_back() {
 }
 
 #[test]
-fn a_margin_collapsing_through_the_changed_box_falls_back() {
+fn a_margin_collapsing_through_the_changed_box_relays_out_its_parent() {
     // The div's first child is a block whose top margin collapses through
-    // the div's open top edge; adding a child changes the div's children.
+    // the div's open top edge: the div cannot be laid out alone, so its
+    // padded parent is.
+    let html =
+        "<div style='padding:1px'><p>before</p><div id=t><p style='margin:20px 0'>first</p></div>\
+                <p>after</p></div>";
+    let script = "var p = document.createElement('p'); p.textContent = 'added'; \
+                  document.getElementById('t').appendChild(p);";
+    verified(html, script);
+}
+
+#[test]
+fn a_change_whose_root_would_be_the_body_falls_back() {
     let html = "<p>before</p><div id=t><p style='margin:20px 0'>first</p></div><p>after</p>";
-    let script =
-        "var p = document.createElement('p'); p.textContent = 'added'; document.getElementById('t').appendChild(p);";
-    assert_eq!(
-        last_fallback(&mutate(Mode::On, html, script)),
-        "margin_collapse_top"
-    );
+    let script = "var p = document.createElement('p'); p.textContent = 'added'; \
+                  document.getElementById('t').appendChild(p);";
+    assert_eq!(last_fallback(&mutate(Mode::On, html, script)), "body_box");
 }
 
 /// Stage 2: what the incremental path did, under `verify` (the full layout
@@ -266,11 +274,20 @@ fn a_set_height_ancestor_stops_the_delta() {
 }
 
 #[test]
-fn a_min_height_ancestor_is_laid_out_again() {
+fn a_min_height_ancestor_grows_past_its_minimum() {
     let html =
         "<div><div style='min-height:40px;padding:2px'><p id=t>x</p></div><p>after</p></div>";
     let stats = verified(html, GROW);
-    assert!(stats.hoists >= 1, "{stats:?}");
+    assert_eq!(stats.hoists, 0, "{stats:?}");
+}
+
+#[test]
+fn a_min_height_ancestor_still_at_its_minimum_falls_back() {
+    let html = "<div><div style='min-height:600px'><p id=t>x</p></div><p>after</p></div>";
+    assert_eq!(
+        last_fallback(&mutate(Mode::On, html, GROW)),
+        "ancestor_min_max"
+    );
 }
 
 #[test]
@@ -399,6 +416,14 @@ fn verify_mode_shows_no_mismatch_on_the_layout_corpus() {
         for (why, n) in &s.fallbacks {
             *fallbacks.entry(why).or_insert(0) += n;
         }
+        if s.skip_violations > 0 {
+            bad.push(format!(
+                "{}: skip hint wrong {} ({})",
+                page.strip_prefix(&root).unwrap_or(page).display(),
+                s.skip_violations,
+                s.last_violation
+            ));
+        }
         if s.mismatches > 0 {
             bad.push(format!(
                 "{}: {}",
@@ -416,7 +441,7 @@ fn verify_mode_shows_no_mismatch_on_the_layout_corpus() {
         pages.len()
     );
     let _ = skip_ok;
-    assert_eq!(skip_bad, 0, "a skip hint was wrong");
+    assert_eq!(skip_bad, 0, "a skip hint was wrong: {bad:?}");
     assert_eq!(mismatches, 0, "pages with mismatches: {bad:?}");
     assert!(
         relaid > 20,

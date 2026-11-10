@@ -566,6 +566,10 @@ pub(crate) struct ViewLayout {
     /// `RUSTKIT_INCREMENTAL_LAYOUT` is not `off`, and what that path did.
     pub(crate) incremental_layout: RefCell<Option<crate::incremental_layout::Retained>>,
     pub(crate) incremental_stats: RefCell<crate::incremental_layout::Stats>,
+    /// INC5 stage 2: the coming relayout's dirty set changed no style and no
+    /// box, so its build may be skipped (`Engine::relayout` sets it, the
+    /// next build takes it).
+    pub(crate) incremental_skip_build: Cell<bool>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank

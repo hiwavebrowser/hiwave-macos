@@ -9964,7 +9964,28 @@ impl Engine {
         // The builds' sheet and custom-property extraction (LAT1): outside
         // `build_ms`, so the line names it.
         let extract_before = SheetExtract::totals().extract_us;
-        let layout_skipped = self.relayout_uncounted(id)?;
+        // INC5 stage 2: script writes whose dirty set restyles nothing and
+        // changes no box (`data-*`/`aria-*` no selector reads) leave the box
+        // tree as it was: the build may be skipped. Only for relayouts that
+        // script writes alone asked for.
+        if incremental_layout::mode() != incremental_layout::Mode::Off {
+            let only_script = !causes.counts.is_empty()
+                && causes
+                    .counts
+                    .iter()
+                    .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "scroll" | "observer_callback"));
+            let nothing_dirty = dirty.as_ref().is_some_and(|d| d.full.is_none() && d.nodes.is_empty());
+            if let Some(view) = self.views.get(&id) {
+                view.lay
+                    .incremental_skip_build
+                    .set(only_script && nothing_dirty && pointer_restyle.is_none());
+            }
+        }
+        let layout_skipped = self.relayout_uncounted(id);
+        if let Some(view) = self.views.get(&id) {
+            view.lay.incremental_skip_build.set(false);
+        }
+        let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
         self.close_stale_select_popup(id);
@@ -10106,6 +10127,14 @@ impl Engine {
         }
 
         let javascript_enabled = self.config.javascript_enabled;
+        // INC5 stage 2: the incremental path takes the published tree back
+        // without a copy when nothing else holds it; the view's own handle
+        // goes first (the bindings hold theirs weakly).
+        if incremental_layout::mode() != incremental_layout::Mode::Off {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.layout = None;
+            }
+        }
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -10176,6 +10205,9 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(Rc::new(root_box));
+        if let Some(layout) = view.layout.as_ref() {
+            incremental_layout::adopt(&view.lay, layout);
+        }
         view.laid_with = Some(LaidWith {
             hover: view.lay.hover_chain.borrow().clone(),
             active: view.lay.active_chain.borrow().clone(),
@@ -11349,6 +11381,14 @@ impl layout_ctx::LayoutCtx {
         bounds: (u32, u32),
     ) -> LayoutBox {
         let lay = building.lay.clone();
+        // INC5 stage 2: a script-mutation relayout whose dirty set changed no
+        // style and no box (`relayout`) keeps the last layout without a build.
+        let skip_hint = lay.as_ref().is_some_and(|l| l.incremental_skip_build.replace(false));
+        if skip_hint && incremental_layout::mode() == incremental_layout::Mode::On {
+            if let Some(tree) = lay.as_ref().and_then(|l| self.skipped_build(l, bounds)) {
+                return tree;
+            }
+        }
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
@@ -11384,6 +11424,8 @@ impl layout_ctx::LayoutCtx {
         let inc_key = incremental_layout::Key { bounds, cb_width, fonts: self.web_font_count() };
         let scrollbar_pass = unlaid.is_some() || !remembered.is_empty() || root_bar_always;
         let mut incremental: Option<LayoutBox> = None;
+        let mut unchanged = false;
+        let mut diffed = false;
         if let (IncMode::Verify | IncMode::On, Some(lay)) = (inc_mode, lay.as_ref()) {
             let previous = lay.incremental_layout.borrow_mut().take();
             let mut stats = lay.incremental_stats.borrow_mut();
@@ -11392,26 +11434,52 @@ impl layout_ctx::LayoutCtx {
                 _ if scrollbar_pass => stats.fallback("scrollbar_pass"),
                 None => stats.fallback("no_retained"),
                 Some(prev) if prev.key != inc_key => stats.fallback("key_changed"),
-                Some(mut prev) => {
-                    let _layout_time = time_stage(Stage::Layout);
-                    match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut prev.laid) {
-                        Ok(done) => {
-                            stats.last_visits = done.visits;
-                            stats.last_moved = done.moved;
-                            if done.path.is_some() {
-                                stats.relaid += 1;
-                                stats.last = format!(
-                                    "relaid(visits={} moved={} compared={} delta={:.1})",
-                                    done.visits, done.moved, done.compared, done.delta
-                                );
-                            } else {
-                                stats.unchanged += 1;
-                                stats.last = format!("unchanged(compared={})", done.compared);
+                Some(mut prev) => match prev.take_laid(&mut stats) {
+                    None => stats.fallback("laid_not_kept"),
+                    Some(mut laid) => {
+                        let _layout_time = time_stage(Stage::Layout);
+                        diffed = true;
+                        match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut laid) {
+                            Ok(done) => {
+                                stats.visits += done.visits;
+                                stats.last_visits = done.visits;
+                                stats.last_moved = done.moved;
+                                if done.roots.is_empty() {
+                                    unchanged = true;
+                                    stats.unchanged += 1;
+                                    stats.last = format!("unchanged(compared={})", done.compared);
+                                } else {
+                                    stats.relaid += 1;
+                                    stats.roots += done.roots.len() as u32;
+                                    stats.hoists += done.hoists;
+                                    stats.bounded += done.bounded;
+                                    stats.last = format!(
+                                        "relaid(roots={} hoists={} bounded={} visits={} moved={} compared={} delta={:.1})",
+                                        done.roots.len(),
+                                        done.hoists,
+                                        done.bounded,
+                                        done.visits,
+                                        done.moved,
+                                        done.compared,
+                                        done.delta
+                                    );
+                                }
+                                incremental = Some(laid);
                             }
-                            incremental = Some(prev.laid);
+                            Err(why) => stats.fallback(why),
                         }
-                        Err(why) => stats.fallback(why),
                     }
+                },
+            }
+            if skip_hint && diffed && !unchanged {
+                // Verify (or a fallback) with a skip hint: the build the hint
+                // would have skipped must have changed nothing.
+                stats.skip_violations += 1;
+                stats.last_violation = stats.last.clone();
+                warn!(outcome = %stats.last, "incremental layout: skip hint, but the build changed");
+                #[cfg(test)]
+                if incremental_layout::panic_on_mismatch() && incremental.is_some() {
+                    panic!("incremental layout: build skip hinted, but the tree changed ({})", stats.last);
                 }
             }
         }
@@ -11517,41 +11585,87 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             if let Some(unlaid) = retain_unlaid {
+                // The tree the view publishes is kept (`adopt`), not a copy.
                 *lay.incremental_layout.borrow_mut() = Some(incremental_layout::Retained {
                     key: inc_key,
                     unlaid,
-                    laid: root_box.clone(),
+                    laid: incremental_layout::Laid::Pending,
+                    raw: Default::default(),
                 });
             }
         }
-
-        // Ensure body element fills viewport (common browser behavior)
-        // If body has zero or minimal height, extend it to viewport height
-        if !root_box.children.is_empty() {
-            let body_box = &mut root_box.children[0];
-            if body_box.dimensions.content.height < 1.0 {
-                // Body is empty or has no content - fill viewport
-                body_box.dimensions.content.height = bounds.1 as f32;
-                debug!(
-                    "Extended empty body to fill viewport height: {}px",
-                    bounds.1
-                );
+        let raw = finish_root(&mut root_box, bounds);
+        if let Some(lay) = lay.as_ref() {
+            if let Some(retained) = lay.incremental_layout.borrow_mut().as_mut() {
+                retained.raw = raw;
             }
         }
-
-        // The root (canvas) box always covers the FULL viewport: its
-        // background is the CSS canvas background (§14.2, set at build from
-        // html/body), which must paint to the viewport edges even when the
-        // page content is shorter.
-        root_box.dimensions.content.width =
-            root_box.dimensions.content.width.max(bounds.0 as f32);
-        root_box.dimensions.content.height = root_box
-            .dimensions
-            .content
-            .height
-            .max(bounds.1 as f32);
         root_box
     }
+
+    /// INC5 stage 2: the last layout again, without a build, when the view
+    /// keeps it under the same key and nothing animates.
+    fn skipped_build(&self, lay: &Rc<layout_ctx::ViewLayout>, bounds: (u32, u32)) -> Option<LayoutBox> {
+        if lay.animations.borrow().running() {
+            return None;
+        }
+        let mut slot = lay.incremental_layout.borrow_mut();
+        let retained = slot.as_mut()?;
+        let key = incremental_layout::Key { bounds, cb_width: bounds.0 as f32, fonts: self.web_font_count() };
+        if retained.key != key {
+            return None;
+        }
+        let mut stats = lay.incremental_stats.borrow_mut();
+        let mut tree = retained.take_laid(&mut stats)?;
+        stats.attempts += 1;
+        stats.skipped_builds += 1;
+        stats.last_visits = 0;
+        stats.last_moved = 0;
+        stats.last = "skipped_build".into();
+        drop(stats);
+        lay.layout_passes.set(lay.layout_passes.get() + 1);
+        lay.layout_builds.set(lay.layout_builds.get() + 1);
+        retained.raw = finish_root(&mut tree, bounds);
+        Some(tree)
+    }
+}
+
+/// The root post-passes: an empty body fills the viewport, and the root
+/// (canvas) box covers it. Returns what they changed, so the incremental
+/// path can take the tree back as layout left it.
+fn finish_root(root_box: &mut LayoutBox, bounds: (u32, u32)) -> incremental_layout::RawRoot {
+    let mut raw = incremental_layout::RawRoot {
+        root: (root_box.dimensions.content.width, root_box.dimensions.content.height),
+        body_height: None,
+    };
+
+    // Ensure body element fills viewport (common browser behavior)
+    // If body has zero or minimal height, extend it to viewport height
+    if !root_box.children.is_empty() {
+        let body_box = &mut root_box.children[0];
+        if body_box.dimensions.content.height < 1.0 {
+            // Body is empty or has no content - fill viewport
+            raw.body_height = Some(body_box.dimensions.content.height);
+            body_box.dimensions.content.height = bounds.1 as f32;
+            debug!(
+                "Extended empty body to fill viewport height: {}px",
+                bounds.1
+            );
+        }
+    }
+
+    // The root (canvas) box always covers the FULL viewport: its
+    // background is the CSS canvas background (§14.2, set at build from
+    // html/body), which must paint to the viewport edges even when the
+    // page content is shorter.
+    root_box.dimensions.content.width =
+        root_box.dimensions.content.width.max(bounds.0 as f32);
+    root_box.dimensions.content.height = root_box
+        .dimensions
+        .content
+        .height
+        .max(bounds.1 as f32);
+    raw
 }
 
 impl layout_ctx::LayoutCtx {
@@ -23857,6 +23971,7 @@ impl Engine {
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
+            incremental_layout::adopt(&lay, &built);
             debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
             // The geometry is built on the first read that needs it, as
             // `publish_geometry` does: a scrollTo after the write needs only

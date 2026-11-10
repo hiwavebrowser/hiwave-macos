@@ -1,7 +1,7 @@
 # Incremental layout: plan for PR 5 of INCREMENTAL_RESTYLE (2026-11-10)
 
-Status: stage 1 implemented behind a flag that defaults to `off`; stages 2 to 6
-are plans. This splits PR 5 of `docs/design/INCREMENTAL_RESTYLE.md` (§3.4, §5)
+Status: stages 1 and 2 implemented behind a flag that defaults to `off`;
+stages 3 to 6 are plans. This splits PR 5 of `docs/design/INCREMENTAL_RESTYLE.md` (§3.4, §5)
 into small PRs. Read §3.4, §4 and §6 of that note first; this file does not
 repeat them.
 
@@ -43,15 +43,33 @@ with the view; restyle note §6):
 
 - the last unlaid box tree (as built, before `set_viewport`), to diff the next
   build against;
-- the last laid-out tree, before the root post-passes (empty body filling the
-  viewport, root covering the viewport), so deltas apply to raw heights;
+- the last laid-out tree: since stage 2, the very tree the view published
+  (`incremental_layout::adopt`), taken back without a copy when nothing else
+  holds it (the bindings hold theirs weakly; the view drops its own handle
+  before the layout). The root post-passes (empty body filling the viewport,
+  root covering the viewport) are undone from their recorded inputs and the
+  engine's stamps (scroll offsets, sticky rules) cleared, so deltas apply to
+  the tree as layout left it. A forced layout's tree is still held by its
+  geometry closures and is copied;
 - the key it was laid out under: viewport bounds, initial containing block
   width and web font count. A changed key drops the state and takes the full
   path.
 
-The state is dropped with the document. Its cost is two box trees per view
-(about 2 x 1.5 KB per element) and one clone of the result per incremental
-layout; the restyle note's §6 memory risk applies, and only when the flag is on.
+The state is dropped with the document. Its cost is one extra box tree per
+view (the unlaid one, about 1.5 KB per element) and one copy of the fresh
+build per full layout; the restyle note's §6 memory risk applies, and only
+when the flag is on.
+
+**Skipped builds (stage 2).** A relayout asked for by script writes alone
+(causes `script_mutation`, `timer`, `scroll`, `observer_callback`) whose
+`DirtySet` is not full and has no node in it changed no style and no box: the
+restyle index's contract is that such writes (`data-*`/`aria-*` attributes no
+selector reads, writes to disconnected nodes) are read by nothing in the
+build. With the flag `on` the build is skipped and the published tree stands
+(`skipped_build`). Under `verify` the build runs and must diff as unchanged; a
+hint that was wrong is counted (`skip_violations`) and panics under
+`cfg(test)`. Skipping the build for writes that do change boxes needs restyle
+PR 3 (subtree build and splice) and is not attempted here.
 
 ## What changed: a box-tree diff, not the DirtySet (stage 1)
 
@@ -121,11 +139,35 @@ until a stage names them.
    subtree and grows every ancestor, up to the root, whose post-passes run
    again. Layout visits: B's subtree plus nothing; boxes moved: those after
    B.
-2. **Relayout boundaries and several changed boxes.** Stop propagation at a
-   box whose size cannot depend on content (§3.4 list). Allow several changed
-   boxes, each relaid in document order with the deltas applied in between.
-   Allow ancestors with `min-height`/`max-height` (re-clamp at each level) and
-   with non-visible overflow (re-run that scroller's overflow mark).
+2. **Hoisting, boundaries, several changed boxes (implemented).**
+   - Several changed boxes in one layout: the diff collects every box whose
+     children changed; nested ones fold into the outer one; each is laid out
+     in reverse document order, so an earlier delta moves the later roots
+     already laid out.
+   - Hoisting: a changed box that cannot be laid out alone (not block-level,
+     margins collapsing through an edge, a float or `clear` under a box that
+     does not contain them, a fixed box under it) moves up to its parent,
+     and so does one under an ancestor that does not just grow (flex, grid,
+     table, columns, a float, an absolute box, a size container, a
+     percentage or keyword min/max height). A relayout root may be a flex or
+     grid container: it is laid out whole, and only its own height delta
+     moves what follows. A root that would be the body (or the root box)
+     falls back: the full layout is as cheap.
+   - Boundaries: an in-flow block ancestor with a definite height (lengths,
+     or a percentage of a definite parent) stops the delta. Its later
+     children move; it, its ancestors and what follows it do not.
+   - Ancestors with `min-height`/`max-height` lengths grow when the old and
+     new content heights are both on the unclamped side; otherwise the
+     layout falls back (`ancestor_min_max`). Ancestors with non-visible
+     overflow grow like any block (a styled scrollbar is still
+     `scrollbar_pass`).
+   - Out-of-flow boxes anchor to their parent's padding box in RustKit
+     (`reanchor_absolute_children`), so the check is now local: no absolute
+     or fixed box may be a child of a growing ancestor or follow the path
+     in a box whose later children move, and no fixed box may move. An
+     absolute box under the relayout root is laid out with it. Relative
+     offsets under the root are applied again after its layout.
+   - The skipped build and the published-tree reuse above.
 3. **Margin collapsing.** Save each block's incoming `MarginCollapseContext`
    and cursor on the laid-out box (output fields), so a parent's child loop
    can be resumed at B instead of B being laid out alone. That lifts the
@@ -151,16 +193,18 @@ randomized sequences, restyle note §4 test 2) runs before the flag defaults to
 
 ## Fallbacks (always correct, restyle note I4)
 
-Full layout, with the reason counted on the view (`IncrementalLayoutStats`)
-and shown on the relayout line: `no_retained`, `key_changed`,
-`scrollbar_pass`, `root_changed`, `root_box` (the change is at the root),
-`changed_not_block`, `changed_position`, `changed_float`, `changed_clear`,
-`changed_percent_height`, `changed_overflow`, `subtree_out_of_flow`,
-`subtree_float`, `subtree_positioned`, `subtree_percent_height`,
-`margin_collapse_top`, `margin_collapse_bottom`, `collapse_through`,
-`ancestor_not_block`, `ancestor_sized`, `ancestor_overflow`,
-`ancestor_holds_fixed`, `ancestor_out_of_flow`, `float_beside`,
-`abspos_on_path`, `fixed_after`, `geometry_moved`.
+Full layout, with the reason counted on the view (`incremental_layout::Stats`)
+and shown on the relayout line. Since stage 2 a reason is the last one met
+while hoisting, when the root would have reached the body: `no_retained`,
+`key_changed`, `laid_not_kept`, `scrollbar_pass`, `root_changed`, `root_box`,
+`body_box` (the change is in the body's own children), `changed_not_block`,
+`changed_position`, `changed_float`, `changed_clear`, `changed_percent_height`,
+`subtree_fixed`, `subtree_float`, `margin_collapse_top`,
+`margin_collapse_bottom`, `collapse_through`, `ancestor_not_block`,
+`ancestor_flex`, `ancestor_grid`, `ancestor_table`, `ancestor_columns`,
+`ancestor_container`, `ancestor_out_of_flow`, `ancestor_sized`,
+`ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
+`fixed_after`, `geometry_moved`.
 
 ## Tests
 
