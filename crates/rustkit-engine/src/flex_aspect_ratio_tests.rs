@@ -345,3 +345,60 @@ fn aspect_ratio_minimum_size_inherit_and_the_card_are_as_in_chrome() {
     let wrong = mismatches(CHROME_EXTRA, "", extra_page);
     assert!(wrong.is_empty(), "{} differ from Chrome:\n{}", wrong.len(), wrong.join("\n"));
 }
+
+/// Percentage heights under a stretched grid or flex item (batch 56: the
+/// image-gallery campaign case went 0.52 % -> 47 % with the first LAY1
+/// head). A stretched item's cross size is definite (css-grid §11.6,
+/// css-flexbox §9.8, css-sizing-3 §5.1), so a `display: flex; height:
+/// 100%` child resolves against it; and `min-height` holds either way.
+/// The gallery's tiles are this: grid -> stretched item -> `display: flex;
+/// height: 100%; min-height: 200px`. Chrome for Testing 148.0.7778.216.
+const STRETCHED: &[(&str, &str, &str)] = &[
+    (
+        "block-auto-min",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c><div id=g><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,200 it=0,0,600,200 im=- txt=0,200,600,18",
+    ),
+    (
+        "flex-stretch-autoline",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:flex\"><div style=\"height:300px;width:100px\"></div><div id=g style=\"width:200px\"><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,300 it=100,0,200,300 im=- txt=0,300,600,18",
+    ),
+    (
+        "flex-stretch100-min",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:flex;height:100px\"><div id=g style=\"width:200px\"><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,100 it=0,0,200,200 im=- txt=0,100,600,18",
+    ),
+    (
+        "flex-stretch300",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:flex;height:300px\"><div id=g style=\"width:200px\"><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,300 it=0,0,200,300 im=- txt=0,300,600,18",
+    ),
+    (
+        "grid-gallery",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:grid;grid-template-columns:repeat(2,1fr);gap:16px\"><div style=\"grid-row:span 2\"><div class=ph id=it style=\"min-height:416px\">a</div></div><div id=g><div class=ph id=im>b</div></div><div><div class=ph>c</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,416 it=0,0,292,416 im=308,0,292,200 txt=0,416,600,18",
+    ),
+    (
+        "grid-row100-min",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:grid;grid-template-columns:1fr 1fr\"><div style=\"height:100px\"></div><div id=g><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,200 it=300,0,300,200 im=- txt=0,200,600,18",
+    ),
+    (
+        "grid-row300",
+        "<!doctype html><html><head><style>body{margin:0}p{margin:0}.ph{width:100%;height:100%;min-height:200px;display:flex;align-items:center;justify-content:center;font-size:20px}</style></head><body><div style=\"width:600px\"><div id=c style=\"display:grid;grid-template-columns:1fr 1fr\"><div style=\"height:300px\"></div><div id=g><div class=ph id=it>b</div></div></div><p id=txt>text</p></div></body></html>",
+        "c=0,0,600,300 it=300,0,300,300 im=- txt=0,300,600,18",
+    ),
+];
+
+#[test]
+fn a_percentage_height_under_a_stretched_grid_or_flex_item_is_definite() {
+    let cases: Vec<(String, String)> = STRETCHED.iter().map(|(n, h, _)| (n.to_string(), h.to_string())).collect();
+    let wrong: Vec<String> = STRETCHED
+        .iter()
+        .zip(measure_all(&cases))
+        .filter(|((_, _, chrome), ours)| ours != chrome)
+        .map(|((name, _, chrome), ours)| format!("{name}\n  chrome {chrome}\n  engine {ours}"))
+        .collect();
+    assert!(wrong.is_empty(), "{} differ from Chrome:\n{}", wrong.len(), wrong.join("\n"));
+}
