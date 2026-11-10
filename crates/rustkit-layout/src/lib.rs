@@ -333,16 +333,17 @@ pub(crate) fn form_control_intrinsic_size(
     // padding and the control fell to the bare 19px blob (new_tab's
     // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
     // high). Resolve every absolute unit the way the rest of layout does.
-    let author_pb_v = {
+    let (author_pad_v, author_border_v) = {
         let px = |l: &Length| match l {
             Length::Percent(_) | Length::Auto => 0.0,
             other => other.to_px(font_size, 16.0, 0.0),
         };
-        px(&style.padding_top)
-            + px(&style.padding_bottom)
-            + px(&style.border_top_width)
-            + px(&style.border_bottom_width)
+        (
+            px(&style.padding_top) + px(&style.padding_bottom),
+            px(&style.border_top_width) + px(&style.border_bottom_width),
+        )
     };
+    let author_pb_v = author_pad_v + author_border_v;
     // The content line is the control font's `normal` line (n58): Arial is
     // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
     // read 14.33 / 15, so every styled control was 0.7–1px short.
@@ -357,9 +358,21 @@ pub(crate) fn form_control_intrinsic_size(
         rustkit_css::LineHeight::Px(px) => px,
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
     };
-    let single_line_box = |blob: f32| {
-        if fully_declared {
-            content_line(font_size) + author_pb_v
+    // CB3b: a BUTTON's height is three independent parts (Chrome for Testing 148: line-height:1 only
+    // 22, padding:0 only 22, border:none only 20, all three declared 16 at 16px Arial): the line
+    // (`line-height` when the author set one, else `normal`), the vertical padding and the vertical
+    // border, each the author's when declared (zero and `none` included) and the UA's
+    // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not. With none of the three declared the
+    // calibrated blob stands. Inputs and selects keep their own rule: they ignore `line-height`
+    // here, and compose only a declared box.
+    let line_declared = !matches!(style.line_height, rustkit_css::LineHeight::Normal);
+    let single_line_box = |blob: f32, is_button: bool| {
+        if is_button && (style.padding_v_declared || style.border_v_declared || line_declared) {
+            let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
+            let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
+            content_line(font_size) + pad + border
+        } else if fully_declared {
+            normal_line_height(style, font_size) + author_pb_v
         } else if author_pb_v > 0.0 {
             normal_line_height(style, font_size) + author_pb_v
         } else {
@@ -387,7 +400,7 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false)),
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -422,7 +435,7 @@ pub(crate) fn form_control_intrinsic_size(
                 normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
                     + author_pb_v
             } else {
-                single_line_box(19.0 * ua_scale)
+                single_line_box(19.0 * ua_scale, true)
             };
             (button_border_box_width(style, font_size, label_metrics.width), height)
         }
@@ -480,7 +493,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // #modeSelector is 31), and RustKit does not carry
                 // `appearance` yet — taking the +2 moved chrome's whole
                 // sidebar 2px down on 12 board rows.
-                (widest.ceil() + 20.0 + pb_h, single_line_box(19.0 * ua_scale))
+                (widest.ceil() + 20.0 + pb_h, single_line_box(19.0 * ua_scale, false))
             }
         }
     }
