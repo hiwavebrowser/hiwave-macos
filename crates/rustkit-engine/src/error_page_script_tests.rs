@@ -77,6 +77,7 @@ pub(crate) fn serve(handler: Handler) -> Server {
 }
 
 pub(crate) fn engine() -> (Engine, EngineViewId, tokio::runtime::Runtime) {
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
@@ -448,6 +449,7 @@ L('/slow.js inserted');
         }
     }
     let server = serve(site);
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig { script_budget_ms: 200, ..EngineConfig::default() }).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
@@ -526,6 +528,7 @@ new IntersectionObserver(function (entries) {\n\
 }).observe(document.getElementById('sentinel'));\n";
 
 fn chain_engine(budget_ms: u64) -> (Engine, EngineViewId, tokio::runtime::Runtime) {
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig { script_budget_ms: budget_ms, ..EngineConfig::default() }).expect("engine");
     // Tall enough that the sentinel is inside the viewport when the feed is short.
     let view = engine

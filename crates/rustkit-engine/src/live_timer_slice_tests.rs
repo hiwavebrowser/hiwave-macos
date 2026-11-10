@@ -17,6 +17,8 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn load(config: EngineConfig, page: String) -> (Engine, EngineViewId) {
+    // A wall-clock test: it runs alone (see `test_phase`).
+    crate::test_phase::exclusive_for_this_test();
     let server = serve_routes(vec![("/", "text/html", page)]);
     let mut engine = Engine::new(config).expect("engine");
     let view = engine

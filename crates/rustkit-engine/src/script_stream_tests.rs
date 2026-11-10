@@ -27,6 +27,7 @@ fn slow_js(body: &str, ms: u64) -> Route {
 /// Load `path` on the same-thread engine (no safe points). Returns the
 /// engine and its view once the load is over.
 fn load_engine(fixture: &Fixture, path: &str) -> (Engine, crate::EngineViewId) {
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
@@ -472,6 +473,7 @@ fn a_navigation_that_is_not_taken_is_offered_once() {
 <script src="/slow.js"></script>
 <script>fetch('/b').then(function () { order.push('b'); });</script>"#;
     let fixture = serve(vec![("/page", html(page)), ("/slow.js", slow_js("order.push('s2');", 300)), ("/b", js("b"))]);
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig { follows_script_navigation: true, ..EngineConfig::default() }).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })

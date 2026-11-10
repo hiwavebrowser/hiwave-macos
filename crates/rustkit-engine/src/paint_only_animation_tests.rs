@@ -28,6 +28,7 @@ fn rt() -> tokio::runtime::Runtime {
 
 fn load_sized(page: &str, size: (u32, u32)) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
     let server = serve_routes(vec![("/", "text/html", page.to_string())]);
+    crate::test_phase::exclusive_for_this_test();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds {
@@ -43,6 +44,8 @@ fn load_sized(page: &str, size: (u32, u32)) -> (Engine, EngineViewId, crate::scr
 }
 
 fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
+    // A wall-clock test: it runs alone (see `test_phase`).
+    crate::test_phase::exclusive_for_this_test();
     load_sized(page, (800, 600))
 }
 

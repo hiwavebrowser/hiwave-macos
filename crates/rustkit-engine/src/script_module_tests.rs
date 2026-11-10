@@ -9,6 +9,8 @@ use crate::script_net_tests::serve_routes;
 type Routes = Vec<(&'static str, &'static str, String)>;
 
 fn load(routes: Routes) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
+    // A wall-clock test: it runs alone (see `test_phase`).
+    crate::test_phase::exclusive_for_this_test();
     let server = serve_routes(routes);
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine

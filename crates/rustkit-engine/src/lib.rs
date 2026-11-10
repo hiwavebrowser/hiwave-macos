@@ -42,17 +42,98 @@ use rustkit_compositor::Compositor;
 pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
     use std::sync::OnceLock;
     // One wgpu instance, adapter and device for the whole test process; each test's compositor shares them
-    // and keeps its own surfaces and textures (T41b). Building a device was ~0.15 s of every engine a test
-    // creates (and its teardown is what the guard below is mostly for); the guard still serialises whole
-    // tests, so what changes is only that no test builds or drops a device of its own.
+    // and keeps its own surfaces and textures (T41b). Only the one creation of the shared device is
+    // serialised; every test after it runs in parallel with the others, on the shared side of
+    // `test_phase` (a wall-clock test takes the exclusive side first and runs alone).
     static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
-    test_gpu::hold_for_this_test();
+    static CREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    test_phase::share_for_this_test();
+    if let Some(shared) = SHARED_COMPOSITOR.get() {
+        return Ok(shared.share_device());
+    }
+    let _creating = CREATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(shared) = SHARED_COMPOSITOR.get() {
         return Ok(shared.share_device());
     }
     let compositor = Compositor::new()?;
     let shared = SHARED_COMPOSITOR.get_or_init(|| compositor.share_device());
     Ok(shared.share_device())
+}
+
+/// A shared/exclusive gate over the whole test process (T41b).
+///
+/// Every engine test shares the one wgpu device and runs in parallel (`share_for_this_test`, taken by
+/// `test_compositor()`); a test that asserts on wall-clock time or counts on process-wide state (the one
+/// inserted-script fetch dispatcher in `script_net.rs`, 8 slots shared by every engine in the process)
+/// asks for `exclusive_for_this_test()` FIRST, before it builds an engine: it waits for the shared tests to
+/// finish, runs alone, and the rest wait for it. Fair: a waiting exclusive test holds off new shared ones, so
+/// it cannot starve. Held until the test thread exits, like the GPU guard below. A helper thread that builds
+/// its own engine takes the shared side and so must not be waited on by an exclusive test.
+#[cfg(test)]
+pub(crate) mod test_phase {
+    use std::cell::RefCell;
+    use std::sync::{Condvar, Mutex};
+
+    struct State {
+        shared: usize,
+        exclusive: bool,
+        waiting_exclusive: usize,
+    }
+    static STATE: Mutex<State> = Mutex::new(State { shared: 0, exclusive: false, waiting_exclusive: 0 });
+    static CHANGED: Condvar = Condvar::new();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Shared,
+        Exclusive,
+    }
+    /// Dropped when the owning thread exits; that is the release.
+    struct Token(Kind);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            match self.0 {
+                Kind::Shared => st.shared -= 1,
+                Kind::Exclusive => st.exclusive = false,
+            }
+            CHANGED.notify_all();
+        }
+    }
+    thread_local! {
+        static TOKEN: RefCell<Option<Token>> = const { RefCell::new(None) };
+    }
+
+    /// Take the shared side for the rest of this thread's life, unless it already holds either side.
+    pub(crate) fn share_for_this_test() {
+        if TOKEN.with(|t| t.borrow().is_some()) {
+            return;
+        }
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        while st.exclusive || st.waiting_exclusive > 0 {
+            st = CHANGED.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        st.shared += 1;
+        drop(st);
+        TOKEN.with(|t| *t.borrow_mut() = Some(Token(Kind::Shared)));
+    }
+
+    /// Take the exclusive side for the rest of this thread's life. Call it before the test builds an engine.
+    pub(crate) fn exclusive_for_this_test() {
+        match TOKEN.with(|t| t.borrow().as_ref().map(|t| t.0)) {
+            Some(Kind::Exclusive) => return,
+            Some(Kind::Shared) => panic!("exclusive_for_this_test() must come before the test builds an engine"),
+            None => {}
+        }
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        st.waiting_exclusive += 1;
+        while st.exclusive || st.shared > 0 {
+            st = CHANGED.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        st.waiting_exclusive -= 1;
+        st.exclusive = true;
+        drop(st);
+        TOKEN.with(|t| *t.borrow_mut() = Some(Token(Kind::Exclusive)));
+    }
 }
 
 /// Test-only GPU guard: at most one unit test at a time owns GPU devices.
@@ -40334,6 +40415,7 @@ mod page_script_tests {
     /// on `crate::test_compositor`'s GPU-init lock, and that wait is not page
     /// load time.
     fn load_timed(config: EngineConfig, port: u16) -> (Engine, EngineViewId, std::time::Duration) {
+        crate::test_phase::exclusive_for_this_test();
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
@@ -40384,6 +40466,7 @@ window.addEventListener('resize', function () {
 var seen = [];
 </script></head><body onload="seen.push('load:' + (this === window) + ':' + document.readyState)"
     onresize="seen.push('attr-resize:' + window.innerWidth)">hi</body></html>"#;
+        crate::test_phase::exclusive_for_this_test();
         let mut engine = Engine::new(EngineConfig::default()).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
@@ -40651,6 +40734,7 @@ document.currentScript.remove();
             subresource_budget_ms: 500,
             ..EngineConfig::default()
         };
+        crate::test_phase::exclusive_for_this_test();
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 100 })
@@ -40700,6 +40784,7 @@ document.currentScript.remove();
             subresource_budget_ms: 500,
             ..EngineConfig::default()
         };
+        crate::test_phase::exclusive_for_this_test();
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds {

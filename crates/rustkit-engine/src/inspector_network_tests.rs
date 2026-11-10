@@ -27,6 +27,8 @@ fn engine(config: EngineConfig, shield: Option<rustkit_net::RequestInterceptor>)
 }
 
 fn load(routes: Vec<Route>) -> (Engine, EngineViewId, TestServer) {
+    // A wall-clock test: it runs alone (see `test_phase`).
+    crate::test_phase::exclusive_for_this_test();
     let server = serve(routes);
     let (mut engine, view) = engine(EngineConfig::default(), None);
     runtime().block_on(engine.load_url(view, server.url("/"))).expect("load_url");

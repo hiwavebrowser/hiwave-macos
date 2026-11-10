@@ -42,6 +42,8 @@ struct Page {
 
 impl Page {
     fn load(config: EngineConfig, routes: Vec<(&'static str, &'static str, String)>) -> Self {
+        // The one fetch dispatcher has 8 slots for the whole process: this test runs alone.
+        crate::test_phase::exclusive_for_this_test();
         let server = serve_routes(routes);
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
