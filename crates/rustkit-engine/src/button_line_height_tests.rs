@@ -53,7 +53,8 @@ fn a_button_with_line_height_1_no_vertical_padding_and_no_border_is_one_line_box
 #[test]
 fn a_buttons_height_is_three_independent_parts() {
     // CB3b: line (line-height) + vertical padding + vertical border, each the author's when
-    // declared (zero and `none` included) and the UA's when not. Chrome for Testing 148 on Linux:
+    // declared (zero and `none` included) and the UA's when not. Chrome for Testing 148.0.7778.216 at
+    // 16px Arial, measured on Linux (Talos) AND on macOS (Atlas, 2026-11-10; identical tables):
     // line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18,
     // all three 16, line-height:1 + padding:0 20, line-height:1 + border:none 18, padding 4px 8px
     // 30. The explicit line-heights here keep `normal` (font-dependent) out of it, and the UA parts

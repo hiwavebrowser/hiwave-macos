@@ -302,12 +302,16 @@ pub(crate) fn button_border_box_width(
 /// (CB3b): the UA padding (top + bottom) and the UA border (top + bottom). Height is the sum of
 /// three independent parts: the line (`line-height`, else `normal`), the vertical padding and the
 /// vertical border, each the author's when declared (zero and `none` included) and these otherwise.
-/// Calibrated to the Mac Chrome for Testing 148 pins already in this file: a bare button at the UA
-/// font is 19 px (a 15 px line + 4) and `padding: 8px 16px` builds 31 (15 + 16, no UA border). The
-/// Linux Chrome for Testing 148 measures 1px padding and 2px border per side instead (24 at 16px
-/// Arial); the three single-declaration heights have not been measured on the Mac.
-pub const UA_BUTTON_PADDING_V: f32 = 4.0;
-pub const UA_BUTTON_BORDER_V: f32 = 0.0;
+/// Measured on Chrome for Testing 148.0.7778.216 (the board's oracle), headless, 800x600, on BOTH
+/// Linux (Talos) and macOS (Atlas, 2026-11-10; computed font Arial on both): `<button
+/// style="font-size:16px">` is 24 px = an 18 px `normal` line + 1 px padding per side + 2 px
+/// outset border per side. These constants are the TOTALS over both sides (padding 2, border 4).
+/// The earlier 4 / 0 "Mac calibration" (bare 19, `padding: 8px 16px` = 31) was RustKit's own
+/// number, not Chrome's: Chrome has no Mac-specific button metrics. Also measured at 16px Arial:
+/// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
+/// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
+pub const UA_BUTTON_PADDING_V: f32 = 2.0;
+pub const UA_BUTTON_BORDER_V: f32 = 4.0;
 
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
@@ -362,12 +366,11 @@ pub(crate) fn form_control_intrinsic_size(
     // 22, padding:0 only 22, border:none only 20, all three declared 16 at 16px Arial): the line
     // (`line-height` when the author set one, else `normal`), the vertical padding and the vertical
     // border, each the author's when declared (zero and `none` included) and the UA's
-    // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not. With none of the three declared the
-    // calibrated blob stands. Inputs and selects keep their own rule: they ignore `line-height`
+    // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not, so a bare button is the model too (the
+    // old 19 px blob was RustKit's own number). Inputs and selects keep their own rule: they ignore `line-height`
     // here, and compose only a declared box.
-    let line_declared = !matches!(style.line_height, rustkit_css::LineHeight::Normal);
     let single_line_box = |blob: f32, is_button: bool| {
-        if is_button && (style.padding_v_declared || style.border_v_declared || line_declared) {
+        if is_button {
             let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
             let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
             content_line(font_size) + pad + border
@@ -13344,6 +13347,10 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The cascade flags a declared side (CB3b): `padding` and `border: none` are both the
+        // author's here, so no UA padding or border is added to the 14px line + 16.
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
         let control = FormControlType::Button {
             label: "Save".to_string(),
             button_type: "button".to_string(),
