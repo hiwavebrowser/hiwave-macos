@@ -236,9 +236,6 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
-        // The watchdog is the bound, not an iteration count: 10M iterations
-        // ended a heavy but finite loop in 50 to 70 ms (JS1).
-        .script_loop_iteration_limit(u64::MAX / 2)
         .live_turn_budget_ms(LIVE_TURN_BUDGET_MS)
         // The event loop loads what a page's script asks for
         // (`take_script_navigation`), so a page that has asked to leave is

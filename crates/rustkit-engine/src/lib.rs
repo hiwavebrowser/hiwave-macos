@@ -23024,9 +23024,17 @@ impl Engine {
         // A script that threw may still have written to the DOM before it
         // did, so the flush runs either way.
         let turn = wgate::script_turn();
+        // This path starts no turn of its own, so without arming one the
+        // only bound on a `while (true) {}` typed into the devtools console
+        // (or sent by the chrome) is the loop-iteration cap (JS1).
+        let armed = arm_live_turn(&self.config, bindings);
         let result = bindings.evaluate(script);
+        let stopped = end_live_turn(&self.config, armed, bindings, "eval");
         drop(turn);
         self.flush_script_dom_writes(id, None)?;
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
         let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))

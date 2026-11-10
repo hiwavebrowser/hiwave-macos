@@ -31,7 +31,15 @@ fn threw(engine: &Engine, view: EngineViewId) -> Vec<String> {
 
 #[test]
 fn a_twelve_million_iteration_loop_completes_in_one_turn() {
-    let (mut engine, id) = view(EngineConfig::default());
+    // The app's shape: the watchdog is on, so completion here is inside
+    // the turn budget, not merely under the cap. The budget is generous
+    // because an unoptimized build runs this loop in tens of seconds.
+    let config = EngineConfig {
+        interrupt_scripts_at_budget: true,
+        script_budget_ms: 300_000,
+        ..EngineConfig::default()
+    };
+    let (mut engine, id) = view(config);
     engine
         .load_html(id, "<html><body><script>(function () { var n = 0; for (var i = 0; i < 12000000; i++) { n++; } window.done = n; })();</script></body></html>")
         .expect("load_html");
@@ -65,7 +73,38 @@ fn the_microtask_cap_does_not_follow_the_loop_cap() {
     let (mut engine, id) = view(EngineConfig::default());
     let started = std::time::Instant::now();
     engine
-        .load_html(id, "<html><body><p>alive</p><script>function again() { Promise.resolve().then(again); } again();</script></body></html>")
+        .load_html(id, "<html><body><p>alive</p><script>window.n = 0; function again() { window.n++; Promise.resolve().then(again); } again();</script></body></html>")
         .expect("load_html");
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    // The 100k job cap ended it (39175 runs in the unoptimized build this
+    // was written in), not the 1G loop cap, which would be 10000x further.
+    let n = engine.execute_script(id, "window.n").unwrap();
+    let n: f64 = n.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap();
+    assert!((1_000.0..=100_000.0).contains(&n), "microtask chain ran {n} times");
+}
+
+/// Prometheus's R1 on #1048: `execute_script` (the chrome's eval, the
+/// devtools console, `PageCmd::Eval`) begins no turn of its own, so with
+/// the iteration cap out of the way a `while (true) {}` there would hold
+/// the page's thread for good.
+#[test]
+fn while_true_through_execute_script_is_stopped_by_the_live_turn_budget() {
+    let config = EngineConfig {
+        interrupt_scripts_at_budget: true,
+        live_turn_budget_ms: 300,
+        ..EngineConfig::default()
+    };
+    let (mut engine, id) = view(config);
+    engine.load_html(id, "<html><body><p>alive</p></body></html>").expect("load_html");
+    let started = std::time::Instant::now();
+    let _ = engine.execute_script(id, "while (true) {}");
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    let log = engine.script_log(id).unwrap();
+    assert!(
+        log.iter().any(|r| r.outcome == ScriptOutcome::OverBudget && r.source == "eval"),
+        "{log:#?}"
+    );
+    // The page is usable afterwards.
+    assert_eq!(engine.execute_script(id, "1 + 1").unwrap(), "Number(2.0)");
 }
