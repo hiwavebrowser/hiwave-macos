@@ -3279,6 +3279,9 @@ class Driver:
                             ms, wall, why.group(1) if why else "no chord-to-menu line"))
             runs = len(re.findall(r'menu event id="focus_url"', log))
             self.expect(c, "%s: one focus_url" % what, runs == 1, "%d focus_url" % runs)
+            # The page answered: nothing was given up (#1023 delta HOLD).
+            self.expect(c, "%s: no chord was given up" % what, "never answered" not in log,
+                        "a give-up line appeared" if "never answered" in log else "none")
             self.note(c, "%s: press to address bar" % what, "INFO", "%s ms" % ms)
             (self.out / ("%s.%d.app.log" % (c, ms_listen))).write_text(self.app.log_text())
             self.close_page()

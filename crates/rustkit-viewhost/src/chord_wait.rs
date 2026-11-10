@@ -226,20 +226,28 @@ impl<E> HeldChords<E> {
         Some(ChordFate::ToMenu(held.event))
     }
 
-    /// When `token`, whose keydown the page has started and not answered,
-    /// is given up on: the timer for [`give_up`](Self::give_up) is armed
-    /// for this. `None`: not held, or the page has not started it.
+    /// When `token` is given up on if the page never answers it: the timer
+    /// for [`give_up`](Self::give_up) is armed for this when the chord's
+    /// 100 ms timer finds it still held, whether the page has started it
+    /// or it is held back behind an earlier started chord. A held-back
+    /// chord the page starts later has no other timer left (#1023 delta
+    /// HOLD 5836613705: without this it stayed held for good, and every
+    /// later timed-out chord waited behind it). `None`: not held, or
+    /// neither started nor held back.
     pub fn give_up_at(&self, token: u64) -> Option<Instant> {
         self.held
             .iter()
-            .find(|h| h.token == token && h.page_started)
+            .find(|h| h.token == token && (h.page_started || h.deferred))
             .map(|h| h.taken + STARTED_CHORD_GIVE_UP)
     }
 
     /// The page started `token`'s keydown and has not answered in
     /// [`STARTED_CHORD_GIVE_UP`]: the chord goes to the menu (or stays the
     /// page's if it took the default), and a late answer or claim for it
-    /// is refused like a timed-out chord's. `None`: it was answered. Call
+    /// is refused like a timed-out chord's. `None`: it was answered, or it
+    /// is held back and not started, which `release_due` releases when the
+    /// earlier chord it waits behind is answered or given up (that chord
+    /// was taken first, so its give-up comes first). Call
     /// [`release_due`](Self::release_due) after it.
     pub fn give_up(&mut self, token: u64) -> Option<ChordFate<E>> {
         let at = self.held.iter().position(|h| h.token == token && h.page_started)?;
