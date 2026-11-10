@@ -298,6 +298,17 @@ pub(crate) fn button_border_box_width(
 /// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
 /// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
 /// Chrome's 63.9x34 and everything below it sat a pixel high.
+/// What a `<button>` adds above and below its line when the author did not declare that side
+/// (CB3b): the UA padding (top + bottom) and the UA border (top + bottom). Height is the sum of
+/// three independent parts: the line (`line-height`, else `normal`), the vertical padding and the
+/// vertical border, each the author's when declared (zero and `none` included) and these otherwise.
+/// Calibrated to the Mac Chrome for Testing 148 pins already in this file: a bare button at the UA
+/// font is 19 px (a 15 px line + 4) and `padding: 8px 16px` builds 31 (15 + 16, no UA border). The
+/// Linux Chrome for Testing 148 measures 1px padding and 2px border per side instead (24 at 16px
+/// Arial); the three single-declaration heights have not been measured on the Mac.
+pub const UA_BUTTON_PADDING_V: f32 = 4.0;
+pub const UA_BUTTON_BORDER_V: f32 = 0.0;
+
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,

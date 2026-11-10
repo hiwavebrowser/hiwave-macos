@@ -15,6 +15,10 @@ const PAGE: &str = "<html><head><style>body{margin:0;font:12.8px Arial}div{margi
     <div><button id=lh1 style='font-size:16px;line-height:1'>x</button></div>\
     <div><button id=all style='font-size:16px;line-height:1;padding:0;border:none'>x</button></div>\
     <div><span id=sp style='display:inline-block;font-size:16px;line-height:1'>&times;</span></div>\
+    <div><button id=lhp0 style='font-size:16px;line-height:1;padding:0'>x</button></div>\
+    <div><button id=lhbn style='font-size:16px;line-height:1;border:none'>x</button></div>\
+    <div><button id=lhpad style='font-size:16px;line-height:1;padding:4px 8px'>x</button></div>\
+    <div><button id=lh20p0 style='font-size:16px;line-height:20px;padding:0'>x</button></div>\
     </body></html>";
 
 fn heights() -> std::collections::HashMap<String, f64> {
@@ -23,7 +27,7 @@ fn heights() -> std::collections::HashMap<String, f64> {
         .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 400 })
         .expect("view");
     engine.load_html(view, PAGE).expect("load_html");
-    let ids = ["item", "rm", "rmx", "lh1", "all", "sp"];
+    let ids = ["item", "rm", "rmx", "lh1", "all", "sp", "lhp0", "lhbn", "lhpad", "lh20p0"];
     let expr = ids
         .iter()
         .map(|id| format!("document.getElementById('{id}').getBoundingClientRect().height"))
@@ -47,12 +51,26 @@ fn a_button_with_line_height_1_no_vertical_padding_and_no_border_is_one_line_box
 }
 
 #[test]
-fn a_partly_declared_button_is_unchanged_until_an_oracle_says_otherwise() {
-    // `line-height:1` alone leaves the UA padding and border in place. The right height needs
-    // Chrome's UA padding and border for a button at this font (CB3b); it is 22.8 on develop and
-    // stays so: this PR only changes a button whose author declared the vertical box too.
+fn a_buttons_height_is_three_independent_parts() {
+    // CB3b: line (line-height) + vertical padding + vertical border, each the author's when
+    // declared (zero and `none` included) and the UA's when not. Chrome for Testing 148 on Linux:
+    // line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18,
+    // all three 16, line-height:1 + padding:0 20, line-height:1 + border:none 18, padding 4px 8px
+    // 30. The explicit line-heights here keep `normal` (font-dependent) out of it, and the UA parts
+    // are the named constants, so a change of the UA numbers changes one line.
+    use rustkit_layout::{UA_BUTTON_BORDER_V as BORDER, UA_BUTTON_PADDING_V as PAD};
     let h = heights();
-    assert!(close(h["lh1"], 22.8), "a button with only line-height:1 is unchanged, got {}", h["lh1"]);
+    let cases = [
+        ("all", 16.0, "line-height:1, padding:0, border:none"),
+        ("lh1", 16.0 + PAD + BORDER, "line-height:1 only: UA padding and border kept"),
+        ("lhp0", 16.0 + BORDER, "line-height:1 + padding:0: UA border kept"),
+        ("lhbn", 16.0 + PAD, "line-height:1 + border:none: UA padding kept"),
+        ("lhpad", 16.0 + 8.0 + BORDER, "line-height:1 + padding:4px 8px: UA border kept"),
+        ("lh20p0", 20.0 + BORDER, "line-height:20px + padding:0: UA border kept"),
+    ];
+    for (id, want, what) in cases {
+        assert!(close(h[id], f64::from(want)), "{what}: {id} should be {want}, got {}", h[id]);
+    }
 }
 
 #[test]
