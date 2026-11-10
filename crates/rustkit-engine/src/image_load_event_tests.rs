@@ -493,3 +493,81 @@ fn decode_settles_with_the_image() {
     assert!(at("a.load") < at("early.resolved"), "decode() resolves with the load, not before: {log}");
     assert!(at("a.load") < at("winload"), "{log}");
 }
+
+/// R1 nit 1: an image the engine gave up on (its budget spent) hears no
+/// event, so a `decode()` waiting on it would wait for good and content
+/// revealed after `await img.decode()` would stay hidden. Its pending
+/// `decode()` resolves when the engine gives up, as it did before E54, and
+/// one asked for afterwards resolves at once.
+#[test]
+fn decode_settles_when_the_engine_gives_up_on_the_image() {
+    let body = "<img id=a src=/hang.png?delay=4000><script>\
+        $('a').decode().then(function(){ev('early.resolved')},function(e){ev('early.rejected:'+e.name)});</script>";
+    let mut page = load(body, vec![a("/hang.png?delay=4000")], Mode::App, 400);
+    page.settle();
+    page.run("$('a').decode().then(function(){ev('late.resolved')},function(e){ev('late.rejected:'+e.name)});0");
+    page.settle();
+    let log = page.log();
+    assert!(log.contains("early.resolved") && log.contains("late.resolved"), "{log}");
+    assert!(!log.contains("a.load") && !log.contains("error"), "{log}");
+}
+
+/// Chrome rejects a pending `decode()` with an EncodingError when `src`
+/// changes before the image is in.
+#[test]
+fn a_src_change_rejects_a_pending_decode() {
+    let mut page = load("<img id=a>", vec![a("/a.png?delay=300"), b("/b.png")], Mode::App, 5_000);
+    page.run("var i=$('a');i.src='/a.png?delay=300';i.decode().then(function(){ev('resolved')},function(e){ev('rejected:'+e.name)});i.src='/b.png';0");
+    page.settle();
+    let log = page.log();
+    assert!(log.contains("rejected:EncodingError") && !log.contains("resolved"), "{log}");
+}
+
+/// R1 nit 5: writing the same `src` after a failed load starts the load
+/// over, so the element reads as in flight until it settles again, not as
+/// the failure it had.
+#[test]
+fn a_same_src_rewrite_after_a_failure_reads_as_in_flight() {
+    let body = "<img id=a src=/missing.png?delay=200><script>watch($('a'),'a');</script>";
+    let mut page = load(body, vec![], Mode::App, 5_000);
+    assert!(page.log().contains("a.error{true,0,0,/missing.png?delay=200}"), "{}", page.log());
+    page.run("$('a').setAttribute('src','/missing.png?delay=200');ev('set',$('a'));0");
+    page.settle();
+    let log = page.log();
+    assert!(log.contains("set{false,0,0,}"), "in flight after the write: {log}");
+    assert_eq!(log.matches("a.error{true,0,0,/missing.png?delay=200}").count(), 2, "{log}");
+}
+
+/// R1 nit 3: an `<img>` in a template's contents is in an inert document;
+/// Chrome does not fetch it, and it hears nothing.
+#[test]
+fn an_img_in_template_content_is_not_fetched() {
+    let body = "<template id=t><img id=x></template><script>\
+        var i=$('t').content.querySelector('img');watch(i,'tpl');i.src='/t.png';</script>";
+    let mut page = load(body, vec![a("/t.png")], Mode::App, 5_000);
+    page.settle();
+    assert!(page.server.served("/t.png").is_empty(), "the template's image was fetched");
+    assert!(!page.log().contains("tpl."), "{}", page.log());
+}
+
+/// R1 nit 4: a `data:` URL that does not decode is a failed load: `error`.
+#[test]
+fn a_broken_data_url_image_hears_error() {
+    let body = "<img id=a src=\"data:image/png;base64,AAAAAAAA\"><script>watch($('a'),'a');</script>";
+    let mut page = load(body, vec![], Mode::App, 5_000);
+    let log = page.log();
+    assert!(log.contains("a.error{true,0,0,") && !log.contains("a.load"), "{log}");
+}
+
+/// R1 nit 2: an image outside the document is dropped from the engine's
+/// list once the engine gave up on it, or once the node is gone.
+#[test]
+fn the_detached_list_is_pruned_after_a_give_up() {
+    let mut page = load("", vec![a("/hang.png?delay=4000")], Mode::App, 300);
+    page.run("var p=new Image();p.src='/hang.png?delay=4000';0");
+    page.settle();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    page.settle();
+    let left = page.engine.views[&page.view].lay.loaded_images.borrow().detached.len();
+    assert_eq!(left, 0, "detached entries left after the give-up");
+}
