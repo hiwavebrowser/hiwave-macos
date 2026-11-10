@@ -6068,6 +6068,33 @@ mod tests {
         );
     }
 
+    /// CH2.B25 / #983: a column flex container's auto height runs to the
+    /// last item's MARGIN-box end. Without `main_margin_end` a single
+    /// margined block was 16+20 tall where Chromium gives 16+20+16.
+    #[test]
+    fn a_column_flex_content_extent_includes_the_last_items_end_margin() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Px(20.0);
+        child_style.margin_top = Length::Px(16.0);
+        child_style.margin_bottom = Length::Px(16.0);
+
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container.dimensions.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+        let containing = container.dimensions.clone();
+        layout_flex_container(&mut container, &containing);
+
+        let h = container.dimensions.content.height;
+        assert!(
+            (h - 52.0).abs() < 0.5,
+            "column content height should be 16+20+16, got {h}"
+        );
+    }
+
     #[test]
     fn a_definite_column_main_size_is_inner_under_both_box_sizing_modes() {
         // The free space a column distributes is the container's INNER main
