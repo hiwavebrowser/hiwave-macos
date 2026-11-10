@@ -63,8 +63,11 @@ pub struct RustKitView {
     /// Navigation the window has asked for. Older events are dropped.
     accepted_nav: Cell<u64>,
     /// A navigation the page decided on, harvested from events:
-    /// url, replace, and whether the user activated it.
-    script_nav: RefCell<Option<(String, bool, bool)>>,
+    /// url, replace, whether the user activated it, and the document's
+    /// navigation id. `take_script_navigation` drops a copy whose id is
+    /// older than [`Self::accepted_nav`]: harvest pulls the event out of
+    /// the queue, so [`stale`] never sees it again.
+    script_nav: RefCell<Option<(String, bool, bool, u64)>>,
     /// Newest commit whose navigation is still the one on screen.
     latest_commit: RefCell<Option<FrameCommit>>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
@@ -621,9 +624,15 @@ impl RustKitView {
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
-            let taken = self.script_nav.borrow_mut().take()?;
-            self.replace_next.set(taken.1);
-            return Some((taken.0, taken.2));
+            let (url, replace, from_user, nav_id) = self.script_nav.borrow_mut().take()?;
+            // The event loop harvests before it takes (`process_events`,
+            // `render`). A URL-bar load or New Tab can start in between and
+            // only then is this copy older than the navigation on screen.
+            if stale_nav(self.accepted_nav.get(), nav_id) {
+                return None;
+            }
+            self.replace_next.set(replace);
+            return Some((url, from_user));
         }
         let (url, replace) =
             self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
@@ -741,7 +750,10 @@ impl RustKitView {
             let _rx = thread.load_html(html);
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
+            // Drop one harvest already copied out of the queue; `stale`
+            // only filters what is still queued.
             self.accepted_nav.set(thread.last_nav_id());
+            let _ = self.script_nav.borrow_mut().take();
             // The new document has nothing focused until it says otherwise.
             self.page_focused.set(false);
             self.live_clock.set(Instant::now());
@@ -894,6 +906,9 @@ impl RustKitView {
             // Signal cancel and the interrupt before the command is queued.
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
+            // Same as New Tab: a script navigation already harvested from
+            // the page being replaced must not be taken on the next turn.
+            let _ = self.script_nav.borrow_mut().take();
             self.page_focused.set(false);
             *self.loading.borrow_mut() = true;
             self.live_clock.set(Instant::now());
@@ -1131,9 +1146,9 @@ impl RustKitView {
                     url,
                     replace,
                     from_user,
-                    ..
+                    nav_id,
                 } => {
-                    *self.script_nav.borrow_mut() = Some((url, replace, from_user));
+                    *self.script_nav.borrow_mut() = Some((url, replace, from_user, nav_id));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
@@ -1172,6 +1187,12 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
     };
+    stale_nav(accepted, nav_id)
+}
+
+/// A navigation id of 0 is not tied to a document (focus, cursor). Any
+/// other id older than the one the window has accepted is a late result.
+fn stale_nav(accepted: u64, nav_id: u64) -> bool {
     nav_id != 0 && nav_id < accepted
 }
 
@@ -1827,6 +1848,74 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// `MainEventsCleared` harvests in `process_events` and `render`, then
+    /// takes on the next wake. A URL-bar load or New Tab in that gap used
+    /// to leave the copy in `script_nav`, and the next take followed the
+    /// page the user had just left.
+    fn harvest_script_navigation(view: &RustKitView, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            view.process_events();
+            let buffered = view.script_nav.borrow().clone();
+            if let Some((url, _, _, _)) = buffered.as_ref() {
+                assert!(url.contains(needle), "harvested {url}, wanted {needle}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "the page never asked to navigate");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_is_taken_while_that_page_is_current() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.as_ref().is_some_and(|(url, from_user)| url.contains("elsewhere") && !*from_user),
+            "the page's own navigation was dropped: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_new_tab() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_html_internal("<body><p>new tab</p></body>").unwrap();
+        assert!(
+            view.take_script_navigation().is_none(),
+            "a script navigation harvested before New Tab pulled the new tab away"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_a_url_bar_load() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_url_blocking(&format!("{base}typed"));
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.is_none(),
+            "a script navigation harvested before the URL bar overrode it: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn a_buffered_navigation_is_stale_once_a_newer_id_is_accepted() {
+        assert!(!stale_nav(4, 4), "the document on screen is still current");
+        assert!(!stale_nav(4, 0), "an id of 0 is not a document");
+        assert!(stale_nav(4, 3), "an older document's request is stale");
     }
 
     fn content_view() -> RustKitView {
