@@ -633,6 +633,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod glyph_phase_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod text_coverage_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vector_clip_tests;
