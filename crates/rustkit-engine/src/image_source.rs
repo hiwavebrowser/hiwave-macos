@@ -31,24 +31,195 @@ pub struct Pick {
     pub density: f32,
 }
 
-/// Select the image for an `<img>` whose `<picture>` sources (those before it) are `sources`.
-pub fn select_source(img: &SourceAttrs<'_>, sources: &[SourceAttrs<'_>], env: &Env) -> Option<Pick> {
-    // STUB (red): the old behaviour, the densest or widest candidate of the img's own srcset.
-    let _ = (sources, env);
-    let srcset = img.srcset?;
-    let mut best: Option<(f32, String)> = None;
+/// A parsed `srcset` candidate: a URL and either a pixel density (`x`) or a width (`w`).
+#[derive(Debug, Clone, PartialEq)]
+struct Candidate {
+    url: String,
+    kind: Descriptor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Descriptor {
+    X(f32),
+    W(f32),
+}
+
+/// Parse a `srcset` value. A candidate is `url [descriptor]`; no descriptor is `1x`. A candidate
+/// with a descriptor that is not a positive `Nx` or `Nw` (or has two descriptors) is dropped.
+fn parse_srcset(srcset: &str) -> Vec<Candidate> {
+    let mut out = Vec::new();
     for cand in srcset.split(',') {
         let mut parts = cand.split_whitespace();
         let Some(url) = parts.next() else { continue };
-        let d = parts
-            .next()
-            .and_then(|d| d.trim_end_matches(['x', 'w']).parse::<f32>().ok())
-            .unwrap_or(1.0);
-        if best.as_ref().map_or(true, |(b, _)| d > *b) {
-            best = Some((d, url.to_string()));
+        let kind = match (parts.next(), parts.next()) {
+            (None, _) => Descriptor::X(1.0),
+            (Some(d), None) => {
+                let (num, unit) = d.split_at(d.len().saturating_sub(1));
+                match (num.parse::<f32>(), unit) {
+                    (Ok(n), "x") if n > 0.0 => Descriptor::X(n),
+                    (Ok(n), "w") if n > 0.0 => Descriptor::W(n),
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        out.push(Candidate { url: url.to_string(), kind });
+    }
+    out
+}
+
+/// The image types RustKit decodes. A `<source type>` outside this list is skipped, so a page
+/// offering AVIF first still gets its fallback.
+fn type_supported(mime: &str) -> bool {
+    let mime = mime.trim().to_ascii_lowercase();
+    matches!(
+        mime.as_str(),
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp" | "image/bmp" | "image/svg+xml" | "image/x-icon" | "image/vnd.microsoft.icon"
+    )
+}
+
+/// One `sizes` length in CSS px: `px`, `vw`, `vh`, `em`/`rem` (16 px), or a bare 0. `calc()` and
+/// anything else is unknown (`None`).
+fn size_px(token: &str, env: &Env) -> Option<f32> {
+    let t = token.trim();
+    if t == "0" {
+        return Some(0.0);
+    }
+    let split = t.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = t.split_at(split);
+    let n: f32 = num.parse().ok()?;
+    match unit.to_ascii_lowercase().as_str() {
+        "px" => Some(n),
+        "vw" => Some(n * env.viewport_w / 100.0),
+        "vh" => Some(n * env.viewport_h / 100.0),
+        "em" | "rem" => Some(n * 16.0),
+        _ => None,
+    }
+}
+
+/// The source size (HTML "parse a sizes attribute"): the first entry whose media condition
+/// matches, else the last entry (the one with no condition), else `100vw`.
+fn source_size(sizes: Option<&str>, env: &Env) -> f32 {
+    let default = env.viewport_w;
+    let Some(sizes) = sizes else { return default };
+    // Split at top-level commas (a media condition may hold parentheses, not commas).
+    let mut entries: Vec<&str> = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, c) in sizes.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                entries.push(&sizes[start..i]);
+                start = i + 1;
+            }
+            _ => {}
         }
     }
-    best.map(|(_, url)| Pick { url, density: 1.0 }).or_else(|| img.src.map(|s| Pick { url: s.to_string(), density: 1.0 }))
+    entries.push(&sizes[start..]);
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // `(media condition) length`, or just `length`: the condition runs to its matching paren.
+        let (condition, length) = if entry.starts_with('(') {
+            let mut depth = 0i32;
+            let mut end = entry.len();
+            for (i, c) in entry.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (entry[..end].trim(), entry[end..].trim())
+        } else {
+            ("", entry)
+        };
+        let Some(px) = size_px(length, env) else { continue };
+        if condition.is_empty() || rustkit_css::media::media_query_list_matches(condition, env.viewport_w, env.viewport_h) {
+            return px;
+        }
+    }
+    default
+}
+
+/// Pick one candidate of a set for `dpr` (HTML "select an image source from a source set"): the
+/// smallest density that covers the DPR, else the largest. `w` candidates have density
+/// `w / slot`. Returns the URL and its density.
+fn pick_candidate(candidates: &[Candidate], slot: f32, dpr: f32) -> Option<Pick> {
+    let mut with_density: Vec<(f32, &Candidate)> = candidates
+        .iter()
+        .filter_map(|c| match c.kind {
+            Descriptor::X(x) => Some((x, c)),
+            Descriptor::W(w) if slot > 0.0 => Some((w / slot, c)),
+            Descriptor::W(_) => None,
+        })
+        .collect();
+    if with_density.is_empty() {
+        return None;
+    }
+    // Stable by density, so equal densities keep document order (the first wins).
+    with_density.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let chosen = with_density
+        .iter()
+        .find(|(d, _)| *d >= dpr)
+        .or_else(|| with_density.last())?;
+    Some(Pick { url: chosen.1.url.clone(), density: chosen.0 })
+}
+
+/// The candidates and size slot of one source of images.
+fn pick_from(set: &SourceAttrs<'_>, env: &Env, with_src: bool) -> Option<Pick> {
+    let mut candidates = parse_srcset(set.srcset.unwrap_or(""));
+    let has_width = candidates.iter().any(|c| matches!(c.kind, Descriptor::W(_)));
+    if with_src && !has_width {
+        if let Some(src) = set.src.map(str::trim).filter(|s| !s.is_empty()) {
+            // `src` is a 1x candidate unless one already is.
+            let has_1x = candidates.iter().any(|c| c.kind == Descriptor::X(1.0));
+            if !has_1x {
+                candidates.push(Candidate { url: src.to_string(), kind: Descriptor::X(1.0) });
+            }
+        }
+    }
+    let slot = source_size(set.sizes, env);
+    pick_candidate(&candidates, slot, env.dpr)
+}
+
+/// Select the image for an `<img>` whose `<picture>` sources (those before it) are `sources`:
+/// the first `<source>` whose `media` matches, whose `type` is supported and that offers a
+/// usable `srcset` decides; otherwise the `<img>`'s own `srcset`, else its `src`.
+pub fn select_source(img: &SourceAttrs<'_>, sources: &[SourceAttrs<'_>], env: &Env) -> Option<Pick> {
+    for source in sources {
+        if let Some(mime) = source.mime {
+            if !type_supported(mime) {
+                continue;
+            }
+        }
+        if let Some(media) = source.media {
+            if !media.trim().is_empty()
+                && !rustkit_css::media::media_query_list_matches(media, env.viewport_w, env.viewport_h)
+            {
+                continue;
+            }
+        }
+        if source.srcset.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+            continue;
+        }
+        if let Some(pick) = pick_from(source, env, false) {
+            return Some(pick);
+        }
+    }
+    if let Some(pick) = pick_from(img, env, true) {
+        return Some(pick);
+    }
+    img.src.map(str::trim).filter(|s| !s.is_empty()).map(|s| Pick { url: s.to_string(), density: 1.0 })
 }
 
 #[cfg(test)]
