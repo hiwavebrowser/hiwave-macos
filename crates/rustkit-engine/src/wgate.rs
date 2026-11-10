@@ -1360,30 +1360,51 @@ mod tests {
         assert!(per < 20_000.0, "{per} ns per input");
     }
 
+    /// The milliseconds between two of a test's own `Instant` reads.
+    fn ms_between(from: Instant, to: Instant) -> f64 {
+        to.duration_since(from).as_secs_f64() * 1000.0
+    }
+
     /// LAT15: a load that lends its thread out at safe points reports its
     /// whole span on the hold line, as before, with the longest stretch
     /// between safe points; the summary takes that stretch, and an entry
     /// made at the safe point is outermost, a sample of its own.
+    ///
+    /// CI2: the bounds are the test's own clock reads around each stretch,
+    /// not the sleeps, so a slow or loaded machine cannot fail it: a stretch
+    /// is at least what the test saw inside it and at most what it saw
+    /// around it. The time lent out (at least 35 ms of sleeps) lies outside
+    /// both outer reads, so a stretch that took it in fails the upper bound.
     #[test]
     fn a_suspended_load_reports_its_whole_span_and_its_longest_stretch() {
         clear_last();
+        let before_load = Instant::now();
+        let (after_load, before_lend, after_lend, before_return, after_return, before_end);
         {
             let _load = hold("load");
-            std::thread::sleep(std::time::Duration::from_millis(80));
+            after_load = Instant::now();
+            sleep(80);
+            before_lend = Instant::now();
             {
                 let _lent = suspend_hold();
+                after_lend = Instant::now();
                 {
                     let _click = hold("click");
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    sleep(5);
                 }
                 assert_eq!(last_entry(), Some("click"), "the served entry is outermost");
-                std::thread::sleep(std::time::Duration::from_millis(30));
+                sleep(30);
+                before_return = Instant::now();
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            after_return = Instant::now();
+            sleep(20);
+            before_end = Instant::now();
         }
+        let after_end = Instant::now();
         assert_eq!(last_entry(), Some("load"));
         let (_, whole) = last_hold().expect("the load's hold line");
-        assert!(whole >= 130.0, "the line keeps the whole span: {whole}");
+        assert!(whole >= ms_between(after_load, before_end), "the line keeps the whole span: {whole}");
+        assert!(whole <= ms_between(before_load, after_end), "the line keeps the whole span: {whole}");
         let line = last_line().expect("line");
         let longest: f64 = line
             .split(" longest_segment_ms=")
@@ -1391,7 +1412,13 @@ mod tests {
             .and_then(|rest| rest.split_whitespace().next())
             .and_then(|ms| ms.parse().ok())
             .unwrap_or_else(|| panic!("no longest_segment_ms: {line}"));
-        assert!((80.0..130.0).contains(&longest), "longest stretch {longest}: {line}");
+        // The line rounds to whole milliseconds.
+        let shortest_possible = ms_between(after_load, before_lend).max(ms_between(after_return, before_end));
+        let longest_possible = ms_between(before_load, after_lend).max(ms_between(before_return, after_end));
+        assert!(
+            (shortest_possible - 0.5..=longest_possible + 0.5).contains(&longest),
+            "longest stretch {longest} outside [{shortest_possible:.1}, {longest_possible:.1}], the lent time is no stretch's: {line}"
+        );
         assert!(line.ends_with(" segments=2"), "{line}");
         // Nothing nested outlives the load: the next entry is outermost.
         {
@@ -1403,21 +1430,42 @@ mod tests {
     /// LAT15 R1 (3): the bucket open across a safe point (the images the
     /// load waits for) stops its clock while the thread is lent out: a
     /// served command is not image time.
+    ///
+    /// CI2: bounded by the test's own clock reads (see the test above): the
+    /// images are charged at least the time the test saw inside the two
+    /// stretches and at most the time around them, and the 120 ms lent out
+    /// lies outside both, so charging it fails however slow the machine.
     #[test]
     fn a_suspended_load_does_not_charge_the_served_time_to_its_open_bucket() {
         clear_last();
+        let before_open = Instant::now();
+        let (after_open, before_lend, after_lend, before_return, after_return, before_close);
         {
             let _load = hold("load");
             let _images = bucket(HoldBucket::Images);
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            after_open = Instant::now();
+            sleep(40);
+            before_lend = Instant::now();
             {
                 let _lent = suspend_hold();
-                std::thread::sleep(std::time::Duration::from_millis(120));
+                after_lend = Instant::now();
+                sleep(120);
+                before_return = Instant::now();
             }
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            after_return = Instant::now();
+            sleep(40);
+            before_close = Instant::now();
         }
+        let after_close = Instant::now();
         assert_eq!(last_entry(), Some("load"));
         let images = last_stages().in_bucket(HoldBucket::Images);
-        assert!((70.0..140.0).contains(&images), "images charged {images} ms; the 120 ms lent out is not image time");
+        let least = ms_between(after_open, before_lend) + ms_between(after_return, before_close);
+        let most = ms_between(before_open, after_lend) + ms_between(before_return, after_close);
+        let lent = ms_between(after_lend, before_return);
+        assert!(
+            // 1 µs for the float sums: the clock reads may share a tick.
+            (least - 0.001..=most + 0.001).contains(&images),
+            "images charged {images:.3} ms outside [{least:.3}, {most:.3}]; the {lent:.3} ms lent out is not image time"
+        );
     }
 }
