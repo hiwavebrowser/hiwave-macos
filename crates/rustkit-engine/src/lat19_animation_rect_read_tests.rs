@@ -149,6 +149,7 @@ fn a_rect_read_in_a_transform_web_animation_frame_builds_no_tree_and_paints_the_
     assert_eq!(s.forced_layouts, s0.forced_layouts, "no read built the layout tree");
     assert_eq!(s.relayouts, s0.relayouts, "no frame relaid the page out");
     assert!(s.animation_frames_painted >= s0.animation_frames_painted + N as u32, "{s:?}");
+    assert!(s.forced_frames >= s0.forced_frames + N as u64, "each read was answered from a frame: {s:?}");
 }
 
 /// A Web Animation of `width` (a layout property) with a rect read in

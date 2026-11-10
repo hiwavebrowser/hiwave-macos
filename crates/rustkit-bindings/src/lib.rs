@@ -898,6 +898,11 @@ pub struct ForcedLayoutReport {
     pub count: u64,
     pub ms: f64,
     pub causes: Vec<(&'static str, &'static str, u64)>,
+    /// LAT19: reads after a paint-only Web Animations write answered from
+    /// an animation frame over the published boxes (no build), and their
+    /// time. Not in `count`.
+    pub framed: u64,
+    pub framed_ms: f64,
 }
 
 impl ForcedLayoutReport {

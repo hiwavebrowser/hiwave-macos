@@ -620,17 +620,19 @@ fn lat7_an_unseen_write_in_a_web_animation_frame_still_takes_the_full_path() {
          p.firstChild.data='new';p.className='x';\
          r.push(b.offsetWidth);window.__r=r.join();})",
     );
-    let (skip, relaid, forced0) = (
-        skipped(&engine, view),
-        relayouts(&engine, view),
-        engine.relayout_stats(view).unwrap().forced_layouts,
-    );
+    // LAT19: the layer write is paint only (opacity), so the first read is
+    // answered from an animation frame over the published boxes.
+    let forced = |engine: &Engine| {
+        let s = engine.relayout_stats(view).unwrap();
+        (s.forced_layouts, s.forced_frames)
+    };
+    let (skip, relaid, forced0) = (skipped(&engine, view), relayouts(&engine, view), forced(&engine));
     frame(&mut engine, view, 16);
     assert_eq!(read(&mut engine, view, "window.__r"), "50,50px,50");
     assert_eq!(
-        engine.relayout_stats(view).unwrap().forced_layouts,
-        forced0 + 1,
-        "the first read forces one layout (the layer write); the read after the hidden write forces none"
+        forced(&engine),
+        (forced0.0, forced0.1 + 1),
+        "the first read places one frame (the layer write); the read after the hidden write forces none"
     );
     assert_eq!(skipped(&engine, view), skip, "the frame with the unseen write is not paint-only");
     assert!(relayouts(&engine, view) > relaid, "it lays out");

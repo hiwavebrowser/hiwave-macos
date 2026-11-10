@@ -62,6 +62,7 @@ fn counting_forced(calls: Rc<Cell<u64>>) -> ForcedLayout {
             hit_tester: None,
             computed_lines: None,
             max_scroll: (0.0, 0.0),
+            framed: false,
         })
     })
 }
