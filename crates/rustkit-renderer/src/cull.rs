@@ -309,6 +309,7 @@ mod tests {
             ascent: None,
             run: None,
             faces: None,
+            undilated: false,
         };
         assert!(paint_bounds(&text).is_none());
         assert!(paint_bounds(&DisplayCommand::PushClip(Rect::new(0.0, 1e6, 1.0, 1.0))).is_none());
@@ -342,6 +343,7 @@ mod tests {
             ascent: Some(13.0),
             run: None,
             faces: None,
+            undilated: false,
         }
     }
 

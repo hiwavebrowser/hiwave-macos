@@ -630,6 +630,8 @@ mod form_empty_submit_tests;
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod text_coverage_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vector_clip_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -13601,6 +13603,11 @@ impl layout_ctx::LayoutCtx {
                         s.overflow_wrap = parent.overflow_wrap;
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
+                        // How the glyphs are rasterized (dilated or not):
+                        // read off the run's own style at paint.
+                        s.font_smoothing = parent.font_smoothing;
+                        s.text_rendering_geometric_precision =
+                            parent.text_rendering_geometric_precision;
                         s.visibility = parent.visibility;
                         s.pointer_events = parent.pointer_events;
                         s.cursor = parent.cursor;
@@ -14027,6 +14034,9 @@ impl layout_ctx::LayoutCtx {
             pseudo_style.overflow_wrap = parent.overflow_wrap;
             pseudo_style.line_break = parent.line_break;
             pseudo_style.text_transform = parent.text_transform;
+            pseudo_style.font_smoothing = parent.font_smoothing;
+            pseudo_style.text_rendering_geometric_precision =
+                parent.text_rendering_geometric_precision;
             pseudo_style.visibility = parent.visibility;
             pseudo_style.pointer_events = parent.pointer_events;
             pseudo_style.cursor = parent.cursor;
@@ -14283,6 +14293,8 @@ impl layout_ctx::LayoutCtx {
             style.overflow_wrap = parent.overflow_wrap;
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
+            style.font_smoothing = parent.font_smoothing;
+            style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision;
             style.visibility = parent.visibility;
             style.pointer_events = parent.pointer_events;
             style.cursor = parent.cursor;
@@ -15489,6 +15501,10 @@ impl Engine {
             "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
             "text-align" => style.text_align = parent.text_align,
             "text-transform" => style.text_transform = parent.text_transform,
+            "-webkit-font-smoothing" | "font-smooth" => style.font_smoothing = parent.font_smoothing,
+            "text-rendering" => {
+                style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision
+            }
             "white-space" => style.white_space = parent.white_space,
             "word-break" => style.word_break = parent.word_break,
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
@@ -16724,6 +16740,19 @@ impl layout_ctx::LayoutCtx {
             // css-overflow-3 §5.1. Not inherited (a block owns its line
             // boxes). The two-value form and `<string>` fallback are
             // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "-webkit-font-smoothing" | "font-smooth" => {
+                let v = value.trim().to_ascii_lowercase();
+                style.font_smoothing = match v.as_str() {
+                    "antialiased" | "grayscale" => rustkit_css::FontSmoothing::Antialiased,
+                    "none" | "never" => rustkit_css::FontSmoothing::None,
+                    "subpixel-antialiased" | "always" => rustkit_css::FontSmoothing::SubpixelAntialiased,
+                    _ => rustkit_css::FontSmoothing::Auto,
+                };
+            }
+            "text-rendering" => {
+                style.text_rendering_geometric_precision =
+                    value.trim().eq_ignore_ascii_case("geometricprecision");
+            }
             "appearance" | "-webkit-appearance" => {
                 style.appearance = if value.trim().eq_ignore_ascii_case("none") {
                     rustkit_css::Appearance::None
@@ -17230,6 +17259,10 @@ impl layout_ctx::LayoutCtx {
             // Not inherited either: `initial` and `unset` undo a reset's
             // `* { box-sizing: inherit }`.
             "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,
+            "-webkit-font-smoothing" | "font-smooth" => {
+                style.font_smoothing = rustkit_css::FontSmoothing::Auto
+            }
+            "text-rendering" => style.text_rendering_geometric_precision = false,
             "appearance" | "-webkit-appearance" => {
                 style.appearance = rustkit_css::Appearance::Auto
             }
@@ -22401,6 +22434,7 @@ impl Engine {
                     ascent,
                     run,
                     faces: _,
+                    undilated: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint
