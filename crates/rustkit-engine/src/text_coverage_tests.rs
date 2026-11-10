@@ -171,3 +171,33 @@ fn an_antialiased_ahem_square_has_no_fringe() {
     let (solid, partial, _) = ahem_square("-webkit-font-smoothing:antialiased");
     assert_eq!((solid, partial), (400, 0));
 }
+
+/// #1030 nit 1: Skia's `SkCTFontGetSmoothBehavior` decision on two BGRX
+/// bitmaps: unequal smoothed channels are subpixel; any changed pixel is
+/// some; no change is none.
+#[test]
+fn the_smoothing_probe_decides_as_skia_does() {
+    use rustkit_renderer::{smooth_behavior_of, SmoothBehavior};
+    let plain = [0u8, 0, 0, 0, 90, 90, 90, 0];
+    assert_eq!(smooth_behavior_of(&plain, &plain), SmoothBehavior::None);
+    assert_eq!(smooth_behavior_of(&plain, &[0, 0, 0, 0, 140, 140, 140, 0]), SmoothBehavior::Some);
+    assert_eq!(smooth_behavior_of(&plain, &[0, 0, 0, 0, 120, 140, 160, 0]), SmoothBehavior::Subpixel);
+    // This seat (and the Mac the ink pins above were measured on): `some`.
+    assert_eq!(rustkit_renderer::smooth_behavior(), SmoothBehavior::Some);
+}
+
+/// Where smoothing has no effect every run takes the undilated outline (as
+/// Skia sets hinting none); `subpixel` scales the luminance colour by 3/4
+/// instead of 1/2, so white lands two buckets higher.
+#[test]
+fn the_coverage_law_follows_the_smoothing_behaviour() {
+    use rustkit_renderer::coverage_for_behavior as law;
+    use rustkit_renderer::SmoothBehavior;
+    for c in [[0, 0, 0], [0x94, 0xa3, 0xb8], [255, 255, 255]] {
+        assert_eq!(law(c, false, SmoothBehavior::None), 0, "{c:?}");
+        assert_eq!(law(c, true, SmoothBehavior::Some), 0, "{c:?}");
+    }
+    assert_eq!(law([0, 0, 0], false, SmoothBehavior::Some), 1);
+    assert_eq!(law([255, 255, 255], false, SmoothBehavior::Some), 4); // 127 >> 5 = 3
+    assert_eq!(law([255, 255, 255], false, SmoothBehavior::Subpixel), 6); // 191 >> 5 = 5
+}

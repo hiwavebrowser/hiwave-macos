@@ -1015,6 +1015,87 @@ pub struct GlyphRasterizer {
     dilate: bool,
 }
 
+/// What CoreGraphics font smoothing does on this machine, probed once as
+/// Skia's `SkCTFontGetSmoothBehavior` does (Chromium 148): one glyph drawn
+/// white on black into two RGB contexts, smoothing off and on. Smoothed
+/// pixels with unequal channels are `Subpixel`; any pixel that differs from
+/// the unsmoothed draw is `Some`; otherwise `None` (smoothing turned off in
+/// System Settings, or `AppleFontSmoothing` 0). Skia probes with a bundled
+/// spider glyph; any outline glyph answers the same question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothBehavior {
+    None,
+    Some,
+    Subpixel,
+}
+
+/// [`SmoothBehavior`] of this machine, probed on first use.
+pub fn smooth_behavior() -> SmoothBehavior {
+    static BEHAVIOR: std::sync::OnceLock<SmoothBehavior> = std::sync::OnceLock::new();
+    *BEHAVIOR.get_or_init(probe_smooth_behavior)
+}
+
+fn probe_smooth_behavior() -> SmoothBehavior {
+    use std::os::raw::c_void;
+    extern "C" {
+        fn CTFontDrawGlyphs(
+            font: core_text::font::CTFontRef,
+            glyphs: *const u16,
+            positions: *const CGPoint,
+            count: usize,
+            context: *mut c_void,
+        );
+        fn CTFontGetGlyphsForCharacters(
+            font: core_text::font::CTFontRef,
+            characters: *const u16,
+            glyphs: *mut u16,
+            count: isize,
+        ) -> bool;
+    }
+    let Ok(font) = font::new_from_name("Helvetica", 16.0) else {
+        return SmoothBehavior::None;
+    };
+    let font_ref = font.as_concrete_TypeRef();
+    let mut glyph = [0u16; 1];
+    let ch = ['W' as u16];
+    // SAFETY: one character in, one glyph out; the font outlives the call.
+    if !unsafe { CTFontGetGlyphsForCharacters(font_ref, ch.as_ptr(), glyph.as_mut_ptr(), 1) } {
+        return SmoothBehavior::None;
+    }
+    let draw = |smooth: bool| -> Vec<u8> {
+        let space = CGColorSpace::create_device_rgb();
+        let info = core_graphics::base::kCGImageAlphaNoneSkipFirst
+            | core_graphics::base::kCGBitmapByteOrder32Little;
+        let mut ctx = CGContext::create_bitmap_context(None, 16, 16, 8, 16 * 4, &space, info);
+        ctx.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
+        ctx.fill_rect(CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(16.0, 16.0)));
+        ctx.set_allows_font_smoothing(true);
+        ctx.set_should_smooth_fonts(smooth);
+        ctx.set_should_antialias(true);
+        ctx.set_gray_fill_color(1.0, 1.0);
+        let at = CGPoint::new(0.0, 3.0);
+        // SAFETY: a live context and font, one glyph.
+        unsafe { CTFontDrawGlyphs(font_ref, glyph.as_ptr(), &at, 1, ctx.as_ptr() as *mut c_void) };
+        ctx.data()[..16 * 16 * 4].to_vec()
+    };
+    let (plain, smoothed) = (draw(false), draw(true));
+    smooth_behavior_of(&plain, &smoothed)
+}
+
+/// The decision of [`probe_smooth_behavior`] from its two BGRX bitmaps.
+pub fn smooth_behavior_of(plain: &[u8], smoothed: &[u8]) -> SmoothBehavior {
+    let mut behavior = SmoothBehavior::None;
+    for (p, s) in plain.chunks_exact(4).zip(smoothed.chunks_exact(4)) {
+        if s[0] != s[1] || s[1] != s[2] {
+            return SmoothBehavior::Subpixel;
+        }
+        if p[..3] != s[..3] {
+            behavior = SmoothBehavior::Some;
+        }
+    }
+    behavior
+}
+
 /// The coverage mask (`width * height` bytes, top row first) of `glyph` of
 /// `font_ref` drawn at `origin` (CG coordinates, bottom-left origin).
 ///

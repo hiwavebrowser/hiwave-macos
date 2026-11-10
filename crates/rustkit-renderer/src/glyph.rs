@@ -104,8 +104,26 @@ pub struct RunGlyphKey {
 }
 
 /// The coverage law for a text run drawn in `rgb`: what Chrome's Skia does
-/// for A8 text on macOS (Chromium 148; this seat's CoreGraphics smoothing
-/// behaviour is `some`, measured with `SkCTFontGetSmoothBehavior`'s probe).
+/// for A8 text on macOS (Chromium 148), for this machine's CoreGraphics
+/// smoothing behaviour (`rustkit_text::macos::smooth_behavior`, Skia's
+/// one-time `SkCTFontGetSmoothBehavior` probe). See [`coverage_for_behavior`].
+pub fn coverage_for(rgb: [u8; 3], undilated: bool) -> u8 {
+    #[cfg(target_os = "macos")]
+    {
+        coverage_for_behavior(rgb, undilated, rustkit_text::macos::smooth_behavior())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (rgb, undilated);
+        0
+    }
+}
+
+/// [`coverage_for`] for a given smoothing behaviour.
+///
+/// - `None` (smoothing has no effect: turned off in System Settings):
+///   `onFilterRec` sets hinting none for everything, so every run takes the
+///   undilated outline. Returns 0.
 ///
 /// - `undilated` (`-webkit-font-smoothing: antialiased`, `text-rendering:
 ///   geometricPrecision`: Blink sets hinting none): the outline's coverage,
@@ -119,9 +137,16 @@ pub struct RunGlyphKey {
 ///   canonicalised to 3 bits (`SkTMaskGamma<3,3,3>::CanonicalColor`).
 ///   Returns `1 + bucket`.
 ///
-/// Other platforms keep their masks: 0.
-pub fn coverage_for(rgb: [u8; 3], undilated: bool) -> u8 {
-    if undilated || !cfg!(target_os = "macos") {
+/// - `Subpixel`: the same, with the luminance colour at 3/4 instead of 1/2
+///   ("goes from a gamma of 2.0 for black foreground to a gamma of ~1.4?").
+#[cfg(target_os = "macos")]
+pub fn coverage_for_behavior(
+    rgb: [u8; 3],
+    undilated: bool,
+    behavior: rustkit_text::macos::SmoothBehavior,
+) -> u8 {
+    use rustkit_text::macos::SmoothBehavior;
+    if undilated || behavior == SmoothBehavior::None {
         return 0;
     }
     // SkPaintPriv::ComputeLuminanceColor: the luminance of the colour in
@@ -129,8 +154,12 @@ pub fn coverage_for(rgb: [u8; 3], undilated: bool) -> u8 {
     let lin = |c: u8| srgb_to_linear(c as f32 / 255.0);
     let y = 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
     let lum = (255.0 * linear_to_srgb(y)).round() as u32;
-    let halved = lum / 2;
-    1 + (halved >> 5) as u8
+    let scaled = if behavior == SmoothBehavior::Subpixel {
+        lum * 3 / 4
+    } else {
+        lum / 2
+    };
+    1 + (scaled >> 5) as u8
 }
 
 /// The luminance colour Skia uses for a paint that is not a plain colour
