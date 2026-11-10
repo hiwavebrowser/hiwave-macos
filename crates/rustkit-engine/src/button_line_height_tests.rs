@@ -86,3 +86,43 @@ fn an_inline_block_with_line_height_1_is_the_control() {
     let h = heights();
     assert!(close(h["sp"], 16.0), "a line-height:1 inline-block at 16px is 16 px, got {}", h["sp"]);
 }
+
+/// Batch 57 found #1037 growing the form-controls buttons from 19 to 24 px: the case's reset sets
+/// `html { line-height: 1.5 }`, and the button INHERITED it (1.5 x 13.33 = 20 px line, + 0 padding
+/// + 4 border = 24). Chrome's UA `font: -webkit-small-control` on form controls resets the line
+/// to `normal`, so only a line-height declared on the button itself counts: with the page's
+/// `* { padding: 0; box-sizing: border-box }` a bare button is 15 + 0 + 4 = 19 (Chrome for Testing
+/// 148, websuite/micro/form-controls baseline, buttons and input type=submit/button/reset).
+#[test]
+fn a_buttons_line_is_normal_unless_the_button_itself_declares_one() {
+    const PAGE: &str = "<html><head><style>\
+        html { font-size: 16px; line-height: 1.5; }\
+        * { margin: 0; padding: 0; box-sizing: border-box; }\
+        #own { line-height: 1; }\
+        </style></head><body>\
+        <div><button id=b>Short</button></div>\
+        <div><input id=s type=submit value=Submit></div>\
+        <div><input id=t type=button value=Button></div>\
+        <div><input id=r type=reset value=Reset></div>\
+        <div><button id=own style='font-size:16px'>x</button></div>\
+        </body></html>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 400 })
+        .expect("view");
+    engine.load_html(view, PAGE).expect("load_html");
+    let ids = ["b", "s", "t", "r", "own"];
+    let expr = ids
+        .iter()
+        .map(|id| format!("document.getElementById('{id}').getBoundingClientRect().height"))
+        .collect::<Vec<_>>()
+        .join(" + ',' + ");
+    let out = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out).to_string();
+    let h: Vec<f64> = text.split(',').map(|n| n.parse().unwrap_or(f64::NAN)).collect();
+    for (i, id) in ["b", "s", "t", "r"].iter().enumerate() {
+        assert!(close(h[i], 19.0), "#{id}: a bare button under html{{line-height:1.5}} + *{{padding:0}} is 19 px, got {}", h[i]);
+    }
+    // The button's OWN line-height still counts: 16 (1 x 16px) + 0 padding + 4 border.
+    assert!(close(h[4], 20.0), "#own: line-height:1 on the button itself is 16 + 0 + 4 = 20, got {}", h[4]);
+}
