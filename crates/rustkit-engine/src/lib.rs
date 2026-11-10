@@ -2078,19 +2078,23 @@ fn end_script_turn(bindings: &DomBindings) {
 
 /// How many jobs one microtask drain may run before the executor refuses more (H19c).
 ///
-/// The cap exists so a runaway promise recursion cannot hang the page. When the engine has the
-/// script-budget interrupt on (`interrupt_scripts_at_budget`, the live app), that interrupt is the
-/// guard that actually bounds the time: Boa reads the view's control word at every call, microtask
-/// jobs included, so an endless chain is stopped at the budget (measured: ~8.6k jobs in a 400 ms
-/// budget). Then the cap can be the loop limit, and a legitimate chain of more than 100 000 jobs
-/// (Chrome runs 200 000 `.then`s in 17 ms) is not killed. Without the interrupt (the default
-/// config, tests, embedders that do not arm the watchdog) nothing else bounds a drain, so the
-/// old 100 000 cap stays.
+/// The cap exists so a runaway promise recursion cannot hang the page. It is 100 000 always, and
+/// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
+/// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
+/// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
+/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
+/// it keeps the 100 000 cap (Prometheus R1 on #1031).
 fn microtask_job_cap(config: &EngineConfig) -> u64 {
+    config.script_loop_iteration_limit.min(100_000)
+}
+
+/// The cap while a turn is armed: the loop limit when the engine arms turns at all
+/// (`interrupt_scripts_at_budget`), else no raise (0).
+fn armed_microtask_job_cap(config: &EngineConfig) -> u64 {
     if config.interrupt_scripts_at_budget {
         config.script_loop_iteration_limit
     } else {
-        config.script_loop_iteration_limit.min(100_000)
+        0
     }
 }
 
@@ -7663,6 +7667,7 @@ impl Engine {
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
         bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
@@ -8965,6 +8970,7 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9425,6 +9431,7 @@ impl Engine {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9552,6 +9559,7 @@ impl Engine {
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
         bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
 
