@@ -272,10 +272,15 @@ pub enum IpcMessage {
         playing: bool,
     },
 
-    // Autofill (vault integration)
+    // Autofill (vault integration). The two content messages are answered
+    // only through `ipc::autofill` (see there); `domain` is advisory.
     TriggerAutofill,
     GetCredentialsForAutofill {
+        #[serde(default)]
         domain: String,
+    },
+    AutofillPick {
+        id: String,
     },
     ToggleTabMute {
         id: String,
@@ -392,15 +397,6 @@ impl IpcResponse {
             message: message.into(),
         }
     }
-}
-
-/// Credential for autofill (includes password for form filling)
-#[derive(Debug, Clone, Serialize)]
-pub struct AutofillCredential {
-    pub id: i64,
-    pub domain: String,
-    pub username: String,
-    pub password: String,
 }
 
 /// Tab information for IPC responses

@@ -286,7 +286,11 @@ enum UserEvent {
     ToggleTabMute { id: String },
     // Autofill
     TriggerAutofill,
-    SendAutofillCredentials { credentials_json: String },
+    /// The content helper asked for the picker list (`domain` is what it
+    /// named, if anything); answered by `ipc::autofill`.
+    AutofillRequested { domain: Option<String> },
+    /// The person picked an entry in the content helper's picker.
+    AutofillPick { id: String },
     // Vault settings events (from settings webview)
     GetVaultStatus,
     UnlockVault(String),
@@ -869,6 +873,22 @@ fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
 /// A URL for the log (#910 R1 nit 3, CH3.A6): scheme, host and path —
 /// without its query, fragment or userinfo; a `data:` URL only up to its
 /// media type (the rest is the page).
+/// Autofill's key for the content view (the active tab) and the view's
+/// current top-level URL as the app reads it from the view, never from the
+/// page. RustKit pages (macOS) have no autofill IPC path: `None`.
+fn autofill_view_and_url(
+    state: &Arc<Mutex<AppState>>,
+    content: &UnifiedContentWebView,
+) -> Option<(String, String)> {
+    #[allow(unreachable_patterns)]
+    let url = match content {
+        UnifiedContentWebView::Wry(v) => v.url().ok()?,
+        _ => return None,
+    };
+    let view = state.lock().ok()?.shell.get_active_tab()?.id.0.to_string();
+    Some((view, url))
+}
+
 fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
@@ -3375,28 +3395,14 @@ fn main() {
                         info!("Tab audio state changed from content: playing={}", playing);
                         let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
                     }
-                    IpcMessage::GetCredentialsForAutofill { ref domain } => {
-                        info!("Getting credentials for autofill: {}", domain);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        info!("Autofill response: {:?}", response);
-                        match response {
-                            ipc::IpcResponse::Success { data } => {
-                                let json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
-                                info!("Sending {} credentials to page", json.len());
-                                let _ = content_proxy_ipc.send_event(UserEvent::SendAutofillCredentials {
-                                    credentials_json: json,
-                                });
-                            }
-                            ipc::IpcResponse::Error { ref message } => {
-                                warn!("Autofill error: {}", message);
-                                // Show error alert on content page
-                                let script = format!(
-                                    "alert('[HiWave Autofill] {}');",
-                                    message.replace('\'', "\\'")
-                                );
-                                let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                            }
-                        }
+                    // Autofill: decided in the event loop by `ipc::autofill`,
+                    // which reads the view's own URL.
+                    IpcMessage::GetCredentialsForAutofill { domain } => {
+                        let domain = (!domain.is_empty()).then(|| domain.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillRequested { domain });
+                    }
+                    IpcMessage::AutofillPick { id } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillPick { id: id.clone() });
                     }
                     // Handle analytics and other commands that need responses sent back to content
                     IpcMessage::GetTodayStats
@@ -6090,20 +6096,42 @@ fn main() {
                         let _ = proxy.send_event(UserEvent::SyncTabs);
                     }
                     UserEvent::TriggerAutofill => {
+                        // An app-side action (chrome, menu, app shortcut):
+                        // arm one request for this view at its current origin.
                         info!("Triggering autofill");
-                        // Focus the password field if any
+                        if let Some((view, url)) = autofill_view_and_url(&state_for_events, &content_for_events) {
+                            if let Ok(mut s) = state_for_events.lock() {
+                                ipc::autofill::arm_autofill(&mut s, &view, &url, std::time::Instant::now());
+                            }
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }"
                         );
                     }
-                    UserEvent::SendAutofillCredentials { ref credentials_json } => {
-                        info!("Sending autofill credentials to page");
-                        // Send credentials to the page via window.postMessage
-                        let script = format!(
-                            "window.postMessage({{ type: 'hiwave_autofill_credentials', credentials: {} }}, '*');",
-                            credentials_json
-                        );
-                        let _ = content_for_events.evaluate_script(&script);
+                    UserEvent::AutofillRequested { ref domain } => {
+                        let entries = autofill_view_and_url(&state_for_events, &content_for_events)
+                            .and_then(|(view, url)| {
+                                let mut s = state_for_events.lock().ok()?;
+                                Some(ipc::autofill::answer_content_autofill_request(
+                                    &mut s, &view, &url, domain.as_deref(), std::time::Instant::now(),
+                                ))
+                            })
+                            .unwrap_or_default();
+                        info!("Autofill picker: {} entries", entries.len());
+                        if !entries.is_empty() {
+                            let _ = content_for_events.evaluate_script(&ipc::autofill::picker_script(&entries));
+                        }
+                    }
+                    UserEvent::AutofillPick { ref id } => {
+                        let script = autofill_view_and_url(&state_for_events, &content_for_events)
+                            .and_then(|(view, url)| {
+                                let mut s = state_for_events.lock().ok()?;
+                                ipc::autofill::autofill_fill_script(&mut s, &view, &url, id, std::time::Instant::now())
+                            });
+                        if let Some(script) = script {
+                            info!("Autofill: filling the picked entry");
+                            let _ = content_for_events.evaluate_script(&script);
+                        }
                     }
                     // Inspector event handlers
                     UserEvent::OpenInspector => {
