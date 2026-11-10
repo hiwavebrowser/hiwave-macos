@@ -54,17 +54,24 @@ pub struct AdBlocker {
 }
 
 impl AdBlocker {
+    /// The name a match by a built-in rule gives for its list.
+    const DEFAULTS_LIST: &'static str = "HiWave defaults";
+
+    /// The built-in starter rules, audited against EasyList/EasyPrivacy (SH1): every host-wide
+    /// ad or tracker rule here is one the lists block or leave to their site-specific
+    /// exceptions. Two were removed because the lists allow what they block on purpose: the
+    /// reCAPTCHA `aframe` (EasyList has `@@||google.com/recaptcha/api2/`, and blocking it breaks
+    /// captchas) and the whole `connect.facebook.net` host (it serves the SDK that logins and
+    /// like buttons need; EasyList blocks only `/signals/`, `fbds.js` and `pcm.js`, third-party).
     const DEFAULT_RULES: &'static [&'static str] = &[
         // Google advertising
         "||doubleclick.net^",
         "||googlesyndication.com^",
         "||googleadservices.com^",
         "||adtrafficquality.google^",
-        "||google.com/recaptcha/api2/aframe^",
         // Social media ads/tracking
         "||ads.twitter.com^",
         "||facebook.com/tr^",
-        "||connect.facebook.net^",
         "||tr.snapchat.com^",
         // Amazon
         "||amazon-adsystem.com^",
@@ -104,7 +111,7 @@ impl AdBlocker {
     pub fn new() -> Self {
         log::info!("Initializing ad blocker");
 
-        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults", false, true)
+        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), Self::DEFAULTS_LIST, false, true)
     }
 
     /// Creates ad blocker with the given filter rules. A match names its
@@ -220,8 +227,18 @@ impl AdBlocker {
     /// The engine the app runs once the downloaded lists are in: what [`with_filter_lists`]
     /// (Self::with_filter_lists) builds from them. A seam, so a test can hand it lists without a
     /// download.
+    ///
+    /// SH1: the lists ADD to the built-in rules, they do not replace them. A host the starter
+    /// rules block (and the app's pending floor blocks until the engine is ready) stays blocked
+    /// after, even when EasyList only names its subdomains (`doubleclick.net` bare). One engine,
+    /// so a list's exception (`@@||cdn.segment.com/analytics-next/`) still beats a built-in rule.
+    /// The built-in rules come last, so a rule both have is named for the list.
     fn filter_engine(lists: &[(&'static str, &str)], names_rules: bool) -> Self {
-        Self::from_lists(lists, names_rules)
+        let defaults = Self::DEFAULT_RULES.join("
+");
+        let mut all: Vec<(&'static str, &str)> = lists.to_vec();
+        all.push((Self::DEFAULTS_LIST, defaults.as_str()));
+        Self::from_lists(&all, names_rules)
     }
 
     /// Reload rules - creates a new engine (immutable design). A match names

@@ -640,6 +640,31 @@ mod tests {
         assert_eq!(census[2].1, 1, "script blocked");
     }
 
+    /// SH1, end to end through the app's own worker and the lists on disk: once the engine is
+    /// READY (the test waits for it, bounded, instead of racing it) the bare floor host is still
+    /// blocked, which the lists alone did not do (EasyList names `ad.doubleclick.net`, not the
+    /// bare host), and what a captcha or a login needs is still allowed.
+    #[test]
+    fn the_ready_engine_still_blocks_the_bare_floor_host_and_allows_captchas_and_logins() {
+        let source = Url::parse("https://news.example/").unwrap();
+        let ask = |url: &str, rt: hiwave_shield::ResourceType| {
+            let url = Url::parse(url).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                if let Some(verdict) = shared_block(&url, &source, rt) {
+                    return verdict;
+                }
+                assert!(std::time::Instant::now() < deadline, "the filter engine never became ready: {url}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        };
+        use hiwave_shield::ResourceType as R;
+        assert!(ask("https://doubleclick.net/pagead.js", R::Script).is_some(), "the bare floor host is blocked");
+        assert!(ask("https://www.google.com/recaptcha/api2/aframe", R::Other).is_none(), "a captcha frame is allowed");
+        assert!(ask("https://connect.facebook.net/en_US/sdk.js", R::Script).is_none(), "the Facebook SDK is allowed");
+        assert!(ask("https://news.example/app.js", R::Script).is_none(), "a first-party script is allowed");
+    }
+
     #[test]
     fn subdomain_of_a_blocked_host_is_blocked_by_the_floor() {
         let handler = ShieldInterceptHandler::new();
