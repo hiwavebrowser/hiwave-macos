@@ -18,6 +18,7 @@
 
 mod traits;
 
+pub mod chord_wait;
 pub mod input_queue;
 pub mod region;
 pub mod cursor;
@@ -31,9 +32,16 @@ pub use traits::{ViewHostTrait, WindowHandle};
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord, set_view_cursor,
+    claim_key_equivalent, drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord,
+    set_view_cursor,
     set_view_tooltip,
 };
+/// No view holds Cmd chords for a menu here: a chord's default is the
+/// page's (see the macOS `claim_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn claim_key_equivalent(_token: u64) -> bool {
+    true
+}
 #[cfg(target_os = "macos")]
 pub use macos::{raise_raw_view_above, raise_raw_view_to_front, set_raw_view_region, set_raw_view_transparent};
 pub use input_queue::{
@@ -41,6 +49,7 @@ pub use input_queue::{
     text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
+pub use chord_wait::CHORD_ANSWER_TIMEOUT;
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
