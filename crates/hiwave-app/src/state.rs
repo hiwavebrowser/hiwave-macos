@@ -40,32 +40,42 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Read a small JSON state file for a loader that falls back to defaults. Missing file: `None`.
-/// Content that does not parse: the file is kept aside (`keep_aside`) so the next save does not
-/// destroy it, and `None`. An I/O error: logged, `None`, the file left alone.
-fn load_json_keep_aside<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
+/// Read a small JSON state file for a loader that falls back to defaults. Returns the value (if
+/// there is a usable one) and whether saving over this file must be REFUSED for the run.
+/// Missing file: `(None, false)`. Content that does not parse (not UTF-8 included): the file is
+/// kept aside (`keep_aside`) so the next save does not destroy it: `(None, false)`, or
+/// `(None, true)` when it could not be moved either. An I/O error (access denied, a sharing
+/// violation, a cloud placeholder) says nothing about the content: the file is left alone and
+/// saving is refused, `(None, true)`.
+fn load_json_keep_aside<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> (Option<T>, bool) {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (None, false),
         Err(err) => {
-            tracing::warn!("{what} could not be read ({err}); using defaults");
-            return None;
+            tracing::warn!("{what} could not be read ({err}); using defaults and not saving it this run");
+            return (None, true);
         }
     };
-    match serde_json::from_slice::<T>(&bytes) {
+    let parsed = std::str::from_utf8(&bytes)
+        .map_err(|err| err.to_string())
+        .and_then(|text| serde_json::from_str::<T>(text).map_err(|err| err.to_string()));
+    match parsed {
         Ok(value) => {
             sweep_stale_temps(path);
-            Some(value)
+            (Some(value), false)
         }
-        Err(err) => {
-            match keep_aside(path) {
-                Ok(kept) => tracing::warn!("{what} is not valid ({err}); kept as {} and using defaults", kept.display()),
-                Err(rename_err) => tracing::warn!(
-                    "{what} is not valid ({err}) and could not be moved aside ({rename_err}); using defaults"
-                ),
+        Err(err) => match keep_aside(path) {
+            Ok(kept) => {
+                tracing::warn!("{what} is not valid ({err}); kept as {} and using defaults", kept.display());
+                (None, false)
             }
-            None
-        }
+            Err(rename_err) => {
+                tracing::warn!(
+                    "{what} is not valid ({err}) and could not be moved aside ({rename_err}); using defaults and not saving it this run"
+                );
+                (None, true)
+            }
+        },
     }
 }
 
@@ -219,7 +229,13 @@ pub struct UserBlocklist {
 impl UserBlocklist {
     /// Load blocklist from file
     pub fn load(path: &PathBuf) -> Self {
-        load_json_keep_aside(path, "The blocklist").unwrap_or_default()
+        Self::load_checked(path).0
+    }
+
+    /// Like `load`, and whether saving over the file must be refused (see `load_json_keep_aside`).
+    pub(crate) fn load_checked(path: &PathBuf) -> (Self, bool) {
+        let (value, blocked) = load_json_keep_aside(path, "The blocklist");
+        (value.unwrap_or_default(), blocked)
     }
 
     /// Save blocklist to file
@@ -676,6 +692,11 @@ pub struct AppState {
     /// refused for the rest of the run, so the unreadable file is never overwritten.
     workspace_state_save_blocked: bool,
 
+    /// Small state files whose saves are refused for this run because the file could not be
+    /// read or moved aside (`settings.json`, `focus_mode.json`, `user-blocklist.json`,
+    /// `visit_history.json`): overwriting it would destroy what may be the user's only copy.
+    blocked_state_files: std::collections::HashSet<&'static str>,
+
     /// Zoom levels per tab (tab_id -> zoom_level, default 1.0)
     pub tab_zoom_levels: HashMap<String, f32>,
 
@@ -713,16 +734,26 @@ impl AppState {
 
         // Load user settings
         let settings_path = config.data_dir.join("settings.json");
-        let user_settings = UserSettings::load(&settings_path);
+        let mut blocked_state_files = std::collections::HashSet::new();
+        let (user_settings, blocked) = UserSettings::load_checked(&settings_path);
+        if blocked {
+            blocked_state_files.insert("settings.json");
+        }
         tracing::info!("Loaded user settings (theme: {})", user_settings.theme);
 
         // Load focus mode config
         let focus_config_path = config.data_dir.join("focus_mode.json");
-        let focus_mode_config = Self::load_focus_config(&focus_config_path);
+        let (focus_mode_config, blocked) = Self::load_focus_config(&focus_config_path);
+        if blocked {
+            blocked_state_files.insert("focus_mode.json");
+        }
 
         // Load user blocklist
         let blocklist_path = config.data_dir.join("user-blocklist.json");
-        let user_blocklist = UserBlocklist::load(&blocklist_path);
+        let (user_blocklist, blocked) = UserBlocklist::load_checked(&blocklist_path);
+        if blocked {
+            blocked_state_files.insert("user-blocklist.json");
+        }
         if !user_blocklist.domains.is_empty() {
             tracing::info!(
                 "Loaded {} user-blocked domains",
@@ -749,6 +780,7 @@ impl AppState {
             recent_popups: Vec::new(),
             tab_select_pending: None,
             workspace_state_save_blocked: false,
+            blocked_state_files,
             tab_zoom_levels: HashMap::new(),
             tab_audio_playing: HashMap::new(),
             tab_audio_muted: HashMap::new(),
@@ -768,8 +800,19 @@ impl AppState {
         self.config.data_dir.join("user-blocklist.json")
     }
 
+    /// Refuse a save over a small state file that could not be read or moved aside at load.
+    fn refuse_if_blocked(&self, file: &'static str) -> HiWaveResult<()> {
+        if self.blocked_state_files.contains(file) {
+            return Err(hiwave_core::HiWaveError::Config(format!(
+                "Not saving {file}: the existing file could not be read or moved aside"
+            )));
+        }
+        Ok(())
+    }
+
     /// Add a domain to the user blocklist and save
     pub fn block_domain(&mut self, domain: String) -> HiWaveResult<bool> {
+        self.refuse_if_blocked("user-blocklist.json")?;
         let added = self.user_blocklist.add_domain(domain.clone());
         if added {
             tracing::info!("Added domain to user blocklist: {}", domain);
@@ -780,6 +823,7 @@ impl AppState {
 
     /// Remove a domain from the user blocklist and save
     pub fn unblock_domain(&mut self, domain: &str) -> HiWaveResult<bool> {
+        self.refuse_if_blocked("user-blocklist.json")?;
         let removed = self.user_blocklist.remove_domain(domain);
         if removed {
             tracing::info!("Removed domain from user blocklist: {}", domain);
@@ -800,6 +844,7 @@ impl AppState {
 
     /// Save current user settings to disk
     pub fn save_settings(&self) -> HiWaveResult<()> {
+        self.refuse_if_blocked("settings.json")?;
         self.user_settings.save(&self.settings_path())
     }
 
@@ -815,12 +860,14 @@ impl AppState {
     }
 
     /// Load focus mode config from file
-    fn load_focus_config(path: &std::path::Path) -> FocusModeConfig {
-        load_json_keep_aside(path, "The focus mode config").unwrap_or_default()
+    fn load_focus_config(path: &std::path::Path) -> (FocusModeConfig, bool) {
+        let (value, blocked) = load_json_keep_aside(path, "The focus mode config");
+        (value.unwrap_or_default(), blocked)
     }
 
     /// Save focus mode config to disk
     pub fn save_focus_config(&self) -> HiWaveResult<()> {
+        self.refuse_if_blocked("focus_mode.json")?;
         let path = self.focus_config_path();
         let json = serde_json::to_string_pretty(&self.focus_mode_config)
             .map_err(|e| hiwave_core::HiWaveError::Config(format!("Failed to serialize focus config: {}", e)))?;
@@ -1343,12 +1390,20 @@ impl AppState {
 
     pub fn load_visit_history(&mut self) -> HiWaveResult<bool> {
         let path = self.visit_history_path();
-        if !path.exists() {
-            return Ok(false);
-        }
-
-        let contents = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<VisitHistorySnapshot>(&contents) {
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                // An I/O failure says nothing about the content: leave the file, refuse saves.
+                self.blocked_state_files.insert("visit_history.json");
+                tracing::warn!("The visit history could not be read ({}); not saving it this run", err);
+                return Err(err.into());
+            }
+        };
+        let parsed = std::str::from_utf8(&bytes)
+            .map_err(|err| err.to_string())
+            .and_then(|text| serde_json::from_str::<VisitHistorySnapshot>(text).map_err(|err| err.to_string()));
+        match parsed {
             Ok(snapshot) => {
                 self.visit_history = snapshot.records;
                 self.next_visit_id = snapshot.next_id.max(1);
@@ -1363,11 +1418,14 @@ impl AppState {
                         err,
                         kept.display()
                     ),
-                    Err(rename_err) => tracing::warn!(
-                        "Invalid visit history data ({}) and it could not be moved aside ({})",
-                        err,
-                        rename_err
-                    ),
+                    Err(rename_err) => {
+                        self.blocked_state_files.insert("visit_history.json");
+                        tracing::warn!(
+                            "Invalid visit history data ({}) and it could not be moved aside ({}); not saving it this run",
+                            err,
+                            rename_err
+                        );
+                    }
                 }
                 Ok(false)
             }
@@ -1375,6 +1433,7 @@ impl AppState {
     }
 
     pub fn save_visit_history(&self) -> HiWaveResult<()> {
+        self.refuse_if_blocked("visit_history.json")?;
         let snapshot = VisitHistorySnapshot {
             records: self.visit_history.clone(),
             next_id: self.next_visit_id,
@@ -1887,7 +1946,13 @@ impl Default for UserSettings {
 impl UserSettings {
     /// Load settings from the given path, returning defaults if not found
     pub fn load(path: &Path) -> Self {
-        load_json_keep_aside(path, "The settings file").unwrap_or_default()
+        Self::load_checked(path).0
+    }
+
+    /// Like `load`, and whether saving over the file must be refused (see `load_json_keep_aside`).
+    pub(crate) fn load_checked(path: &Path) -> (Self, bool) {
+        let (value, blocked) = load_json_keep_aside(path, "The settings file");
+        (value.unwrap_or_default(), blocked)
     }
 
     /// Save settings to the given path
@@ -2238,6 +2303,28 @@ mod workspace_state_file_tests {
         assert_eq!(std::fs::read_to_string(file(&s)).unwrap(), "{ truncated");
     }
 
+    /// The unix twin of `when_the_rename_aside_fails_saving_is_refused_and_the_file_survives`:
+    /// a read-only data directory (mode 0555) lets the corrupt file be read but not renamed.
+    /// Not run on the box that wrote it (Windows); it runs on macOS and Linux.
+    #[cfg(unix)]
+    #[test]
+    fn when_the_rename_aside_fails_on_unix_saving_is_refused_and_the_file_survives() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut s = fresh("rename_fails_unix");
+        std::fs::write(file(&s), "{ truncated").unwrap();
+        let dir = s.config.data_dir.clone();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = s.load_workspace_state();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Running as root ignores the mode and the rename works; then there is nothing to pin.
+        if file(&s).exists() {
+            assert!(result.is_err());
+            assert!(s.workspace_state_save_blocked, "the failed rename itself blocked saving");
+            assert!(s.save_workspace_state().is_err(), "and nothing may overwrite it");
+            assert_eq!(std::fs::read_to_string(file(&s)).unwrap(), "{ truncated");
+        }
+    }
+
     fn old_tmp(s: &AppState, name: &str) -> PathBuf {
         let p = s.config.data_dir.join(name);
         std::fs::write(&p, "{}").unwrap();
@@ -2392,5 +2479,60 @@ mod other_state_files_tests {
         assert!(s.save_settings().is_err());
         assert_eq!(std::fs::read(config.data_dir.join("settings.json")).unwrap(), good);
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// Nit 2: a read I/O error on a small file must refuse saves for the run (not just load
+    /// defaults and then overwrite). A directory sitting where the file should be makes the read
+    /// fail with an I/O error on every OS.
+    #[test]
+    fn a_read_error_on_each_small_file_refuses_its_saves() {
+        for file in ["settings.json", "focus_mode.json", "user-blocklist.json", "visit_history.json"] {
+            let config = config(&format!("blocked_{file}"));
+            std::fs::create_dir_all(config.data_dir.join(file)).unwrap();
+            let mut s = AppState::new(config.clone()).unwrap();
+            if file == "visit_history.json" {
+                assert!(s.load_visit_history().is_err(), "{file}: the read error is reported");
+            }
+            assert!(s.blocked_state_files.contains(file), "{file}: saving is refused for the run");
+            let refused = match file {
+                "settings.json" => s.save_settings(),
+                "focus_mode.json" => s.save_focus_config(),
+                "user-blocklist.json" => s.block_domain("x.test".to_string()).map(|_| ()),
+                _ => s.save_visit_history(),
+            };
+            assert!(refused.is_err(), "{file}: the save is refused");
+            assert!(config.data_dir.join(file).is_dir(), "{file}: what was there is untouched");
+            assert!(!config.data_dir.join(format!("{file}.corrupt")).exists(), "{file}: not treated as corruption");
+        }
+    }
+
+    #[test]
+    fn a_good_small_file_is_not_blocked() {
+        let config = config("not_blocked");
+        let mut s = AppState::new(config.clone()).unwrap();
+        s.save_settings().unwrap();
+        s.save_focus_config().unwrap();
+        assert!(s.block_domain("fine.test".to_string()).unwrap());
+        s.save_visit_history().unwrap();
+        assert!(s.blocked_state_files.is_empty());
+    }
+
+    /// Nit 2 again, on a real unreadable file (unix: mode 000). The data directory stays
+    /// writable, so a save WOULD replace the file; only the block keeps it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_small_file_is_not_overwritten_by_a_later_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = config("unix_unreadable");
+        let path = config.data_dir.join("settings.json");
+        std::fs::write(&path, r#"{"theme":"light"}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let s = AppState::new(config.clone()).unwrap();
+        // Running as root can read it anyway; then there is nothing to pin.
+        if s.blocked_state_files.contains("settings.json") {
+            assert!(s.save_settings().is_err());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"theme":"light"}"#);
+        }
     }
 }
