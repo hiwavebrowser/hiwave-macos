@@ -25,7 +25,7 @@ use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, Scr
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(crate) mod editing;
@@ -341,6 +341,11 @@ pub(crate) struct DomHost {
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
+    /// The `<img>` elements (by NodeId) whose `src` or `srcset` script has
+    /// written since the engine last took them, in or out of the document
+    /// and whether or not the value changed: writing either starts the
+    /// image's load over (`DomBindings::take_image_writes`).
+    pub(crate) image_writes: RefCell<HashSet<usize>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -615,6 +620,7 @@ impl DomHost {
         self.submit_requests.clear();
         self.navigation_requests.clear();
         self.inserted_scripts.clear();
+        self.image_writes.get_mut().clear();
         self.generation
     }
 
@@ -990,6 +996,9 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             } else {
                 name.to_string()
             };
+            if op == "setAttr" && tag_name == "img" && matches!(name.as_str(), "src" | "srcset") {
+                host.image_writes.borrow_mut().insert(node.id.raw());
+            }
             let mut attributes = attributes.clone();
             let changed = if op == "setAttr" {
                 let value = string_arg(args, 4).unwrap_or("").to_string();
@@ -4946,8 +4955,42 @@ const WRAPPERS_JS: &str = r#"
         value: function (id) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
+            loadedImages.delete(target);
             failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            target.dispatchEvent(new Event('error'));
+            var ev = new Event('error');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The engine reports that an `<img>`'s image is in (E54): the element
+    // is marked with the `src`/`srcset` that loaded, the image's own size
+    // and the URL it came from, which `complete`, `naturalWidth`,
+    // `naturalHeight` and `currentSrc` read (web_reflect.js), and then
+    // hears `load`: trusted, at the element only. The mark and the event
+    // are one step, so a handler never runs for an image that reads as
+    // still loading.
+    var loadedImages = new WeakMap();
+    Object.defineProperty(Document.prototype, '__rkImageLoaded', {
+        value: function (id, width, height, url) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            failedImages.delete(target);
+            // No URL: a `data:` image, which is its own `src`.
+            loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+            var ev = new Event('load');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The mark of the image an `<img>` shows now: null while its current
+    // `src`/`srcset` has not loaded.
+    Object.defineProperty(Document.prototype, '__rkImageLoadedFor', {
+        value: function (img) {
+            var mark = loadedImages.get(img);
+            if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+            return mark;
         },
         configurable: true, enumerable: false, writable: true
     });

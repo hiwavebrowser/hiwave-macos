@@ -70,15 +70,19 @@ struct Page {
     took: std::time::Duration,
 }
 
-fn load(body: &str, mut routes: Vec<(&'static str, &'static str, Vec<u8>)>, mode: Mode, budget_ms: u64) -> Page {
-    let page = format!("<html><head>{HARNESS}</head><body>{body}</body></html>");
-    routes.insert(0, ("/", "text/html", page.into_bytes()));
-    let server = serve_byte_routes(routes);
+fn load(body: &str, routes: Vec<(&'static str, &'static str, Vec<u8>)>, mode: Mode, budget_ms: u64) -> Page {
     let config = EngineConfig {
         subresource_budget_ms: budget_ms,
         post_load_requests_live: mode == Mode::App,
         ..EngineConfig::default()
     };
+    load_with(body, routes, config)
+}
+
+fn load_with(body: &str, mut routes: Vec<(&'static str, &'static str, Vec<u8>)>, config: EngineConfig) -> Page {
+    let page = format!("<html><head>{HARNESS}</head><body>{body}</body></html>");
+    routes.insert(0, ("/", "text/html", page.into_bytes()));
+    let server = serve_byte_routes(routes);
     let mut engine = Engine::new(config).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
@@ -100,7 +104,8 @@ impl Page {
         rt.block_on(self.engine.pump_live(self.view, 16));
         while std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
-            if rt.block_on(self.engine.pump_live(self.view, 16)).in_flight == 0 {
+            let turn = rt.block_on(self.engine.pump_live(self.view, 16));
+            if turn.in_flight == 0 && !turn.yielded_for_frame {
                 break;
             }
         }
@@ -204,6 +209,37 @@ fn the_window_load_waits_for_an_image_a_script_inserted() {
     assert_eq!(page.log(), "DCL | a.load{true,40,30,/a.png?delay=300} | winload");
 }
 
+/// A load that yields while a script it inserted is still out (the app's
+/// load) fires the window's `load` from a live turn: the image has heard
+/// its own by then.
+#[test]
+fn a_yielded_load_tells_the_image_before_the_window_load() {
+    let body = "<img id=a src=/a.png><script>watch($('a'),'a');var s=document.createElement('script');\
+        s.src='/late.js?delay=200';document.head.appendChild(s);</script>";
+    let page = format!("<html><head>{HARNESS}</head><body>{body}</body></html>");
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", page.into_bytes()),
+        a("/a.png"),
+        ("/late.js?delay=200", "text/javascript", b"ev('late');".to_vec()),
+    ]);
+    let config = EngineConfig { post_load_requests_live: true, ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let yielded = runtime().block_on(engine.load_url_yielding(view, url)).expect("load");
+    assert!(matches!(yielded, LoadYield::Yielded), "precondition: the load yielded");
+    let mut page = Page { engine, view, server, took: Default::default() };
+    page.settle();
+    page.turn_after(300);
+    page.settle();
+    let log = page.log();
+    assert_eq!(log.matches("a.load{true,40,30,/a.png}").count(), 1, "{log}");
+    assert!(log.ends_with("| winload"), "{log}");
+    assert!(log.contains("late"), "{log}");
+}
+
 /// A broken image's `error` also comes before the window's `load` (LAT9-r1
 /// fired it on the first live turn after).
 #[test]
@@ -259,6 +295,25 @@ fn an_image_added_after_the_load_hears_load() {
     page.run("var i=watch(document.createElement('img'),'a');i.id='a';i.src='/a.png';$('box').appendChild(i);0");
     page.settle();
     assert_eq!(page.log(), "DCL | winload | a.load{true,40,30,/a.png}");
+}
+
+/// Image handlers are the live turn's script, charged to its budget of
+/// JavaScript time: once that is spent the turn fires no more, says it has
+/// more, and the next turn goes on. Each element still hears once.
+#[test]
+fn image_handlers_past_the_turn_budget_wait_for_the_next_turn() {
+    let config = EngineConfig { post_load_requests_live: true, live_turn_budget_ms: 60, ..EngineConfig::default() };
+    let mut page = load_with("<img id=a src=/a.png><div id=box></div>", vec![a("/a.png")], config);
+    page.run(
+        "for(var k=0;k<6;k++){var i=document.createElement('img');i.onload=function(){\
+         var t=Date.now(),n=0;while(Date.now()-t<40&&n<200000)n++;ev('slow');};i.src='/a.png';$('box').appendChild(i);}0",
+    );
+    let turn = runtime().block_on(page.engine.pump_live(page.view, 16));
+    let first = page.log().matches("slow").count();
+    assert!((1..6).contains(&first), "the first turn fired some and left some: {first}");
+    assert_eq!(turn.next_timer_ms, Some(0), "the rest are due at once");
+    page.settle();
+    assert_eq!(page.log().matches("slow").count(), 6, "{}", page.log());
 }
 
 /// A good image swapped for another good one: `load` again, with the new

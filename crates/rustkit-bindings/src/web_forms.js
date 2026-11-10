@@ -439,12 +439,15 @@
         reflectString(g.HTMLDetailsElement.prototype, 'name', 'name');
     }
 
-    // ---- img size (HTML §4.8.4.3): the attributes, 0 when absent; there
-    // is no layout box to measure here.
+    // ---- img size (HTML §4.8.4.3): the attribute when there is one; with
+    // none, the rendered box, and for an image that has no box (not
+    // displayed, not in the document) its own size once loaded, else 0.
     ['width', 'height'].forEach(function (k) {
         accessor(Img, k, function () {
             var n = parseInt(this.getAttribute(k), 10);
-            return n >= 0 ? n : 0;
+            if (n >= 0) return n;
+            var box = this.isConnected ? Math.round(this.getBoundingClientRect()[k]) : 0;
+            return box > 0 ? box : (k === 'width' ? this.naturalWidth : this.naturalHeight) || 0;
         }, function (v) { this.setAttribute(k, String(v >>> 0)); });
     });
     // img.src: the `src` attribute (whatever loads an img loads this one),
