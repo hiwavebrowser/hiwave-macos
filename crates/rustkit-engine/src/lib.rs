@@ -40,8 +40,19 @@ use rustkit_compositor::Compositor;
 /// the rest of the test, not just the call: see [`test_gpu::hold_for_this_test`].
 #[cfg(test)]
 pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
+    use std::sync::OnceLock;
+    // One wgpu instance, adapter and device for the whole test process; each test's compositor shares them
+    // and keeps its own surfaces and textures (T41b). Building a device was ~0.15 s of every engine a test
+    // creates (and its teardown is what the guard below is mostly for); the guard still serialises whole
+    // tests, so what changes is only that no test builds or drops a device of its own.
+    static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
-    Compositor::new()
+    if let Some(shared) = SHARED_COMPOSITOR.get() {
+        return Ok(shared.share_device());
+    }
+    let compositor = Compositor::new()?;
+    let shared = SHARED_COMPOSITOR.get_or_init(|| compositor.share_device());
+    Ok(shared.share_device())
 }
 
 /// Test-only GPU guard: at most one unit test at a time owns GPU devices.
