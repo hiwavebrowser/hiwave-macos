@@ -1113,6 +1113,8 @@ enum ImageEvent {
     Load { node: usize, width: u32, height: u32, url: String },
     /// Its load failed.
     Error { node: usize },
+    /// The engine gave up on it: no event, a pending `decode()` resolves.
+    GaveUp { node: usize },
 }
 
 impl FetchedImages {
@@ -8104,6 +8106,9 @@ impl Engine {
                     break;
                 }
                 info!(count = events.len(), "Images settled before load: firing load/error");
+                // Not sliced like the live turn's events: the whole batch
+                // runs here under the load's one script budget, which can
+                // stop it (R1 probe e).
                 let record = run(bindings, "event:image".to_string(), 0, &|_| {
                     Self::fire_image_events(bindings, &events);
                     Ok(())
@@ -18774,6 +18779,15 @@ impl Engine {
             }
         }
         if let Some(view) = self.views.get(&id) {
+            // Nor given up on: its elements hear what this request brings.
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.gave_up.is_empty() {
+                for url in pending.iter().chain(&svg_urls) {
+                    loaded.gave_up.remove(url.as_str());
+                }
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
             let mut failed = view.lay.failed_images.borrow_mut();
             if !failed.urls.is_empty() {
                 // A URL asked for again is in flight again, not failed.
@@ -19080,9 +19094,14 @@ impl Engine {
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
-            // Not failures: nothing is recorded, so the elements keep what
-            // they paint and hear nothing.
+            // Not failures: the elements keep what they paint and hear no
+            // event; only a `decode()` waiting on them is settled (E54 R1).
             debug!(count = fetched.gave_up.len(), "Images given up on (budget or pass cap)");
+            if let Some(view) = self.views.get(&id) {
+                let mut loaded = view.lay.loaded_images.borrow_mut();
+                loaded.gave_up.extend(fetched.gave_up);
+                loaded.due = true;
+            }
         }
         if !fetched.failed.is_empty() {
             if let Some(view) = self.views.get(&id) {
@@ -19174,6 +19193,7 @@ impl Engine {
         let mut failed = view.lay.failed_images.borrow_mut();
         for raw in writes {
             loaded.heard.remove(&raw);
+            loaded.gave_up_heard.remove(&raw);
             failed.heard.remove(&raw);
             let outside = document
                 .get_node(rustkit_dom::NodeId::new(raw))
@@ -19257,8 +19277,18 @@ impl Engine {
         elements.extend(detached);
         let mut still_failed = std::collections::HashSet::new();
         let mut still_loaded = std::collections::HashSet::new();
+        let mut still_gave_up = std::collections::HashSet::new();
         for (node, _, url) in elements {
             let name = url.to_string();
+            if loaded.gave_up.contains(&name) {
+                still_gave_up.insert(node);
+                let key = layout_ctx::LoadedImages::key(&name);
+                if loaded.gave_up_heard.get(&node) != Some(&key) {
+                    loaded.gave_up_heard.insert(node, key);
+                    events.push(ImageEvent::GaveUp { node });
+                }
+                continue;
+            }
             if failed.urls.contains(&name) {
                 still_failed.insert(node);
                 if failed.heard.get(&node) != Some(&name) {
@@ -19278,8 +19308,15 @@ impl Engine {
         }
         failed.heard.retain(|node, _| still_failed.contains(node));
         loaded.heard.retain(|node, _| still_loaded.contains(node));
-        // An image outside the document that has heard is done with.
-        loaded.detached.retain(|node| !still_failed.contains(node) && !still_loaded.contains(node));
+        loaded.gave_up_heard.retain(|node, _| still_gave_up.contains(node));
+        // An image outside the document that has heard, or that the engine
+        // gave up on, is done with; so is one whose node is gone (R1 nit 2).
+        loaded.detached.retain(|node| {
+            !still_failed.contains(node)
+                && !still_loaded.contains(node)
+                && !still_gave_up.contains(node)
+                && document.get_node(rustkit_dom::NodeId::new(*node)).is_some()
+        });
         (relaid_out, events)
     }
 
@@ -19290,6 +19327,7 @@ impl Engine {
             let _ = match event {
                 ImageEvent::Load { node, width, height, url } => bindings.fire_image_load(*node, *width, *height, url),
                 ImageEvent::Error { node } => bindings.fire_image_error(*node),
+                ImageEvent::GaveUp { node } => bindings.fire_image_gave_up(*node),
             };
         }
     }
@@ -19319,8 +19357,19 @@ impl Engine {
             if fired > 0 && script_js_exhausted() {
                 break;
             }
-            with_script_js(bindings, || Self::fire_image_events(bindings, std::slice::from_ref(event)));
+            // As the yielded tail does: a panic in the engine while a
+            // listener runs is caught here and ends this turn's events; the
+            // rest are owed to the next turn (R1 nit 7).
+            let (caught, _) = with_script_js(bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::fire_image_events(bindings, std::slice::from_ref(event))
+                }))
+            });
             fired += 1;
+            if caught.is_err() {
+                warn!(?id, "An image listener's turn panicked; its other events wait for the next turn");
+                break;
+            }
         }
         info!(count = fired, left = events.len() - fired, "Images settled: firing load/error");
         let more = fired < events.len();
@@ -19353,6 +19402,10 @@ impl Engine {
                 }
                 ImageEvent::Error { node } => {
                     failed.heard.remove(node);
+                    *node
+                }
+                ImageEvent::GaveUp { node } => {
+                    loaded.gave_up_heard.remove(node);
                     *node
                 }
             };

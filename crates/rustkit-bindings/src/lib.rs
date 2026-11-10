@@ -2366,9 +2366,19 @@ impl DomBindings {
     /// `load` fires at it (it does not bubble). Listener exceptions are
     /// queued, see [`Self::take_reported_errors`].
     pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
+        let url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
         self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkImageLoaded({node}, {width}, {height}, {url:?});"
+            "document.__rkImageLoaded({node}, {width}, {height}, {url});"
         ))?;
+        Ok(())
+    }
+
+    /// Tell an `<img>` (by node id) that the engine stopped loading the
+    /// image its `src`/`srcset` names (its budget ran out, or it got no
+    /// slot): no event fires, it still reads as loading, and a `decode()`
+    /// waiting on it resolves, as before E54.
+    pub fn fire_image_gave_up(&self, node: usize) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!("document.__rkImageGaveUp({node});"))?;
         Ok(())
     }
 

@@ -597,15 +597,31 @@ pub(crate) struct LoadedImages {
     /// like one in the document; it leaves the list once it has heard, and
     /// comes back if its `src` is written again.
     pub(crate) detached: Vec<usize>,
+    /// The URLs the engine gave up on (an image's budget ran out, or it got
+    /// no slot within its pass's cap) and which `<img>` elements were told
+    /// so, by [`Self::key`]. Not a failure: no event fires, and the element
+    /// reads as loading, but a `decode()` waiting on it resolves (E54 R1).
+    /// A pass that asks for such a URL again takes it out.
+    pub(crate) gave_up: std::collections::HashSet<String>,
+    pub(crate) gave_up_heard: HashMap<usize, u64>,
 }
 
 impl LoadedImages {
-    /// What [`Self::heard`] keeps of a URL: its hash. A `data:` URL can be
-    /// megabytes, and a page can show hundreds of them.
+    /// What [`Self::heard`] keeps of a URL: a hash. A `data:` URL can be
+    /// megabytes, and a page can show hundreds of them, each looked at on
+    /// every planning pass (R1 nit 4), so a long URL is hashed by its length
+    /// and its first and last 256 bytes, not all of it.
     pub(crate) fn key(url: &str) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        url.hash(&mut hasher);
+        let bytes = url.as_bytes();
+        if bytes.len() <= 1024 {
+            bytes.hash(&mut hasher);
+        } else {
+            bytes.len().hash(&mut hasher);
+            bytes[..256].hash(&mut hasher);
+            bytes[bytes.len() - 256..].hash(&mut hasher);
+        }
         hasher.finish()
     }
 }

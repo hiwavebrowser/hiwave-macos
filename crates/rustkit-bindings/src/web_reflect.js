@@ -256,9 +256,9 @@
         def(I, 'naturalHeight', function () { var mark = loaded(this); return mark ? mark[3] : 0; });
         def(I, 'x', function () { return this.getBoundingClientRect().x; });
         def(I, 'y', function () { return this.getBoundingClientRect().y; });
-        // decode(): settles with the image. Resolved once it is in,
-        // rejected with an EncodingError when it failed or names no image
-        // (Chrome 148).
+        // decode(): settles with the image. Resolved once it is in, or once
+        // the engine gave up on it; rejected with an EncodingError when it
+        // failed, names no image, or its `src` changed meanwhile (Chrome 148).
         method(I, 'decode', function decode() {
             var img = this;
             return new Promise(function (settled, rejected) {
@@ -268,13 +268,9 @@
                 };
                 if (loaded(img)) return settled();
                 if (sourceless(img) || failed(img)) return broken();
-                var done = function (e) {
-                    img.removeEventListener('load', done);
-                    img.removeEventListener('error', done);
-                    if (e.type === 'load') settled(); else broken();
-                };
-                img.addEventListener('load', done);
-                img.addEventListener('error', done);
+                // The image's own event settles it (dom.rs), and so does the
+                // engine giving up on it; a `src` change rejects it.
+                if (document.__rkDecodeWait) document.__rkDecodeWait(img, settled, function () { broken(); });
             });
         });
     }
