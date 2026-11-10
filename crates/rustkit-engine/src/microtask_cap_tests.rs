@@ -83,10 +83,28 @@ fn with_the_budget_interrupt_a_chain_past_100k_jobs_runs_to_the_end() {
 
 #[test]
 fn without_the_budget_interrupt_the_cap_still_bounds_a_runaway_chain() {
-    // The default engine config has no watchdog, so the cap is the only guard there.
-    let (mut engine, view, _) = load(EngineConfig::default(), &chain(LONG_CHAIN));
+    // The default engine config has no watchdog, so the cap is the only guard there. The executor
+    // ALSO has a wall-clock job timeout (`script_budget_ms`, 5 s by default): on a machine slower
+    // than ~40 us a job the timeout trips first and the test would read the wrong message. So the
+    // timeout is put far out of reach here, and the assertion is the cap's own message.
+    let config = EngineConfig { script_budget_ms: 3_600_000, ..EngineConfig::default() };
+    let (mut engine, view, _) = load(config, &chain(LONG_CHAIN));
     let text = format!("{:#?}", engine.script_log(view));
     assert!(text.contains("Job queue iteration limit (100000)"), "the cap must still fire: {text}");
+    assert!(!text.contains("execution timeout"), "and the wall-clock timeout must not be what ended it: {text}");
+}
+
+#[test]
+fn the_wall_clock_job_timeout_still_fires_when_the_cap_is_out_of_reach() {
+    // The sibling: neither limit is left unpinned. A 300 ms timeout against a chain of 120 000 jobs
+    // (several seconds even on a fast machine in a debug build) ends it with the timeout's message,
+    // not the cap's, because it is checked each loop turn and the cap would take far longer.
+    let config = EngineConfig { script_budget_ms: 300, ..EngineConfig::default() };
+    let (mut engine, view, took) = load(config, &chain(LONG_CHAIN));
+    let text = format!("{:#?}", engine.script_log(view));
+    assert!(text.contains("Job queue execution timeout"), "the timeout must be what ended it: {text}");
+    assert!(!text.contains("Job queue iteration limit"), "not the cap: {text}");
+    assert!(took < Duration::from_secs(8), "and the timeout bounded the time, took {took:?}");
 }
 
 #[test]
