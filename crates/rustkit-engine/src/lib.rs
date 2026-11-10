@@ -2181,8 +2181,11 @@ fn end_script_turn(bindings: &DomBindings) {
 /// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
 /// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
 /// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
-/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
-/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+/// An evaluation outside one has no deadline, so it keeps the 100 000 cap (Prometheus R1 on
+/// #1031). `Engine::execute_script` is no longer such an evaluation: it arms a live turn (JS1), so
+/// a promise chain there is bounded by the live-turn time budget, and with the 1G default loop
+/// limit by nothing else. What still runs unarmed is what goes straight to the bindings
+/// (turn 0, bookkeeping).
 fn microtask_job_cap(config: &EngineConfig) -> u64 {
     config.script_loop_iteration_limit.min(100_000)
 }

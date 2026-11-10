@@ -132,30 +132,60 @@ fn an_endless_promise_chain_is_stopped_by_the_script_budget_not_the_job_cap() {
     );
 }
 
+/// The chain the next two tests run: endless, each job counted in `window.n`.
+const ENDLESS: &str = "window.n = 0; function f() { window.n++; Promise.resolve().then(f); } f(); 'returned'";
+
+fn jobs_run(engine: &mut Engine, view: EngineViewId) -> u64 {
+    engine
+        .execute_script(view, "String(window.n)")
+        .unwrap()
+        .trim_start_matches("String(\"")
+        .trim_end_matches("\")")
+        .parse()
+        .unwrap_or(u64::MAX)
+}
+
 #[test]
-fn an_evaluation_outside_an_armed_turn_keeps_the_100k_cap_under_the_live_config() {
-    // Prometheus R1 on #1031: `Engine::execute_script` (chrome IPC, `history.back()`) evaluates
-    // with no live turn armed, so no deadline bounds it. The raised cap must not apply there,
-    // or an endless chain would drain up to the loop limit on the window thread. The loop limit
-    // is set to 300 000 so that "the cap followed the config" and "the cap held at 100 000"
-    // differ by a few seconds, not minutes.
+fn an_endless_promise_chain_through_execute_script_is_stopped_by_the_live_turn_time_budget() {
+    // JS1 (#1048): `Engine::execute_script` (chrome IPC, the devtools console, `PageCmd::Eval`)
+    // arms a live turn now, so under #1031's design its microtask cap is the loop limit (1G by
+    // default) and only the TIME budget bounds an endless chain. The budget here is 400 ms; the
+    // chain must be recorded as stopped by it, in bounded wall-clock, not by a job count.
+    let config = EngineConfig { live_turn_budget_ms: 400, ..live_config(60_000) };
+    let (mut engine, view, _) = load(config, "window.n = 0;");
+    let started = Instant::now();
+    let _ = engine.execute_script(view, ENDLESS);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(4), "nothing stopped the chain: {took:?}");
+    let log = engine.script_log(view).unwrap();
+    let text = format!("{log:#?}");
+    assert!(
+        log.iter().any(|r| r.source == "eval" && r.outcome == ScriptOutcome::OverBudget),
+        "the time budget stopped it: {text}"
+    );
+    assert!(!text.contains("Job queue iteration limit"), "not a job count: {text}");
+    assert_eq!(engine.execute_script(view, "1 + 1").unwrap(), "Number(2.0)", "the page is usable after");
+}
+
+#[test]
+fn an_evaluation_with_no_turn_armed_keeps_the_100k_cap_under_the_live_config() {
+    // Prometheus R1 on #1031, kept for what can still run unarmed (the bookkeeping evaluations
+    // that go straight to the bindings, as turn 0 does): no deadline bounds them, so the raised
+    // cap must not apply. The loop limit is 300 000 so that "the cap followed the config" and
+    // "the cap held at 100 000" differ by seconds, not minutes.
     let config = EngineConfig {
         script_loop_iteration_limit: 300_000,
         ..live_config(60_000)
     };
     let (mut engine, view, _) = load(config, "window.n = 0;");
     let started = Instant::now();
-    let result = engine.execute_script(
-        view,
-        "window.n = 0; function f() { window.n++; Promise.resolve().then(f); } f(); 'returned'",
-    );
+    let result = engine
+        .views
+        .get(&view)
+        .and_then(|v| v.bindings.as_ref())
+        .expect("bindings")
+        .evaluate(ENDLESS);
     let took = started.elapsed();
-    let n: u64 = engine
-        .execute_script(view, "String(window.n)")
-        .unwrap()
-        .trim_start_matches("String(\"")
-        .trim_end_matches("\")")
-        .parse()
-        .unwrap_or(u64::MAX);
+    let n = jobs_run(&mut engine, view);
     assert!(n <= 100_001, "the unarmed evaluation ran {n} jobs ({took:?}); the cap followed the config: {result:?}");
 }
