@@ -572,6 +572,58 @@ pub(crate) struct ViewLayout {
     /// LAT9-r1: the image URLs of this document whose load has settled as
     /// failed, and which `<img>` elements have heard `error` for theirs.
     pub(crate) failed_images: RefCell<FailedImages>,
+    /// E54: which `<img>` elements have heard `load`, and for which image.
+    pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+/// The current document's loaded images, as its script has been told of
+/// them ([`ViewLayout::loaded_images`]). An `<img>` whose image is in
+/// hears `load` once for that image; script reads `complete`,
+/// `naturalWidth`/`naturalHeight` and `currentSrc` from what the event
+/// brought, so an image reads as in flight until its `load`.
+#[derive(Default)]
+pub(crate) struct LoadedImages {
+    /// An image arrived, an `<img>` was found showing a loaded image it has
+    /// not heard of, or script wrote a `src`: the next live turn (or the
+    /// load, before the window's `load`) has events to send.
+    pub(crate) due: bool,
+    /// The URL each `<img>` (raw NodeId) has heard `load` for, as its
+    /// [`Self::key`]. An element whose `src` moves on, or is written again,
+    /// is dropped, so it hears the next one.
+    pub(crate) heard: HashMap<usize, u64>,
+    /// The `<img>` elements (raw NodeId) script gave a `src` that are in
+    /// no document tree (`new Image()`, a created element not inserted): a
+    /// preload or a pixel. Each is fetched and hears `load` or `error`
+    /// like one in the document; it leaves the list once it has heard, and
+    /// comes back if its `src` is written again.
+    pub(crate) detached: Vec<usize>,
+    /// The URLs the engine gave up on (an image's budget ran out, or it got
+    /// no slot within its pass's cap) and which `<img>` elements were told
+    /// so, by [`Self::key`]. Not a failure: no event fires, and the element
+    /// reads as loading, but a `decode()` waiting on it resolves (E54 R1).
+    /// A pass that asks for such a URL again takes it out.
+    pub(crate) gave_up: std::collections::HashSet<String>,
+    pub(crate) gave_up_heard: HashMap<usize, u64>,
+}
+
+impl LoadedImages {
+    /// What [`Self::heard`] keeps of a URL: a hash. A `data:` URL can be
+    /// megabytes, and a page can show hundreds of them, each looked at on
+    /// every planning pass (R1 nit 4), so a long URL is hashed by its length
+    /// and its first and last 256 bytes, not all of it.
+    pub(crate) fn key(url: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let bytes = url.as_bytes();
+        if bytes.len() <= 1024 {
+            bytes.hash(&mut hasher);
+        } else {
+            bytes.len().hash(&mut hasher);
+            bytes[..256].hash(&mut hasher);
+            bytes[bytes.len() - 256..].hash(&mut hasher);
+        }
+        hasher.finish()
+    }
 }
 
 /// The current document's failed image loads ([`ViewLayout::failed_images`]).
@@ -586,9 +638,8 @@ pub(crate) struct ViewLayout {
 /// paints and hears nothing. A pass that asks for a failed URL again takes
 /// it out when it starts the request.
 ///
-/// Limit: `error` goes to the `<img>` elements in the document. An image
-/// that is not in it (`new Image()` with an `onerror`, a preload or a
-/// pixel) is not fetched at all, so it hears neither `load` nor `error`.
+/// `error` goes to the `<img>` elements in the document and to those
+/// script gave a `src` outside it ([`LoadedImages::detached`]).
 #[derive(Default)]
 pub(crate) struct FailedImages {
     /// Absolute URLs.

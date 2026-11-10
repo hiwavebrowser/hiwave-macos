@@ -25,7 +25,7 @@ use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, Scr
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(crate) mod editing;
@@ -341,6 +341,11 @@ pub(crate) struct DomHost {
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
+    /// The `<img>` elements (by NodeId) whose `src` or `srcset` script has
+    /// written since the engine last took them, in or out of the document
+    /// and whether or not the value changed: writing either starts the
+    /// image's load over (`DomBindings::take_image_writes`).
+    pub(crate) image_writes: RefCell<HashSet<usize>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -615,6 +620,7 @@ impl DomHost {
         self.submit_requests.clear();
         self.navigation_requests.clear();
         self.inserted_scripts.clear();
+        self.image_writes.get_mut().clear();
         self.generation
     }
 
@@ -990,6 +996,18 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             } else {
                 name.to_string()
             };
+            // An `<img>` in a template's contents is in an inert document:
+            // Chrome does not fetch it, so the engine is not told of it.
+            if op == "setAttr" && tag_name == "img" && matches!(name.as_str(), "src" | "srcset") {
+                let mut top = node.clone();
+                while let Some(parent) = top.parent() {
+                    top = parent;
+                }
+                let in_template = host.templates.borrow().values().any(|content| Rc::ptr_eq(content, &top));
+                if !in_template {
+                    host.image_writes.borrow_mut().insert(node.id.raw());
+                }
+            }
             let mut attributes = attributes.clone();
             let changed = if op == "setAttr" {
                 let value = string_arg(args, 4).unwrap_or("").to_string();
@@ -3290,14 +3308,25 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
     Element.prototype.hasAttribute = function (name) { return this.getAttribute(name) !== null; };
+    // A write to an `<img>`'s `src` or `srcset` starts its load over
+    // (E54): the marks script reads `complete` and `decode()` from are
+    // updated at once, not on the next event.
+    function imageWritten(el, name) {
+        var n = String(name).toLowerCase();
+        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && document.__rkImageWritten) {
+            document.__rkImageWritten(el);
+        }
+    }
     Element.prototype.setAttribute = function (name, value) {
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
         setData(this, 'setAttr', String(name), String(value), 'setAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.removeAttribute = function (name) {
         setData(this, 'removeAttr', String(name), null, 'removeAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -5015,8 +5044,97 @@ const WRAPPERS_JS: &str = r#"
         value: function (id) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
+            loadedImages.delete(target);
             failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            target.dispatchEvent(new Event('error'));
+            var ev = new Event('error');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+            settleDecodes(target, false);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The engine reports that an `<img>`'s image is in (E54): the element
+    // is marked with the `src`/`srcset` that loaded, the image's own size
+    // and the URL it came from, which `complete`, `naturalWidth`,
+    // `naturalHeight` and `currentSrc` read (web_reflect.js), and then
+    // hears `load`: trusted, at the element only. The mark and the event
+    // are one step, so a handler never runs for an image that reads as
+    // still loading.
+    var loadedImages = new WeakMap();
+    Object.defineProperty(Document.prototype, '__rkImageLoaded', {
+        value: function (id, width, height, url) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            failedImages.delete(target);
+            // No URL: a `data:` image, which is its own `src`.
+            loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+            var ev = new Event('load');
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+            settleDecodes(target, true);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // `decode()` promises waiting on an `<img>` (web_reflect.js): each with
+    // the `src`/`srcset` it waits for. They settle with the image's event,
+    // and resolve when the engine gives up on it (E54 R1: a slow image the
+    // engine stopped loading hears nothing, and a decode waiting on it
+    // would wait for good). A `src` change rejects them, as in Chrome.
+    var pendingDecodes = new WeakMap();
+    var gaveUpImages = new WeakMap();
+    function decodeError() {
+        var E = g.DOMException;
+        return E ? new E('The source image cannot be decoded.', 'EncodingError') : new Error('The source image cannot be decoded.');
+    }
+    function sameSource(img, mark) {
+        return !!mark && mark[0] === img.getAttribute('src') && mark[1] === img.getAttribute('srcset');
+    }
+    function settleDecodes(img, ok) {
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        pendingDecodes.delete(img);
+        list.forEach(function (p) { if (ok) p[2](); else p[3](decodeError()); });
+    }
+    Object.defineProperty(Document.prototype, '__rkDecodeWait', {
+        value: function (img, resolve, reject) {
+            if (sameSource(img, gaveUpImages.get(img))) return resolve();
+            var list = pendingDecodes.get(img) || [];
+            list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
+            pendingDecodes.set(img, list);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageGaveUp', {
+        value: function (id) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+            settleDecodes(target, true);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageWritten', {
+        value: function (img) {
+            // A failure is not held against the restarted load, nor is a
+            // give-up; a successful image stays readable while the same
+            // `src` reloads (its mark is checked against `src`).
+            failedImages.delete(img);
+            gaveUpImages.delete(img);
+            var list = pendingDecodes.get(img);
+            if (!list) return;
+            var keep = list.filter(function (p) { return sameSource(img, p); });
+            list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
+            if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // The mark of the image an `<img>` shows now: null while its current
+    // `src`/`srcset` has not loaded.
+    Object.defineProperty(Document.prototype, '__rkImageLoadedFor', {
+        value: function (img) {
+            var mark = loadedImages.get(img);
+            if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+            return mark;
         },
         configurable: true, enumerable: false, writable: true
     });

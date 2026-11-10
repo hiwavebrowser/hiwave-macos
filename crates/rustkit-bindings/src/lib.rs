@@ -2318,6 +2318,12 @@ impl DomBindings {
             .set_max_job_iterations(max_iterations);
     }
 
+    /// The job cap a drain may run to while a watchdog turn is open (see
+    /// [`JsRuntime::set_armed_max_job_iterations`]).
+    pub fn set_armed_max_job_iterations(&self, limit: u64) {
+        self.runtime.borrow_mut().set_armed_max_job_iterations(limit);
+    }
+
     /// Run any pending jobs (microtasks and async completions).
     pub fn run_jobs(&self) -> Result<(), BindingError> {
         self.runtime
@@ -2356,6 +2362,42 @@ impl DomBindings {
             "document.__rkImageFailed({node});"
         ))?;
         Ok(())
+    }
+
+    /// Tell an `<img>` (by node id) that the image its `src`/`srcset` names
+    /// now is in, with the image's own size and the URL it came from (an
+    /// empty `url` stands for the element's own `src`, for a `data:` URL):
+    /// `complete` reads true, `naturalWidth`/`naturalHeight` the size and
+    /// `currentSrc` the URL from here until those attributes change, and
+    /// `load` fires at it (it does not bubble). Listener exceptions are
+    /// queued, see [`Self::take_reported_errors`].
+    pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
+        let url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkImageLoaded({node}, {width}, {height}, {url});"
+        ))?;
+        Ok(())
+    }
+
+    /// Tell an `<img>` (by node id) that the engine stopped loading the
+    /// image its `src`/`srcset` names (its budget ran out, or it got no
+    /// slot): no event fires, it still reads as loading, and a `decode()`
+    /// waiting on it resolves, as before E54.
+    pub fn fire_image_gave_up(&self, node: usize) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!("document.__rkImageGaveUp({node});"))?;
+        Ok(())
+    }
+
+    /// The `<img>` elements (node ids) whose `src` or `srcset` script wrote
+    /// since the last call, which are reset: each one's load starts over,
+    /// also when the value did not change (Chrome fires `load` again for
+    /// the same `src` written twice). An element that is not in the
+    /// document is among them: nothing else tells the engine of it.
+    pub fn take_image_writes(&self) -> Vec<usize> {
+        let host = self.dom_host.borrow();
+        let mut writes: Vec<usize> = host.image_writes.borrow_mut().drain().collect();
+        writes.sort_unstable();
+        writes
     }
 
     /// Fire the user's mouse input at an element (by node id) as a trusted,

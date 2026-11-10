@@ -556,6 +556,8 @@ mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod image_load_event_tests;
+#[cfg(all(test, feature = "headless"))]
 mod scroll_paints_first_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_after_yielded_load_tests;
@@ -617,6 +619,10 @@ mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod microtask_cap_tests;
+#[cfg(all(test, feature = "headless"))]
+mod record_elapsed_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
@@ -628,6 +634,8 @@ mod form_empty_submit_tests;
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod text_coverage_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vector_clip_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1058,6 +1066,8 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
+    /// The URLs only an `<img>` outside the document asks for (E54).
+    offscreen: std::collections::HashSet<Url>,
     /// Each image's own budget, counted from when its request starts
     /// (`subresource_budget_ms`; LAT9).
     budget: std::time::Duration,
@@ -1110,11 +1120,26 @@ struct FetchedImages {
     /// It is not a failure to the page: nothing of it is kept, the element
     /// goes on painting what it painted and reads as still loading.
     gave_up: Vec<String>,
+    /// Loaded images that no box shows (E54): the image of an `<img>` that
+    /// is in no document tree. Its element hears `load`; the page is not
+    /// laid out again for it.
+    offscreen: usize,
+}
+
+/// An event the engine owes an `<img>` (raw NodeId) about its image (E54).
+enum ImageEvent {
+    /// The image is in: its own size, and the URL it came from (empty for
+    /// a `data:` URL, which is the element's own `src`).
+    Load { node: usize, width: u32, height: u32, url: String },
+    /// Its load failed.
+    Error { node: usize },
+    /// The engine gave up on it: no event, a pending `decode()` resolves.
+    GaveUp { node: usize },
 }
 
 impl FetchedImages {
     fn loaded(count: usize, svgs: Vec<(String, rustkit_svg::SvgDocument)>) -> Self {
-        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new() }
+        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new(), offscreen: 0 }
     }
 
     /// The image's load failed: the page is told ([`FetchedImages::failed`]).
@@ -1472,6 +1497,7 @@ impl ViewState {
         self.lay.checked_states.borrow_mut().clear();
         self.lay.shown_images.borrow_mut().clear();
         *self.lay.failed_images.borrow_mut() = layout_ctx::FailedImages::default();
+        *self.lay.loaded_images.borrow_mut() = layout_ctx::LoadedImages::default();
         self.lay.select_popup.borrow_mut().take();
         self.lay.select_popup_release.set(false);
         self.lay.select_popup_opening_press.set(false);
@@ -2147,6 +2173,28 @@ fn begin_script_turn(bindings: &DomBindings, budget: std::time::Duration) {
 /// Closes what [`begin_script_turn`] opened.
 fn end_script_turn(bindings: &DomBindings) {
     SCRIPT_STAMP.with(|stamp| bindings.end_turn(stamp));
+}
+
+/// How many jobs one microtask drain may run before the executor refuses more (H19c).
+///
+/// The cap exists so a runaway promise recursion cannot hang the page. It is 100 000 always, and
+/// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
+/// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
+/// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
+/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
+/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+fn microtask_job_cap(config: &EngineConfig) -> u64 {
+    config.script_loop_iteration_limit.min(100_000)
+}
+
+/// The cap while a turn is armed: the loop limit when the engine arms turns at all
+/// (`interrupt_scripts_at_budget`), else no raise (0).
+fn armed_microtask_job_cap(config: &EngineConfig) -> u64 {
+    if config.interrupt_scripts_at_budget {
+        config.script_loop_iteration_limit
+    } else {
+        0
+    }
 }
 
 /// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
@@ -3717,7 +3765,7 @@ impl Engine {
                         };
                         inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5437,7 +5485,7 @@ impl Engine {
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
         view.script_log.extend(stopped);
         answer
     }
@@ -5595,6 +5643,20 @@ impl Engine {
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
             self.refresh_layout_for_script(id, &bindings);
+            // E54: the images that have settled hear `load` or `error`
+            // before the window's `load` (the live turns since the yield
+            // told most of them already). Nothing is waited for here.
+            self.note_image_writes_of(id, &bindings);
+            let (_, events) = self.image_events_due(id, false);
+            if !events.is_empty() {
+                let (caught, _) = with_script_js(&bindings, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::fire_image_events(&bindings, &events)))
+                });
+                stopped = caught.is_err();
+                self.refresh_layout_for_script(id, &bindings);
+            }
+        }
+        if !stopped {
             // The same lines the blocking load logs. A yielded tail used to
             // fire `load` without them, so a live run never showed
             // `source=event:load`.
@@ -5612,21 +5674,21 @@ impl Engine {
                 }))
             });
             if load_stopped {
-                log_script_stopped("event:load", 0, take_script_js_overrun());
+                log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "event:load".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "event:load".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5638,7 +5700,7 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -5654,21 +5716,21 @@ impl Engine {
                 }))
             });
             if timer_stopped {
-                log_script_stopped("timers", 0, take_script_js_overrun());
+                log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "timers".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "timers".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5680,7 +5742,7 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -6207,7 +6269,11 @@ impl Engine {
             .views
             .get(&id)
             .is_some_and(|v| v.images_planned_for != v.frame_generation);
-        if out.relaid_out || unplanned {
+        // A `src` script wrote starts that image's load over (E54), also
+        // with no layout to show for it: the same value again, or an image
+        // that is in no document.
+        let rewritten = self.note_image_writes(id);
+        if out.relaid_out || unplanned || rewritten {
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
             }
@@ -6270,10 +6336,17 @@ impl Engine {
                 view.images_planned_for = view.frame_generation;
             }
         }
-        // Images that settled as failed (LAT9-r1): the old image of a
-        // swapped `src` goes, and the elements hear `error`. What a
-        // listener wrote may name images of its own (a fallback `src`).
-        if self.settle_failed_images(id) {
+        // Images that settled (E54, LAT9-r1): each `<img>` whose image is
+        // in hears `load`; for one that failed, the old image of a swapped
+        // `src` goes and the element hears `error`. What a listener wrote
+        // may name images of its own (the real `src`, a fallback).
+        let (image_layout, more_image_events) = self.settle_image_events(id);
+        if more_image_events {
+            // The rest are due at once, after the frame this turn made.
+            out.yielded_for_frame = true;
+            out.next_timer_ms = Some(0);
+        }
+        if image_layout {
             out.relaid_out = true;
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
@@ -6285,7 +6358,7 @@ impl Engine {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => debug!(?id, error = %e, "Failed to look for images an error listener added"),
+                Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -7735,7 +7808,8 @@ impl Engine {
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
@@ -8291,17 +8365,54 @@ impl Engine {
             // with those the load handler and the timers add.
             let after_load = post_load_live && source != "event:DOMContentLoaded";
             let leaving = self.config.follows_script_navigation && bindings.navigation_requested();
-            if after_load && source == "event:load" && !leaving {
-                match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
-                    None => return,
-                    Some(Ok(0)) => {}
-                    Some(Ok(count)) => {
-                        info!(count, "Loaded images added by page scripts before load");
-                        if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
-                            warn!(?e, "relayout after images added before load failed");
+            // E54: before the window's `load`, every image that has settled
+            // hears its own `load` or `error`. The images of the markup
+            // arrived before the scripts ran; what the scripts added is
+            // waited for here (as the app loads a page), one subresource
+            // budget at most, and an image still out then goes on as live
+            // work and hears its event when it arrives. A handler may name
+            // another image (a placeholder's `onload` setting the real
+            // `src`): that one gets one more wait of the same length, and
+            // no further round, so the window's `load` is at most two
+            // budgets behind the scripts whatever the handlers do.
+            let mut round = 0;
+            while source == "event:load" {
+                round += 1;
+                self.note_image_writes_of(id, bindings);
+                if after_load && !leaving {
+                    match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
+                        None => return,
+                        Some(Ok(0)) => {}
+                        Some(Ok(count)) => {
+                            info!(count, "Loaded images added by page scripts before load");
+                            if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
+                                warn!(?e, "relayout after images added before load failed");
+                            }
                         }
+                        Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
                     }
-                    Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
+                }
+                let (_, events) = self.image_events_due(id, false);
+                if events.is_empty() {
+                    break;
+                }
+                info!(count = events.len(), "Images settled before load: firing load/error");
+                // Not sliced like the live turn's events: the whole batch
+                // runs here under the load's one script budget, which can
+                // stop it (R1 probe e).
+                let record = run(bindings, "event:image".to_string(), 0, &|_| {
+                    Self::fire_image_events(bindings, &events);
+                    Ok(())
+                });
+                if record.outcome != ScriptOutcome::Ran {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                if poisoned.get() || nav_cancel::cancelled(watch) {
+                    return;
+                }
+                self.refresh_layout_for_script(id, bindings);
+                if round == 2 {
+                    break;
                 }
             }
             info!(%source, "Running page lifecycle step");
@@ -8333,7 +8444,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::Threw(message),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8342,7 +8453,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8353,11 +8464,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -8412,6 +8523,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // The script time of every slice, for the errors the timers reported (H19c).
+            let mut timers_ms: u64 = 0;
             loop {
                 if nav_cancel::cancelled(watch) {
                     return;
@@ -8424,6 +8537,7 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
+                timers_ms += step_started.elapsed().as_millis() as u64;
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
@@ -8454,7 +8568,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::Threw(strip(e)),
                             },
                         );
@@ -8468,7 +8582,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                             },
                         );
@@ -8517,7 +8631,7 @@ impl Engine {
                     return;
                 }
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, "timers");
+            inspector_glue::drain_reports(bindings, &inspector, log, "timers", timers_ms);
         }
         if yielded {
             return;
@@ -9026,7 +9140,7 @@ impl Engine {
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9035,6 +9149,7 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9316,6 +9431,11 @@ impl Engine {
                 }
                 Err(e) => warn!(?e, "Failed to load images added by page scripts"),
             }
+            // Those images hear `load` or `error` now (E54); with
+            // `post_load_requests_live` the live loop tells them.
+            if !post_load_live && !leaving && !self.nav_superseded(id, generation) {
+                self.settle_image_events(id);
+            }
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after script-added images");
                 return Ok(());
@@ -9478,7 +9598,7 @@ impl Engine {
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9495,6 +9615,7 @@ impl Engine {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9621,7 +9742,8 @@ impl Engine {
         };
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
 
@@ -9760,7 +9882,7 @@ impl Engine {
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source);
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source, 0);
         }
 
         if let Some(view) = self.views.get_mut(&id) {
@@ -13572,6 +13694,11 @@ impl layout_ctx::LayoutCtx {
                         s.overflow_wrap = parent.overflow_wrap;
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
+                        // How the glyphs are rasterized (dilated or not):
+                        // read off the run's own style at paint.
+                        s.font_smoothing = parent.font_smoothing;
+                        s.text_rendering_geometric_precision =
+                            parent.text_rendering_geometric_precision;
                         s.visibility = parent.visibility;
                         s.pointer_events = parent.pointer_events;
                         s.cursor = parent.cursor;
@@ -13998,6 +14125,9 @@ impl layout_ctx::LayoutCtx {
             pseudo_style.overflow_wrap = parent.overflow_wrap;
             pseudo_style.line_break = parent.line_break;
             pseudo_style.text_transform = parent.text_transform;
+            pseudo_style.font_smoothing = parent.font_smoothing;
+            pseudo_style.text_rendering_geometric_precision =
+                parent.text_rendering_geometric_precision;
             pseudo_style.visibility = parent.visibility;
             pseudo_style.pointer_events = parent.pointer_events;
             pseudo_style.cursor = parent.cursor;
@@ -14254,6 +14384,8 @@ impl layout_ctx::LayoutCtx {
             style.overflow_wrap = parent.overflow_wrap;
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
+            style.font_smoothing = parent.font_smoothing;
+            style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision;
             style.visibility = parent.visibility;
             style.pointer_events = parent.pointer_events;
             style.cursor = parent.cursor;
@@ -15460,6 +15592,10 @@ impl Engine {
             "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
             "text-align" => style.text_align = parent.text_align,
             "text-transform" => style.text_transform = parent.text_transform,
+            "-webkit-font-smoothing" | "font-smooth" => style.font_smoothing = parent.font_smoothing,
+            "text-rendering" => {
+                style.text_rendering_geometric_precision = parent.text_rendering_geometric_precision
+            }
             "white-space" => style.white_space = parent.white_space,
             "word-break" => style.word_break = parent.word_break,
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
@@ -16695,6 +16831,19 @@ impl layout_ctx::LayoutCtx {
             // css-overflow-3 §5.1. Not inherited (a block owns its line
             // boxes). The two-value form and `<string>` fallback are
             // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "-webkit-font-smoothing" | "font-smooth" => {
+                let v = value.trim().to_ascii_lowercase();
+                style.font_smoothing = match v.as_str() {
+                    "antialiased" | "grayscale" => rustkit_css::FontSmoothing::Antialiased,
+                    "none" | "never" => rustkit_css::FontSmoothing::None,
+                    "subpixel-antialiased" | "always" => rustkit_css::FontSmoothing::SubpixelAntialiased,
+                    _ => rustkit_css::FontSmoothing::Auto,
+                };
+            }
+            "text-rendering" => {
+                style.text_rendering_geometric_precision =
+                    value.trim().eq_ignore_ascii_case("geometricprecision");
+            }
             "appearance" | "-webkit-appearance" => {
                 style.appearance = if value.trim().eq_ignore_ascii_case("none") {
                     rustkit_css::Appearance::None
@@ -17201,6 +17350,10 @@ impl layout_ctx::LayoutCtx {
             // Not inherited either: `initial` and `unset` undo a reset's
             // `* { box-sizing: inherit }`.
             "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,
+            "-webkit-font-smoothing" | "font-smooth" => {
+                style.font_smoothing = rustkit_css::FontSmoothing::Auto
+            }
+            "text-rendering" => style.text_rendering_geometric_precision = false,
             "appearance" | "-webkit-appearance" => {
                 style.appearance = rustkit_css::Appearance::Auto
             }
@@ -18598,15 +18751,6 @@ impl Engine {
             .collect()
     }
 
-    /// Each `<img>` (raw NodeId) and the absolute URL of the image it asks
-    /// for, by the rule [`Self::discover_images`] fetches by.
-    fn img_sources(document: &Document, base_url: Option<&Url>) -> Vec<(usize, Url)> {
-        Self::img_elements(document, base_url)
-            .into_iter()
-            .map(|(node, _, url)| (node, url))
-            .collect()
-    }
-
     /// Every `<img>` that names an image: its raw NodeId, the source as
     /// written, and that resolved.
     fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
@@ -18876,7 +19020,31 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let elements = Self::img_elements(document.as_ref(), base_url);
+        let mut elements = Self::img_elements(document.as_ref(), base_url);
+        // The URLs the document itself shows, when an `<img>` outside it
+        // asks for one too (E54): what only such an element asks for is
+        // fetched, and no layout follows its arrival.
+        let detached = Self::detached_img_elements(document.as_ref(), base_url, &view.lay.loaded_images.borrow().detached, &elements);
+        let shown: std::collections::HashSet<Url> = match detached.is_empty() {
+            true => Default::default(),
+            false => elements.iter().map(|(_, _, url)| url.clone()).collect(),
+        };
+        let mut offscreen: std::collections::HashSet<Url> =
+            detached.iter().map(|(_, _, url)| url.clone()).filter(|url| !shown.contains(url)).collect();
+        elements.extend(detached);
+        // An `<img>` showing a loaded image it has not heard `load` for
+        // (E54): events are due. One that has heard costs a map lookup.
+        {
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.due {
+                let failed = view.lay.failed_images.borrow();
+                loaded.due = elements.iter().any(|(node, _, url)| {
+                    loaded.heard.get(node) != Some(&layout_ctx::LoadedImages::key(url.as_str()))
+                        && !failed.urls.contains(url.as_str())
+                        && (self.lctx.image_manager.is_cached(url) || self.lctx.svg_cache.borrow().contains_key(url.as_str()))
+                });
+            }
+        }
         // The `<img>` elements asking for a URL that has failed: who is
         // owed an `error` (LAT9-r1). Nothing is collected on a page with
         // no failed image.
@@ -18904,6 +19072,9 @@ impl Engine {
             false => std::collections::HashSet::new(),
         };
         let inspector = view.inspector.clone();
+        for (_, url) in &backgrounds {
+            offscreen.remove(url);
+        }
         images.extend(backgrounds);
         if only_new {
             images.retain(|(_, url)| !view.images_attempted.contains(url));
@@ -18948,6 +19119,15 @@ impl Engine {
             }
         }
         if let Some(view) = self.views.get(&id) {
+            // Nor given up on: its elements hear what this request brings.
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.gave_up.is_empty() {
+                for url in pending.iter().chain(&svg_urls) {
+                    loaded.gave_up.remove(url.as_str());
+                }
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
             let mut failed = view.lay.failed_images.borrow_mut();
             if !failed.urls.is_empty() {
                 // A URL asked for again is in flight again, not failed.
@@ -18980,6 +19160,7 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded: loaded,
+            offscreen,
             budget,
             wait_until: now + budget,
             start_by: now + budget * IMAGE_PASS_START_BUDGETS,
@@ -19012,6 +19193,7 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded,
+            offscreen,
             budget,
             wait_until: _,
             start_by,
@@ -19047,7 +19229,14 @@ impl Engine {
             };
             let on_page = job.url.scheme() == "data";
             let url = job.url.clone();
-            let work = Self::fetch_one_image(job);
+            let unshown = offscreen.contains(&url);
+            let work = async move {
+                let mut fetched = Self::fetch_one_image(job).await;
+                if unshown {
+                    fetched.offscreen += std::mem::take(&mut fetched.loaded);
+                }
+                fetched
+            };
             let fetch: script_net::LiveFuture<FetchedImages> = if on_page {
                 Box::pin(work)
             } else {
@@ -19210,6 +19399,7 @@ impl Engine {
                 next = pending.next() => match next {
                     Some(fetched) => {
                         out.loaded += fetched.loaded;
+                        out.offscreen += fetched.offscreen;
                         out.svgs.extend(fetched.svgs);
                         out.failed.extend(fetched.failed);
                         out.gave_up.extend(fetched.gave_up);
@@ -19236,11 +19426,22 @@ impl Engine {
     /// The last part: keep what a fetch brought. Returns how many images
     /// the pass loaded.
     fn keep_fetched_images(&mut self, id: EngineViewId, fetched: FetchedImages) -> usize {
+        if fetched.loaded + fetched.offscreen > 0 || !fetched.svgs.is_empty() {
+            // Their elements hear `load` (E54).
+            if let Some(view) = self.views.get(&id) {
+                view.lay.loaded_images.borrow_mut().due = true;
+            }
+        }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
-            // Not failures: nothing is recorded, so the elements keep what
-            // they paint and hear nothing.
+            // Not failures: the elements keep what they paint and hear no
+            // event; only a `decode()` waiting on them is settled (E54 R1).
             debug!(count = fetched.gave_up.len(), "Images given up on (budget or pass cap)");
+            if let Some(view) = self.views.get(&id) {
+                let mut loaded = view.lay.loaded_images.borrow_mut();
+                loaded.gave_up.extend(fetched.gave_up);
+                loaded.due = true;
+            }
         }
         if !fetched.failed.is_empty() {
             if let Some(view) = self.views.get(&id) {
@@ -19252,26 +19453,144 @@ impl Engine {
         fetched.loaded
     }
 
-    /// LAT9-r1: what a settled image failure does to the page, on the live
-    /// turn after it arrives. An `<img>` still painting its previous image
-    /// for a `src` that has now failed is laid out again, as the broken
-    /// image a failed first load gives; then each `<img>` whose image
-    /// failed hears `error`, once for that `src` (Chrome for Testing
-    /// 148.0.7778.216: after a failed swap the old image is gone, `error`
-    /// has fired once, `complete` is true, `naturalWidth` 0). Returns
-    /// whether it laid out.
-    fn settle_failed_images(&mut self, id: EngineViewId) -> bool {
+    /// The `<img>` elements script gave a `src` outside the document
+    /// (`detached`, raw NodeIds) that still are outside it and name an
+    /// image, as [`Self::img_elements`] lists those inside. One that is in
+    /// `listed` (it has been inserted since, or sits in a shadow tree) is
+    /// left to that list.
+    fn detached_img_elements(
+        document: &Document,
+        base_url: Option<&Url>,
+        detached: &[usize],
+        listed: &[(usize, String, Url)],
+    ) -> Vec<(usize, String, Url)> {
+        if detached.is_empty() {
+            return Vec::new();
+        }
+        let listed: std::collections::HashSet<usize> = listed.iter().map(|(node, _, _)| *node).collect();
+        detached
+            .iter()
+            .filter(|node| !listed.contains(node))
+            .filter_map(|&raw| {
+                let node = document.get_node(rustkit_dom::NodeId::new(raw))?;
+                let NodeType::Element { attributes, .. } = &node.node_type else {
+                    return None;
+                };
+                let src = attributes
+                    .get("srcset")
+                    .and_then(|ss| Self::pick_from_srcset(ss))
+                    .or_else(|| attributes.get("src").cloned())?;
+                let url = match base_url {
+                    Some(base) => base.join(&src).ok()?,
+                    None => Url::parse(&src).ok()?,
+                };
+                Some((raw, src, url))
+            })
+            .collect()
+    }
+
+    /// Whether `node` is in the document's own tree.
+    fn in_document_tree(document: &Document, node: &Rc<Node>) -> bool {
+        let mut top = node.clone();
+        while let Some(parent) = top.parent() {
+            top = parent;
+        }
+        Rc::ptr_eq(&top, document.root())
+    }
+
+    /// E54: script wrote these `<img>` elements' `src` or `srcset`
+    /// (`DomBindings::take_image_writes`). Each one's load starts over: it
+    /// hears `load` or `error` again for what it names now, also when the
+    /// value is the one it had (Chrome fires `load` again). One that is in
+    /// no document tree is remembered, so that its image is fetched.
+    /// Returns whether there was a write.
+    fn note_image_writes_of(&mut self, id: EngineViewId, bindings: &DomBindings) -> bool {
+        self.note_image_writes_list(id, bindings.take_image_writes())
+    }
+
+    /// [`Self::note_image_writes_of`] with the view's own bindings.
+    fn note_image_writes(&mut self, id: EngineViewId) -> bool {
+        let writes = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map(|bindings| bindings.take_image_writes())
+            .unwrap_or_default();
+        self.note_image_writes_list(id, writes)
+    }
+
+    fn note_image_writes_list(&mut self, id: EngineViewId, writes: Vec<usize>) -> bool {
+        if writes.is_empty() {
+            return false;
+        }
         let Some(view) = self.views.get(&id) else {
             return false;
         };
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        for raw in writes {
+            loaded.heard.remove(&raw);
+            loaded.gave_up_heard.remove(&raw);
+            failed.heard.remove(&raw);
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(raw))
+                .is_some_and(|node| !Self::in_document_tree(document.as_ref(), &node));
+            if outside && !loaded.detached.contains(&raw) {
+                loaded.detached.push(raw);
+            }
+        }
+        loaded.due = true;
+        failed.due = true;
+        true
+    }
+
+    /// An image's own size once it is in: the decoded raster, or an SVG's
+    /// width and height. `None` while it is not loaded.
+    fn loaded_image_size(&self, url: &Url) -> Option<(u32, u32)> {
+        if let Some(image) = self.lctx.image_manager.get_cached(url) {
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        if let Some(svg) = self.lctx.svg_cache.borrow().get(url.as_str()) {
+            let (width, height) = svg.get_size(300.0, 150.0);
+            return Some((width.round() as u32, height.round() as u32));
+        }
+        if url.scheme() == "data" {
+            let image = self.lctx.image_manager.load_blocking(url.clone()).ok()?;
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        None
+    }
+
+    /// E54, LAT9-r1: the events the document's images are owed, once a
+    /// load has settled. Each `<img>` whose image is in is owed `load`,
+    /// once for that image (Chrome for Testing 148.0.7778.216: `load` once
+    /// per successful load, at the element; inside it `complete` is true
+    /// and `naturalWidth` the image's own). Each whose image failed is owed
+    /// `error`, once for that `src` (after a failed swap the old image is
+    /// gone, `complete` is true, `naturalWidth` 0); with `relayout`, an
+    /// `<img>` still painting its previous image for a `src` that has now
+    /// failed is laid out again first, as the broken image a failed first
+    /// load gives. An image the engine gave up on is owed nothing. The
+    /// list is made before any listener runs: a listener may write the
+    /// DOM, and what it wrote is the next round's. Returns whether it laid
+    /// out, and the events in document order.
+    fn image_events_due(&mut self, id: EngineViewId, relayout: bool) -> (bool, Vec<ImageEvent>) {
+        let Some(view) = self.views.get(&id) else {
+            return (false, Vec::new());
+        };
         {
             let mut failed = view.lay.failed_images.borrow_mut();
-            if !failed.due {
-                return false;
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !failed.due && !loaded.due {
+                return (false, Vec::new());
             }
             failed.due = false;
+            loaded.due = false;
         }
-        let stale = {
+        let stale = relayout && {
             let failed = view.lay.failed_images.borrow();
             view.lay.shown_images.borrow().values().any(|image| {
                 image.shown.as_ref().is_some_and(|shown| *shown != image.wanted) && failed.urls.contains(&image.wanted)
@@ -19285,43 +19604,161 @@ impl Engine {
             }
         }
         let Some(view) = self.views.get(&id) else {
-            return relaid_out;
+            return (relaid_out, Vec::new());
         };
-        let (Some(document), Some(bindings)) = (view.document.as_ref(), view.bindings.as_ref()) else {
-            return relaid_out;
+        let Some(document) = view.document.as_ref() else {
+            return (relaid_out, Vec::new());
         };
-        // The elements whose image failed and that have not heard so. The
-        // list is made before any listener runs: a listener may write the
-        // DOM, and what it wrote is the next turn's.
-        let mut hear = Vec::new();
-        {
-            let mut failed = view.lay.failed_images.borrow_mut();
-            let mut still_failed = std::collections::HashSet::new();
-            for (node, url) in Self::img_sources(document.as_ref(), view.url.as_ref()) {
-                let url = url.to_string();
-                if !failed.urls.contains(&url) {
-                    continue;
+        let mut events = Vec::new();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut elements = Self::img_elements(document.as_ref(), view.url.as_ref());
+        let detached = Self::detached_img_elements(document.as_ref(), view.url.as_ref(), &loaded.detached, &elements);
+        elements.extend(detached);
+        let mut still_failed = std::collections::HashSet::new();
+        let mut still_loaded = std::collections::HashSet::new();
+        let mut still_gave_up = std::collections::HashSet::new();
+        for (node, _, url) in elements {
+            let name = url.to_string();
+            if loaded.gave_up.contains(&name) {
+                still_gave_up.insert(node);
+                let key = layout_ctx::LoadedImages::key(&name);
+                if loaded.gave_up_heard.get(&node) != Some(&key) {
+                    loaded.gave_up_heard.insert(node, key);
+                    events.push(ImageEvent::GaveUp { node });
                 }
-                still_failed.insert(node);
-                if failed.heard.get(&node) != Some(&url) {
-                    failed.heard.insert(node, url);
-                    hear.push(node);
-                }
+                continue;
             }
-            failed.heard.retain(|node, _| still_failed.contains(node));
+            if failed.urls.contains(&name) {
+                still_failed.insert(node);
+                if failed.heard.get(&node) != Some(&name) {
+                    failed.heard.insert(node, name);
+                    events.push(ImageEvent::Error { node });
+                }
+            } else if loaded.heard.get(&node) == Some(&layout_ctx::LoadedImages::key(&name)) {
+                still_loaded.insert(node);
+            } else if let Some((width, height)) = self.loaded_image_size(&url) {
+                still_loaded.insert(node);
+                loaded.heard.insert(node, layout_ctx::LoadedImages::key(&name));
+                // A `data:` URL is the element's own `src`: script reads
+                // it from there, and it is not sent a second time.
+                let url = if url.scheme() == "data" { String::new() } else { name };
+                events.push(ImageEvent::Load { node, width, height, url });
+            }
         }
-        if hear.is_empty() {
-            return relaid_out;
+        failed.heard.retain(|node, _| still_failed.contains(node));
+        loaded.heard.retain(|node, _| still_loaded.contains(node));
+        loaded.gave_up_heard.retain(|node, _| still_gave_up.contains(node));
+        // An image outside the document that has heard, or that the engine
+        // gave up on, is done with; so is one whose node is gone (R1 nit 2).
+        loaded.detached.retain(|node| {
+            !still_failed.contains(node)
+                && !still_loaded.contains(node)
+                && !still_gave_up.contains(node)
+                && document.get_node(rustkit_dom::NodeId::new(*node)).is_some()
+        });
+        (relaid_out, events)
+    }
+
+    /// Tell the elements. A listener's exception is queued in the bindings
+    /// like any other listener's.
+    fn fire_image_events(bindings: &DomBindings, events: &[ImageEvent]) {
+        for event in events {
+            let _ = match event {
+                ImageEvent::Load { node, width, height, url } => bindings.fire_image_load(*node, *width, *height, url),
+                ImageEvent::Error { node } => bindings.fire_image_error(*node),
+                ImageEvent::GaveUp { node } => bindings.fire_image_gave_up(*node),
+            };
         }
-        debug!(count = hear.len(), "Images failed: firing error");
-        for node in hear {
-            let _ = bindings.fire_image_error(node);
+    }
+
+    /// [`Self::image_events_due`], fired at the view's own bindings on a
+    /// live turn, and what the listeners wrote laid out. Returns whether it
+    /// laid out, and whether events are left for the next turn.
+    ///
+    /// The handlers are the turn's script like its timers: each is charged
+    /// to the turn's budget of JavaScript time (`live_turn_budget_ms`) and
+    /// can be stopped by it. Once the budget is spent the rest keep their
+    /// turn and go out on the next one, after this one's frame. They are
+    /// not spread thinner than that: on a recorded search page the image
+    /// handlers wrote a style and read a rect, a forced layout each (0.7 s
+    /// there), and a turn per handler paid for a second layout between
+    /// every two.
+    fn settle_image_events(&mut self, id: EngineViewId) -> (bool, bool) {
+        let (mut relaid_out, events) = self.image_events_due(id, true);
+        if events.is_empty() {
+            return (relaid_out, false);
         }
-        match self.flush_script_dom_writes(id, Some(RelayoutCause::Other("image_failed"))) {
+        let Some(bindings) = self.views.get(&id).and_then(|view| view.bindings.as_ref()) else {
+            return (relaid_out, false);
+        };
+        let mut fired = 0;
+        for event in &events {
+            if fired > 0 && script_js_exhausted() {
+                break;
+            }
+            // As the yielded tail does: a panic in the engine while a
+            // listener runs is caught here and ends this turn's events; the
+            // rest are owed to the next turn (R1 nit 7).
+            let (caught, _) = with_script_js(bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::fire_image_events(bindings, std::slice::from_ref(event))
+                }))
+            });
+            fired += 1;
+            if caught.is_err() {
+                warn!(?id, "An image listener's turn panicked; its other events wait for the next turn");
+                break;
+            }
+        }
+        info!(count = fired, left = events.len() - fired, "Images settled: firing load/error");
+        let more = fired < events.len();
+        if more {
+            self.owe_image_events(id, &events[fired..]);
+        }
+        match self.flush_script_dom_writes(id, Some(RelayoutCause::Other("image_event"))) {
             Ok(wrote) => relaid_out |= wrote,
-            Err(e) => debug!(?id, error = %e, "relayout after image error listeners failed"),
+            Err(e) => debug!(?id, error = %e, "relayout after image listeners failed"),
         }
-        relaid_out
+        (relaid_out, more)
+    }
+
+    /// Events [`Self::image_events_due`] listed that were not fired: their
+    /// elements have not heard, and are due again.
+    fn owe_image_events(&mut self, id: EngineViewId, unfired: &[ImageEvent]) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(document) = view.document.as_ref() else {
+            return;
+        };
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        for event in unfired {
+            let node = match event {
+                ImageEvent::Load { node, .. } => {
+                    loaded.heard.remove(node);
+                    *node
+                }
+                ImageEvent::Error { node } => {
+                    failed.heard.remove(node);
+                    *node
+                }
+                ImageEvent::GaveUp { node } => {
+                    loaded.gave_up_heard.remove(node);
+                    *node
+                }
+            };
+            // One outside the document was dropped from the list as heard.
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(node))
+                .is_some_and(|n| !Self::in_document_tree(document.as_ref(), &n));
+            if outside && !loaded.detached.contains(&node) {
+                loaded.detached.push(node);
+            }
+        }
+        failed.due = true;
+        loaded.due = true;
     }
 
     /// Who a subresource request comes from: the document URL and the
@@ -20581,7 +21018,7 @@ impl SelectorMatcher {
             compound.matches_ancestor_in_chain(ancestors, idx)
         };
         let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
-            let _relational = compound.needs_node().then(|| {
+            let _relational = compound.needs_node_as_sibling().then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
             });
             compound.matches_sibling_in_chain(prev, ancestors)
@@ -20654,8 +21091,9 @@ impl SelectorMatcher {
                             let Some(key) = dom_sibling_key(node) else {
                                 return false;
                             };
-                            let _relational =
-                                compound.needs_node().then(|| RelationalNodeScope::enter(Some(node.clone())));
+                            let _relational = compound
+                                .needs_node_as_sibling()
+                                .then(|| RelationalNodeScope::enter(Some(node.clone())));
                             compound.matches_sibling_in_chain(&key, above)
                         };
                         let matched = match combinator.as_str() {
@@ -22372,6 +22810,7 @@ impl Engine {
                     ascent,
                     run,
                     faces: _,
+                    undilated: _,
                 } => serde_json::json!({
                     "op": "text",
                     // The SHAPED-RUN CONTRACT, made visible: the face paint
@@ -41365,6 +41804,10 @@ thread_local! {
     /// from 1 too, and every node outlives the build.
     static HAS_MEMO: std::cell::RefCell<Option<HashMap<(usize, String), bool>>> =
         const { std::cell::RefCell::new(None) };
+    /// Where each element the walk named sits among its siblings, by node address, for
+    /// one build (CH2.E51; installed and cleared with [`HAS_MEMO`] by `HasMemoScope`).
+    static STRUCTURAL_CONTEXT: std::cell::RefCell<Option<HashMap<usize, SiblingContext>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -41640,6 +42083,7 @@ impl HasMemoScope {
             let fresh = m.is_none();
             if fresh {
                 *m = Some(HashMap::new());
+                STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = Some(HashMap::new()));
             }
             fresh
         }))
@@ -41650,8 +42094,49 @@ impl Drop for HasMemoScope {
     fn drop(&mut self) {
         if self.0 {
             HAS_MEMO.with(|m| *m.borrow_mut() = None);
+            STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = None);
         }
     }
+}
+
+/// The tree-structural pseudo-classes (Selectors 4 §14), by name.
+const STRUCTURAL_PSEUDOS: &[&str] = &[
+    "first-child",
+    "last-child",
+    "only-child",
+    "nth-child",
+    "nth-last-child",
+    "first-of-type",
+    "last-of-type",
+    "only-of-type",
+    "nth-of-type",
+    "nth-last-of-type",
+];
+
+/// Whether the structural pseudo-class `name(arg)` holds for `node`, its
+/// position read from the tree by the one evaluator the subject uses
+/// (`match_pseudo_class`). The position (`SiblingContext`, which costs a scan
+/// of the parent's children) is memoised per node for the build, in
+/// [`STRUCTURAL_CONTEXT`] (the DOM does not change inside a build):
+/// `tr:nth-child(even) td` asks about the same `tr` once for every cell in
+/// it, and does not allocate to ask.
+fn structural_holds(node: &Rc<Node>, name: &str, arg: Option<&str>) -> bool {
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return true;
+    };
+    let address = Rc::as_ptr(node) as usize;
+    let tag = lower_tag(tag_name);
+    let known = STRUCTURAL_CONTEXT.with(|m| m.borrow().as_ref().and_then(|m| m.get(&address).copied()));
+    let sib = known.unwrap_or_else(|| {
+        let sib = dom_sibling_context(node, &tag, Engine::node_has_children(node));
+        STRUCTURAL_CONTEXT.with(|m| {
+            if let Some(m) = m.borrow_mut().as_mut() {
+                m.insert(address, sib);
+            }
+        });
+        sib
+    });
+    SelectorMatcher.match_pseudo_class(name, arg, &tag, sib, attributes)
 }
 
 /// Whether the element the compound under test is for matches
@@ -41948,6 +42433,16 @@ struct AncestorCompound {
     /// One entry per `:is()`/`:where()` in the compound: some alternative
     /// must match.
     any_of: Vec<AnyOf>,
+    /// The tree-structural pseudo-classes (`:first-child`, `:nth-child(2)`,
+    /// ...), as (name, argument). The chain carries no sibling position, so
+    /// they are decided against the DOM element the walk names
+    /// (`RELATIONAL_NODE`), with the position read from the tree and
+    /// memoised for the build (CH2.E51). Without a named element they stay
+    /// permissive, as before.
+    structural: Vec<(String, Option<String>)>,
+    /// `:not(<one structural pseudo-class>)` members (`:not(:first-child)`):
+    /// decided the same way, and none may hold. `undecided` too, as `structural`.
+    not_structural: Vec<(String, Option<String>)>,
     /// The `[...]` parts, brackets off. Tested only against an ancestor
     /// that carries its attributes (`AncestorKey`).
     attrs: Vec<String>,
@@ -42110,6 +42605,13 @@ impl AncestorCompound {
                                         false => Some(AncestorCompound::parse(member.trim())),
                                     };
                                     match parsed {
+                                        // `:not(:first-child)`: a member that is one structural
+                                        // pseudo-class and nothing else is decided against the
+                                        // DOM element the walk names (CH2.E51).
+                                        Some(m) if m.is_one_structural_pseudo() => {
+                                            out.not_structural.extend(m.structural);
+                                            out.undecided = true;
+                                        }
                                         // `:not(:hover)`: nothing is, so it excludes nothing.
                                         Some(m) if m.never => {}
                                         Some(m) if !m.undecided => {
@@ -42141,8 +42643,19 @@ impl AncestorCompound {
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
-                            // Structural and the rest need context the tuple
-                            // does not carry: permissive.
+                            // Structural pseudo-classes: the position is not in
+                            // the tuple, so it is read from the DOM element
+                            // the walk names (CH2.E51). Still `undecided`
+                            // (inside `:not()` a maybe excludes nothing),
+                            // and `:nth-child(.. of S)` stays permissive.
+                            (n, a) if STRUCTURAL_PSEUDOS.contains(&n)
+                                && !a.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(" of ")) =>
+                            {
+                                out.structural.push((name.clone(), arg.clone()));
+                                out.undecided = true;
+                            }
+                            // The rest need context the tuple does not
+                            // carry: permissive.
                             _ => out.undecided = true,
                         }
                         i = next;
@@ -42212,19 +42725,23 @@ impl AncestorCompound {
     /// `:is()` members decided against that ancestor's own chain.
     fn matches_ancestor_in_chain(&self, ancestors: &[Ancestor], idx: usize) -> bool {
         let ancestor = &ancestors[idx];
-        self.matches_ancestor(ancestor) && {
-            let (tag, classes, id, attributes) = &**ancestor;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
-        }
+        self.matches_ancestor(ancestor)
+            && self.structural_hold_for_the_named_node()
+            && {
+                let (tag, classes, id, attributes) = &**ancestor;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
+            }
     }
 
     /// [`Self::matches_sibling`], with the complex `:is()` members decided
     /// against the sibling's chain, which is the subject's.
     fn matches_sibling_in_chain(&self, prev: &SiblingKey, ancestors: &[Ancestor]) -> bool {
-        self.matches_sibling(prev) && {
-            let (tag, classes, id, _) = prev;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
-        }
+        self.matches_sibling(prev)
+            && self.node_parts_hold(prev, true)
+            && {
+                let (tag, classes, id, _) = prev;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
+            }
     }
 
     /// Every `:is()` with a complex member holds for the element known by
@@ -42322,7 +42839,80 @@ impl AncestorCompound {
     /// [`RELATIONAL_NODE`]: a `:has()` reads its subtree, and a complex
     /// `:is()` member's own walk reads its DOM siblings.
     fn needs_node(&self) -> bool {
-        self.relational || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+        self.relational || self.has_structural() || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+    }
+
+    /// The structural pseudo-classes against the DOM element the walk
+    /// named for this ancestor (`RELATIONAL_NODE`); permissive without one.
+    fn structural_hold_for_the_named_node(&self) -> bool {
+        if !self.has_structural() {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        self.structural_holds_for(&node)
+    }
+
+    /// A structural pseudo-class, or a `:not()` of one, is in the compound.
+    fn has_structural(&self) -> bool {
+        !self.structural.is_empty() || !self.not_structural.is_empty()
+    }
+
+    /// Every structural pseudo-class holds for `node` and no `:not()` one does.
+    fn structural_holds_for(&self, node: &Rc<Node>) -> bool {
+        self.structural.iter().all(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+            && !self.not_structural.iter().any(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+    }
+
+    /// The compound is exactly one structural pseudo-class: no tag, class,
+    /// id, attribute, state, `:is()`, `:not()` or `:has()`.
+    fn is_one_structural_pseudo(&self) -> bool {
+        self.structural.len() == 1
+            && !self.never
+            && self.tag.is_none()
+            && self.classes.is_empty()
+            && self.id.is_none()
+            && self.attrs.is_empty()
+            && self.state.is_empty()
+            && self.not_state.is_empty()
+            && self.any_of.is_empty()
+            && self.none_of.is_empty()
+            && self.not_structural.is_empty()
+            && self.has.is_empty()
+            && !self.relational
+    }
+
+    /// [`Self::needs_node`] for a compound left of `+` / `~`: an earlier
+    /// sibling's key carries no attributes either (`SiblingKey`), so its
+    /// `[...]` and `:not([...])` parts are read from the DOM element too.
+    fn needs_node_as_sibling(&self) -> bool {
+        self.needs_node() || !self.attrs.is_empty() || !self.none_of.is_empty()
+    }
+
+    /// The parts of the compound a key tuple cannot decide, for the DOM
+    /// element the walk names (`RELATIONAL_NODE`): its structural
+    /// pseudo-classes and, for an earlier sibling (`attrs_too`), its
+    /// attribute selectors. Permissive where no element is named.
+    fn node_parts_hold(&self, key: &SiblingKey, attrs_too: bool) -> bool {
+        if !self.has_structural() && !(attrs_too && (!self.attrs.is_empty() || !self.none_of.is_empty())) {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        if !self.structural_holds_for(&node) {
+            return false;
+        }
+        if !attrs_too || (self.attrs.is_empty() && self.none_of.is_empty()) {
+            return true;
+        }
+        let NodeType::Element { attributes, .. } = &node.node_type else {
+            return true;
+        };
+        let (tag, classes, id, _) = key;
+        self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id.as_ref(), Some(attributes)))
     }
 }
 
@@ -43661,9 +44251,13 @@ impl SelectorReads {
                         "" => {}
                         // `:has()` on an ancestor reads its subtree, which
                         // the chain key does not hold.
+                        // A structural pseudo-class on an ancestor reads
+                        // that ancestor's place among its siblings (CH2.E51),
+                        // which the chain key does not hold either: elements
+                        // alike in every key can differ in it.
                         " " | ">" => {
                             self.note_ancestor(compound);
-                            positional |= compound.relational;
+                            positional |= compound.relational || compound.has_structural();
                         }
                         _ => positional = true,
                     }

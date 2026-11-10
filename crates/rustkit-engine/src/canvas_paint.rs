@@ -657,6 +657,7 @@ fn draw_text(
         ascent: Some(0.0),
         run: None,
         faces: None,
+        undilated: false,
     });
 }
 
