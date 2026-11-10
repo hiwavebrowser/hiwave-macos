@@ -578,6 +578,55 @@ mod tests {
         assert!(chords.is_empty());
     }
 
+    /// #1023 delta HOLD 5836613705: a chord held back behind a started one,
+    /// which the page then starts and never answers, must still be given
+    /// up at its own deadline; otherwise it stays held for good and every
+    /// later timed-out chord waits behind it (Cmd shortcuts dead app-wide).
+    #[test]
+    fn a_deferred_chord_the_page_starts_and_never_answers_is_given_up() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        // A: started, its listener slow.
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        assert_eq!(chords.expire(1), None);
+        // B: its wait runs out behind A, so it is held back. Its give-up
+        // timer is armed now, when its 100 ms timer fires.
+        chords.hold(2, 'd', t0 + Duration::from_millis(30));
+        assert_eq!(chords.expire(2), None, "B waits behind A");
+        assert_eq!(
+            chords.give_up_at(2),
+            Some(t0 + Duration::from_millis(30) + STARTED_CHORD_GIVE_UP),
+            "the 100 ms timer finds a give-up deadline for the held-back chord"
+        );
+        // A's listener returns; the page reaches B before A's answer crosses.
+        assert!(chords.begin(2), "B is the page's");
+        assert_eq!(chords.answer(1, false, t0).map(|(f, _)| f), Some(ChordFate::ToMenu('l')));
+        assert!(chords.release_due().is_empty(), "B is started: the page answers it");
+        // B is never answered (the page's thread died). At B's give-up:
+        assert_eq!(chords.give_up(2), Some(ChordFate::ToMenu('d')), "B given up, once");
+        assert!(chords.is_empty(), "nothing stays held");
+        // A later chord is not held back by anything.
+        chords.hold(3, 't', t0 + Duration::from_secs(7));
+        assert_eq!(chords.expire(3), Some(ChordFate::ToMenu('t')), "C still reaches the menu at its deadline");
+    }
+
+    /// A held-back chord whose give-up fires while it is still not started
+    /// is left to `release_due` (its blocker's answer or give-up, which
+    /// comes first, releases it).
+    #[test]
+    fn a_give_up_on_a_held_back_chord_not_started_waits_for_release_due() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        chords.hold(2, 'd', t0);
+        assert_eq!(chords.expire(2), None);
+        assert_eq!(chords.give_up(2), None, "not started: not the give-up's");
+        assert_eq!(chords.give_up(1), Some(ChordFate::ToMenu('l')));
+        assert_eq!(chords.release_due(), vec![(2, ChordFate::ToMenu('d'))]);
+    }
+
     /// #1015 delta R1 (b): a timed-out token that fell out of the memory is
     /// still the menu's. Forgetting fails safe: the page skips the edit.
     #[test]
