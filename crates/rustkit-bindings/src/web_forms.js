@@ -439,15 +439,18 @@
         reflectString(g.HTMLDetailsElement.prototype, 'name', 'name');
     }
 
-    // ---- img size (HTML §4.8.4.3): the attribute when there is one; with
-    // none, the rendered box, and for an image that has no box (not
-    // displayed, not in the document) its own size once loaded, else 0.
+    // ---- img size (HTML §4.8.4.3): the attribute when there is one, else
+    // the image's own size once loaded, else 0. Chrome answers the rendered
+    // box, which needs a layout; the same number for an image CSS does not
+    // size. Read here without one: a page's load handlers read it for every
+    // card after writing a style, and the engine's forced layout of a large
+    // page is far dearer than Chrome's (E54, a recorded search page: 22 such
+    // reads were 15.7 s).
     ['width', 'height'].forEach(function (k) {
         accessor(Img, k, function () {
             var n = parseInt(this.getAttribute(k), 10);
             if (n >= 0) return n;
-            var box = this.isConnected ? Math.round(this.getBoundingClientRect()[k]) : 0;
-            return box > 0 ? box : (k === 'width' ? this.naturalWidth : this.naturalHeight) || 0;
+            return (k === 'width' ? this.naturalWidth : this.naturalHeight) || 0;
         }, function (v) { this.setAttribute(k, String(v >>> 0)); });
     });
     // img.src: the `src` attribute (whatever loads an img loads this one),
