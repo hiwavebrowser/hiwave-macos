@@ -12,6 +12,7 @@ on:
 # Only pull_request runs share a group (parity-pr-<number>); push to
 # master/main and the daily schedule get parity-<run_id>, a group of one,
 # and cancel-in-progress is false for them, so they are never cancelled.
+# (T42; syntax per GitHub's workflow-syntax docs, `concurrency` section.)
 concurrency:
   group: parity-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
