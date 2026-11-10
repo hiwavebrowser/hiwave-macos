@@ -61,6 +61,12 @@ pub(crate) struct LayoutCtx {
     /// What the inline svg pre-pass keeps between builds: the id index,
     /// each svg's markup key and the paint maps (`svg_prepass`, LAT4b).
     pub(crate) svg_prepass: RefCell<crate::svg_prepass::SvgPrepass>,
+    /// The display's device pixel ratio, for choosing among an `<img>`'s `srcset` candidates
+    /// (`EngineConfig::device_pixel_ratio`; `None`: not told, the densest candidate wins).
+    pub(crate) image_dpr: std::cell::Cell<Option<f32>>,
+    /// The density each chosen image URL was picked at (its `x`, or `w / sizes`): the image's
+    /// natural size is its pixel size divided by it. Keyed by the absolute URL the box uses.
+    pub(crate) image_density: RefCell<HashMap<String, f32>>,
 }
 
 impl Default for LayoutCtx {
@@ -73,6 +79,8 @@ impl Default for LayoutCtx {
             svg_cache: RefCell::default(),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
+            image_dpr: std::cell::Cell::new(None),
+            image_density: RefCell::default(),
         }
     }
 }

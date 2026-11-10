@@ -1,0 +1,25 @@
+CH2.E54b part 1: what Chromium does for <img srcset/sizes>, <picture>.
+Chromium 143.0.7499.4 (Playwright's bundled build; Chrome for Testing 148 was not to hand), headless,
+viewport 800x600, device pixel ratio 1 and 2. Images: a=100x50, b=200x100, c=400x200, d=800x400 PNG.
+Page: <body style="margin:0"> + the markup; read img.currentSrc, naturalWidth x naturalHeight, width x height.
+Probe: tools-free script, kept in the PR description (page set below).
+
+markup                                                              | dpr1 cur / natural / shown | dpr2 cur / natural / shown
+srcset="a 1x, b 2x, c 4x"                                           | a / 100x50 / 100x50 | b / 100x50 / 100x50
+srcset="a 1.5x, b 3x"                                               | a / 66x33 / 67x33   | b / 66x33 / 67x33
+srcset=a 100w, b 200w, c 400w, d 800w; sizes="300px"                | c / 300x150 / 300x150 | d / 300x150 / 300x150
+  ... sizes="50vw"                                                  | c / 400x200 / 400x200 | d / 400x200 / 400x200
+  ... sizes="(max-width: 500px) 100px, 600px"                       | d / 600x300 / 600x300 | d / 600x300 / 600x300
+  ... (no sizes)                                                    | d / 800x400 / 800x400 | d / 800x400 / 800x400
+  ... sizes="calc(50vw - 100px)"                                    | c / 300x150 / 300x150 | d / 300x150 / 300x150
+src="a" srcset="b 2x"                                               | a / 100x50 / 100x50 | b / 100x50 / 100x50
+src="a" srcset="b 200w, c 400w" sizes="200px"                       | b / 200x100 / 200x100 | c / 200x100 / 200x100
+<picture><source media="(max-width: 900px)" srcset=b><img src=c>    | b / 200x100 / 200x100 | b
+<picture><source media="(max-width: 500px)" srcset=b><img src=c>    | c / 400x200 / 400x200 | c
+<picture><source type="image/x-nonsense" srcset=b><img src=c>       | c | c
+<picture><source type="image/png" srcset=b><img src=c>              | b | b
+<picture><source srcset=a><source srcset=b><img src=c>              | a (first match wins) | a
+<picture><source media="(min-width: 400px)" srcset="a 100w, b 200w, d 800w" sizes="400px"><img src=c> | d / 400x200 / 400x200 | d
+srcset="a 1x, b 2x" style="width:50px"                              | a / 100x50 / 50x25  | b / 100x50 / 50x25
+srcset="b 2x"                                                       | b / 100x50 / 100x50 | b / 100x50 / 100x50
+natural size = image pixel size / density of the chosen candidate (density = x, or w / source size).

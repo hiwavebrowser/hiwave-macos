@@ -289,6 +289,7 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+pub mod image_source;
 mod focus_pseudo;
 mod text_input;
 pub use text_input::{TextInputCaret, TextInputState};
@@ -466,6 +467,8 @@ mod sheet_reuse_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
+#[cfg(all(test, feature = "headless"))]
+mod image_source_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1618,6 +1621,11 @@ pub struct EngineConfig {
     /// those scripts added: nobody will see that page. Off by default: a
     /// capture never follows the page, and shows it as it was.
     pub follows_script_navigation: bool,
+    /// The display's device pixel ratio, which decides among an `<img>`'s `srcset` candidates
+    /// (HTML 4.8.4.3). `None`: the embedder did not say (the engine has never tracked the
+    /// window's backing scale), and the densest candidate wins, as it always did. A capture
+    /// that compares with Chrome at ratio 1 sets `Some(1.0)`.
+    pub device_pixel_ratio: Option<f32>,
     /// What the page asks of the network once its `load` event has fired
     /// (a load handler's `fetch`, an XHR, an `<img>` a beacon appends, and
     /// the same from the load's timers) is left to the live loop
@@ -1655,6 +1663,7 @@ impl Default for EngineConfig {
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
+            device_pixel_ratio: None,
             post_load_requests_live: false,
             inspector: InspectorConfig::tab(),
             system_clipboard: false,
@@ -2503,6 +2512,8 @@ impl EngineConfig {
     pub fn for_parity_testing() -> Self {
         Self {
             disable_animations: true,
+            // Captures are compared with Chrome at ratio 1 (the board's oracle).
+            device_pixel_ratio: Some(1.0),
             ..Default::default()
         }
     }
@@ -3129,6 +3140,8 @@ impl Engine {
 
         console_log::install_console_diag();
         let system_clipboard = config.system_clipboard;
+        let lctx = layout_ctx::LayoutCtx::default();
+        lctx.image_dpr.set(config.device_pixel_ratio);
         Ok(Self {
             config,
             presenter,
@@ -3145,7 +3158,7 @@ impl Engine {
             views: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
-            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+            lctx: Rc::new(lctx),
         })
     }
 
@@ -6878,6 +6891,13 @@ impl Engine {
 
     /// A view's viewport in CSS px, as `relayout` sizes it: the headless
     /// bounds if it has them, otherwise its host surface.
+    /// What `srcset` / `sizes` / `<picture>` selection reads of a view: its viewport and the
+    /// device pixel ratio the embedder gave (`image_source`).
+    fn image_source_env(&self, id: EngineViewId) -> image_source::SourceEnv {
+        let (viewport_width, viewport_height) = self.view_viewport(id).unwrap_or((0.0, 0.0));
+        image_source::SourceEnv { viewport_width, viewport_height, device_pixel_ratio: self.config.device_pixel_ratio }
+    }
+
     fn view_viewport(&self, id: EngineViewId) -> Option<(f32, f32)> {
         let view = self.views.get(&id)?;
         let bounds = match view.headless_bounds {
@@ -11973,7 +11993,10 @@ impl layout_ctx::LayoutCtx {
         });
 
         match (&loaded, svg_size) {
-            (Some(image), _) => (image.natural_width as f32, image.natural_height as f32),
+            (Some(image), _) => {
+                let density = self.image_density.borrow().get(src).copied().unwrap_or(1.0).max(f32::MIN_POSITIVE);
+                (image.natural_width as f32 / density, image.natural_height as f32 / density)
+            }
             (None, Some((w, h))) => (w, h),
             // Image unavailable at layout time: fall back to the
             // width=/height= attributes, then the placeholder size.
@@ -12412,9 +12435,16 @@ impl layout_ctx::LayoutCtx {
                     // SAME selection rule as discover_images, or the loader
                     // caches under one key and layout looks up another — the
                     // exact cache-miss shape #113 fixed for relative URLs.
-                    let src = attributes
-                        .get("srcset")
-                        .and_then(|ss| Engine::pick_from_srcset(ss))
+                    let (viewport_w, viewport_h) = self.building_viewport().unwrap_or((0.0, 0.0));
+                    let env = image_source::SourceEnv {
+                        viewport_width: viewport_w,
+                        viewport_height: viewport_h,
+                        device_pixel_ratio: self.image_dpr.get(),
+                    };
+                    let chosen = image_source::select_for_node(node, &env);
+                    let chosen_density = chosen.as_ref().map(|c| c.density);
+                    let src = chosen
+                        .map(|c| c.url)
                         .or_else(|| attributes.get("src").cloned())
                         .unwrap_or_default();
 
@@ -12450,6 +12480,16 @@ impl layout_ctx::LayoutCtx {
                         .resolve_resource_url(&src)
                         .map(|u| u.to_string())
                         .unwrap_or(src);
+                    // The density the candidate was chosen at: the natural size is the image's
+                    // pixel size over it (`<img srcset="b.png 2x">`, b.png 200 px, is 100 wide).
+                    match chosen_density {
+                        Some(density) if (density - 1.0).abs() > f32::EPSILON => {
+                            self.image_density.borrow_mut().insert(src.clone(), density);
+                        }
+                        _ => {
+                            self.image_density.borrow_mut().remove(&src);
+                        }
+                    }
                     let src = self
                         .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src))
                         .unwrap_or(src);
@@ -17835,74 +17875,6 @@ impl Engine {
         urls
     }
 
-    /// Discover images from <img> elements.
-    /// Choose one candidate from an `srcset` attribute.
-    ///
-    /// HTML §4.8.4.2. Deliberately a SUBSET: candidates are parsed and the
-    /// widest `w` (or highest `x`) wins, which is the right answer on a
-    /// retina display and a defensible one everywhere. Full selection needs
-    /// the `sizes` attribute and viewport/DPR math — that is a separate unit
-    /// and is NOT claimed here.
-    ///
-    /// Why it exists at all: `srcset` had ZERO support, so a page serving
-    /// images only via srcset (increasingly common; the `src` is often a
-    /// 1x1 placeholder or absent) rendered NO IMAGE AT ALL. A wrong-density
-    /// image is a rendering difference; no image is a hole.
-    fn pick_from_srcset(srcset: &str) -> Option<String> {
-        // `w` and `x` descriptors are NOT comparable — one is a pixel width,
-        // the other a device ratio. The first version scaled x by 1000 to
-        // rank them together; a test then showed 2x and 2000w colliding
-        // exactly, with the tie decided by document order. Inventing a
-        // common scale for incomparable units is the bug, not the tie.
-        //
-        // So: partition. If ANY width candidate exists, width decides
-        // (that is the descriptor authors reach for when the rendered size
-        // varies); otherwise density decides. Mixed srcsets are invalid per
-        // HTML §4.8.4.2 anyway.
-        let mut widest: Option<(f32, String)> = None;
-        let mut densest: Option<(f32, String)> = None;
-        let mut bare: Option<String> = None;
-
-        for cand in srcset.split(',') {
-            let mut parts = cand.split_whitespace();
-            let url = match parts.next() {
-                Some(u) if !u.is_empty() => u,
-                _ => continue,
-            };
-            match parts.next() {
-                // No descriptor means 1x (HTML §4.8.4.2).
-                None => {
-                    if bare.is_none() {
-                        bare = Some(url.to_string());
-                    }
-                    if densest.as_ref().map(|(d, _)| 1.0 > *d).unwrap_or(true) {
-                        densest = Some((1.0, url.to_string()));
-                    }
-                }
-                Some(d) if d.ends_with('w') => {
-                    if let Ok(w) = d[..d.len() - 1].parse::<f32>() {
-                        if widest.as_ref().map(|(b, _)| w > *b).unwrap_or(true) {
-                            widest = Some((w, url.to_string()));
-                        }
-                    }
-                }
-                Some(d) if d.ends_with('x') => {
-                    if let Ok(x) = d[..d.len() - 1].parse::<f32>() {
-                        if densest.as_ref().map(|(b, _)| x > *b).unwrap_or(true) {
-                            densest = Some((x, url.to_string()));
-                        }
-                    }
-                }
-                Some(_) => {}
-            }
-        }
-
-        widest
-            .map(|(_, u)| u)
-            .or_else(|| densest.map(|(_, u)| u))
-            .or(bare)
-    }
-
     /// Serialize an inline `<svg>` element subtree back to markup for
     /// rustkit-svg's parser. Attributes are emitted in sorted order because
     /// the same subtree is serialized twice per layout (cache insert in the
@@ -18571,8 +18543,8 @@ impl Engine {
         }
     }
 
-    fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
-        Self::img_elements(document, base_url)
+    fn discover_images(&self, document: &Document, base_url: Option<&Url>, env: &image_source::SourceEnv) -> Vec<(String, Url)> {
+        Self::img_elements(document, base_url, env)
             .into_iter()
             .map(|(_, src, url)| (src, url))
             .collect()
@@ -18580,8 +18552,8 @@ impl Engine {
 
     /// Each `<img>` (raw NodeId) and the absolute URL of the image it asks
     /// for, by the rule [`Self::discover_images`] fetches by.
-    fn img_sources(document: &Document, base_url: Option<&Url>) -> Vec<(usize, Url)> {
-        Self::img_elements(document, base_url)
+    fn img_sources(document: &Document, base_url: Option<&Url>, env: &image_source::SourceEnv) -> Vec<(usize, Url)> {
+        Self::img_elements(document, base_url, env)
             .into_iter()
             .map(|(node, _, url)| (node, url))
             .collect()
@@ -18589,7 +18561,7 @@ impl Engine {
 
     /// Every `<img>` that names an image: its raw NodeId, the source as
     /// written, and that resolved.
-    fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
+    fn img_elements(document: &Document, base_url: Option<&Url>, env: &image_source::SourceEnv) -> Vec<(usize, String, Url)> {
         let mut images = Vec::new();
 
         // Find all <img> elements, shadow trees included
@@ -18597,11 +18569,10 @@ impl Engine {
 
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
-                // srcset wins when present (that is the point of it); src is
-                // the fallback and is often a placeholder on srcset pages.
-                let chosen = attributes
-                    .get("srcset")
-                    .and_then(|ss| Self::pick_from_srcset(ss))
+                // HTML 4.8.4.3: a <picture>'s sources, then srcset against the ratio and
+                // `sizes`, with src a 1x candidate (`image_source`).
+                let chosen = image_source::select_for_node(&img_el, env)
+                    .map(|c| c.url)
                     .or_else(|| attributes.get("src").cloned());
 
                 if let Some(src) = chosen {
@@ -18856,7 +18827,8 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let elements = Self::img_elements(document.as_ref(), base_url);
+        let env = self.image_source_env(id);
+        let elements = Self::img_elements(document.as_ref(), base_url, &env);
         // The `<img>` elements asking for a URL that has failed: who is
         // owed an `error` (LAT9-r1). Nothing is collected on a page with
         // no failed image.
@@ -19264,6 +19236,7 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "relayout after a failed image failed"),
             }
         }
+        let env = self.image_source_env(id);
         let Some(view) = self.views.get(&id) else {
             return relaid_out;
         };
@@ -19277,7 +19250,7 @@ impl Engine {
         {
             let mut failed = view.lay.failed_images.borrow_mut();
             let mut still_failed = std::collections::HashSet::new();
-            for (node, url) in Self::img_sources(document.as_ref(), view.url.as_ref()) {
+            for (node, url) in Self::img_sources(document.as_ref(), view.url.as_ref(), &env) {
                 let url = url.to_string();
                 if !failed.urls.contains(&url) {
                     continue;
@@ -24060,6 +24033,13 @@ impl EngineBuilder {
     /// (`EngineConfig::system_clipboard`).
     pub fn system_clipboard(mut self, on: bool) -> Self {
         self.config.system_clipboard = on;
+        self
+    }
+
+    /// The display's device pixel ratio for `srcset` selection
+    /// (`EngineConfig::device_pixel_ratio`).
+    pub fn device_pixel_ratio(mut self, ratio: f32) -> Self {
+        self.config.device_pixel_ratio = Some(ratio);
         self
     }
 
@@ -37602,6 +37582,14 @@ mod relative_url_tests {
 mod srcset_tests {
     use super::*;
 
+    /// The selection an embedder that gave no device pixel ratio gets (the densest candidate):
+    /// what these tests pinned when `pick_from_srcset` was the whole of it. The full selection
+    /// (ratio, `sizes`, `<picture>`) is `image_source`'s, with tests of its own.
+    fn pick_unsized(srcset: &str) -> Option<String> {
+        let env = image_source::SourceEnv { viewport_width: 800.0, viewport_height: 600.0, device_pixel_ratio: None };
+        image_source::select_image_source(None, Some(srcset), None, &[], &env).map(|c| c.url)
+    }
+
     // ---- srcset had ZERO support (live finding, 2026-08-08) ----
     //
     // A page serving images only via srcset rendered NO IMAGE AT ALL — the
@@ -37610,15 +37598,13 @@ mod srcset_tests {
 
     #[test]
     fn widest_w_candidate_wins() {
-        let picked = Engine::pick_from_srcset(
-            "small.jpg 400w, medium.jpg 800w, large.jpg 1600w",
-        );
+        let picked = pick_unsized("small.jpg 400w, medium.jpg 800w, large.jpg 1600w");
         assert_eq!(picked.as_deref(), Some("large.jpg"));
     }
 
     #[test]
     fn density_candidates_are_ranked_among_themselves() {
-        let picked = Engine::pick_from_srcset("a.png, b.png 2x, c.png 3x");
+        let picked = pick_unsized("a.png, b.png 2x, c.png 3x");
         assert_eq!(picked.as_deref(), Some("c.png"));
     }
 
@@ -37628,7 +37614,7 @@ mod srcset_tests {
         // make a single-candidate srcset resolve to nothing, which is the
         // no-image hole this whole change exists to close.
         assert_eq!(
-            Engine::pick_from_srcset("only.png").as_deref(),
+            pick_unsized("only.png").as_deref(),
             Some("only.png")
         );
     }
@@ -37637,14 +37623,14 @@ mod srcset_tests {
     fn density_never_outranks_width_by_scale_accident() {
         // 2x and 2000w are on different scales. Without normalisation a
         // naive max() picks the 2x candidate over a far larger w one.
-        let picked = Engine::pick_from_srcset("dense.png 2x, wide.png 2000w");
+        let picked = pick_unsized("dense.png 2x, wide.png 2000w");
         assert_eq!(picked.as_deref(), Some("wide.png"));
     }
 
     #[test]
     fn malformed_input_yields_none_rather_than_a_bogus_url() {
-        assert_eq!(Engine::pick_from_srcset(""), None);
-        assert_eq!(Engine::pick_from_srcset("   "), None);
+        assert_eq!(pick_unsized(""), None);
+        assert_eq!(pick_unsized("   "), None);
     }
 
     #[test]
