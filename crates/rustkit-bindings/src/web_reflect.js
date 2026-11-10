@@ -12,8 +12,10 @@
 // have it (web_forms.js and the DOM layer own the form controls, `a.href`
 // and `script.src`).
 //
-// Honest limits: `img.complete` is true only for an image with no `src`, and
-// `naturalWidth/Height` are 0 (the engine does not publish decoded sizes);
+// Honest limits: `img.complete` is true only for an image with no `src` or
+// one whose load the engine reported as failed (a loaded image still reads
+// false), and `naturalWidth/Height` are 0 (the engine does not publish
+// decoded sizes);
 // `iframe.contentWindow/contentDocument` are null; `link.sheet` stays as the
 // CSSOM layer has it.
 (function (g) {
@@ -229,7 +231,15 @@
         enm(I, 'referrerPolicy', 'referrerpolicy', ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'], '', '');
         enm(I, 'fetchPriority', 'fetchpriority', ['high', 'low', 'auto'], 'auto');
         def(I, 'currentSrc', function () { var v = this.getAttribute('src'); return v === null ? '' : resolve(v); });
-        def(I, 'complete', function () { var v = this.getAttribute('src'); return v === null || v === ''; });
+        // Also true once the engine has reported this `src`/`srcset` as a
+        // failed load (`document.__rkImageFailed`), as in Chrome, where a
+        // broken image is complete with a naturalWidth of 0.
+        def(I, 'complete', function () {
+            var v = this.getAttribute('src');
+            if (v === null || v === '') return true;
+            var failed = document.__rkImageFailedFor ? document.__rkImageFailedFor(this) : null;
+            return !!failed && failed[0] === v && failed[1] === this.getAttribute('srcset');
+        });
         def(I, 'naturalWidth', function () { return 0; });
         def(I, 'naturalHeight', function () { return 0; });
         def(I, 'x', function () { return this.getBoundingClientRect().x; });
