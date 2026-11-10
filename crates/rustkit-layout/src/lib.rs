@@ -456,7 +456,14 @@ pub(crate) fn form_control_intrinsic_size(
                 // #modeSelector is 31), and RustKit does not carry
                 // `appearance` yet — taking the +2 moved chrome's whole
                 // sidebar 2px down on 12 board rows.
-                (widest.ceil() + 20.0 + pb_h, single_line_box(19.0 * ua_scale))
+                // `appearance: none` drops the arrow well (Chrome 148: 79
+                // wide for 99 with it, form_control_decoration_tests).
+                let well = if style.appearance == rustkit_css::Appearance::None {
+                    0.0
+                } else {
+                    20.0
+                };
+                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale))
             }
         }
     }
@@ -8744,6 +8751,13 @@ pub enum DisplayCommand {
         /// on the legacy callers (paint then decides with the same function
         /// on its own font) and wherever `advances` is `None`.
         faces: Option<Vec<rustkit_text::GlyphFace>>,
+        /// The glyphs are drawn from the undilated outline (Skia's path for
+        /// unhinted text on macOS: `-webkit-font-smoothing: antialiased`,
+        /// `text-rendering: geometricPrecision`). `false`, the default, is
+        /// Chrome's normal macOS text: CoreGraphics-smoothed (dilated)
+        /// masks with Skia's mask pre-blend for the text colour
+        /// (`ComputedStyle::text_dilated`).
+        undilated: bool,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -11828,16 +11842,29 @@ impl DisplayList {
     /// Render borders.
     fn render_borders(&mut self, layout_box: &LayoutBox) {
         let d = &layout_box.dimensions;
-        let s = &layout_box.style;
-        let bb = d.border_box();
+        let radius = self.border_radius_px(layout_box);
+        let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
+        self.paint_border_ring(&layout_box.style, d.border_box(), widths, radius);
+    }
+
+    /// A border ring of `widths` (top, right, bottom, left) on the border
+    /// box `bb`, in `s`'s border colours and styles, with corner `radius`.
+    /// `render_borders` paints a box's border with it, and a form control,
+    /// whose border is inside its content rect, paints its author frame
+    /// with it (`render_form_control`).
+    fn paint_border_ring(
+        &mut self,
+        s: &rustkit_css::ComputedStyle,
+        bb: Rect,
+        widths: [f32; 4],
+        radius: BorderRadius,
+    ) {
 
         // Rounded corners: one command, so the renderer can curve both
         // edges of the ring. The strips below painted a square frame around
         // a rounded background (rounded-corners §5). Solid rings only: the
         // ring command has no dash pattern, so a rounded dashed/dotted border
         // keeps the per-side path below (square corners, correct dashes).
-        let radius = self.border_radius_px(layout_box);
-        let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
         let all_solid = [
             s.border_top_style,
             s.border_right_style,
@@ -11848,7 +11875,7 @@ impl DisplayList {
         .all(|st| matches!(st, rustkit_css::BorderStyle::Solid | rustkit_css::BorderStyle::None));
         if !radius.is_zero() && all_solid && widths.iter().any(|w| *w > 0.0) {
             self.commands.push(DisplayCommand::RoundedBorder {
-                rect: d.border_box(),
+                rect: bb,
                 widths,
                 colors: [
                     s.border_top_color,
@@ -11868,31 +11895,31 @@ impl DisplayList {
         let sides = [
             // (thickness, color, style, strip rect, horizontal)
             (
-                d.border.top,
+                widths[0],
                 s.border_top_color,
                 s.border_top_style,
-                Rect::new(bb.x, bb.y, bb.width, d.border.top),
+                Rect::new(bb.x, bb.y, bb.width, widths[0]),
                 true,
             ),
             (
-                d.border.right,
+                widths[1],
                 s.border_right_color,
                 s.border_right_style,
-                Rect::new(bb.right() - d.border.right, bb.y, d.border.right, bb.height),
+                Rect::new(bb.right() - widths[1], bb.y, widths[1], bb.height),
                 false,
             ),
             (
-                d.border.bottom,
+                widths[2],
                 s.border_bottom_color,
                 s.border_bottom_style,
-                Rect::new(bb.x, bb.bottom() - d.border.bottom, bb.width, d.border.bottom),
+                Rect::new(bb.x, bb.bottom() - widths[2], bb.width, widths[2]),
                 true,
             ),
             (
-                d.border.left,
+                widths[3],
                 s.border_left_color,
                 s.border_left_style,
-                Rect::new(bb.x, bb.y, d.border.left, bb.height),
+                Rect::new(bb.x, bb.y, widths[3], bb.height),
                 false,
             ),
         ];
@@ -12239,6 +12266,7 @@ impl DisplayList {
                     ascent: Some(seat_ascent),
                     run: line_run.map(std::sync::Arc::new),
                     faces,
+                    undilated: !style.text_dilated(),
                 });
 
                 // Draw text decorations
@@ -12486,6 +12514,20 @@ impl DisplayList {
         } else {
             1.0
         };
+        // The box's own decorations are the author's (CB1b). Its background
+        // was painted under this by `render_background`, with its radius
+        // and image layers; the control commands re-filled the box square
+        // over it (chrome.html's rounded Mode select painted square). An
+        // author frame, every side an explicit width, is painted here as a
+        // border ring, with its radius and dashes (the new-tab button's
+        // `1px dashed` painted solid); the commands' own frame is only the
+        // stand-in of a control without one.
+        let author_frame = sides.iter().all(|w| w.is_some_and(|w| w > 0.0));
+        if author_frame {
+            let widths = sides.map(|w| w.unwrap_or(0.0));
+            let radius = self.border_radius_px(layout_box);
+            self.paint_border_ring(&layout_box.style, rect, widths, radius);
+        }
         let font_family = layout_box.style.font_family.clone();
         let font_weight = layout_box.style.font_weight.0;
         // Same resolution layout_form_control composes the box from, so the
@@ -12541,8 +12583,10 @@ impl DisplayList {
                     // The UA layer supplies the default background for form
                     // controls, so an authored `transparent` survives here
                     // instead of being replaced with white at paint time.
-                    background_color: bg_color,
-                    border_color: if border_color.a > 0.0 {
+                    background_color: Color::TRANSPARENT,
+                    border_color: if author_frame {
+                        Color::TRANSPARENT
+                    } else if border_color.a > 0.0 {
                         border_color
                     } else {
                         Color::new(200, 200, 200, 1.0)
@@ -12573,8 +12617,10 @@ impl DisplayList {
                     // The UA layer supplies the default background for form
                     // controls, so an authored `transparent` survives here
                     // instead of being replaced with white at paint time.
-                    background_color: bg_color,
-                    border_color: if border_color.a > 0.0 {
+                    background_color: Color::TRANSPARENT,
+                    border_color: if author_frame {
+                        Color::TRANSPARENT
+                    } else if border_color.a > 0.0 {
                         border_color
                     } else {
                         Color::new(200, 200, 200, 1.0)
@@ -12600,8 +12646,10 @@ impl DisplayList {
                     },
                     // ButtonFace comes from the UA style (engine), so an
                     // authored `transparent` survives here (CH2.B3).
-                    background_color: bg_color,
-                    border_color: if border_color.a > 0.0 {
+                    background_color: Color::TRANSPARENT,
+                    border_color: if author_frame {
+                        Color::TRANSPARENT
+                    } else if border_color.a > 0.0 {
                         border_color
                     } else {
                         Color::new(180, 180, 180, 1.0)
@@ -12690,8 +12738,10 @@ impl DisplayList {
                     font_family: font_family.clone(),
                     font_weight,
                     text_color,
-                    background_color: bg_color,
-                    border_color: if border_color.a > 0.0 {
+                    background_color: Color::TRANSPARENT,
+                    border_color: if author_frame {
+                        Color::TRANSPARENT
+                    } else if border_color.a > 0.0 {
                         border_color
                     } else {
                         Color::new(200, 200, 200, 1.0)
@@ -12711,9 +12761,17 @@ impl DisplayList {
                     .cloned()
                     .unwrap_or_default();
 
+                // `appearance: none` drops the native parts, the arrow and
+                // the label's 4px inset: the label paints as a text field's
+                // value does (Chrome 148, form_control_decoration_tests).
+                let kind = if layout_box.style.appearance == rustkit_css::Appearance::None {
+                    TextControlKind::Text
+                } else {
+                    TextControlKind::MenuList
+                };
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
-                    kind: TextControlKind::MenuList,
+                    kind,
                     value: display_text,
                     placeholder: String::new(),
                     font_size,
@@ -12725,8 +12783,10 @@ impl DisplayList {
                     // The UA layer supplies the default background for form
                     // controls, so an authored `transparent` survives here
                     // instead of being replaced with white at paint time.
-                    background_color: bg_color,
-                    border_color: if border_color.a > 0.0 {
+                    background_color: Color::TRANSPARENT,
+                    border_color: if author_frame {
+                        Color::TRANSPARENT
+                    } else if border_color.a > 0.0 {
                         border_color
                     } else {
                         Color::new(200, 200, 200, 1.0)

@@ -200,13 +200,22 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
 
 /// After `source` ran: the errors its listeners and timers reported go onto
 /// the log (as before), then, for a listening Inspector only, the page's
-/// error reports and unimplemented members.
-pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: &mut Vec<ScriptRecord>, source: &str) {
+/// error reports and unimplemented members. `elapsed_ms` is the wall time of the step that ran
+/// (its listeners or timer callbacks): the report does not say which callback threw, so each record
+/// carries the step's time, as the step's own record does (H19c). 0 only where the caller has no
+/// step timer.
+pub(crate) fn drain_reports(
+    bindings: &DomBindings,
+    inspector: &Inspector,
+    log: &mut Vec<ScriptRecord>,
+    source: &str,
+    elapsed_ms: u64,
+) {
     for message in bindings.take_reported_errors() {
         log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
-            elapsed_ms: 0,
+            elapsed_ms,
             outcome: ScriptOutcome::Threw(message),
         });
     }

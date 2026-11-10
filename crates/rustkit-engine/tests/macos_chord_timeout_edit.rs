@@ -1,5 +1,6 @@
-//! M1e (#1015 R1 nit 1): a Cmd+V / Cmd+Z whose wait for the page ran out
-//! edits once, not twice.
+//! M1e (#1015 R1 nit 1): a Cmd+V / Cmd+Z / Cmd+X / Cmd+C whose wait for
+//! the page ran out edits once, not twice, and (M1g) the page does not
+//! hear its keydown: the menu is the chord's one actor.
 //!
 //! With the keyboard in a text field, Cmd+V goes to the page first
 //! (`performKeyEquivalent:`); the page's keydown runs and, uncancelled, the
@@ -8,9 +9,10 @@
 //! to the menu instead. The menu's Paste item then sends `paste:` to the
 //! view, which queues an edit command for the page. When the page's thread
 //! comes free it finds both: the chord's keydown, then the menu's paste.
-//! The keydown still fires (the page may hear a key the menu also took, the
-//! disclosed M1e tradeoff), but its editing default must not run: the menu
-//! has the chord, and its edit command is the one edit.
+//! The chord's keydown is not dispatched (M1g, #1015 delta R1 5835356948:
+//! exactly one actor; a page that heard it would act on a key the menu also
+//! took, e.g. in a tab the menu just left), and its editing default does not
+//! run: the menu has the chord, and its edit command is the one edit.
 //!
 //! This walks that path with the real pieces: an NSWindow, the engine's
 //! content view, a main menu with Paste and Undo, the view's input queue
@@ -86,6 +88,7 @@ fn main() {
             .expect("focus");
         assert!(engine.focused_node(view).is_some(), "the field has focus");
         engine.clipboard().write_text("XY");
+        let clipboard = engine.clipboard();
 
         let frame_view: id = msg_send![content_view, superview];
         let page: id = msg_send![frame_view, hitTest: NSPoint::new(10.0, 800.0 - 95.0)];
@@ -94,13 +97,19 @@ fn main() {
         let responder: id = msg_send![window, firstResponder];
         assert!(responder == page, "the content view has the keyboard");
 
-        // The menu: Edit > Paste (Cmd+V) and Undo (Cmd+Z), to the view.
+        // The menu: Edit > Paste (Cmd+V), Undo (Cmd+Z), Cut (Cmd+X) and
+        // Copy (Cmd+C), to the view.
         let string = |s: &str| -> id { NSString::alloc(nil).init_str(s) };
         let menu: id = msg_send![class!(NSMenu), alloc];
         let menu: id = msg_send![menu, initWithTitle: string("Main")];
         let sub: id = msg_send![class!(NSMenu), alloc];
         let sub: id = msg_send![sub, initWithTitle: string("Edit")];
-        for (title, action, key) in [("Paste", sel!(paste:), "v"), ("Undo", sel!(undo:), "z")] {
+        for (title, action, key) in [
+            ("Paste", sel!(paste:), "v"),
+            ("Undo", sel!(undo:), "z"),
+            ("Cut", sel!(cut:), "x"),
+            ("Copy", sel!(copy:), "c"),
+        ] {
             let item: id = msg_send![class!(NSMenuItem), alloc];
             let item: id = msg_send![item, initWithTitle: string(title) action: action keyEquivalent: string(key)];
             let _: () = msg_send![item, setTarget: page];
@@ -162,11 +171,15 @@ fn main() {
                         seen.push(match action {
                             EditAction::Paste => "menu paste",
                             EditAction::Undo => "menu undo",
+                            EditAction::Cut => "menu cut",
+                            EditAction::Copy => "menu copy",
                             _ => "menu other",
                         });
                         handle.send(PageCmd::Input(PageInput::Edit(match action {
                             EditAction::Paste => EditCommand::Paste,
                             EditAction::Undo => EditCommand::Undo,
+                            EditAction::Cut => EditCommand::Cut,
+                            EditAction::Copy => EditCommand::Copy,
                             _ => panic!("unexpected edit action"),
                         })));
                     }
@@ -212,11 +225,13 @@ fn main() {
             v == "helloXY" && seen == ["chord"] && after.is_empty(),
             format!("Cmd+V answered in time: one paste, by the page: value {v:?}, queue {seen:?} then {after:?}"),
         );
-        let _ = keys(&handle, &mut endpoint);
+        let heard = keys(&handle, &mut endpoint);
+        check(heard == "v", format!("Cmd+V answered in time: the page heard its keydown: {heard:?}"));
 
         // 2. The page's thread is held past the wait: the chord goes to the
         //    menu, whose Paste reaches the view. The page then finds the
-        //    chord and the menu's paste: one paste, and the keydown is heard.
+        //    chord and the menu's paste: one paste, and the chord's keydown
+        //    is not dispatched (M1g: one actor).
         let before = value(&handle, &mut endpoint);
         press(9, "v");
         turn(Duration::from_millis(300));
@@ -231,7 +246,7 @@ fn main() {
             v == format!("{before}XY"),
             format!("Cmd+V unanswered for 300 ms: pasted once: {before:?} -> {v:?}"),
         );
-        check(heard == "v", format!("the late keydown is still heard, once: {heard:?}"));
+        check(heard.is_empty(), format!("the page does not hear a timed-out chord's keydown: {heard:?}"));
 
         // 3. The same for undo. Two pastes in time are two undo steps; a
         //    Cmd+Z whose wait ran out takes back one of them, not both.
@@ -245,6 +260,7 @@ fn main() {
         assert!(v1 == format!("{v0}XY") && v2 == format!("{v1}XY"), "two pastes in time: {v0:?} {v1:?} {v2:?}");
         turn(Duration::from_millis(300));
         assert!(serve(&handle, &mut endpoint, "v").is_empty(), "in-time pastes left nothing for the menu");
+        let _ = keys(&handle, &mut endpoint);
         press(6, "z");
         turn(Duration::from_millis(300));
         let seen = serve(&handle, &mut endpoint, "z");
@@ -253,6 +269,43 @@ fn main() {
             seen == ["chord", "menu undo"] && v == v1,
             format!("Cmd+Z unanswered for 300 ms: one step undone: {v2:?} -> {v:?} (want {v1:?}), queue {seen:?}"),
         );
+
+        let heard = keys(&handle, &mut endpoint);
+        check(heard.is_empty(), format!("nor a timed-out Cmd+Z's: {heard:?}"));
+
+        // 4. Cut (#1015 delta R1 (c)): the field holds "abcdef" with "cd"
+        //    selected. A Cmd+X whose wait ran out is the menu's Cut: "cd" goes
+        //    to the clipboard and leaves the field once, the page hears no
+        //    keydown, and its late default cuts nothing more.
+        eval(&handle, &mut endpoint, "q.value = 'abcdef'; q.setSelectionRange(2, 4); 0");
+        let _ = keys(&handle, &mut endpoint);
+        press(7, "x");
+        turn(Duration::from_millis(300));
+        let seen = serve(&handle, &mut endpoint, "x");
+        let v = value(&handle, &mut endpoint);
+        let clip = clipboard.read_text();
+        let heard = keys(&handle, &mut endpoint);
+        check(
+            seen == ["chord", "menu cut"] && v == "abef" && clip.as_deref() == Some("cd"),
+            format!("Cmd+X unanswered for 300 ms: cut once by the menu: value {v:?}, clipboard {clip:?}, queue {seen:?}"),
+        );
+        check(heard.is_empty(), format!("the page does not hear the timed-out Cmd+X: {heard:?}"));
+
+        // 5. Copy: a Cmd+C whose wait ran out is the menu's Copy; the field is
+        //    unchanged and the page hears no keydown.
+        eval(&handle, &mut endpoint, "q.value = 'ghijkl'; q.setSelectionRange(1, 3); 0");
+        let _ = keys(&handle, &mut endpoint);
+        press(8, "c");
+        turn(Duration::from_millis(300));
+        let seen = serve(&handle, &mut endpoint, "c");
+        let v = value(&handle, &mut endpoint);
+        let clip = clipboard.read_text();
+        let heard = keys(&handle, &mut endpoint);
+        check(
+            seen == ["chord", "menu copy"] && v == "ghijkl" && clip.as_deref() == Some("hi"),
+            format!("Cmd+C unanswered for 300 ms: copied by the menu, field unchanged: value {v:?}, clipboard {clip:?}, queue {seen:?}"),
+        );
+        check(heard.is_empty(), format!("the page does not hear the timed-out Cmd+C: {heard:?}"));
 
         assert!(failures.is_empty(), "{} failed: {failures:#?}", failures.len());
         println!("ok: a Cmd edit chord whose wait ran out edits once");

@@ -2125,8 +2125,32 @@ impl Overflow {
 
 /// `text-overflow` (css-overflow-3 §5.1): how inline content that overflows
 /// its line box in the inline direction is rendered, on a block container
+/// css-ui-4 §7.1 `appearance` (and its `-webkit-` alias). Only `none`
+/// changes anything here: a form control without its native parts (a
+/// drop-down's arrow, its arrow well and label inset). Every other keyword
+/// is `auto`. Not inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    Auto,
+    None,
+}
+
 /// whose `overflow` is other than `visible`. Not inherited — the block
 /// owns its line boxes, so the block owns the ellipsis.
+/// `-webkit-font-smoothing` (inherited). Chrome on macOS draws text with
+/// CoreGraphics font smoothing (dilated outlines) unless this is
+/// `antialiased` (or `none`), Blink's `FontPlatformData::CreateSkFont`
+/// switching hinting off; see [`ComputedStyle::text_dilated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontSmoothing {
+    #[default]
+    Auto,
+    None,
+    Antialiased,
+    SubpixelAntialiased,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextOverflow {
     /// Overflowing content is simply clipped (initial value).
@@ -3185,6 +3209,13 @@ pub struct ComputedStyle {
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// `-webkit-font-smoothing`; inherited.
+    pub font_smoothing: FontSmoothing,
+    /// `text-rendering: geometricPrecision`; inherited. Blink turns
+    /// hinting (and so the CoreGraphics dilation) off for it on macOS.
+    pub text_rendering_geometric_precision: bool,
+    /// `appearance` / `-webkit-appearance`; see [`Appearance`].
+    pub appearance: Appearance,
     /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
     /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
     /// value: the legacy flexbox is not laid out, except in the line-clamp
@@ -3373,6 +3404,17 @@ impl ComputedStyle {
         }
     }
 
+    /// Whether this text is drawn with dilated (smoothed) glyph masks, as
+    /// Chrome draws it on macOS: everything except
+    /// `-webkit-font-smoothing: antialiased | none` and `text-rendering:
+    /// geometricPrecision` (Chromium 148 `FontPlatformData::CreateSkFont`
+    /// sets hinting none for those; `SkTypeface_Mac::onFilterRec` then
+    /// keeps CoreGraphics smoothing off).
+    pub fn text_dilated(&self) -> bool {
+        !(matches!(self.font_smoothing, FontSmoothing::Antialiased | FontSmoothing::None)
+            || self.text_rendering_geometric_precision)
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
@@ -3421,6 +3463,8 @@ impl ComputedStyle {
     pub fn inherit_from(parent: &ComputedStyle) -> Self {
         Self {
             // Inherited properties
+            font_smoothing: parent.font_smoothing,
+            text_rendering_geometric_precision: parent.text_rendering_geometric_precision,
             color: parent.color,
             font_size: parent.font_size.clone(),
             font_weight: parent.font_weight,

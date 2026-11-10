@@ -773,10 +773,11 @@ fn a_served_listener_record_keeps_its_place_in_the_script_log() {
 
 /// The app's find-in-page script, run while an image arrives and before a
 /// page script that replaces the text (as a hydrating page does). In
-/// RustKit content the script stops at `Range.surroundContents`, which is
-/// not callable here, after it has added its `<style>`; it does so after
-/// the load too (a separate gap). The pin: the find is answered at once,
-/// wraps no text, and the page's own script and load are untouched.
+/// RustKit content it wraps each match with `Range.surroundContents` (CH2.E47:
+/// it used to throw there, after adding its `<style>`, so nothing was ever
+/// highlighted). The pin: the find is answered at once with its count, the
+/// match is wrapped before the page's own script runs (the script sees the
+/// mark), and the script's replacement of the text and the load are untouched.
 #[test]
 fn find_in_page_mid_load_then_a_hydrating_script() {
     const FIND: &str = include_str!("../../hiwave-app/src/ui/find_in_page.js");
@@ -798,22 +799,20 @@ document.getElementById('main').textContent = 'hydrated hello world';</script>"#
     let answer = wait(&mut rx, Duration::from_secs(20));
     let waited = sent.elapsed();
     assert!(waited < SERVED, "find waited {waited:?}");
-    assert!(
-        answer.as_ref().is_some_and(|r| r.as_ref().is_err_and(|e| e.contains("surroundContents") || e.contains("not a callable"))),
-        "find mid-load: {answer:?}"
-    );
+    assert_eq!(answer, Some(Ok("String(\"1\")".to_string())), "find mid-load");
     load.wait_complete();
     let (state, _) = load.eval(
         "String(window.sawMark) + ',' + document.getElementById('main').textContent + ',' + document.readyState",
         Duration::from_secs(5),
     );
-    assert_eq!(state.as_deref(), Some("String(\"false,hydrated hello world,complete\")"));
+    // The find wrapped "hello" before the page's script ran, so the script saw the mark.
+    assert_eq!(state.as_deref(), Some("String(\"true,hydrated hello world,complete\")"));
 }
 
 /// The app's autofill scripts mid-load. On macOS the autofill helper is
 /// not injected into RustKit content (main.rs injects it off macOS only),
-/// so the trigger is a no-op and the credentials message reaches only a
-/// page listener. Neither touches the form or the load.
+/// so the trigger and the picker call are no-ops. Neither touches the form
+/// or the load.
 #[test]
 fn autofill_scripts_mid_load_leave_the_form_and_the_load_alone() {
     let page = r#"<!doctype html><body style="margin:0">
@@ -824,11 +823,11 @@ fn autofill_scripts_mid_load_leave_the_form_and_the_load_alone() {
     let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000))]);
     let mut load = Load::start(&fixture, "/page");
     load.wait_main();
-    // `UserEvent::TriggerAutofill` and `SendAutofillCredentials`, verbatim.
+    // `UserEvent::TriggerAutofill` and `ipc::autofill::picker_script`, verbatim.
     let (_, waited) = load.eval("if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }", Duration::from_secs(20));
     assert!(waited < SERVED, "the trigger waited {waited:?}");
     let _ = load.eval(
-        "window.postMessage({ type: 'hiwave_autofill_credentials', credentials: [{\"username\":\"u\",\"password\":\"p\"}] }, '*');",
+        "(function(l){var a=window.hiwaveAutofill;if(a&&typeof a.showCredentials==='function'){a.showCredentials(l);}})([{\"id\":\"0123456789abcdef\",\"username\":\"u\"}]);",
         Duration::from_secs(20),
     );
     load.wait_complete();

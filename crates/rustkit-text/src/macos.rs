@@ -1004,6 +1004,198 @@ pub struct GlyphRasterizer {
     font_size: f32,
     font_weight: u16,
     font_italic: bool,
+    /// Draw coverage masks the way Chrome's Skia does on macOS for text
+    /// with normal hinting: CoreGraphics font smoothing ON (its outlines
+    /// are dilated), black on white in an RGB context, linearised with
+    /// `(v * v + 128) / 255` and reduced to luminance
+    /// (`SkScalerContext_Mac::generateImage`, `onFilterRec`, Chromium 148).
+    /// Off: the undilated outline coverage Skia draws for unhinted text
+    /// (`-webkit-font-smoothing: antialiased`, `text-rendering:
+    /// geometricPrecision`). See [`GlyphRasterizer::with_dilation`].
+    dilate: bool,
+}
+
+/// What CoreGraphics font smoothing does on this machine, probed once as
+/// Skia's `SkCTFontGetSmoothBehavior` does (Chromium 148): one glyph drawn
+/// white on black into two RGB contexts, smoothing off and on. Smoothed
+/// pixels with unequal channels are `Subpixel`; any pixel that differs from
+/// the unsmoothed draw is `Some`; otherwise `None` (smoothing turned off in
+/// System Settings, or `AppleFontSmoothing` 0). Skia probes with a bundled
+/// spider glyph; any outline glyph answers the same question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothBehavior {
+    None,
+    Some,
+    Subpixel,
+}
+
+/// [`SmoothBehavior`] of this machine, probed on first use.
+pub fn smooth_behavior() -> SmoothBehavior {
+    smooth_probe().0
+}
+
+/// The probe's result and how it was reached: `"probed"`, or why it fell
+/// back to `None` (the probe font or its glyph did not load). The renderer
+/// logs this once, so a silent `None` (every glyph undilated) is visible.
+pub fn smooth_probe() -> (SmoothBehavior, &'static str) {
+    static PROBE: std::sync::OnceLock<(SmoothBehavior, &'static str)> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(probe_smooth_behavior)
+}
+
+fn probe_smooth_behavior() -> (SmoothBehavior, &'static str) {
+    use std::os::raw::c_void;
+    extern "C" {
+        fn CTFontDrawGlyphs(
+            font: core_text::font::CTFontRef,
+            glyphs: *const u16,
+            positions: *const CGPoint,
+            count: usize,
+            context: *mut c_void,
+        );
+        fn CTFontGetGlyphsForCharacters(
+            font: core_text::font::CTFontRef,
+            characters: *const u16,
+            glyphs: *mut u16,
+            count: isize,
+        ) -> bool;
+    }
+    let Ok(font) = font::new_from_name("Helvetica", 16.0) else {
+        return (SmoothBehavior::None, "Helvetica did not load: treated as no smoothing");
+    };
+    let font_ref = font.as_concrete_TypeRef();
+    let mut glyph = [0u16; 1];
+    let ch = ['W' as u16];
+    // SAFETY: one character in, one glyph out; the font outlives the call.
+    if !unsafe { CTFontGetGlyphsForCharacters(font_ref, ch.as_ptr(), glyph.as_mut_ptr(), 1) } {
+        return (SmoothBehavior::None, "Helvetica has no 'W': treated as no smoothing");
+    }
+    let draw = |smooth: bool| -> Vec<u8> {
+        let space = CGColorSpace::create_device_rgb();
+        let info = core_graphics::base::kCGImageAlphaNoneSkipFirst
+            | core_graphics::base::kCGBitmapByteOrder32Little;
+        let mut ctx = CGContext::create_bitmap_context(None, 16, 16, 8, 16 * 4, &space, info);
+        ctx.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
+        ctx.fill_rect(CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(16.0, 16.0)));
+        ctx.set_allows_font_smoothing(true);
+        ctx.set_should_smooth_fonts(smooth);
+        ctx.set_should_antialias(true);
+        ctx.set_gray_fill_color(1.0, 1.0);
+        let at = CGPoint::new(0.0, 3.0);
+        // SAFETY: a live context and font, one glyph.
+        unsafe { CTFontDrawGlyphs(font_ref, glyph.as_ptr(), &at, 1, ctx.as_ptr() as *mut c_void) };
+        ctx.data()[..16 * 16 * 4].to_vec()
+    };
+    let (plain, smoothed) = (draw(false), draw(true));
+    (smooth_behavior_of(&plain, &smoothed), "probed")
+}
+
+/// The decision of [`probe_smooth_behavior`] from its two BGRX bitmaps.
+pub fn smooth_behavior_of(plain: &[u8], smoothed: &[u8]) -> SmoothBehavior {
+    let mut behavior = SmoothBehavior::None;
+    for (p, s) in plain.chunks_exact(4).zip(smoothed.chunks_exact(4)) {
+        if s[0] != s[1] || s[1] != s[2] {
+            return SmoothBehavior::Subpixel;
+        }
+        if p[..3] != s[..3] {
+            behavior = SmoothBehavior::Some;
+        }
+    }
+    behavior
+}
+
+/// The coverage mask (`width * height` bytes, top row first) of `glyph` of
+/// `font_ref` drawn at `origin` (CG coordinates, bottom-left origin).
+///
+/// Undilated: white on black in a device-gray context with font smoothing
+/// off, so coverage comes from the outline alone (9a9f1872; Skia's path for
+/// unhinted A8 glyphs).
+///
+/// Dilated: Skia's path for hinted A8 glyphs on a Mac where smoothing has an
+/// effect (Chromium 148 `SkScalerContext_Mac::generateImage`): black on white
+/// in a device-RGB context with smoothing on, each channel linearised with
+/// `(v * v + 128) / 255` (CoreGraphics' smoothed output carries a 2.0
+/// coverage gamma), then `255 - SkComputeLuminance` of the result.
+unsafe fn draw_coverage_mask(
+    font_ref: core_text::font::CTFontRef,
+    glyph: u16,
+    origin: CGPoint,
+    width: u32,
+    height: u32,
+    dilate: bool,
+    subpixel: bool,
+) -> Vec<u8> {
+    use std::os::raw::c_void;
+    extern "C" {
+        fn CTFontDrawGlyphs(
+            font: core_text::font::CTFontRef,
+            glyphs: *const u16,
+            positions: *const CGPoint,
+            count: usize,
+            context: *mut c_void,
+        );
+        // Subpixel controls: CoreGraphics grid-fits glyph origins by
+        // default, which rounds away a fractional origin; quantization must
+        // be off for it to survive.
+        fn CGContextSetAllowsFontSubpixelPositioning(c: *mut c_void, allows: bool);
+        fn CGContextSetShouldSubpixelPositionFonts(c: *mut c_void, should: bool);
+        fn CGContextSetAllowsFontSubpixelQuantization(c: *mut c_void, allows: bool);
+        fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
+    }
+    let (w, h) = (width as usize, height as usize);
+    let glyphs = [glyph];
+    if !dilate {
+        let color_space = CGColorSpace::create_device_gray();
+        let mut context = CGContext::create_bitmap_context(None, w, h, 8, w, &color_space, 0);
+        let ctx = context.as_ptr() as *mut c_void;
+        if subpixel {
+            CGContextSetAllowsFontSubpixelPositioning(ctx, true);
+            CGContextSetShouldSubpixelPositionFonts(ctx, true);
+            CGContextSetAllowsFontSubpixelQuantization(ctx, false);
+            CGContextSetShouldSubpixelQuantizeFonts(ctx, false);
+        }
+        context.set_allows_antialiasing(true);
+        context.set_should_antialias(true);
+        // Font smoothing DILATES the outline (~0.3px per side, ~0.6px on
+        // top; n33 on Ahem): off here, the outline alone.
+        context.set_allows_font_smoothing(false);
+        context.set_should_smooth_fonts(false);
+        context.set_gray_fill_color(0.0, 1.0);
+        context.fill_rect(CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(w as CGFloat, h as CGFloat)));
+        context.set_gray_fill_color(1.0, 1.0);
+        CTFontDrawGlyphs(font_ref, glyphs.as_ptr(), &origin, 1, ctx);
+        return context.data()[..w * h].to_vec();
+    }
+    let color_space = CGColorSpace::create_device_rgb();
+    // kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little: BGRX bytes.
+    let info = core_graphics::base::kCGImageAlphaNoneSkipFirst
+        | core_graphics::base::kCGBitmapByteOrder32Little;
+    let mut context = CGContext::create_bitmap_context(None, w, h, 8, w * 4, &color_space, info);
+    let ctx = context.as_ptr() as *mut c_void;
+    if subpixel {
+        CGContextSetAllowsFontSubpixelPositioning(ctx, true);
+        CGContextSetShouldSubpixelPositionFonts(ctx, true);
+        CGContextSetAllowsFontSubpixelQuantization(ctx, false);
+        CGContextSetShouldSubpixelQuantizeFonts(ctx, false);
+    }
+    context.set_allows_antialiasing(true);
+    context.set_should_antialias(true);
+    context.set_allows_font_smoothing(true);
+    context.set_should_smooth_fonts(true);
+    context.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
+    context.fill_rect(CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(w as CGFloat, h as CGFloat)));
+    context.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
+    CTFontDrawGlyphs(font_ref, glyphs.as_ptr(), &origin, 1, ctx);
+    let data = context.data();
+    let linear = |v: u8| -> u32 { ((v as u32) * (v as u32) + 128) / 255 };
+    let mut mask = Vec::with_capacity(w * h);
+    for px in data[..w * h * 4].chunks_exact(4) {
+        let (b, g, r) = (px[0], px[1], px[2]);
+        // rgb_to_a8: 0xFF - each linearised channel, then
+        // SkComputeLuminance (54 R + 183 G + 19 B) >> 8.
+        let (r, g, b) = (255 - linear(r), 255 - linear(g), 255 - linear(b));
+        mask.push(((r * 54 + g * 183 + b * 19) >> 8) as u8);
+    }
+    mask
 }
 
 /// A rasterized glyph: `(bitmap, width, height, advance, bearing_x,
@@ -1031,6 +1223,13 @@ impl GlyphRaster {
 }
 
 impl GlyphRasterizer {
+    /// The same rasterizer drawing dilated (smoothed) masks when `on`
+    /// (see the `dilate` field).
+    pub fn with_dilation(mut self, on: bool) -> Self {
+        self.dilate = on;
+        self
+    }
+
     /// Create a new glyph rasterizer for a font
     pub fn new(family: &str, size: f64) -> Result<Self, TextError> {
         let font = create_font(family, size)?;
@@ -1039,6 +1238,7 @@ impl GlyphRasterizer {
             font_size: size as f32,
             font_weight: 400,
             font_italic: false,
+            dilate: false,
         })
     }
     
@@ -1052,6 +1252,7 @@ impl GlyphRasterizer {
             font_size: size,
             font_weight: 400,
             font_italic: false,
+            dilate: false,
         }
     }
     
@@ -1065,6 +1266,7 @@ impl GlyphRasterizer {
             font_size: size,
             font_weight: weight,
             font_italic: italic,
+            dilate: false,
         }
     }
     
@@ -1082,6 +1284,7 @@ impl GlyphRasterizer {
             font_size: size,
             font_weight: 400,
             font_italic: false,
+            dilate: false,
         }
     }
 
@@ -1181,7 +1384,6 @@ impl GlyphRasterizer {
 
         unsafe {
             use core_text::font::CTFontRef;
-            use std::os::raw::c_void;
 
             let font_ref = self.font.as_concrete_TypeRef();
 
@@ -1201,31 +1403,6 @@ impl GlyphRasterizer {
                     bounding_rects: *mut CGRect,
                     count: isize,
                 ) -> CGRect;
-                
-                fn CTFontDrawGlyphs(
-                    font: CTFontRef,
-                    glyphs: *const u16,
-                    positions: *const CGPoint,
-                    count: usize,
-                    context: *mut c_void,
-                );
-
-                // Subpixel controls. CoreGraphics grid-fits glyph origins by
-                // default, which silently ROUNDS AWAY the offset we pass —
-                // measured on this tree: at 36px, requesting 0.25px moved the
-                // ink 0.0px and requesting 0.5px moved it a full 1.0px.
-                // Quantization must be off for fractional positioning to
-                // survive at all.
-                fn CGContextSetAllowsFontSubpixelPositioning(
-                    c: *mut c_void,
-                    allows: bool,
-                );
-                fn CGContextSetShouldSubpixelPositionFonts(c: *mut c_void, should: bool);
-                fn CGContextSetAllowsFontSubpixelQuantization(
-                    c: *mut c_void,
-                    allows: bool,
-                );
-                fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
             }
             
             // Get glyph advance
@@ -1257,68 +1434,13 @@ impl GlyphRasterizer {
                 (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32 + shift_pad;
             let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
-            // Create grayscale bitmap context
-            let color_space = CGColorSpace::create_device_gray();
-            let mut context = CGContext::create_bitmap_context(
-                None,
-                width as usize,
-                height as usize,
-                8,  // bits per component
-                width as usize,  // bytes per row
-                &color_space,
-                0,  // kCGImageAlphaNone for grayscale
-            );
-            
-            // Allow fractional glyph origins and DISABLE quantization, so the
-            // subpixel_x we pass survives to the rasterizer instead of being
-            // snapped to the pixel grid. Without this the offset is a no-op at
-            // some sizes and a whole-pixel jump at others.
-            let ctx_ptr = context.as_ptr() as *mut c_void;
-            CGContextSetAllowsFontSubpixelPositioning(ctx_ptr, true);
-            CGContextSetShouldSubpixelPositionFonts(ctx_ptr, true);
-            CGContextSetAllowsFontSubpixelQuantization(ctx_ptr, false);
-            CGContextSetShouldSubpixelQuantizeFonts(ctx_ptr, false);
-            // Font smoothing DILATES the outline (~0.3px per side, ~0.6px
-            // on top) — measured n33 on Ahem: an integer-aligned 20px em
-            // square rasterized 22 columns wide with a 60%-coverage row
-            // above it, so every Ahem overlap reftest read a fringe where
-            // Chrome reads a hard edge. Skia/Chrome disable smoothing for
-            // grayscale AA; coverage must come from the outline alone.
-            context.set_allows_font_smoothing(false);
-            context.set_should_smooth_fonts(false);
-
-            // Set up drawing context
-            // Fill with black (transparent in our alpha usage)
-            context.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
-            context.fill_rect(CGRect::new(
-                &CGPoint::new(0.0, 0.0),
-                &CGSize::new(width as CGFloat, height as CGFloat),
-            ));
-
-            // Set text color to white (opaque)
-            context.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
-
             // Calculate position to draw glyph
             // Origin is at bottom-left, glyph origin needs adjustment
             let x = padding - bounds.origin.x + subpixel_x as f64;
             // INTEGER-BASELINE CONTRACT: `draw_y` is a whole CG row (see
             // baseline_seat) so the outline is rasterized at vertical phase 0.
             let y = draw_y;
-
-            let positions = [CGPoint::new(x, y)];
-            
-            // Draw the glyph
-            CTFontDrawGlyphs(
-                font_ref,
-                glyphs.as_ptr(),
-                positions.as_ptr(),
-                1,
-                context.as_ptr() as *mut c_void,
-            );
-            
-            // Extract bitmap data
-            let data = context.data();
-            let bitmap: Vec<u8> = data.to_vec();
+            let bitmap = draw_coverage_mask(font_ref, glyphs[0], CGPoint::new(x, y), width, height, self.dilate, true);
 
             let advance = advance_size.width as f32;
             // BITMAP-EDGE CONTRACT: the returned bearings position the padded
@@ -1363,7 +1485,6 @@ impl GlyphRasterizer {
 
         unsafe {
             use core_text::font::CTFontRef;
-            use std::os::raw::c_void;
 
             extern "C" {
                 fn CTFontGetAdvancesForGlyphs(
@@ -1381,14 +1502,6 @@ impl GlyphRasterizer {
                     bounding_rects: *mut CGRect,
                     count: isize,
                 ) -> CGRect;
-                
-                fn CTFontDrawGlyphs(
-                    font: CTFontRef,
-                    glyphs: *const u16,
-                    positions: *const CGPoint,
-                    count: usize,
-                    context: *mut c_void,
-                );
             }
             
             let font_ref = font.as_concrete_TypeRef();
@@ -1415,41 +1528,10 @@ impl GlyphRasterizer {
             let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
             let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
-            let color_space = CGColorSpace::create_device_gray();
-            let mut context = CGContext::create_bitmap_context(
-                None,
-                width as usize,
-                height as usize,
-                8,
-                width as usize,
-                &color_space,
-                0,
-            );
-            
-            context.set_allows_antialiasing(true);
-            context.set_should_antialias(true);
-            // Same contract as rasterize_char: no smoothing dilation, the
-            // fallback face must not paint heavier than the primary one.
-            context.set_allows_font_smoothing(false);
-            context.set_should_smooth_fonts(false);
-            context.set_gray_fill_color(1.0, 1.0);
-            
             let draw_x = padding - bounds.origin.x;
-
-            let position = CGPoint::new(draw_x, draw_y);
-            CTFontDrawGlyphs(
-                font_ref,
-                glyphs.as_ptr(),
-                &position,
-                1,
-                context.as_ptr() as *mut c_void,
-            );
-
-            let data = context.data();
-            let bitmap: Vec<u8> = std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                (width * height) as usize,
-            ).to_vec();
+            // The fallback face is drawn as the primary one is (the same
+            // dilation), so it does not paint lighter or heavier.
+            let bitmap = draw_coverage_mask(font_ref, glyph, CGPoint::new(draw_x, draw_y), width, height, self.dilate, false);
 
             let advance = advance_size.width as f32;
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the

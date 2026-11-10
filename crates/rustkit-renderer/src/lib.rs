@@ -67,6 +67,21 @@ pub use screenshot::CaptureMetadata;
 mod shaders;
 
 pub use glyph::*;
+/// The smoothing probe the glyph-mask law follows (`glyph::coverage_for`).
+#[cfg(target_os = "macos")]
+pub use rustkit_text::macos::{smooth_behavior, smooth_behavior_of, SmoothBehavior};
+
+/// Log the CoreGraphics smoothing probe the glyph-mask law follows, once
+/// per process (a `None` from a font that failed to load is otherwise
+/// silent: every glyph would take the undilated outline).
+#[cfg(target_os = "macos")]
+fn log_smooth_probe_once() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        let (behavior, how) = rustkit_text::macos::smooth_probe();
+        tracing::info!(?behavior, how, "CoreGraphics font smoothing probe (glyph-mask law)");
+    });
+}
 pub use pipeline::*;
 pub use screenshot::*;
 
@@ -613,6 +628,8 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RendererError> {
+        #[cfg(target_os = "macos")]
+        log_smooth_probe_once();
         // Create uniform buffer
         let uniforms = Uniforms {
             viewport_size: [800.0, 600.0],
@@ -2844,6 +2861,68 @@ impl Renderer {
 
     /// Process a single display command.
     fn process_command(&mut self, cmd: &DisplayCommand) {
+        // The vector primitives push their triangles straight into the
+        // color batch, so the clip in force is applied to what they pushed
+        // (CB1a: the Mode select's arrow, a `Polyline`, painted over the
+        // toolbar from inside chrome.html's collapsed, `overflow: hidden`
+        // sidebar; radios leaked the same way). Rects and glyphs clip as
+        // they are emitted. `Polyline` and `StrokePolygon` clip through the
+        // `Line`s they become.
+        if matches!(
+            cmd,
+            DisplayCommand::Line { .. }
+                | DisplayCommand::FillPolygon { .. }
+                | DisplayCommand::FillCircle { .. }
+                | DisplayCommand::StrokeCircle { .. }
+                | DisplayCommand::FillEllipse { .. }
+        ) {
+            let (v0, i0) = (self.color_vertices.len(), self.color_indices.len());
+            self.process_command_unclipped(cmd);
+            self.clip_pushed_triangles(v0, i0);
+            return;
+        }
+        self.process_command_unclipped(cmd);
+    }
+
+    /// Clip the color triangles pushed since `(v0, i0)` (vertices, indices)
+    /// to the clip rect in force, in screen space, where those primitives
+    /// put their vertices. A rounded clip's corners are not applied (its
+    /// rect is): no vector primitive reached a rounded clip on the board.
+    fn clip_pushed_triangles(&mut self, v0: usize, i0: usize) {
+        let Some(clip) = self.clip_stack.last().map(|e| e.rect) else {
+            return;
+        };
+        let new = &self.color_vertices[v0..];
+        if new.is_empty() {
+            return;
+        }
+        let inside = new.iter().all(|v| {
+            let [x, y] = v.position;
+            x >= clip.x && x <= clip.x + clip.width && y >= clip.y && y <= clip.y + clip.height
+        });
+        if inside {
+            return;
+        }
+        let vertices: Vec<ColorVertex> = self.color_vertices.drain(v0..).collect();
+        let indices: Vec<u32> = self.color_indices.drain(i0..).collect();
+        for tri in indices.chunks_exact(3) {
+            let poly: Vec<ColorVertex> = tri
+                .iter()
+                .map(|&i| vertices[i as usize - v0])
+                .collect();
+            let kept = clip_polygon_to_rect(&poly, clip);
+            if kept.len() < 3 {
+                continue;
+            }
+            let base = self.color_vertices.len() as u32;
+            self.color_vertices.extend_from_slice(&kept);
+            for k in 1..kept.len() as u32 - 1 {
+                self.color_indices.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+        }
+    }
+
+    fn process_command_unclipped(&mut self, cmd: &DisplayCommand) {
         match cmd {
             DisplayCommand::SolidColor(color, rect) => {
                 self.draw_solid_rect(*rect, *color);
@@ -2886,6 +2965,7 @@ impl Renderer {
                 ascent,
                 run,
                 faces,
+                undilated,
             } => {
                 // SHAPED-RUN CONTRACT (S0): a command that carries its run
                 // is painted from the run. The family-list path below is
@@ -2894,7 +2974,7 @@ impl Renderer {
                 // record (`faces`) for which face draws each character.
                 let painted_from_run = run
                     .as_deref()
-                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent, *undilated));
                 if !painted_from_run {
                     self.draw_text_with_metrics(
                         text,
@@ -2908,6 +2988,7 @@ impl Renderer {
                         advances.as_deref(),
                         *ascent,
                         faces.as_deref(),
+                        *undilated,
                     );
                 }
             }
@@ -5520,6 +5601,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
 
@@ -5615,6 +5697,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
         self.pop_clip();
@@ -5693,6 +5776,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
         
@@ -5758,6 +5842,9 @@ impl Renderer {
         layout_ascent: Option<f32>,
         layout_faces: Option<&[rustkit_text::GlyphFace]>,
     ) {
+        // Skia's luminance for a non-plain paint, once per command.
+        let gradient_coverage =
+            crate::glyph::coverage_for(crate::glyph::GRADIENT_TEXT_LUMINANCE, false);
         let stops = match gradient {
             rustkit_css::Gradient::Linear(g) => &g.stops,
             rustkit_css::Gradient::Radial(g) => &g.stops,
@@ -5862,6 +5949,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage: gradient_coverage,
             };
             let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
@@ -6019,13 +6107,17 @@ impl Renderer {
         y: f32,
         color: Color,
         layout_ascent: Option<f32>,
+        undilated: bool,
     ) -> bool {
         // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        // The glyph-mask law for the run's colour (`glyph::coverage_for`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let key_for = |glyph_id: u16| RunGlyphKey {
             face: run.face.id,
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage,
         };
 
         // Every glyph's bitmap first, so a missing face is known before a
@@ -6121,8 +6213,12 @@ impl Renderer {
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
         layout_faces: Option<&[rustkit_text::GlyphFace]>,
+        undilated: bool,
     ) {
         let mut cursor_x = x;
+        // The glyph-mask law for this colour, once per command
+        // (`glyph::coverage_for` costs three `powf`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let c = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
@@ -6189,6 +6285,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage,
             };
             // ADVANCE CONTRACT: layout's advance wins when present so
             // painted ink tracks measured width 1:1; the atlas advance is
@@ -10052,6 +10149,55 @@ const LIST_BOX_SELECTED_TEXT: Color = Color {
     a: 1.0,
 };
 
+/// Sutherland-Hodgman: the part of convex polygon `poly` inside `clip`,
+/// colours interpolated along the cut edges.
+fn clip_polygon_to_rect(poly: &[ColorVertex], clip: Rect) -> Vec<ColorVertex> {
+    let lerp = |a: &ColorVertex, b: &ColorVertex, t: f32| {
+        let mut v = *a;
+        for i in 0..2 {
+            v.position[i] = a.position[i] + (b.position[i] - a.position[i]) * t;
+        }
+        for i in 0..4 {
+            v.color[i] = a.color[i] + (b.color[i] - a.color[i]) * t;
+        }
+        v
+    };
+    // (axis, bound, keep the side >= bound)
+    let edges = [
+        (0, clip.x, true),
+        (0, clip.x + clip.width, false),
+        (1, clip.y, true),
+        (1, clip.y + clip.height, false),
+    ];
+    let mut out: Vec<ColorVertex> = poly.to_vec();
+    for (axis, bound, keep_above) in edges {
+        if out.is_empty() {
+            break;
+        }
+        let inside = |v: &ColorVertex| {
+            if keep_above {
+                v.position[axis] >= bound
+            } else {
+                v.position[axis] <= bound
+            }
+        };
+        let input = std::mem::take(&mut out);
+        for i in 0..input.len() {
+            let cur = &input[i];
+            let prev = &input[(i + input.len() - 1) % input.len()];
+            let (ci, pi) = (inside(cur), inside(prev));
+            if ci != pi {
+                let t = (bound - prev.position[axis]) / (cur.position[axis] - prev.position[axis]);
+                out.push(lerp(prev, cur, t));
+            }
+            if ci {
+                out.push(*cur);
+            }
+        }
+    }
+    out
+}
+
 /// Centre of a drop-down's arrow in its border box `rect`.
 fn menu_list_arrow_centre(rect: Rect) -> (f32, f32) {
     (rect.x + rect.width - 8.75, rect.y + rect.height / 2.0)
@@ -10085,6 +10231,25 @@ mod select_paint_tests {
         let (bx, by) = menu_list_arrow_centre(big);
         assert_eq!(big.x + big.width - bx, rect.x + rect.width - cx);
         assert_eq!(by, 187.0);
+    }
+
+    fn v(x: f32, y: f32) -> ColorVertex {
+        ColorVertex { position: [x, y], color: [1.0, 1.0, 1.0, 1.0] }
+    }
+
+    /// CB1a: a primitive wholly outside the clip keeps nothing; one cut by
+    /// it keeps only the inside part.
+    #[test]
+    fn a_vector_triangle_is_cut_to_the_clip_rect() {
+        let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let outside = [v(20.0, 0.0), v(30.0, 0.0), v(20.0, 5.0)];
+        assert!(clip_polygon_to_rect(&outside, clip).is_empty());
+        let inside = [v(1.0, 1.0), v(5.0, 1.0), v(1.0, 5.0)];
+        assert_eq!(clip_polygon_to_rect(&inside, clip).len(), 3);
+        let cut = clip_polygon_to_rect(&[v(5.0, 2.0), v(15.0, 2.0), v(5.0, 8.0)], clip);
+        assert!(cut.len() >= 3);
+        assert!(cut.iter().all(|p| p.position[0] <= 10.0 + 1e-4));
+        assert!(cut.iter().any(|p| (p.position[0] - 10.0).abs() < 1e-4));
     }
 
     /// Chrome's option rows stack from the inside of the frame: 16px rows
@@ -10251,6 +10416,7 @@ mod shaped_run_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
@@ -10352,6 +10518,7 @@ mod shaped_run_measured_face_tests {
             glyph_id: run.glyphs[0].glyph_id,
             font_size: 140,
             subpixel_phase: 0,
+            coverage: 0,
         };
         let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
         assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
@@ -10382,6 +10549,7 @@ mod shaped_run_windows_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
