@@ -13,9 +13,18 @@
 //!    [`answer_content_autofill_request`]: once per arming, within
 //!    [`AUTOFILL_ARM_TTL`], for the same view and origin, and only with
 //!    usernames and opaque ids.
-//! 3. The user's pick becomes a fill through [`autofill_fill_script`]:
-//!    once, for an id from the current offer, for the same view and
-//!    origin. The script re-checks the origin in the page before it fills.
+//! 3. A pick from the helper becomes a fill through
+//!    [`autofill_fill_script`]: one fill per arming, for an id from the
+//!    current offer, for the same view and origin. The script re-checks the
+//!    origin in the page before it fills. The pick arrives from the page's
+//!    picker, so the gate bounds it to one fill per arming on the armed
+//!    origin; it does not prove which entry the person chose (an app-drawn
+//!    picker would).
+//!
+//! Only https origins (and http on loopback hosts) are eligible, and a
+//! vault row is offered only when its saved origin equals the page's
+//! origin. The vault keeps a host per row, which counts as
+//! `https://host` on the default port.
 
 use crate::state::AppState;
 use serde::Serialize;
@@ -34,14 +43,41 @@ pub struct AutofillEntry {
     pub username: String,
 }
 
-/// The origin (`scheme://host[:port]`) of a top-level URL, for http(s)
-/// pages with a host; `None` for anything else.
+/// The origin (`scheme://host[:port]`) of a top-level URL when it is
+/// eligible for autofill: https, or http on a loopback host. `None` for
+/// anything else.
 pub fn page_origin(top_level_url: &str) -> Option<String> {
     let url = Url::parse(top_level_url).ok()?;
-    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
-        return None;
+    let eligible = match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => is_loopback(&url),
+        _ => false,
+    };
+    eligible.then(|| url.origin().ascii_serialization())
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
-    Some(url.origin().ascii_serialization())
+}
+
+/// The origin a vault row was saved for. A full URL gives its own origin;
+/// a bare host (what the vault stores today) counts as `https://host`.
+pub fn saved_origin(saved: &str) -> Option<String> {
+    let parsed = if saved.contains("://") {
+        Url::parse(saved).ok()?
+    } else {
+        Url::parse(&format!("https://{saved}")).ok()?
+    };
+    parsed.host()?;
+    match parsed.origin() {
+        o @ url::Origin::Tuple(..) => Some(o.ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
 }
 
 #[derive(Debug)]
@@ -96,6 +132,8 @@ impl AutofillGate {
         requested_domain: Option<&str>,
         now: Instant,
     ) -> Option<String> {
+        // Taken before the checks: a request that does not match clears the
+        // arming too (fail-safe; the person arms again).
         let armed = self.armed.take()?;
         let origin = page_origin(top_level_url)?;
         if armed.view != view || armed.origin != origin || !fresh(armed.at, now) {
@@ -148,6 +186,8 @@ impl AutofillGate {
         entry_id: &str,
         now: Instant,
     ) -> Option<(String, i64)> {
+        // Taken before the checks: a pick that does not match clears the
+        // offer too (fail-safe; the person arms again).
         let offer = self.offer.take()?;
         let origin = page_origin(top_level_url)?;
         if offer.view != view || offer.origin != origin || !fresh(offer.at, now) {
@@ -206,20 +246,30 @@ pub fn picker_script(entries: &[AutofillEntry]) -> String {
     )
 }
 
+/// The vault rows saved for exactly `origin`. The vault looks rows up by
+/// host; scheme and port are checked here.
 fn vault_rows(state: &AppState, origin: &str) -> Vec<hiwave_vault::Credential> {
     if !state.vault.is_unlocked() {
         return Vec::new();
     }
     let Ok(url) = Url::parse(origin) else { return Vec::new() };
-    state.vault.get_credentials(&url).unwrap_or_default()
+    state
+        .vault
+        .get_credentials(&url)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| saved_origin(&c.url).as_deref() == Some(origin))
+        .collect()
 }
 
 fn js_literal(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-/// A self-contained fill: it runs only while the page is still at
-/// `origin`, and does not call into any page-reachable global.
+/// The fill: it runs only while the page is still at `origin` and does not
+/// go through `window.hiwaveAutofill`. It does use DOM and prototype
+/// methods the page can override, which is acceptable only because the
+/// page is at the credential's own origin.
 fn fill_script(origin: &str, username: &str, password: &str) -> String {
     let (o, u, p) = (js_literal(origin), js_literal(username), js_literal(password));
     format!(
@@ -399,8 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn only_http_pages_have_an_origin() {
+    fn only_https_pages_and_loopback_have_an_origin() {
         assert_eq!(page_origin("https://a.example:8443/x").as_deref(), Some("https://a.example:8443"));
+        assert_eq!(page_origin("https://a.example:443/x").as_deref(), Some("https://a.example"));
+        assert_eq!(page_origin("http://a.example/x"), None);
+        assert_eq!(page_origin("http://localhost:3000/").as_deref(), Some("http://localhost:3000"));
+        assert_eq!(page_origin("http://127.0.0.1/").as_deref(), Some("http://127.0.0.1"));
+        assert_eq!(page_origin("http://[::1]:8080/").as_deref(), Some("http://[::1]:8080"));
         assert_eq!(page_origin("about:blank"), None);
         assert_eq!(page_origin("data:text/html,x"), None);
         assert_eq!(page_origin("file:///etc/hosts"), None);
@@ -468,6 +523,32 @@ mod tests {
         assert!(autofill_fill_script(&mut state, VIEW, PAGE, &first[0].id, now).is_none());
         // ...and the mismatched pick cleared the offer (fail-safe).
         assert!(autofill_fill_script(&mut state, VIEW, PAGE, &second[0].id, now).is_none());
+    }
+
+    /// A bare host counts as https on the default port; a full URL keeps
+    /// its own scheme and port.
+    #[test]
+    fn saved_rows_have_an_origin() {
+        assert_eq!(saved_origin("a.example").as_deref(), Some("https://a.example"));
+        assert_eq!(saved_origin("https://a.example:8443/login").as_deref(), Some("https://a.example:8443"));
+        assert_eq!(saved_origin("http://a.example/").as_deref(), Some("http://a.example"));
+        assert_eq!(saved_origin(""), None);
+    }
+
+    /// A loopback http page is eligible, but a row saved as a bare host is
+    /// an https row, so it is not offered there.
+    #[test]
+    fn a_loopback_http_page_gets_no_https_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_vault(dir.path());
+        state
+            .vault
+            .save_credential(&Url::parse("http://localhost:3000/").unwrap(), "dev", "dev-secret")
+            .expect("save");
+        let now = Instant::now();
+        let page = "http://localhost:3000/login";
+        assert!(arm_autofill(&mut state, VIEW, page, now));
+        assert!(answer_content_autofill_request(&mut state, VIEW, page, None, now).is_empty());
     }
 
     const HELPER: &str = include_str!("../ui/autofill.js");

@@ -14,14 +14,16 @@
         return;
     }
 
-    const ipc = window.ipc;
-    const post = ipc && ipc.postMessage ? ipc.postMessage.bind(ipc) : null;
+    // Installed at document start, where the IPC object may not exist yet:
+    // keep it if present, else look it up when sending.
+    const ipcAtInstall = window.ipc && window.ipc.postMessage ? window.ipc : null;
     let autofillPopup = null;
     let anchorField = null;
 
     function send(message) {
-        if (post) {
-            post(JSON.stringify(message));
+        const ipc = ipcAtInstall || window.ipc;
+        if (ipc && typeof ipc.postMessage === 'function') {
+            ipc.postMessage(JSON.stringify(message));
         }
     }
 

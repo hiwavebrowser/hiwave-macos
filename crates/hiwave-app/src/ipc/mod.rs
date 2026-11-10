@@ -505,7 +505,6 @@ pub const JS_BRIDGE: &str = r#"
         // Vault
         unlockVault: (password) => window.ipc.postMessage(JSON.stringify({ cmd: 'unlock_vault', password })),
         lockVault: () => window.ipc.postMessage(JSON.stringify({ cmd: 'lock_vault' })),
-        getCredentials: (domain) => window.ipc.postMessage(JSON.stringify({ cmd: 'get_credentials', domain })),
         saveCredential: (url, username, password) => window.ipc.postMessage(JSON.stringify({ cmd: 'save_credential', url, username, password })),
 
         // Focus mode

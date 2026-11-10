@@ -289,7 +289,8 @@ enum UserEvent {
     /// The content helper asked for the picker list (`domain` is what it
     /// named, if anything); answered by `ipc::autofill`.
     AutofillRequested { domain: Option<String> },
-    /// The person picked an entry in the content helper's picker.
+    /// The content helper's picker sent a pick (one fill per arming; the
+    /// gate does not prove the person, rather than the page, chose it).
     AutofillPick { id: String },
     // Vault settings events (from settings webview)
     GetVaultStatus,
@@ -873,22 +874,6 @@ fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
 /// A URL for the log (#910 R1 nit 3, CH3.A6): scheme, host and path —
 /// without its query, fragment or userinfo; a `data:` URL only up to its
 /// media type (the rest is the page).
-/// Autofill's key for the content view (the active tab) and the view's
-/// current top-level URL as the app reads it from the view, never from the
-/// page. RustKit pages (macOS) have no autofill IPC path: `None`.
-fn autofill_view_and_url(
-    state: &Arc<Mutex<AppState>>,
-    content: &UnifiedContentWebView,
-) -> Option<(String, String)> {
-    #[allow(unreachable_patterns)]
-    let url = match content {
-        UnifiedContentWebView::Wry(v) => v.url().ok()?,
-        _ => return None,
-    };
-    let view = state.lock().ok()?.shell.get_active_tab()?.id.0.to_string();
-    Some((view, url))
-}
-
 fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
@@ -904,6 +889,22 @@ fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     Cow::Borrowed(url)
+}
+
+/// Autofill's key for the content view (the active tab) and the view's
+/// current top-level URL as the app reads it from the view, never from the
+/// page. RustKit pages (macOS) have no autofill IPC path: `None`.
+fn autofill_view_and_url(
+    state: &Arc<Mutex<AppState>>,
+    content: &UnifiedContentWebView,
+) -> Option<(String, String)> {
+    #[allow(unreachable_patterns)]
+    let url = match content {
+        UnifiedContentWebView::Wry(v) => v.url().ok()?,
+        _ => return None,
+    };
+    let view = state.lock().ok()?.shell.get_active_tab()?.id.0.to_string();
+    Some((view, url))
 }
 
 /// A page URL for an info line (CH3.A6): whole only when IPC bodies are
@@ -3110,6 +3111,9 @@ fn main() {
 
         WebViewBuilder::new()
         .with_html(ABOUT_HTML)
+        // Autofill helper at document start, top frame only, so its frozen
+        // `window.hiwaveAutofill` is in place before page script runs.
+        .with_initialization_script_for_main_only(AUTOFILL_HELPER, true)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
         .with_bounds(content_bounds)
@@ -4544,8 +4548,6 @@ fn main() {
                             let _ = content_for_events.evaluate_script(CONTEXT_MENU_HELPER);
                             info!("Injecting audio detector into content webview");
                             let _ = content_for_events.evaluate_script(AUDIO_DETECTOR);
-                            info!("Injecting autofill helper into content webview");
-                            let _ = content_for_events.evaluate_script(AUTOFILL_HELPER);
                             info!("Injecting console interceptor into content webview");
                             let _ = content_for_events.evaluate_script(CONSOLE_INJECT);
                         }
