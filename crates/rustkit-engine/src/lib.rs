@@ -10833,7 +10833,7 @@ impl Engine {
         let from = ComputedStyle::inherit_from(details);
         let mut style = ComputedStyle::new();
         style.color = from.color;
-        style.font_size = from.font_size;
+        style.copy_font_size_from(&from);
         style.font_weight = from.font_weight;
         style.font_style = from.font_style;
         style.font_stretch = from.font_stretch;
@@ -13677,7 +13677,7 @@ impl layout_ctx::LayoutCtx {
                         let mut s = ComputedStyle::new();
                         // Inherit text-related properties
                         s.font_family = parent.font_family.clone();
-                        s.font_size = parent.font_size.clone();
+                        s.copy_font_size_from(parent);
                         s.font_weight = parent.font_weight;
                         s.font_style = parent.font_style;
                         s.color = parent.color;
@@ -13899,7 +13899,7 @@ impl layout_ctx::LayoutCtx {
                 return None;
             }
             let mut style = ComputedStyle::new();
-            style.font_size = element.font_size.clone();
+            style.copy_font_size_from(element);
             style.color = element.color;
             matched.sort_by_key(|(spec, rule)| (rule.layer_order, *spec));
             let mut important = matched.clone();
@@ -14111,9 +14111,7 @@ impl layout_ctx::LayoutCtx {
         // (a 22 px line became 40.8 px).
         pseudo_style.display = rustkit_css::Display::Inline;
         if let Some(parent) = parent {
-            pseudo_style.font_size = parent.font_size.clone();
-            pseudo_style.font_size_keyword = parent.font_size_keyword;
-            pseudo_style.font_size_absolute = parent.font_size_absolute;
+            pseudo_style.copy_font_size_from(parent);
             pseudo_style.font_family = parent.font_family.clone();
             pseudo_style.font_weight = parent.font_weight;
             pseudo_style.font_style = parent.font_style;
@@ -14375,9 +14373,7 @@ impl layout_ctx::LayoutCtx {
         // double-shift. Without this, about's hero (logo/tagline/version) and
         // any centered-container heading left-aligned.
         if let Some(parent) = parent_style {
-            style.font_size = parent.font_size.clone();
-            style.font_size_keyword = parent.font_size_keyword;
-            style.font_size_absolute = parent.font_size_absolute;
+            style.copy_font_size_from(parent);
             style.font_family = parent.font_family.clone();
             style.font_weight = parent.font_weight;
             style.font_style = parent.font_style;
@@ -14436,42 +14432,42 @@ impl layout_ctx::LayoutCtx {
             // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(2.0);
+                style.set_font_size_length(rustkit_css::Length::Em(2.0));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.67);
                 style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.5);
+                style.set_font_size_length(rustkit_css::Length::Em(1.5));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.83);
                 style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.17);
+                style.set_font_size_length(rustkit_css::Length::Em(1.17));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.0);
                 style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.0);
+                style.set_font_size_length(rustkit_css::Length::Em(1.0));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
                 style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(0.83);
+                style.set_font_size_length(rustkit_css::Length::Em(0.83));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
                 style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(0.67);
+                style.set_font_size_length(rustkit_css::Length::Em(0.67));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
                 style.margin_bottom = rustkit_css::Length::Em(2.33);
@@ -14543,7 +14539,7 @@ impl layout_ctx::LayoutCtx {
                 // three buttons vertically (h=124.6 vs Chrome 39) with the
                 // interstitial whitespace text runs each taking a line.
                 style.display = rustkit_css::Display::InlineBlock;
-                style.font_size = rustkit_css::Length::Px(13.333);
+                style.set_font_size_length(rustkit_css::Length::Px(13.333));
                 // The pinned oracle (Chrome CfT-148 on this seat) computes
                 // `font-family: Arial` for every unstyled control on every
                 // board case (n53 census over baselines/chrome-148); its
@@ -14598,20 +14594,24 @@ impl layout_ctx::LayoutCtx {
             }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
             }
             "big" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(19.0); // larger
+                // `font-size: larger` (Chrome UA): x 1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.2));
             }
             "sub" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
                                                                  // vertical-align: sub (not implemented)
             }
             "sup" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
                                                                  // vertical-align: super (not implemented)
             }
             // Code and preformatted
@@ -15583,9 +15583,7 @@ impl Engine {
             "opacity" => style.opacity = parent.opacity,
             "font-family" => style.font_family = parent.font_family.clone(),
             "font-size" => {
-                style.font_size = parent.font_size.clone();
-                style.font_size_keyword = parent.font_size_keyword;
-                style.font_size_absolute = parent.font_size_absolute;
+                style.copy_font_size_from(parent);
             }
             "font-weight" => style.font_weight = parent.font_weight,
             "font-style" => style.font_style = parent.font_style,
@@ -15593,9 +15591,7 @@ impl Engine {
             "line-height" => style.line_height = parent.line_height,
             "font" => {
                 style.font_family = parent.font_family.clone();
-                style.font_size = parent.font_size.clone();
-                style.font_size_keyword = parent.font_size_keyword;
-                style.font_size_absolute = parent.font_size_absolute;
+                style.copy_font_size_from(parent);
                 style.font_weight = parent.font_weight;
                 style.font_style = parent.font_style;
                 style.font_stretch = parent.font_stretch;
@@ -15963,22 +15959,14 @@ impl layout_ctx::LayoutCtx {
                     _ => 0,
                 };
                 if keyword > 0 {
-                    style.font_size = rustkit_css::Length::Px(
-                        rustkit_css::ComputedStyle::font_size_for_keyword(keyword, false),
-                    );
-                    style.font_size_keyword = keyword;
-                    style.font_size_absolute = false;
+                    style.set_font_size_keyword(keyword);
+                } else if value.trim().eq_ignore_ascii_case("smaller") {
+                    // Blink: x 1/1.2 and x 1.2 of the parent, keyword cleared.
+                    style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
+                } else if value.trim().eq_ignore_ascii_case("larger") {
+                    style.set_font_size_length(rustkit_css::Length::Em(1.2));
                 } else if let Some(length) = parse_length(value) {
-                    // em/% of the inherited size keep its absoluteness;
-                    // any other length is the author's own.
-                    if !matches!(
-                        length,
-                        rustkit_css::Length::Em(_) | rustkit_css::Length::Percent(_)
-                    ) {
-                        style.font_size_absolute = true;
-                    }
-                    style.font_size_keyword = 0;
-                    style.font_size = length;
+                    style.set_font_size_length(length);
                 }
             }
             "font-weight" => {
@@ -16013,7 +16001,18 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "font-family" => {
-                style.font_family = value.trim_matches(|c| c == '"' || c == '\'').to_string();
+                // A quoted "monospace" is a family name, not the generic
+                // (#1053 R1; CfT 148 sizes it 16px): its quotes are kept so
+                // `is_generic_monospace` does not take it for the generic.
+                let v = value.trim();
+                let quoted_generic = v.len() >= 2
+                    && (v.starts_with('"') || v.starts_with('\''))
+                    && v[1..v.len() - 1].trim().eq_ignore_ascii_case("monospace");
+                style.font_family = if quoted_generic {
+                    v.to_string()
+                } else {
+                    value.trim_matches(|c| c == '"' || c == '\'').to_string()
+                };
             }
             "font-style" => {
                 if value == "italic" {
@@ -17399,11 +17398,7 @@ impl layout_ctx::LayoutCtx {
             "appearance" | "-webkit-appearance" => {
                 style.appearance = rustkit_css::Appearance::Auto
             }
-            "font-size" => {
-                style.font_size = rustkit_css::Length::Px(16.0);
-                style.font_size_keyword = 4;
-                style.font_size_absolute = false;
-            }
+            "font-size" => style.set_font_size_keyword(4),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
