@@ -303,3 +303,152 @@ fn the_first_lines_show_in_the_task_that_brings_them() {
     frames(&mut engine, view, 3);
     assert_eq!(rows(&mut engine, view), 6);
 }
+
+// SEC1b: on the WebKit content path the console lines, DOM tree and picked
+// element the Inspector shows are posted by the content page, which can
+// set every field to any type. They must reach the Inspector page (which
+// holds `window.ipc`) as data: no element and no script from them.
+
+/// Arm the harmless flag; after the page took the data, click whatever
+/// element it may have made from it, and read the flag and the count of
+/// such elements.
+fn arm(engine: &mut Engine, view: EngineViewId) {
+    eval(engine, view, "window.__flag = 0; 0");
+}
+
+fn injected_and_flag(engine: &mut Engine, view: EngineViewId) -> String {
+    eval(
+        engine,
+        view,
+        "var e = document.getElementById('injected'); if (e) e.click(); \
+         String(document.querySelectorAll('#injected').length) + ',' + String(window.__flag)",
+    )
+}
+
+/// Markup that, if it lands in an attribute value or text unescaped, makes
+/// `#injected`, whose click sets the flag.
+const MARKUP: &str = "\"><span id=\"injected\" onclick=\"window.__flag=1\">x</span><i data-x=\"";
+
+#[test]
+fn a_console_line_with_a_non_numeric_doc_shows_no_markup() {
+    let (mut engine, view) = inspector();
+    console_tab(&mut engine, view);
+    arm(&mut engine, view);
+    let entry = serde_json::json!({
+        "id": 1, "level": "log", "message": "m", "doc": MARKUP, "timestamp": 1
+    });
+    eval(&mut engine, view, &format!("window.hiwaveInspector.addConsoleEntry({entry}); 0"));
+    frames(&mut engine, view, 3);
+    assert_eq!(injected_and_flag(&mut engine, view), "0,0", "no element, no script from the doc");
+    assert_eq!(shown(&mut engine, view), "m", "the line itself is shown");
+}
+
+#[test]
+fn a_dom_tree_with_a_string_children_omitted_shows_no_markup() {
+    let (mut engine, view) = inspector();
+    arm(&mut engine, view);
+    let tree = serde_json::json!({
+        "type": "element", "tag": "html", "path": "html", "classes": [],
+        "children": [{
+            "type": "element", "tag": "div", "path": "html > div", "classes": [],
+            "children": [], "childrenOmitted": MARKUP
+        }]
+    });
+    eval(&mut engine, view, &format!("window.hiwaveInspector.setDomTree({tree}); 0"));
+    frames(&mut engine, view, 2);
+    assert_eq!(injected_and_flag(&mut engine, view), "0,0", "no element, no script from childrenOmitted");
+    assert_eq!(
+        eval(&mut engine, view, "String(document.querySelectorAll('#dom-tree .dom-node').length)"),
+        "1",
+        "the node itself is shown"
+    );
+}
+
+/// A picked element's path reaches `selectElementByPath` exactly as the
+/// page sent it, whatever it holds, and nothing in it runs.
+#[test]
+fn a_picked_path_reaches_select_element_by_path_intact() {
+    let paths = [
+        // A backslash before a quote, then code and a line comment.
+        "div\\'); window.__flag = 1; } //",
+        // Quotes, a backslash and line breaks.
+        "div[title=\"a\\\\b\"] > p:nth-child(2)\n'x'\r\u{2028}",
+    ];
+    for path in paths {
+        let (mut engine, view) = inspector();
+        arm(&mut engine, view);
+        eval(
+            &mut engine,
+            view,
+            "window.__got = null; \
+             window.hiwaveInspector.selectElementByPath = function (p) { window.__got = p; }; 0",
+        );
+        let script = crate::inspector_picked_script(path, "null");
+        let _ = engine.execute_script(view, &script);
+        assert_eq!(eval(&mut engine, view, "String(window.__flag)"), "0", "nothing in {path:?} ran");
+        let literal = serde_json::to_string(path).unwrap();
+        assert_eq!(
+            eval(&mut engine, view, &format!("String(window.__got === {literal})")),
+            "true",
+            "the path arrives intact: {path:?}"
+        );
+    }
+}
+
+/// The colour preview takes only a colour: a value with more declarations
+/// in it gets no preview (the value itself is still listed, as text).
+#[test]
+fn a_colour_preview_is_only_made_for_a_plain_colour() {
+    let (mut engine, view) = inspector();
+    let styles = serde_json::json!({
+        "selector": "div",
+        "computedStyles": {
+            "color": "rgb(1, 2, 3)",
+            "background-color": "rgb(0, 0, 0; position: fixed; inset: 0)",
+            "border-color": "rgba(0,0,0,0.5)"
+        }
+    });
+    eval(&mut engine, view, &format!("window.hiwaveInspector.setElementStyles({styles}); 0"));
+    assert_eq!(
+        eval(&mut engine, view, "String(document.querySelectorAll('#computed-styles .color-preview').length)"),
+        "2",
+        "previews for the two plain colours only"
+    );
+    assert_eq!(
+        eval(
+            &mut engine,
+            view,
+            "String(Array.from(document.querySelectorAll('#computed-styles .style-property-value'))\
+             .some(v => v.textContent.includes('position: fixed')))",
+        ),
+        "true",
+        "the forged value is still listed as text"
+    );
+}
+
+/// A console message `0` shows as `0`, not as an empty line.
+#[test]
+fn a_zero_message_shows_as_zero() {
+    let (mut engine, view) = inspector();
+    console_tab(&mut engine, view);
+    eval(
+        &mut engine,
+        view,
+        "window.hiwaveInspector.addConsoleEntry({id: 0, level: 'log', message: 0, doc: 1, timestamp: 1}); 0",
+    );
+    frames(&mut engine, view, 3);
+    assert_eq!(shown(&mut engine, view), "0");
+}
+
+/// autofill.js (injected into content pages) builds no markup from what it
+/// shows: #1034 replaced its string escaping (`escapeHtml` into `innerHTML`)
+/// with `textContent`, so there is no escaper left to test. This pins the
+/// source instead: no HTML-parsing sink, and `textContent` for the text.
+#[test]
+fn the_autofill_helper_builds_no_markup_from_entries() {
+    let src = crate::AUTOFILL_HELPER;
+    for sink in ["innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"] {
+        assert!(!src.contains(sink), "autofill.js uses {sink}");
+    }
+    assert!(src.contains("textContent"), "autofill.js sets its text with textContent");
+}

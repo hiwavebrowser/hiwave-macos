@@ -812,8 +812,8 @@ document.getElementById('main').textContent = 'hydrated hello world';</script>"#
 
 /// The app's autofill scripts mid-load. On macOS the autofill helper is
 /// not injected into RustKit content (main.rs injects it off macOS only),
-/// so the trigger is a no-op and the credentials message reaches only a
-/// page listener. Neither touches the form or the load.
+/// so the trigger and the picker call are no-ops. Neither touches the form
+/// or the load.
 #[test]
 fn autofill_scripts_mid_load_leave_the_form_and_the_load_alone() {
     let page = r#"<!doctype html><body style="margin:0">
@@ -824,11 +824,11 @@ fn autofill_scripts_mid_load_leave_the_form_and_the_load_alone() {
     let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000))]);
     let mut load = Load::start(&fixture, "/page");
     load.wait_main();
-    // `UserEvent::TriggerAutofill` and `SendAutofillCredentials`, verbatim.
+    // `UserEvent::TriggerAutofill` and `ipc::autofill::picker_script`, verbatim.
     let (_, waited) = load.eval("if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }", Duration::from_secs(20));
     assert!(waited < SERVED, "the trigger waited {waited:?}");
     let _ = load.eval(
-        "window.postMessage({ type: 'hiwave_autofill_credentials', credentials: [{\"username\":\"u\",\"password\":\"p\"}] }, '*');",
+        "(function(l){var a=window.hiwaveAutofill;if(a&&typeof a.showCredentials==='function'){a.showCredentials(l);}})([{\"id\":\"0123456789abcdef\",\"username\":\"u\"}]);",
         Duration::from_secs(20),
     );
     load.wait_complete();

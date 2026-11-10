@@ -1584,6 +1584,40 @@ mod node_write_tests {
         assert_eq!(doc.body().unwrap().text_content(), "xhi");
     }
 
+    /// CH2.E17 / #964: `sheet.disabled` is keyed by [`Node::sheet_generation`].
+    /// A child rewrite or a connection move ends that sheet, so the flag dies.
+    #[test]
+    fn a_disabled_flag_dies_when_sheet_generation_moves() {
+        let doc = Document::parse_html(
+            "<html><head><style id=s>p{}</style></head><body></body></html>",
+        )
+        .unwrap();
+        let style = doc.get_element_by_id("s").unwrap();
+        assert!(!doc.style_sheet_disabled(&style));
+        doc.set_style_sheet_disabled(&style, true);
+        assert!(doc.style_sheet_disabled(&style));
+
+        // CSSOM text rewrite bumps sheet_generation (append_child → end_sheet).
+        let before = style.sheet_generation();
+        style.append_child(doc.create_node(NodeType::Text("q{}".into())));
+        assert_ne!(style.sheet_generation(), before);
+        assert!(
+            !doc.style_sheet_disabled(&style),
+            "a new sheet starts enabled"
+        );
+
+        // Re-disable, then move the element: connection_generation also ends it.
+        doc.set_style_sheet_disabled(&style, true);
+        assert!(doc.style_sheet_disabled(&style));
+        let head = doc.head().unwrap();
+        style.remove_from_parent();
+        head.append_child(style.clone());
+        assert!(
+            !doc.style_sheet_disabled(&style),
+            "a moved style's sheet is a new, enabled sheet"
+        );
+    }
+
     #[test]
     fn replacing_data_keeps_the_nodes_listeners() {
         let doc = Document::parse_html("<html><body><a id=a>x</a></body></html>").unwrap();
