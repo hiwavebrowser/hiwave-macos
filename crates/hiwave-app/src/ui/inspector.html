@@ -1069,8 +1069,9 @@
 
             function renderConsoleRow(row) {
                 if (row.entry) return renderConsoleEntry(row.entry, row.stale);
-                const label = row.stale ? `Document ${row.divider} (earlier page)` : `Document ${row.divider}`;
-                return `<div class="console-doc-divider" data-doc="${row.divider}">${label}</div>`;
+                const doc = escapeHtml(row.divider);
+                const label = row.stale ? `Document ${doc} (earlier page)` : `Document ${doc}`;
+                return `<div class="console-doc-divider" data-doc="${doc}">${label}</div>`;
             }
 
             function renderConsoleEntry(entry, stale) {
@@ -1078,11 +1079,12 @@
                 const time = formatTime(entry.timestamp);
                 const source = formatSource(entry.stack);
 
-                return `<div class="console-entry ${entry.level}${stale ? ' stale-doc' : ''}" data-id="${entry.id}" data-level="${entry.level}">
+                const level = escapeHtml(entry.level);
+                return `<div class="console-entry ${level}${stale ? ' stale-doc' : ''}" data-id="${escapeHtml(String(entry.id))}" data-level="${level}">
                     <span class="console-entry-time">${time}</span>
                     ${icon ? `<span class="console-entry-icon">${icon}</span>` : ''}
                     <span class="console-entry-content">${escapeHtml(entry.message)}</span>
-                    ${source ? `<span class="console-entry-source">${source}</span>` : ''}
+                    ${source ? `<span class="console-entry-source">${escapeHtml(source)}</span>` : ''}
                 </div>`;
             }
 
@@ -1222,7 +1224,26 @@
                 scheduleConsole();
             }
 
+            // A console line's numbers, as numbers (SEC1b): on the WebKit
+            // content path the page posts its lines, so a field may hold
+            // anything. A document id that is not a finite number is
+            // dropped, as if the line had none.
+            function consoleNumber(value) {
+                const n = Number(value);
+                return value != null && value !== '' && Number.isFinite(n) ? n : null;
+            }
+
+            function normalizeConsoleEntry(entry) {
+                entry = (entry && typeof entry === 'object') ? entry : { message: String(entry) };
+                entry.doc = consoleNumber(entry.doc);
+                const time = consoleNumber(entry.timestamp);
+                entry.timestamp = time != null ? time : Date.now();
+                if (!Array.isArray(entry.stack)) entry.stack = [];
+                return entry;
+            }
+
             function addConsoleEntry(entry) {
+                entry = normalizeConsoleEntry(entry);
                 // Input and results belong to the document showing now.
                 if (entry.doc == null && consoleEntries.length) {
                     entry.doc = consoleEntries[consoleEntries.length - 1].doc;
@@ -1300,7 +1321,7 @@
             // Render DOM tree node
             function renderDomNode(node, depth = 0) {
                 const indent = depth * 16;
-                const omitted = node.childrenOmitted || 0;
+                const omitted = Math.max(0, Math.floor(Number(node.childrenOmitted))) || 0;
                 const hasChildren = (node.children && node.children.length > 0) || omitted > 0;
                 // Auto-expand the first 3 levels, and every level the engine sent
                 // down to a picked element (RustKit content).
@@ -1392,11 +1413,17 @@
                 return html;
             }
 
+            // Text or a double- or single-quoted attribute value: & < > " '.
+            // (&apos;, not &#39;: renderStyleProperty highlights digits in
+            // escaped text.)
             function escapeHtml(text) {
-                if (!text) return '';
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
+                if (text == null) return '';
+                return String(text)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&apos;');
             }
 
             // Update box model display
@@ -1473,7 +1500,9 @@
 
                 // Color preview
                 if (name.includes('color') || name === 'background') {
-                    const colorMatch = value.match(/^(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|[a-z]+)$/i);
+                    // Plain colours only: a value with `;` or `:` in it
+                    // would add declarations to the preview's style.
+                    const colorMatch = String(value).match(/^(#[0-9a-fA-F]{3,8}|(rgb|hsl)a?\([0-9a-z.,%\/\s+-]+\)|[a-z]+)$/i);
                     if (colorMatch) {
                         formattedValue = `<span class="color-preview" style="background: ${escapeHtml(value)}"></span>${formattedValue}`;
                     }
@@ -1741,7 +1770,8 @@
 
                 addConsoleEntries: function(entries) {
                     const now = Date.now();
-                    for (const entry of entries) {
+                    for (const raw of entries) {
+                        const entry = normalizeConsoleEntry(raw);
                         entry.timestamp = entry.timestamp || now;
                         consoleEntries.push(entry);
                     }
