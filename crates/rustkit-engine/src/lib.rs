@@ -23361,6 +23361,8 @@ impl Engine {
                 },
                 canvas,
                 modal_popup: view.lay.select_popup.borrow().is_some(),
+                // Installed for this view just above.
+                web_fonts: rustkit_layout::webfonts::current(),
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };

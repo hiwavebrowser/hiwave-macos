@@ -453,7 +453,68 @@ mod imp {
     }
 }
 
-pub use imp::{clear, face_id, install, is_installed, lookup_descriptor};
+pub use imp::{face_id, is_installed, lookup_descriptor};
+
+/// A thread's installed face set as it was handed over (tag and faces), so
+/// that a frame built on one thread can be drawn on another with the same
+/// faces: the app lays a page out on its content thread and draws the
+/// committed frame on the window thread, whose slot holds other faces or
+/// none. Empty: no web faces.
+#[derive(Debug, Clone, Default)]
+pub struct FaceSet(Option<Arc<(String, Vec<WebFontFace>)>>);
+
+impl FaceSet {
+    pub fn is_empty(&self) -> bool {
+        self.0.as_ref().map_or(true, |set| set.1.is_empty())
+    }
+}
+
+thread_local! {
+    /// What this thread installed last, for [`current`].
+    static CURRENT: std::cell::RefCell<FaceSet> = std::cell::RefCell::new(FaceSet::default());
+}
+
+/// Install `faces` as this thread's document font set, replacing whatever
+/// was there. Returns how many faces were accepted; a face that fails
+/// `inspect` or that the platform cannot decode is dropped and counted
+/// against that number, never silently kept as a name with no glyphs.
+/// Installing the set already installed (same non-empty `tag`) is a no-op.
+pub fn install(tag: &str, faces: &[WebFontFace]) -> usize {
+    let accepted = imp::install(tag, faces);
+    CURRENT.with(|current| {
+        let mut current = current.borrow_mut();
+        let same = current.0.as_ref().is_some_and(|set| !tag.is_empty() && set.0 == tag);
+        if !same {
+            *current = FaceSet(Some(Arc::new((tag.to_string(), faces.to_vec()))));
+        }
+    });
+    accepted
+}
+
+/// Drop this thread's set. After this no family resolves through the registry.
+pub fn clear() {
+    imp::clear();
+    CURRENT.with(|current| *current.borrow_mut() = FaceSet::default());
+}
+
+/// The set this thread has installed, to hand to the thread that draws
+/// what this one built ([`install_set`]).
+pub fn current() -> FaceSet {
+    CURRENT.with(|current| current.borrow().clone())
+}
+
+/// Install a set another thread handed over ([`current`]); an empty set
+/// clears this thread's, so no family resolves to a face another document
+/// installed here. Returns how many faces were accepted.
+pub fn install_set(set: &FaceSet) -> usize {
+    match &set.0 {
+        Some(set) => install(&set.0, &set.1),
+        None => {
+            clear();
+            0
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub use imp::lookup;
