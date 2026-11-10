@@ -1563,13 +1563,18 @@ impl Renderer {
             let grouped = commands
                 .iter()
                 .any(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_) | DisplayCommand::PushFilter(_) | DisplayCommand::PushClipPath { .. }));
-            // Outlines neither this list nor the last one used are dropped.
+            // Outlines no list drew in the last `CLIP_MASK_KEEP_FRAMES` are
+            // dropped. Not just the last one: a fractional scroll cycles an
+            // outline through its sub-pixel phases, and a phase comes back
+            // a few frames later (#1052 R1 nit 1). Past the count or byte
+            // budget the cache starts over.
             self.clip_mask_frame += 1;
             let frame = self.clip_mask_frame;
-            if self.clip_mask_cache.len() > MAX_CACHED_CLIP_MASKS {
+            let bytes: usize = self.clip_mask_cache.values().map(|m| m.bytes).sum();
+            if self.clip_mask_cache.len() > MAX_CACHED_CLIP_MASKS || bytes > MAX_CACHED_CLIP_MASK_BYTES {
                 self.clip_mask_cache.clear();
             }
-            self.clip_mask_cache.retain(|_, mask| mask.used + 1 >= frame);
+            self.clip_mask_cache.retain(|_, mask| mask.used + CLIP_MASK_KEEP_FRAMES >= frame);
             if layered && grouped && !has_backdrop && self.defer_layers() {
                 let sticky = (
                     self.window_sticky,
@@ -3004,7 +3009,7 @@ impl Renderer {
             y1 = y1.max(y);
         }
         let (vw, vh) = self.viewport_size;
-        let empty = ClipMask { key: None, rect: [0, 0, 0, 0] };
+        let empty = ClipMask { key: None, rect: [0, 0, 0, 0], origin: [0, 0] };
         if !(x0 < x1 && y0 < y1) {
             return empty;
         }
@@ -3015,25 +3020,59 @@ impl Renderer {
         if right <= left || bottom <= top {
             return empty;
         }
-        let (w, h) = ((right - left) as u32, (bottom - top) as u32);
-        let rect = [left as u32, top as u32, w, h];
-        // The same outline at the same place in the mask is the same mask.
+        // What is drawn: the outline's box cut to the viewport.
+        let rect = [left as u32, top as u32, (right - left) as u32, (bottom - top) as u32];
+        // What is rasterised: the whole outline, in its own pixels, so the
+        // mask does not change while the page scrolls. Keyed on the clamped
+        // corner, a box across the viewport edge missed on every scrolled
+        // frame (#1052 R1 nit 1). The outline is placed at its own sub-pixel
+        // phase, snapped to 1/16 px, so a fractional (trackpad) scroll finds
+        // one of at most 256 masks rather than none; the snap moves an edge
+        // by under 1/32 px. A box far bigger than the viewport keeps the
+        // clamped mask, so no texture outgrows the device.
+        let snap = |f: f32| (f * CLIP_MASK_PHASES).round() / CLIP_MASK_PHASES;
+        let (phase_x, phase_y) = (snap(x0 - x0.floor()), snap(y0 - y0.floor()));
+        let (whole_w, whole_h) = ((x1 - x0 + phase_x).ceil() as i64, (y1 - y0 + phase_y).ceil() as i64);
+        let whole = whole_w <= (vw as i64).max(1) * 2
+            && whole_h <= (vh as i64).max(1) * 2
+            && whole_w <= MAX_CLIP_MASK_DIM
+            && whole_h <= MAX_CLIP_MASK_DIM;
+        let (origin, w, h, local): (_, u32, u32, Vec<Vec<(f32, f32)>>) = if whole {
+            // Rounded to 1/256 px: `(x - scroll) - (x0 - scroll)` is not the
+            // same float at every scroll, and a key over raw bits missed
+            // every fractional frame.
+            let q = |v: f32| (v * 256.0).round() / 256.0;
+            let local = screen
+                .iter()
+                .map(|c| c.iter().map(|&(x, y)| (q(x - x0) + phase_x, q(y - y0) + phase_y)).collect())
+                .collect();
+            // Texel (0, 0) of the mask sits at the snapped corner on screen.
+            let origin = [(x0.floor() as i32), (y0.floor() as i32)];
+            (origin, whole_w as u32, whole_h as u32, local)
+        } else {
+            let local = screen
+                .iter()
+                .map(|c| c.iter().map(|&(x, y)| (x - left as f32, y - top as f32)).collect())
+                .collect();
+            ([left as i32, top as i32], rect[2], rect[3], local)
+        };
+        // The same outline in the same mask pixels is the same mask.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (w, h, even_odd, screen.len()).hash(&mut hasher);
-        for contour in &screen {
+        (whole, w, h, even_odd, local.len()).hash(&mut hasher);
+        for contour in &local {
             contour.len().hash(&mut hasher);
             for &(x, y) in contour {
-                ((x - left as f32).to_bits(), (y - top as f32).to_bits()).hash(&mut hasher);
+                (x.to_bits(), y.to_bits()).hash(&mut hasher);
             }
         }
         let key = hasher.finish();
         let frame = self.clip_mask_frame;
         if let Some(cached) = self.clip_mask_cache.get_mut(&key) {
             cached.used = frame;
-            return ClipMask { key: Some(key), rect };
+            return ClipMask { key: Some(key), rect, origin };
         }
         self.stats.clip_masks_rasterized += 1;
-        let coverage = clip_mask_coverage(&screen, even_odd, left as i32, top as i32, w, h);
+        let coverage = clip_mask_coverage(&local, even_odd, 0, 0, w, h);
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Clip Mask Texture"),
@@ -3062,8 +3101,9 @@ impl Renderer {
             layout: &self.clip_mask_pipeline.mask_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
         });
-        self.clip_mask_cache.insert(key, CachedClipMask { _texture: texture, bind_group, used: frame });
-        ClipMask { key: Some(key), rect }
+        let bytes = (w as usize) * (h as usize);
+        self.clip_mask_cache.insert(key, CachedClipMask { _texture: texture, bind_group, used: frame, bytes });
+        ClipMask { key: Some(key), rect, origin }
     }
 
     /// The draw that lays the layer `layer_group` samples over its target
@@ -3074,13 +3114,15 @@ impl Renderer {
         let mask_group = mask.key.and_then(|key| self.clip_mask_cache.get(&key)).map(|m| m.bind_group.clone())?;
         let [x, y, w, h] = mask.rect;
         let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
-        let (mw, mh) = (w as f32, h as f32);
+        // Texture coordinates: the mask's own pixels, from its origin.
+        let (u0, v0) = (x0 - mask.origin[0] as f32, y0 - mask.origin[1] as f32);
+        let (u1, v1) = (u0 + w as f32, v0 + h as f32);
         let color = [1.0; 4];
         let vertices = [
-            TextureVertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
-            TextureVertex { position: [x1, y0], tex_coords: [mw, 0.0], color },
-            TextureVertex { position: [x1, y1], tex_coords: [mw, mh], color },
-            TextureVertex { position: [x0, y1], tex_coords: [0.0, mh], color },
+            TextureVertex { position: [x0, y0], tex_coords: [u0, v0], color },
+            TextureVertex { position: [x1, y0], tex_coords: [u1, v0], color },
+            TextureVertex { position: [x1, y1], tex_coords: [u1, v1], color },
+            TextureVertex { position: [x0, y1], tex_coords: [u0, v1], color },
         ];
         let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
         Some(Draw {
@@ -3127,14 +3169,15 @@ impl Renderer {
                     ],
                 });
                 let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
-                // Texture coordinates: the mask's own pixels.
-                let (mw, mh) = (w as f32, h as f32);
+                // Texture coordinates: the mask's own pixels, from its origin.
+                let (u0, v0) = (x0 - mask.origin[0] as f32, y0 - mask.origin[1] as f32);
+                let (u1, v1) = (u0 + w as f32, v0 + h as f32);
                 let color = [1.0; 4];
                 let vertices = [
-                    TextureVertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
-                    TextureVertex { position: [x1, y0], tex_coords: [mw, 0.0], color },
-                    TextureVertex { position: [x1, y1], tex_coords: [mw, mh], color },
-                    TextureVertex { position: [x0, y1], tex_coords: [0.0, mh], color },
+                    TextureVertex { position: [x0, y0], tex_coords: [u0, v0], color },
+                    TextureVertex { position: [x1, y0], tex_coords: [u1, v0], color },
+                    TextureVertex { position: [x1, y1], tex_coords: [u1, v1], color },
+                    TextureVertex { position: [x0, y1], tex_coords: [u0, v1], color },
                 ];
                 let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -7676,8 +7719,17 @@ enum LayerEffect {
 /// target) and `[x, y, width, height]` in the target.
 struct ClipMask {
     key: Option<u64>,
+    /// Where the mask is drawn: the outline's box cut to the viewport.
     rect: [u32; 4],
+    /// Where the mask's texel (0, 0) lies on screen (can be off it).
+    origin: [i32; 2],
 }
+
+/// Sub-pixel phases an outline mask is snapped to, per axis.
+const CLIP_MASK_PHASES: f32 = 16.0;
+/// The largest outline mask rasterised whole; past it the mask is cut to
+/// the viewport (and re-made when the page scrolls).
+const MAX_CLIP_MASK_DIM: i64 = 4096;
 
 /// A rasterised outline, kept between frames: a list drawn again (a
 /// repaint, a scroll by whole pixels) finds its masks here instead of
@@ -7687,7 +7739,14 @@ struct CachedClipMask {
     bind_group: wgpu::BindGroup,
     /// The `clip_mask_frame` that last used it.
     used: u64,
+    /// Its size in bytes (one byte a pixel).
+    bytes: usize,
 }
+
+/// Frames a cached outline mask outlives its last use.
+const CLIP_MASK_KEEP_FRAMES: u64 = 64;
+/// The most bytes of outline masks kept between frames.
+const MAX_CACHED_CLIP_MASK_BYTES: usize = 64 << 20;
 
 /// The most `PushClipPath` scopes one list draws as layers; the rest clip
 /// to their bounding boxes. Each costs a layer like an opacity scope's.

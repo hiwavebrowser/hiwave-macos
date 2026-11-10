@@ -9826,8 +9826,9 @@ pub(crate) enum ShapeClip {
 }
 
 impl ShapeClip {
-    /// An outline clip; empty contours (a path that did not parse to any
-    /// point) clip everything.
+    /// An outline clip; contours with no area (a valid `path('M 0 0 L 100
+    /// 100')` or `path('M 10 10')`) clip everything, as in Chrome 148. An
+    /// unparsable path never gets here: it is no clip (`path_data::is_valid`).
     fn outline(contours: Vec<Vec<(f32, f32)>>, even_odd: bool) -> ShapeClip {
         let contours: Vec<Vec<(f32, f32)>> = contours.into_iter().filter(|c| c.len() >= 3).collect();
         let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
@@ -11556,6 +11557,11 @@ impl DisplayList {
                     .strip_prefix('"')
                     .and_then(|d| d.strip_suffix('"'))
                     .or_else(|| data.strip_prefix('\'').and_then(|d| d.strip_suffix('\'')))?;
+                // An unparsable string invalidates the declaration: no
+                // clip at all, as Chrome 148 (`path('')` included).
+                if !path_data::is_valid(data) {
+                    return None;
+                }
                 let commands = path_data::parse(data);
                 let contours: Vec<Vec<(f32, f32)>> = path_data::flatten(&commands, CLIP_FLATTEN_TOLERANCE_PX)
                     .into_iter()

@@ -943,4 +943,13 @@ fn an_invalid_path_leaves_the_box_unclipped() {
          width:200px;height:200px;background:#00f;clip-path:path('M 0 0 L 100 0 L 0 100 Z')\"></div></body></html>",
     );
     assert_eq!(f[(240 * W + 240) as usize], WHITE, "a valid path clips (240,240) away");
+    // A valid path with no area clips everything (CfT 148: white at
+    // (240,240), the declaration kept).
+    for path in ["path('M 0 0 L 100 100')", "path('M 10 10')"] {
+        let page = format!(
+            "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:50px;top:50px;\
+             width:200px;height:200px;background:#00f;clip-path:{path}\"></div></body></html>"
+        );
+        assert_eq!(frame(&page)[(240 * W + 240) as usize], WHITE, "{path}: a valid empty outline clips everything");
+    }
 }

@@ -643,3 +643,130 @@ fn quad_bezier_points(
 
     points
 }
+
+/// Whether `d` is valid path data as a whole (SVG 2 path grammar): it starts
+/// with a moveto, every command has complete argument groups, arc flags are
+/// `0` or `1`, and nothing else is in it. `parse` is lenient on purpose (an
+/// SVG `d` renders up to its first error); CSS `path()` is not: an
+/// unparsable string makes the declaration invalid, and Chrome for Testing
+/// 148 then leaves the box unclipped, `path('')` included (C8b, #1052 nit 5).
+pub fn is_valid(d: &str) -> bool {
+    let b = d.as_bytes();
+    let mut i = 0usize;
+    let skip_ws = |i: &mut usize| {
+        while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') {
+            *i += 1;
+        }
+    };
+    let skip_sep = |i: &mut usize| {
+        skip_ws(i);
+        if *i < b.len() && b[*i] == b',' {
+            *i += 1;
+            skip_ws(i);
+        }
+    };
+    let number = |i: &mut usize| -> bool {
+        let start = *i;
+        if *i < b.len() && matches!(b[*i], b'+' | b'-') {
+            *i += 1;
+        }
+        let mut digits = 0;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+            digits += 1;
+        }
+        if *i < b.len() && b[*i] == b'.' {
+            *i += 1;
+            while *i < b.len() && b[*i].is_ascii_digit() {
+                *i += 1;
+                digits += 1;
+            }
+        }
+        if digits == 0 {
+            *i = start;
+            return false;
+        }
+        if *i < b.len() && matches!(b[*i], b'e' | b'E') {
+            let save = *i;
+            *i += 1;
+            if *i < b.len() && matches!(b[*i], b'+' | b'-') {
+                *i += 1;
+            }
+            let mut exp = 0;
+            while *i < b.len() && b[*i].is_ascii_digit() {
+                *i += 1;
+                exp += 1;
+            }
+            if exp == 0 {
+                *i = save;
+            }
+        }
+        true
+    };
+    let flag = |i: &mut usize| -> bool {
+        if *i < b.len() && matches!(b[*i], b'0' | b'1') {
+            *i += 1;
+            true
+        } else {
+            false
+        }
+    };
+    skip_ws(&mut i);
+    if i >= b.len() || !matches!(b[i], b'M' | b'm') {
+        return false;
+    }
+    while i < b.len() {
+        let cmd = b[i].to_ascii_lowercase();
+        i += 1;
+        let args = match cmd {
+            b'z' => 0,
+            b'm' | b'l' | b't' => 2,
+            b'h' | b'v' => 1,
+            b'c' => 6,
+            b's' | b'q' => 4,
+            b'a' => 7,
+            _ => return false,
+        };
+        skip_ws(&mut i);
+        if args == 0 {
+            continue;
+        }
+        // One or more argument groups.
+        let mut groups = 0;
+        loop {
+            let at = i;
+            let mut ok = true;
+            for k in 0..args {
+                if k > 0 {
+                    skip_sep(&mut i);
+                }
+                let good = if cmd == b'a' && (k == 3 || k == 4) { flag(&mut i) } else { number(&mut i) };
+                if !good {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                if groups == 0 {
+                    return false;
+                }
+                i = at;
+                break;
+            }
+            groups += 1;
+            let before_sep = i;
+            skip_sep(&mut i);
+            if i >= b.len() || b[i].is_ascii_alphabetic() && !matches!(b[i], b'e' | b'E') {
+                break;
+            }
+            if i == before_sep && !matches!(b[i], b'+' | b'-' | b'.') && !b[i].is_ascii_digit() {
+                return false;
+            }
+        }
+        skip_ws(&mut i);
+        if i < b.len() && !b[i].is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    true
+}
