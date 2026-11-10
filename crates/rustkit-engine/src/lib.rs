@@ -615,6 +615,10 @@ mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod microtask_cap_tests;
+#[cfg(all(test, feature = "headless"))]
+mod record_elapsed_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
@@ -2143,6 +2147,28 @@ fn begin_script_turn(bindings: &DomBindings, budget: std::time::Duration) {
 /// Closes what [`begin_script_turn`] opened.
 fn end_script_turn(bindings: &DomBindings) {
     SCRIPT_STAMP.with(|stamp| bindings.end_turn(stamp));
+}
+
+/// How many jobs one microtask drain may run before the executor refuses more (H19c).
+///
+/// The cap exists so a runaway promise recursion cannot hang the page. It is 100 000 always, and
+/// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
+/// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
+/// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
+/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
+/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+fn microtask_job_cap(config: &EngineConfig) -> u64 {
+    config.script_loop_iteration_limit.min(100_000)
+}
+
+/// The cap while a turn is armed: the loop limit when the engine arms turns at all
+/// (`interrupt_scripts_at_budget`), else no raise (0).
+fn armed_microtask_job_cap(config: &EngineConfig) -> u64 {
+    if config.interrupt_scripts_at_budget {
+        config.script_loop_iteration_limit
+    } else {
+        0
+    }
 }
 
 /// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
@@ -3713,7 +3739,7 @@ impl Engine {
                         };
                         inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5433,7 +5459,7 @@ impl Engine {
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
         view.script_log.extend(stopped);
         answer
     }
@@ -5608,21 +5634,21 @@ impl Engine {
                 }))
             });
             if load_stopped {
-                log_script_stopped("event:load", 0, take_script_js_overrun());
+                log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "event:load".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "event:load".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5634,7 +5660,7 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -5650,21 +5676,21 @@ impl Engine {
                 }))
             });
             if timer_stopped {
-                log_script_stopped("timers", 0, take_script_js_overrun());
+                log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "timers".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "timers".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5676,7 +5702,7 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -7731,7 +7757,8 @@ impl Engine {
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
@@ -8329,7 +8356,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::Threw(message),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8338,7 +8365,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8349,11 +8376,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -8408,6 +8435,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // The script time of every slice, for the errors the timers reported (H19c).
+            let mut timers_ms: u64 = 0;
             loop {
                 if nav_cancel::cancelled(watch) {
                     return;
@@ -8420,6 +8449,7 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
+                timers_ms += step_started.elapsed().as_millis() as u64;
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
@@ -8450,7 +8480,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::Threw(strip(e)),
                             },
                         );
@@ -8464,7 +8494,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                             },
                         );
@@ -8513,7 +8543,7 @@ impl Engine {
                     return;
                 }
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, "timers");
+            inspector_glue::drain_reports(bindings, &inspector, log, "timers", timers_ms);
         }
         if yielded {
             return;
@@ -9022,7 +9052,7 @@ impl Engine {
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9031,6 +9061,7 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9474,7 +9505,7 @@ impl Engine {
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9491,6 +9522,7 @@ impl Engine {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
@@ -9617,7 +9649,8 @@ impl Engine {
         };
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
+        bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
 
@@ -9756,7 +9789,7 @@ impl Engine {
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source);
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source, 0);
         }
 
         if let Some(view) = self.views.get_mut(&id) {

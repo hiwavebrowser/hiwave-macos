@@ -2318,6 +2318,12 @@ impl DomBindings {
             .set_max_job_iterations(max_iterations);
     }
 
+    /// The job cap a drain may run to while a watchdog turn is open (see
+    /// [`JsRuntime::set_armed_max_job_iterations`]).
+    pub fn set_armed_max_job_iterations(&self, limit: u64) {
+        self.runtime.borrow_mut().set_armed_max_job_iterations(limit);
+    }
+
     /// Run any pending jobs (microtasks and async completions).
     pub fn run_jobs(&self) -> Result<(), BindingError> {
         self.runtime
