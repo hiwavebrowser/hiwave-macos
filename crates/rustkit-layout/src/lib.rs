@@ -19,6 +19,7 @@ pub mod forms;
 pub mod selection;
 pub mod fragment;
 pub mod grid;
+pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
@@ -99,6 +100,7 @@ pub use images::{
     calculate_intrinsic_size, calculate_placeholder_size, render_background_image,
     render_broken_image, render_image, ImageLayoutInfo,
 };
+pub use incremental::layout_visits;
 pub use intrinsic_cache::IntrinsicSizingMode;
 pub use margin_collapse::{
     collapse_margins, establishes_bfc, is_margin_collapsible_through,
@@ -2522,6 +2524,7 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: Option<f32>,
     ) {
+        incremental::count_visit();
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -3051,6 +3054,7 @@ impl LayoutBox {
         floats: &FloatContext,
         first_band: (f32, f32),
     ) -> (usize, f32) {
+        incremental::count_visit();
         let BoxType::Text(ref text) = self.box_type else {
             return (0, 0.0);
         };
@@ -4276,6 +4280,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
+        incremental::count_visit();
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);

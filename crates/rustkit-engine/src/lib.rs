@@ -306,8 +306,11 @@ mod select_popup_engine_tests;
 #[cfg(test)]
 mod select_popup_overlay_tests;
 mod restyle_invalidation;
+mod incremental_layout;
 #[cfg(test)]
 mod restyle_invalidation_tests;
+#[cfg(all(test, feature = "headless"))]
+mod incremental_layout_tests;
 mod presenter;
 pub use presenter::FrameCommit;
 mod painted_region;
@@ -1502,6 +1505,7 @@ impl ViewState {
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
+        self.lay.incremental_layout.borrow_mut().take();
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
         self.lay.animations.borrow_mut().reset();
@@ -9983,6 +9987,12 @@ impl Engine {
         if let Some(reason) = dirty.full {
             would.push_str(&format!(" full_reason={reason}"));
         }
+        // INC5: what the incremental layout path did with this relayout.
+        if incremental_layout::mode() != incremental_layout::Mode::Off {
+            if let Some(view) = self.views.get(&id) {
+                would.push_str(&format!(" inc_layout={}", view.lay.incremental_stats.borrow().last));
+            }
+        }
         // Why a pending pointer restyle took the full path.
         match pointer_restyle {
             Some(true) if !layout_skipped => {
@@ -11365,8 +11375,60 @@ impl layout_ctx::LayoutCtx {
         let root_bar_always = root_bar > 0.0
             && (root_remembered || root_box.style.overflow_y == rustkit_css::Overflow::Scroll);
         let mut cb_width = bounds.0 as f32 - if root_bar_always { root_bar } else { 0.0 };
+        // INC5 (`docs/design/INCREMENTAL_LAYOUT_PLAN.md`): lay out only what
+        // changed since this view's last layout, when the flag is on and the
+        // change is a case the incremental path takes. Verify lays out in
+        // full anyway and compares.
+        use incremental_layout::Mode as IncMode;
+        let inc_mode = if lay.is_some() { incremental_layout::mode() } else { IncMode::Off };
+        let inc_key = incremental_layout::Key { bounds, cb_width, fonts: self.web_font_count() };
+        let scrollbar_pass = unlaid.is_some() || !remembered.is_empty() || root_bar_always;
+        let mut incremental: Option<LayoutBox> = None;
+        if let (IncMode::Verify | IncMode::On, Some(lay)) = (inc_mode, lay.as_ref()) {
+            let previous = lay.incremental_layout.borrow_mut().take();
+            let mut stats = lay.incremental_stats.borrow_mut();
+            stats.attempts += 1;
+            match previous {
+                _ if scrollbar_pass => stats.fallback("scrollbar_pass"),
+                None => stats.fallback("no_retained"),
+                Some(prev) if prev.key != inc_key => stats.fallback("key_changed"),
+                Some(mut prev) => {
+                    let _layout_time = time_stage(Stage::Layout);
+                    match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut prev.laid) {
+                        Ok(done) => {
+                            stats.last_visits = done.visits;
+                            stats.last_moved = done.moved;
+                            if done.path.is_some() {
+                                stats.relaid += 1;
+                                stats.last = format!(
+                                    "relaid(visits={} moved={} compared={} delta={:.1})",
+                                    done.visits, done.moved, done.compared, done.delta
+                                );
+                            } else {
+                                stats.unchanged += 1;
+                                stats.last = format!("unchanged(compared={})", done.compared);
+                            }
+                            incremental = Some(prev.laid);
+                        }
+                        Err(why) => stats.fallback(why),
+                    }
+                }
+            }
+        }
+        let use_incremental = inc_mode == IncMode::On && incremental.is_some();
+        // The unlaid tree the next layout diffs against.
+        let mut retain_unlaid = None;
         let mut passes = 0;
+        if use_incremental {
+            retain_unlaid = Some(std::mem::replace(&mut root_box, incremental.take().expect("incremental tree")));
+            passes = 1;
+        } else if inc_mode != IncMode::Off && !scrollbar_pass {
+            retain_unlaid = Some(root_box.clone());
+        }
         for pass in 0..4 {
+            if use_incremental {
+                break;
+            }
             if pass > 0 {
                 let Some(unlaid) = unlaid.as_ref() else { break };
                 let mut marks = HashMap::new();
@@ -11438,6 +11500,29 @@ impl layout_ctx::LayoutCtx {
             root_box.collect_scrollbar_marks(&mut marks);
             *lay.scrollbar_marks.borrow_mut() = marks;
             lay.root_scrollbar.set(cb_width < bounds.0 as f32);
+        }
+        if let Some(lay) = lay.as_ref() {
+            if let Some(incremental) = incremental.as_ref() {
+                // Verify: the incremental tree against the full one, box by box.
+                let (count, shown) = rustkit_layout::incremental::compare_rects(incremental, &root_box, 8);
+                let mut stats = lay.incremental_stats.borrow_mut();
+                if count > 0 {
+                    stats.mismatches += count as u32;
+                    stats.mismatched_layouts += 1;
+                    warn!(mismatches = count, first = ?shown, outcome = %stats.last, "incremental layout verify mismatch");
+                    #[cfg(test)]
+                    if incremental_layout::panic_on_mismatch() {
+                        panic!("incremental layout verify: {count} boxes differ ({}): {shown:?}", stats.last);
+                    }
+                }
+            }
+            if let Some(unlaid) = retain_unlaid {
+                *lay.incremental_layout.borrow_mut() = Some(incremental_layout::Retained {
+                    key: inc_key,
+                    unlaid,
+                    laid: root_box.clone(),
+                });
+            }
         }
 
         // Ensure body element fills viewport (common browser behavior)
