@@ -286,6 +286,8 @@ enum UserEvent {
     ToggleTabMute { id: String },
     // Autofill
     TriggerAutofill,
+    // Delivered into the WRY content webview only (Windows/Linux); nothing sends it on macOS.
+    #[cfg(not(target_os = "macos"))]
     SendAutofillCredentials { credentials_json: String },
     // Vault settings events (from settings webview)
     GetVaultStatus,
@@ -1112,6 +1114,24 @@ fn apply_layout(
     chrome.keep_on_top();
 }
 
+/// What the log says about a chrome IPC command and its answer: the command name, only when it
+/// looks like one (a short snake_case word; anything else is "unknown"), and the answer's kind and
+/// size. Never the answer itself: it can carry what the vault or the history holds.
+fn ipc_log_shape(body: &str, response: &ipc::IpcResponse) -> String {
+    let name = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str().map(str::to_owned)))
+        .filter(|c| !c.is_empty() && c.len() <= 40 && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+        .unwrap_or_else(|| "unknown".to_string());
+    match response {
+        ipc::IpcResponse::Success { data } => {
+            let bytes = serde_json::to_string(data).map(|s| s.len()).unwrap_or(0);
+            format!("{name}: success, {bytes} bytes")
+        }
+        ipc::IpcResponse::Error { .. } => format!("{name}: error"),
+    }
+}
+
 /// The chrome's `window.ipc` messages, as the WebKit chrome view hands
 /// them over. A function, not the handler closure, so the RustKit chrome
 /// view (CH3.A2) can feed it the same messages.
@@ -1152,7 +1172,7 @@ fn handle_chrome_ipc(
             IpcMessage::CreateTab { ref url } => {
                 let nav_url = url.clone();
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("IPC response: {:?}", response);
+                info!("IPC response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 if let Some(u) = nav_url {
@@ -1536,7 +1556,7 @@ fn handle_chrome_ipc(
             }
             _ => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("IPC response: {:?}", response);
+                info!("IPC response: {}", ipc_log_shape(body, &response));
             }
         },
         Err(e) => {
@@ -2531,6 +2551,65 @@ fn should_record_history_url(url: &str) -> bool {
 // which provides comprehensive cross-platform URL blocking
 
 // CH3.A4b and the #907 R1 nits: lazy panels, IPC log lines, the eval hook.
+#[cfg(test)]
+mod chrome_ipc_log_tests {
+    use super::*;
+
+    const SECRET: &str = "hunter2-chrome-secret";
+
+    #[test]
+    fn a_chrome_ipc_response_is_logged_by_kind_and_size_never_its_data() {
+        let ok = ipc::IpcResponse::success(serde_json::json!([{ "username": "u", "password": SECRET }]));
+        let line = ipc_log_shape(r#"{"cmd":"get_all_credentials"}"#, &ok);
+        assert!(line.starts_with("get_all_credentials: success, "), "{line}");
+        assert!(line.ends_with(" bytes"), "{line}");
+        assert!(!line.contains(SECRET) && !line.contains("username"), "{line}");
+        let err = ipc::IpcResponse::error(format!("failed for {SECRET}"));
+        assert_eq!(ipc_log_shape(r#"{"cmd":"unlock_vault"}"#, &err), "unlock_vault: error");
+    }
+
+    #[test]
+    fn the_logged_command_name_is_a_short_snake_case_word_or_unknown() {
+        let ok = ipc::IpcResponse::success(serde_json::json!(1));
+        for body in [
+            format!(r#"{{"cmd":"{}"}}"#, "a".repeat(41)),
+            r#"{"cmd":"Has Spaces & secret"}"#.to_string(),
+            r#"{"cmd":""}"#.to_string(),
+            r#"{"cmd":7}"#.to_string(),
+            "not json".to_string(),
+        ] {
+            assert!(ipc_log_shape(&body, &ok).starts_with("unknown: "), "{body}");
+        }
+        assert!(ipc_log_shape(&format!(r#"{{"cmd":"{}"}}"#, "a".repeat(40)), &ok).starts_with("aaaa"));
+    }
+
+    /// Source pins: the chrome handler never logs a whole response, and the autofill delivery
+    /// (a `window.postMessage(..., '*')` of credentials into the page) is compiled only where
+    /// the WRY content webview that sends it exists.
+    #[test]
+    fn source_pins_for_the_chrome_log_and_the_autofill_delivery() {
+        let source = include_str!("main.rs").replace("\r\n", "\n");
+        // Everything but this module, whose own strings name what it looks for.
+        let this = source.find("#[cfg(test)]\nmod chrome_ipc_log_tests").unwrap();
+        let after = this + source[this..].find("#[cfg(test)]\nmod lazy_panel_tests").unwrap();
+        let production = format!("{}{}", &source[..this], &source[after..]);
+        let whole_response_logs: Vec<&str> =
+            production.lines().filter(|l| l.contains("IPC response:") && l.contains("{:?}")).collect();
+        assert!(whole_response_logs.is_empty(), "a chrome IPC response is logged whole: {whole_response_logs:?}");
+
+        // The event variant and the arm that handles it: the line above each is the gate.
+        for needle in ["SendAutofillCredentials { credentials_json: String }", "SendAutofillCredentials { ref credentials_json }"] {
+            let at = production.find(needle).unwrap_or_else(|| panic!("`{needle}` is gone; update this pin"));
+            let line_start = production[..at].rfind('\n').map_or(0, |i| i + 1);
+            let above = production[..line_start.saturating_sub(1)].lines().last().unwrap_or("").trim();
+            assert_eq!(
+                above, "#[cfg(not(target_os = \"macos\"))]",
+                "`{needle}` is compiled on macOS, where nothing sends it"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod lazy_panel_tests {
     use super::*;
@@ -6096,6 +6175,7 @@ fn main() {
                             "if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }"
                         );
                     }
+                    #[cfg(not(target_os = "macos"))]
                     UserEvent::SendAutofillCredentials { ref credentials_json } => {
                         info!("Sending autofill credentials to page");
                         // Send credentials to the page via window.postMessage
