@@ -24,6 +24,8 @@ mod tab_order_tests;
 mod tab_shortcut_tests;
 // The history lists keep a visited URL as data (no markup, no script).
 mod history_markup_tests;
+// M1f: Escape in the address bar stops or reverts; it never closes the sidebar.
+mod address_bar_escape_tests;
 
 /// chrome.html on a headless engine view, as the app's chrome view.
 struct HeadlessChrome {

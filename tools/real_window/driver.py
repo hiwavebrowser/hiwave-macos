@@ -3261,6 +3261,101 @@ class Driver:
                     "menu %s, page %s" % ("took it" if 'menu event id="focus_url"' in log else "did not take it",
                                           heard or "heard nothing"))
 
+    def m1f_escape_stops_with_sidebar(self):
+        """M1f: with the sidebar open and a page still loading (an image the server holds 8 s), one Escape in the address bar stops the load and leaves the sidebar open; typed text is reverted first."""
+        c = "m1f_escape_stops_with_sidebar"
+        # The sidebar opened explicitly by the chrome's own toggle once it
+        # boots (#1022 R1 nit 6), not left to the seed profile's default.
+        env = {"HIWAVE_RUSTKIT_CHROME_EVAL": "sidebarOpen = false; sidebar.classList.add('collapsed'); toggleSidebar();"}
+        if not self.open_page(c, "m1d_keys.html?slowimg", env=env):
+            return
+        if not self.can_input:
+            return self.not_run(c, "Escape", self.why_not("Accessibility"))
+        self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        widths = re.findall(r'"cmd":"set_sidebar_width","width":(\d+)', self.app.log_text())
+        self.expect(c, "the sidebar is open (opened by the chrome's toggle)", bool(widths) and int(widths[-1]) > 0,
+                    "last set_sidebar_width: %s" % (widths[-1] if widths else "none"))
+        loading = not re.search(r"Navigation finished[^\n]*m1d_keys", self.app.log_text())
+        # The address bar, right of the sidebar and the nav buttons (as
+        # a2_chrome_typed_url clicks it).
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the address bar", bool(clicked))
+        time.sleep(0.4)
+        # Typed text first: Escape reverts it and does not stop the load.
+        self.hw("type", pid, "zz")
+        time.sleep(0.3)
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        time.sleep(0.6)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "Escape over typed text reverted it: no stop, sidebar untouched",
+                    "Stopping load" not in after and "set_sidebar_width" not in after,
+                    "stop: %s; sidebar posts: %d" % ("Stopping load" in after, after.count("set_sidebar_width")))
+        # Nothing typed now: one Escape stops the load; the sidebar stays.
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        stopped = self.app.wait_log(r"Stopping load", 1.5, esc_from)
+        time.sleep(0.5)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "one Escape stopped the load",
+                    bool(stopped) and "Stop: nothing loading" not in after,
+                    "page was loading at the start: %s; stop: %s; %s" % (
+                        loading, bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+        self.expect(c, "the sidebar stayed open", "set_sidebar_width" not in after,
+                    "sidebar posts after Escape: %d" % after.count("set_sidebar_width"))
+        self.close_page()
+
+    def m1g_cmd_l_slow_listener(self):
+        """M1g (#1023 R1 item 5): a page whose Cmd+L keydown listener runs 300 ms, then one whose listener runs 2 s (neither cancels): Cmd+L reaches the address bar once, after the listener; the time from the press is reported."""
+        c = "m1g_cmd_l_slow_listener"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for ms_listen in (300, 2000):
+            what = "a %d ms listener" % ms_listen
+            if not self.open_page(c, "m1d_keys.html?slowl=%d" % ms_listen, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
+            time.sleep(0.6)
+            mark = self.fixture.mark()
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', ms_listen / 1000.0 + 5, log_from)
+            wall = (time.time() - t) * 1000
+            time.sleep(0.8)
+            log = self.app.log_text()[log_from:]
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            heard = len(self.fixture.seen("beacon?m1g-slowl-heard", mark)) > 0
+            done = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
+            why = re.search(r'why="([^"]*)"', chord.group(0)) if chord else None
+            self.expect(c, "%s: the page heard Cmd+L" % what, heard)
+            self.expect(c, "%s: the listener finished" % what, done)
+            self.expect(c, "%s: Cmd+L took the address bar after the listener, from the page's answer" % what,
+                        bool(took) and ms is not None and ms >= ms_listen and why is not None
+                        and why.group(1) == "the page did not claim it",
+                        "%s ms from the press (driver wall clock %.0f ms); why: %s" % (
+                            ms, wall, why.group(1) if why else "no chord-to-menu line"))
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one focus_url" % what, runs == 1, "%d focus_url" % runs)
+            # The page answered: nothing was given up (#1023 delta HOLD).
+            self.expect(c, "%s: no chord was given up" % what, "never answered" not in log,
+                        "a give-up line appeared" if "never answered" in log else "none")
+            self.note(c, "%s: press to address bar" % what, "INFO", "%s ms" % ms)
+            (self.out / ("%s.%d.app.log" % (c, ms_listen))).write_text(self.app.log_text())
+            self.close_page()
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
@@ -3274,7 +3369,8 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
               "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
-              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l"]
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l", "m1f_escape_stops_with_sidebar",
+              "m1g_cmd_l_slow_listener"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
