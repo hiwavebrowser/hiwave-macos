@@ -623,6 +623,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
 #[cfg(all(test, feature = "headless"))]
+mod text_coverage_tests;
+#[cfg(all(test, feature = "headless"))]
 mod color_space_syntax_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
