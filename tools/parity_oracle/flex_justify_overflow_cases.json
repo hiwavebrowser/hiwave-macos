@@ -99,6 +99,21 @@
    "name": "column-center-in-a-zero-height-container",
    "html": "<!doctype html><body style=\"margin:0\"><div id=c style=\"display:flex;flex-direction:column;justify-content:center;width:40px;height:0;margin-top:200px\"><div id=i0 style=\"flex:none;width:20px;height:300px\"></div></div>",
    "chrome_boxes": "c:0:200:40:0 i0:0:50:20:300"
+  },
+  {
+   "name": "row-safe-center-fits",
+   "html": "<!doctype html><body style=\"margin:0\"><div id=c style=\"display:flex;justify-content:safe center;width:100px;height:40px;margin-left:200px\"><div id=i0 style=\"flex:none;width:60px;height:20px\"></div></div>",
+   "chrome_boxes": "c:200:0:100:40 i0:220:0:60:20"
+  },
+  {
+   "name": "absolute-explicit-zero-width-center",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"position:relative;margin-left:200px;height:40px\"><div id=c style=\"position:absolute;display:flex;justify-content:center;width:0;height:40px\"><div id=i0 style=\"flex:none;width:300px;height:20px\"></div></div></div>",
+   "chrome_boxes": "c:200:0:0:40 i0:50:0:300:20"
+  },
+  {
+   "name": "fixed-inset0-overlay-in-a-zero-size-fixed-wrapper",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"position:fixed\"><div id=c style=\"position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center\"><div id=i0 style=\"flex:none;width:448px;height:20px\"></div></div></div>",
+   "chrome_boxes": "c:0:0:600:600 i0:76:290:448:20"
   }
  ],
  "chrome": "148.0.7778.216"

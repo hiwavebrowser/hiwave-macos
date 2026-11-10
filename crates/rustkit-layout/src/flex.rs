@@ -469,6 +469,17 @@ fn layout_flex_container_at(
         Axis::Vertical
     };
     let cross_axis = main_axis.cross();
+    // Pete's option 2 (CH2.B19): an out-of-flow container whose main size
+    // is `auto` and comes out 0 does not justify an overflowing line
+    // unsafely (see `distribute_main_axis`).
+    let zero_main_from_containing_block = matches!(container.position, crate::Position::Fixed | crate::Position::Absolute)
+        && matches!(
+            match main_axis {
+                Axis::Horizontal => &style.width,
+                Axis::Vertical => &style.height,
+            },
+            rustkit_css::Length::Auto
+        );
 
     // CSS2 §10.6.4, resolved before anything reads a main size: an
     // out-of-flow box with both insets set is definite, and only the
@@ -797,6 +808,7 @@ fn layout_flex_container_at(
             main_gap,
             style.justify_content,
             direction.is_reverse(),
+            zero_main_from_containing_block,
         );
     }
 
@@ -1409,6 +1421,7 @@ fn layout_flex_container_at(
                     main_gap,
                     style.justify_content,
                     direction.is_reverse(),
+                    zero_main_from_containing_block,
                 );
                 for item in &mut line.items {
                     if item.main_margin_auto != (false, false) {
@@ -2833,6 +2846,7 @@ fn distribute_main_axis(
     main_gap: f32,
     justify_content: JustifyContent,
     reverse: bool,
+    zero_main_from_containing_block: bool,
 ) {
     if line.items.is_empty() {
         return;
@@ -2879,14 +2893,16 @@ fn distribute_main_axis(
         free_space
     };
 
-    // Not in a container whose main size is 0 (Pete's option 2, 11-06): a
-    // `position: fixed; inset: 0` overlay inside a zero-size fixed wrapper
-    // is still sized against the wrapper here, not the viewport (CH2.B15),
-    // and unsafe centring there pushed a consent dialog off the left edge
-    // where nothing can click it. Chrome does centre unsafely in a 0-wide
-    // container; this keeps the start until B15 sizes fixed boxes against
-    // the viewport (pinned as gaps in flex_justify_overflow_tests).
-    let unsafe_space = if signed_free_space < 0.0 && container_main > 0.0 {
+    // Pete's option 2 (11-06), only for the case it covers: an out-of-flow
+    // (fixed or absolute) container with an `auto` main size that came out
+    // 0. A `position: fixed; inset: 0` overlay inside a zero-size fixed
+    // wrapper is still sized against the wrapper here, not the viewport
+    // (CH2.B15), and unsafe centring there pushed a consent dialog off the
+    // left edge where nothing can click it. In-flow and explicitly sized
+    // zero-size containers are unsafe as in Chrome. Remove with B15 (the
+    // gap page in flex_justify_overflow_tests says when).
+    let b15_zero_size = zero_main_from_containing_block && container_main <= 0.0;
+    let unsafe_space = if signed_free_space < 0.0 && !b15_zero_size {
         signed_free_space
     } else {
         free_space

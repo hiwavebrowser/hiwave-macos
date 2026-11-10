@@ -22,16 +22,18 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
 ///
-/// The three zero-size containers keep the start on purpose (Pete's option 2,
-/// 11-06): until CH2.B15 sizes a fixed box against the viewport, an
-/// `inset: 0` overlay in a zero-size fixed wrapper is itself 0 wide here,
-/// and unsafe centring there put a consent dialog off screen
-/// (`consent_click_tests::a_fixed_overlay_in_a_zero_size_fixed_container`).
-/// Take them off when B15 lands.
+/// - `fixed-inset0-overlay-in-a-zero-size-fixed-wrapper`: CH2.B15. The
+///   `inset: 0` overlay is sized against its zero-size fixed wrapper, not the
+///   viewport, and Pete's option 2 (11-06) keeps its overflowing line at the
+///   start rather than off screen
+///   (`consent_click_tests::a_fixed_overlay_in_a_zero_size_fixed_container`).
+///   Take it off, and the guard in `distribute_main_axis` out, when B15 lands.
+/// - `row-safe-center-fits`: CH2.B19b. `safe center` parses to `flex-start`,
+///   so a FITTING item starts at 0 where Chrome centres it. (The overflowing
+///   `safe center` page matches only because safe falls back to the start.)
 const GAPS: &[&str] = &[
-    "row-center-in-a-zero-width-container",
-    "row-flex-end-in-a-zero-width-container",
-    "column-center-in-a-zero-height-container",
+    "fixed-inset0-overlay-in-a-zero-size-fixed-wrapper",
+    "row-safe-center-fits",
 ];
 
 #[test]
