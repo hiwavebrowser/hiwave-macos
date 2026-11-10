@@ -87,6 +87,8 @@ pub(crate) struct BuildView {
     pub(crate) url: Option<Url>,
     /// The viewport in CSS px: the headless bounds, else the host surface.
     pub(crate) viewport: Option<(f32, f32)>,
+    /// The device pixel ratio an `<img>`'s `srcset` is selected for (E54b).
+    pub(crate) dpr: f32,
     /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
     /// so the alternative was checking "is this node focused in ANY view",
     /// which would mark a node focused in one view while building another.
@@ -441,6 +443,10 @@ impl LayoutCtx {
         self.building.borrow().as_ref().and_then(|b| b.focus)
     }
 
+    pub(crate) fn building_dpr(&self) -> f32 {
+        self.building.borrow().as_ref().map_or(1.0, |b| b.dpr)
+    }
+
     pub(crate) fn building_viewport(&self) -> Option<(f32, f32)> {
         self.building.borrow().as_ref().and_then(|b| b.viewport)
     }
@@ -455,6 +461,10 @@ impl LayoutCtx {
 /// only reads, apart from the three outputs at the end.
 #[derive(Default)]
 pub(crate) struct ViewLayout {
+    /// The density (image pixels per CSS pixel) of the image each `<img>` (raw NodeId) was last
+    /// built with: `srcset` picks a 2x image for a 1x box, and its natural size is the decoded
+    /// size over that density (E54b).
+    pub(crate) image_densities: RefCell<HashMap<usize, f32>>,
     /// Currently focused DOM node.
     pub(crate) focused_node: Cell<Option<rustkit_dom::NodeId>>,
     /// The element the pointer is over and the elements above it (raw
@@ -630,6 +640,7 @@ mod tests {
             id: EngineViewId::new(),
             lay: Some(lay.clone()),
             url: None,
+            dpr: 1.0,
             viewport: None,
             focus: None,
             external_sheets: Rc::default(),

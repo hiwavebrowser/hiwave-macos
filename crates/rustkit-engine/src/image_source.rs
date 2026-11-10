@@ -44,13 +44,48 @@ enum Descriptor {
     W(f32),
 }
 
-/// Parse a `srcset` value. A candidate is `url [descriptor]`; no descriptor is `1x`. A candidate
-/// with a descriptor that is not a positive `Nx` or `Nw` (or has two descriptors) is dropped.
+/// Parse a `srcset` value (HTML "parse a srcset attribute"): a URL is a run of non-whitespace
+/// characters and MAY contain commas (`data:image/png;base64,...`); trailing commas are stripped
+/// from it and end the candidate; otherwise the descriptors run to the next comma. No descriptor
+/// is `1x`. A candidate with a descriptor that is not a positive `Nx` or `Nw` (or two descriptors)
+/// is dropped.
 fn parse_srcset(srcset: &str) -> Vec<Candidate> {
+    let chars: Vec<char> = srcset.chars().collect();
     let mut out = Vec::new();
-    for cand in srcset.split(',') {
-        let mut parts = cand.split_whitespace();
-        let Some(url) = parts.next() else { continue };
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && (chars[i].is_whitespace() || chars[i] == ',') {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let mut url: String = chars[start..i].iter().collect();
+        let mut descriptors = String::new();
+        if url.ends_with(',') {
+            url = url.trim_end_matches(',').to_string();
+        } else {
+            let dstart = i;
+            let mut depth = 0i32;
+            while i < chars.len() {
+                match chars[i] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    ',' if depth <= 0 => break,
+                    _ => {}
+                }
+                i += 1;
+            }
+            descriptors = chars[dstart..i].iter().collect();
+        }
+        if url.is_empty() {
+            continue;
+        }
+        let mut parts = descriptors.split_whitespace();
         let kind = match (parts.next(), parts.next()) {
             (None, _) => Descriptor::X(1.0),
             (Some(d), None) => {
@@ -63,7 +98,7 @@ fn parse_srcset(srcset: &str) -> Vec<Candidate> {
             }
             _ => continue,
         };
-        out.push(Candidate { url: url.to_string(), kind });
+        out.push(Candidate { url, kind });
     }
     out
 }
@@ -314,6 +349,20 @@ mod tests {
         // c13: a source with w descriptors and its own sizes.
         let c13 = vec![SourceAttrs { srcset: Some("i100.png 100w, i300.png 300w"), sizes: Some("200px"), ..img() }];
         check("c13", base, c13, [("i300.png", 300.0, 200.0); 4]);
+    }
+
+    #[test]
+    fn a_url_may_contain_commas_and_trailing_commas_end_the_candidate() {
+        let c = parse_srcset("data:image/png;base64,AAAA 2x, b.png, c.png 3x,");
+        let urls: Vec<&str> = c.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(urls, ["data:image/png;base64,AAAA", "b.png", "c.png"]);
+        assert_eq!(c[0].kind, Descriptor::X(2.0));
+        assert_eq!(c[1].kind, Descriptor::X(1.0));
+        assert_eq!(c[2].kind, Descriptor::X(3.0));
+        // A bad descriptor drops that candidate only.
+        let d = parse_srcset("a.png 0x, b.png 2q, c.png 1.5x");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].url, "c.png");
     }
 
     #[test]
