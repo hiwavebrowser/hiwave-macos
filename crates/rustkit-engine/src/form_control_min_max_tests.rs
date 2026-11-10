@@ -11,6 +11,12 @@
 //! (`grid_flexible_row_log.mjs --file form_control_min_max_cases.json
 //! --write`). The axis not under test has an explicit size, and one case of
 //! each kind sits in a flex row (the flex item size path is separate).
+//!
+//! The `*-min-*-over-max-*` cases are flex items whose author minimum is
+//! above their maximum: min wins on every flex path (frozen hypothetical,
+//! `flex: none`, shrink, grow, column main size, stretched and unstretched
+//! cross size, aspect-ratio), for a text control and for a plain `<div>`
+//! (#985's last R1 HOLD). Those do not depend on font metrics.
 
 use super::*;
 

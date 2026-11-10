@@ -159,7 +159,82 @@
    "name": "a-border-box-input-stretched-in-a-10px-flex-column-cross-size",
    "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:10px;height:100px\"><input id=a style=\"box-sizing:border-box;padding:0 20px;border:3px solid;height:20px;min-width:0\"></div>",
    "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-flex-input-min-width-over-max-width-frozen",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;min-width:80px;max-width:50px;height:20px\"><div id=b style=\"width:10px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:80:20 b:80:0:10:10"
+  },
+  {
+   "name": "a-flex-none-input-min-width-over-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;flex:none;min-width:80px;max-width:50px;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:80:20"
+  },
+  {
+   "name": "a-shrinking-input-min-width-over-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:30px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;width:200px;min-width:80px;max-width:50px;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:80:20"
+  },
+  {
+   "name": "a-column-input-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:100px;height:300px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;width:60px;min-height:40px;max-height:30px\"><div id=b style=\"width:10px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:60:40 b:0:40:10:10"
+  },
+  {
+   "name": "a-stretched-input-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px;height:100px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;width:60px;min-height:40px;max-height:30px\"></div>",
+   "chrome_boxes": "a:0:0:60:40"
+  },
+  {
+   "name": "an-unstretched-input-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start;width:300px;height:100px\"><input id=a style=\"box-sizing:border-box;padding:0 4px;border:1px solid;width:60px;min-height:40px;max-height:30px\"></div>",
+   "chrome_boxes": "a:0:0:60:40"
+  },
+  {
+   "name": "a-flex-div-min-width-over-max-width-frozen",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><div id=a style=\"min-width:80px;max-width:50px;height:10px\"></div><div id=b style=\"width:10px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:80:10 b:80:0:10:10"
+  },
+  {
+   "name": "a-flex-none-div-min-width-over-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><div id=a style=\"flex:none;width:20px;min-width:80px;max-width:50px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:80:10"
+  },
+  {
+   "name": "a-growing-div-min-width-over-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px\"><div id=a style=\"flex:1;min-width:80px;max-width:50px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:80:10"
+  },
+  {
+   "name": "a-column-div-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:100px;height:300px\"><div id=a style=\"width:60px;min-height:40px;max-height:30px\"></div><div id=b style=\"width:10px;height:10px\"></div></div>",
+   "chrome_boxes": "a:0:0:60:40 b:0:40:10:10"
+  },
+  {
+   "name": "a-stretched-div-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px;height:100px\"><div id=a style=\"width:60px;min-height:40px;max-height:30px\"></div></div>",
+   "chrome_boxes": "a:0:0:60:40"
+  },
+  {
+   "name": "an-unstretched-div-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start;width:300px;height:100px\"><div id=a style=\"width:60px;min-height:40px;max-height:30px\"></div></div>",
+   "chrome_boxes": "a:0:0:60:40"
+  },
+  {
+   "name": "an-auto-height-flex-row-div-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div id=c style=\"display:flex;width:300px\"><div id=a style=\"width:60px;min-height:40px;max-height:30px\"></div></div>",
+   "chrome_boxes": "c:0:0:300:40 a:0:0:60:40"
+  },
+  {
+   "name": "an-aspect-ratio-column-div-min-height-over-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:300px;height:300px\"><div id=a style=\"aspect-ratio:2;align-self:stretch;min-height:80px;max-height:50px\"></div></div>",
+   "chrome_boxes": "a:0:0:300:80"
+  },
+  {
+   "name": "an-aspect-ratio-row-div-min-width-over-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:300px;height:300px;align-items:flex-start\"><div id=a style=\"aspect-ratio:2;height:20px;min-width:80px;max-width:50px\"></div></div>",
+   "chrome_boxes": "a:0:0:80:20"
   }
  ],
- "chrome": "143.0.7499.4"
+ "chrome": "148.0.7778.216"
 }
