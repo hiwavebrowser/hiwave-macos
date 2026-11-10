@@ -1,7 +1,7 @@
 //! JS1: the per-loop iteration cap is a guard for configs without the
 //! watchdog, not the thing that decides how long a page's script may run.
 //! At 10M iterations an optimized Boa threw `RuntimeLimitError` after
-//! 50 to 70 ms, so a legitimate heavy loop (a 12M-iteration hash or a
+//! 50 to 70 ms, so a legitimate heavy loop (a 50M-iteration hash or a
 //! table build) was killed far inside the 5 s turn budget. The time budget
 //! (`interrupt_scripts_at_budget`) is what stops a runaway now.
 
@@ -32,11 +32,12 @@ fn threw(engine: &Engine, view: EngineViewId) -> Vec<String> {
 #[test]
 fn a_twelve_million_iteration_loop_completes_in_one_turn() {
     // The app's shape: the watchdog is on, so completion here is inside
-    // the turn budget, not merely under the cap. The budget is generous
-    // because an unoptimized build runs this loop in tens of seconds.
+    // the app's 5 s turn budget, not merely under the cap. 12M is past the
+    // old 10M cap and takes ~1.8 s here (`[profile.dev.package."*"]`, #1038:
+    // about 7M iterations/s for this body, so 50M would not fit in 5 s).
     let config = EngineConfig {
         interrupt_scripts_at_budget: true,
-        script_budget_ms: 300_000,
+        script_budget_ms: 5_000,
         ..EngineConfig::default()
     };
     let (mut engine, id) = view(config);
@@ -76,11 +77,11 @@ fn the_microtask_cap_does_not_follow_the_loop_cap() {
         .load_html(id, "<html><body><p>alive</p><script>window.n = 0; function again() { window.n++; Promise.resolve().then(again); } again();</script></body></html>")
         .expect("load_html");
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
-    // The 100k job cap ended it (39175 runs in the unoptimized build this
-    // was written in), not the 1G loop cap, which would be 10000x further.
+    // The 100k job cap ended it (100001 runs with optimized dependencies),
+    // not the 1G loop cap, which would be 10000x further.
     let n = engine.execute_script(id, "window.n").unwrap();
     let n: f64 = n.trim_start_matches("Number(").trim_end_matches(')').parse().unwrap();
-    assert!((1_000.0..=100_000.0).contains(&n), "microtask chain ran {n} times");
+    assert!((99_900.0..=100_100.0).contains(&n), "microtask chain ran {n} times");
 }
 
 /// Prometheus's R1 on #1048: `execute_script` (the chrome's eval, the
