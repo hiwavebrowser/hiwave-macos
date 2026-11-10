@@ -41,11 +41,16 @@
     });
   });
   var slowl = +((q.match(/slowl=(\d+)/) || [0, '0'])[1]);
+  function spin() { var x = 0; for (var i = 0; i < 20000; i++) { x += i; } return x; }
   if (slowl > 0) {
     document.addEventListener('keydown', function (e) {
       if (e.metaKey && e.key.toLowerCase() === 'l') {
-        var t = Date.now();
-        while (Date.now() - t < slowl) {}
+        // One busy loop would trip the engine's loop-iteration limit (it
+        // counts per call frame) at about 1.2 s; a call per step gets a
+        // fresh frame, so the wait runs its full length.
+        beacon('m1g-slowl-heard');
+        var t = Date.now(), s = 0;
+        while (Date.now() - t < slowl) { s += spin(); }
         beacon('m1g-slowl-done');
       }
     });

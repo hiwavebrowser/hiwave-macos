@@ -3337,9 +3337,11 @@ class Driver:
             if chord and focus:
                 pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
                 ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
-            heard = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
+            heard = len(self.fixture.seen("beacon?m1g-slowl-heard", mark)) > 0
+            done = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
             why = re.search(r'why="([^"]*)"', chord.group(0)) if chord else None
-            self.expect(c, "%s: the page heard Cmd+L and its listener ran" % what, heard)
+            self.expect(c, "%s: the page heard Cmd+L" % what, heard)
+            self.expect(c, "%s: the listener finished" % what, done)
             self.expect(c, "%s: Cmd+L took the address bar after the listener, from the page's answer" % what,
                         bool(took) and ms is not None and ms >= ms_listen and why is not None
                         and why.group(1) == "the page did not claim it",
