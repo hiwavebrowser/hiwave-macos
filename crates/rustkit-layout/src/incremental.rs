@@ -11,8 +11,6 @@
 //! whole tree out, which is always correct. The engine's verify mode runs
 //! both and compares every box rect ([`compare_rects`]).
 
-#![allow(dead_code, unused_imports)]
-
 use crate::{
     BoxType, Dimensions, EdgeSizes, FloatContext, LayoutBox, MarginCollapseContext, Position, Rect,
 };
@@ -77,9 +75,85 @@ pub fn relayout(
     fresh: &LayoutBox,
     laid: &mut LayoutBox,
 ) -> Result<Relaid, Fallback> {
-    // Stage 1 lands in the next commit: every layout falls back for now.
-    let _ = (old_unlaid, fresh, laid);
-    Err("not_implemented")
+    let mut out = Relaid::default();
+    let path = match changed_path(old_unlaid, fresh, &mut out.compared)? {
+        None => return Ok(out),
+        Some(path) => path,
+    };
+    if path.is_empty() {
+        return Err("root_box");
+    }
+    let old_b = at(laid, &path).ok_or("shape")?;
+    let new_b = at(fresh, &path).ok_or("shape")?;
+    let old_unlaid_b = at(old_unlaid, &path).ok_or("shape")?;
+
+    changed_box_ok(new_b)?;
+    subtree_ok(new_b)?;
+    subtree_ok(old_b)?;
+    let top_closed = edge_closed_top(old_b);
+    let bottom_closed = edge_closed_bottom(old_b);
+    for b in [new_b, old_unlaid_b] {
+        if !top_closed && !b.children.first().is_some_and(is_inline_level) {
+            return Err("margin_collapse_top");
+        }
+        if !bottom_closed && !b.children.last().is_some_and(is_inline_level) {
+            return Err("margin_collapse_bottom");
+        }
+    }
+    ancestors_ok(laid, &path)?;
+    let b_top = old_b.dimensions.border_box().y;
+    let mut scan = Scan {
+        b_top,
+        failure: None,
+    };
+    scan.walk(laid, &path, 0, false, false, false);
+    if let Some(why) = scan.failure {
+        return Err(why);
+    }
+
+    // Lay B out alone where the full pass put it: its top margin counts as
+    // already adjoined (the context resolves to 0), so its content edge
+    // lands at the old one.
+    let parent = at(laid, &path[..path.len() - 1]).ok_or("shape")?;
+    let mut nb = new_b.clone();
+    nb.set_viewport(old_b.viewport.0, old_b.viewport.1);
+    nb.percent_height_is_auto = old_b.percent_height_is_auto;
+    let shares_floats = matches!(nb.box_type, BoxType::Block | BoxType::AnonymousBlock)
+        && !crate::margin_collapse::establishes_bfc(&nb.style, nb.float);
+    nb.context_floats = shares_floats.then(FloatContext::new);
+    let d = &old_b.dimensions;
+    let mut cb = parent.dimensions.clone();
+    cb.content.x = d.content.x - d.margin.left - d.border_with_gutter().left - d.padding.left;
+    cb.content.y = d.content.y - d.border_with_gutter().top - d.padding.top;
+    cb.content.height = 0.0;
+    let mut margins = MarginCollapseContext::new();
+    margins.first_child_top_adjoined = true;
+    let before = layout_visits();
+    nb.layout_with_collapse_in(&cb, &mut margins, &mut FloatContext::new(), None);
+    out.visits = layout_visits() - before;
+    nb.context_floats = None;
+    if margins.child_collapsed_through {
+        return Err("collapse_through");
+    }
+    let (old_h, new_h) = (
+        old_b.dimensions.border_box().height,
+        nb.dimensions.border_box().height,
+    );
+    if (old_h <= 0.0 || new_h <= 0.0) && !(top_closed && bottom_closed) {
+        return Err("collapse_through");
+    }
+    let nd = &nb.dimensions;
+    if !close(nd.content.x, d.content.x)
+        || !close(nd.content.y, d.content.y)
+        || !close(nd.content.width, d.content.width)
+        || !edges_close(&nd.margin, &d.margin)
+    {
+        return Err("geometry_moved");
+    }
+    out.delta = nb.dimensions.border_box().bottom() - old_b.dimensions.border_box().bottom();
+    out.moved = splice(laid, &path, nb, out.delta);
+    out.path = Some(path);
+    Ok(out)
 }
 
 fn close(a: f32, b: f32) -> bool {
