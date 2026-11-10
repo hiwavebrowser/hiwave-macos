@@ -15414,6 +15414,16 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
+/// A size the child inherits: the parent's computed value. An `em` length
+/// computes to pixels in the parent's font (CSS Values 4 §6.1.1), so it is
+/// handed down as pixels; everything else is handed down as written.
+fn inherited_size(length: &rustkit_css::Length, parent: &ComputedStyle) -> rustkit_css::Length {
+    match (length, &parent.font_size) {
+        (rustkit_css::Length::Em(n), rustkit_css::Length::Px(font)) => rustkit_css::Length::Px(n * font),
+        _ => length.clone(),
+    }
+}
+
 impl Engine {
 
     /// Apply a single CSS property to a computed style.
@@ -15461,6 +15471,19 @@ impl Engine {
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
             "box-sizing" => style.box_sizing = parent.box_sizing,
+            // The box's sizes (LAY1): the parent's COMPUTED value, so a
+            // percentage stays a percentage and resolves against this box's
+            // own containing block, and an `em` length is the parent's
+            // (computed in the parent's font). A recorded search page's
+            // result cards are `a { width: inherit; height: inherit }` under
+            // a `width: 100%; height: 100%` box; the keyword used to leave the
+            // child at `auto`.
+            "width" => style.width = inherited_size(&parent.width, parent),
+            "height" => style.height = inherited_size(&parent.height, parent),
+            "min-width" => style.min_width = inherited_size(&parent.min_width, parent),
+            "min-height" => style.min_height = inherited_size(&parent.min_height, parent),
+            "max-width" => style.max_width = inherited_size(&parent.max_width, parent),
+            "max-height" => style.max_height = inherited_size(&parent.max_height, parent),
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
             "cursor" => style.cursor = parent.cursor,
