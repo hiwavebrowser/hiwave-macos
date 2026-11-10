@@ -608,7 +608,6 @@ pub(crate) struct FailedImages {
 }
 
 /// An `<img>`'s `src` and the image it painted last ([`ViewLayout::shown_images`]).
-#[derive(Default)]
 pub(crate) struct ImgSource {
     /// The absolute URL its `src` (or `srcset` pick) names now.
     pub(crate) wanted: String,
@@ -620,6 +619,14 @@ pub(crate) struct ImgSource {
     /// The density of the pick `shown` came from. During a pending swap the box paints `shown`,
     /// so its natural size divides by THIS, never by the new pick's `wanted_density`.
     pub(crate) shown_density: f32,
+}
+
+/// An image with no pick yet is 1x: a derived `Default` would be 0.0, which divides a natural
+/// size by zero.
+impl Default for ImgSource {
+    fn default() -> Self {
+        Self { wanted: String::new(), wanted_density: 1.0, shown: None, shown_density: 1.0 }
+    }
 }
 
 /// What `getComputedStyle` reads for an element with no layout box
