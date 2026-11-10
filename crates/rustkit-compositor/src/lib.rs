@@ -121,6 +121,7 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    #[cfg(feature = "test-support")]
     /// A compositor that shares this one's GPU instance, adapter, device and queue
     /// and has its own empty surface and headless-texture maps. For tests: building
     /// a device costs ~0.15 s and used to be paid by every engine a test builds.

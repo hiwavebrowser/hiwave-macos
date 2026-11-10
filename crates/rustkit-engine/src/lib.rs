@@ -45,6 +45,9 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
     // and keeps its own surfaces and textures (T41b). Building a device was ~0.15 s of every engine a test
     // creates (and its teardown is what the guard below is mostly for); the guard still serialises whole
     // tests, so what changes is only that no test builds or drops a device of its own.
+    // Known limit (R1 nit 3, a follow-up): a device lost partway through a test run stays in this
+    // `OnceLock` (it cannot be reset), so later GPU tests in the same process fail with it instead of
+    // building a fresh one; before this change each test built its own.
     static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
     if let Some(shared) = SHARED_COMPOSITOR.get() {
