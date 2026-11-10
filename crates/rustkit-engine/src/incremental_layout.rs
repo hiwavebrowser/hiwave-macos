@@ -97,6 +97,15 @@ pub(crate) struct Stats {
     pub(crate) last_moved: u64,
     /// The last layout's outcome, for the relayout line.
     pub(crate) last: String,
+    /// Stage 2 (next commit): counted there.
+    pub(crate) visits: u64,
+    pub(crate) roots: u32,
+    pub(crate) hoists: u32,
+    pub(crate) bounded: u32,
+    pub(crate) skipped_builds: u32,
+    pub(crate) skip_violations: u32,
+    pub(crate) reused_trees: u32,
+    pub(crate) cloned_trees: u32,
 }
 
 impl Stats {
