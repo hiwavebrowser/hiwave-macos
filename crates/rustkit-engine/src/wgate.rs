@@ -1365,25 +1365,19 @@ mod tests {
         to.duration_since(from).as_secs_f64() * 1000.0
     }
 
-    /// LAT15: a load that lends its thread out at safe points reports its
-    /// whole span on the hold line, as before, with the longest stretch
-    /// between safe points; the summary takes that stretch, and an entry
-    /// made at the safe point is outermost, a sample of its own.
-    ///
-    /// CI2: the bounds are the test's own clock reads around each stretch,
-    /// not the sleeps, so a slow or loaded machine cannot fail it: a stretch
-    /// is at least what the test saw inside it and at most what it saw
-    /// around it. The time lent out (at least 35 ms of sleeps) lies outside
-    /// both outer reads, so a stretch that took it in fails the upper bound.
-    #[test]
-    fn a_suspended_load_reports_its_whole_span_and_its_longest_stretch() {
+    /// One load lent out once, `first` ms before its safe point and `second`
+    /// after: checks the hold line against the test's own clock reads and
+    /// returns the line. A stretch is at least what the test saw inside it
+    /// and at most what it saw around it; the time lent out (at least 35 ms
+    /// of sleeps) lies outside both outer reads.
+    fn lend_once(first: u64, second: u64) -> String {
         clear_last();
         let before_load = Instant::now();
         let (after_load, before_lend, after_lend, before_return, after_return, before_end);
         {
             let _load = hold("load");
             after_load = Instant::now();
-            sleep(80);
+            sleep(first);
             before_lend = Instant::now();
             {
                 let _lent = suspend_hold();
@@ -1397,7 +1391,7 @@ mod tests {
                 before_return = Instant::now();
             }
             after_return = Instant::now();
-            sleep(20);
+            sleep(second);
             before_end = Instant::now();
         }
         let after_end = Instant::now();
@@ -1417,9 +1411,27 @@ mod tests {
         let longest_possible = ms_between(before_load, after_lend).max(ms_between(before_return, after_end));
         assert!(
             (shortest_possible - 0.5..=longest_possible + 0.5).contains(&longest),
-            "longest stretch {longest} outside [{shortest_possible:.1}, {longest_possible:.1}], the lent time is no stretch's: {line}"
+            "{first}/{second}: longest stretch {longest} outside [{shortest_possible:.1}, {longest_possible:.1}], \
+             the lent time is no stretch's: {line}"
         );
         assert!(line.ends_with(" segments=2"), "{line}");
+        line
+    }
+
+    /// LAT15: a load that lends its thread out at safe points reports its
+    /// whole span on the hold line, as before, with the longest stretch
+    /// between safe points; the summary takes that stretch, and an entry
+    /// made at the safe point is outermost, a sample of its own.
+    ///
+    /// CI2: the bounds are the test's own clock reads around each stretch,
+    /// not the sleeps, so a slow or loaded machine cannot fail it. The line
+    /// names only the longest stretch, so the load runs twice, the long
+    /// stretch first and then last: lent time leaked into either side of
+    /// the safe point lands in the stretch the line names in one of them.
+    #[test]
+    fn a_suspended_load_reports_its_whole_span_and_its_longest_stretch() {
+        lend_once(80, 20);
+        lend_once(20, 80);
         // Nothing nested outlives the load: the next entry is outermost.
         {
             let _next = hold("move");
