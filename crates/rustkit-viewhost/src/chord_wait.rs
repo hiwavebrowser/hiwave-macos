@@ -10,6 +10,19 @@
 //! answer, claimed or not, is dropped. The menu runs once, and a claim
 //! that comes too late does not take the chord back.
 //!
+//! One actor (M1g, #1015 delta R1 5835356948): when the page's thread
+//! reaches a chord whose wait already ran out, it does not dispatch the
+//! chord's keydown at all ([`HeldChords::begin`]). Otherwise a page with
+//! its own handler for the chord (a web app that switches panes on Cmd+2)
+//! would act as well as the menu, and after a Cmd+digit tab switch it would
+//! act in the tab the menu just left. This is a divergence from Chrome on
+//! the timeout path only: Chrome has no timeout and always delivers the
+//! keydown before the menu sees the chord. The cost is that a page's
+//! observe-only listener misses a key the user pressed while its thread was
+//! held for more than 100 ms. A chord whose keydown the page has started
+//! is the page's to answer: its wait running out then sends nothing to the
+//! menu, and the page's answer (claimed or not) decides, as in Chrome.
+//!
 //! Why 100 ms: it is the response budget a press has before the delay is
 //! felt (RAIL: respond to input within 100 ms), and far above what an idle
 //! page thread takes to run a keydown listener and answer (the in-time
@@ -35,9 +48,9 @@ pub enum ChordFate<E> {
     PageKept(E),
 }
 
-/// How many timed-out chords are remembered until the page's late answer
-/// comes for them ([`HeldChords::claim`]). A page thread would have to fall
-/// this many timed-out chords behind for one to be forgotten.
+/// How many timed-out chords are remembered one by one until the page's
+/// late answer comes for them. One that falls out is still known to have
+/// timed out ([`HeldChords::forgotten_through`]).
 const RAN_OUT_KEPT: usize = 64;
 
 #[derive(Debug)]
@@ -48,6 +61,8 @@ struct Held<E> {
     taken: Instant,
     /// The page has started the chord's own default ([`HeldChords::claim`]).
     page_has_it: bool,
+    /// The page has started the chord's keydown ([`HeldChords::begin`]).
+    page_started: bool,
 }
 
 /// The chords the view holds for the page, by token, with when each was
@@ -63,6 +78,17 @@ pub struct HeldChords<E> {
     held: Vec<Held<E>>,
     /// Tokens whose wait ran out, until the page's answer for them comes.
     ran_out: VecDeque<u64>,
+    /// The highest token that fell out of `ran_out` (0: none). The view
+    /// issues tokens in increasing order and holds each one before the page
+    /// can hear of it, so a token at or below this mark that is not held
+    /// either timed out or was answered; the page asks about a token only
+    /// before it answers, so for the page it timed out. Forgetting fails
+    /// safe (#1015 delta R1 (b)): a page more than `RAN_OUT_KEPT` timed-out
+    /// chords behind skips them, as it skips a remembered one. A mark, not
+    /// an age bound: the page thread can be held for any length of time
+    /// (an 8 s image), and no age is safe to forget at, while the mark
+    /// costs one integer and needs no clock.
+    forgotten_through: u64,
 }
 
 impl<E> Default for HeldChords<E> {
@@ -73,7 +99,7 @@ impl<E> Default for HeldChords<E> {
 
 impl<E> HeldChords<E> {
     pub const fn new() -> Self {
-        Self { held: Vec::new(), ran_out: VecDeque::new() }
+        Self { held: Vec::new(), ran_out: VecDeque::new(), forgotten_through: 0 }
     }
 
     /// The view took `event` for the page at `at`, the moment it asks the
@@ -85,7 +111,7 @@ impl<E> HeldChords<E> {
     /// asked. `since_press_ms` in the log is the other clock, press to
     /// menu, and is what the real-window gate reads.
     pub fn hold(&mut self, token: u64, event: E, at: Instant) {
-        self.held.push(Held { token, event, taken: at, page_has_it: false });
+        self.held.push(Held { token, event, taken: at, page_has_it: false, page_started: false });
     }
 
     /// When `token`'s wait ends, while it is held. The timer is armed for
@@ -105,7 +131,26 @@ impl<E> HeldChords<E> {
             held.page_has_it = true;
             return true;
         }
-        !self.ran_out.contains(&token)
+        !self.timed_out(token)
+    }
+
+    /// The page, from its own thread, is about to dispatch the chord's
+    /// keydown: whether it may. Held: yes, and from here the page answers
+    /// for the chord; its wait running out no longer sends it to the menu.
+    /// Timed out (remembered or forgotten): no, the menu has it and the
+    /// page skips the keydown and the default (M1g: one actor). A token
+    /// this view never held is the page's.
+    pub fn begin(&mut self, token: u64) -> bool {
+        if let Some(held) = self.held.iter_mut().find(|h| h.token == token) {
+            held.page_started = true;
+            return true;
+        }
+        !self.timed_out(token)
+    }
+
+    /// `token` is not held and went to the menu at its deadline.
+    fn timed_out(&self, token: u64) -> bool {
+        self.ran_out.contains(&token) || token <= self.forgotten_through
     }
 
     /// The page's answer for `token`, with how long it waited. `None`: the
@@ -125,17 +170,25 @@ impl<E> HeldChords<E> {
     /// `token`'s wait ran out. If the page has not answered, the chord goes
     /// to the menu, unless the page already took it ([`claim`](Self::claim))
     /// and its answer is on the way: then the page keeps it. `None`: the
-    /// page answered first. The timer that calls this was armed for the
+    /// page answered first, or it is running the chord's keydown
+    /// ([`begin`](Self::begin)) and its answer, which comes as soon as the
+    /// listeners return, releases the chord. The timer that calls this was armed for the
     /// deadline; it does not check the clock, so a timer that fires a hair
     /// early still releases the chord.
     pub fn expire(&mut self, token: u64) -> Option<ChordFate<E>> {
         let at = self.held.iter().position(|h| h.token == token)?;
+        // The page is running the chord's keydown: its answer decides.
+        if self.held[at].page_started && !self.held[at].page_has_it {
+            return None;
+        }
         let held = self.held.remove(at);
         if held.page_has_it {
             return Some(ChordFate::PageKept(held.event));
         }
         if self.ran_out.len() == RAN_OUT_KEPT {
-            self.ran_out.pop_front();
+            if let Some(forgotten) = self.ran_out.pop_front() {
+                self.forgotten_through = self.forgotten_through.max(forgotten);
+            }
         }
         self.ran_out.push_back(token);
         Some(ChordFate::ToMenu(held.event))
@@ -305,6 +358,59 @@ mod tests {
         }
         assert_eq!(chords.ran_out.len(), RAN_OUT_KEPT);
         assert!(!chords.claim(RAN_OUT_KEPT as u64 + 4), "the newest is remembered");
+    }
+
+    // M1g: one actor. The page does not hear a chord the menu has.
+
+    #[test]
+    fn a_timed_out_chord_is_not_the_pages_to_hear() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'v', t0);
+        assert_eq!(chords.expire(1), Some(ChordFate::ToMenu('v')));
+        assert!(!chords.begin(1), "the menu has it: no keydown");
+        assert!(!chords.claim(1), "and no edit");
+        assert_eq!(chords.answer(1, false, t0), None);
+    }
+
+    #[test]
+    fn a_chord_whose_keydown_has_started_waits_for_the_pages_answer() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        // The page started the keydown at 99 ms, its listener is running
+        // when the wait runs out: nothing goes to the menu at the deadline.
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        assert_eq!(chords.expire(1), None, "no menu run while the page is on it");
+        assert_eq!(chords.len(), 1, "still held for the answer");
+        // Not cancelled, no edit default (Cmd+L): the answer sends it to the
+        // menu, after the keydown, as in Chrome. Once.
+        assert_eq!(chords.answer(1, false, t0).map(|(f, _)| f), Some(ChordFate::ToMenu('l')));
+        assert_eq!(chords.expire(1), None);
+        // Cancelled by the page: the page keeps it.
+        chords.hold(2, 'l', t0);
+        assert!(chords.begin(2));
+        assert_eq!(chords.expire(2), None);
+        assert_eq!(chords.answer(2, true, t0).map(|(f, _)| f), Some(ChordFate::PageKept('l')));
+        // Started, then took the default, then the wait ran out: the page's.
+        chords.hold(3, 'v', t0);
+        assert!(chords.begin(3));
+        assert!(chords.claim(3));
+        assert_eq!(chords.expire(3), Some(ChordFate::PageKept('v')));
+        assert!(chords.is_empty());
+        assert!(chords.ran_out.is_empty(), "none of these timed out");
+    }
+
+    #[test]
+    fn a_forgotten_timed_out_token_is_not_the_pages_to_hear() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        for token in 1..=(RAN_OUT_KEPT as u64 + 1) {
+            chords.hold(token, (), t0);
+            chords.expire(token);
+        }
+        assert!(!chords.begin(1), "forgotten, still timed out");
+        assert!(chords.begin(RAN_OUT_KEPT as u64 + 2), "a later token the view never held is the page's");
     }
 
     /// #1015 delta R1 (b): a timed-out token that fell out of the memory is

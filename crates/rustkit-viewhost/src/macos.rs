@@ -255,6 +255,19 @@ pub fn claim_key_equivalent(token: u64) -> bool {
     KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).claim(token)
 }
 
+/// The page, from its own thread, before it dispatches the keydown of the
+/// Cmd chord `token`: whether it may. False once the chord's wait ran out
+/// and it went to the menu (M1g, #1015 delta R1 5835356948): the menu is
+/// then the chord's one actor, and the page neither hears the keydown nor
+/// runs its default. A deliberate divergence on the timeout path only;
+/// Chrome has no timeout (see `chord_wait`). True makes the page the one
+/// to answer for the chord: its wait running out no longer sends it to the
+/// menu. Any thread.
+#[cfg(target_os = "macos")]
+pub fn begin_key_equivalent(token: u64) -> bool {
+    KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).begin(token)
+}
+
 /// A held chord goes on to the main menu, and its retain is dropped.
 #[cfg(target_os = "macos")]
 unsafe fn chord_to_menu(event: id, token: u64, why: &'static str, waited: std::time::Duration) {
