@@ -2633,21 +2633,34 @@ mod chrome_ipc_log_tests {
                 .expect("the module after chrome_ipc_log_tests moved: update this pin's end marker");
         let production = format!("{}{}", &source[..this], &source[after..]);
 
-        // Any `info!(.., {:?}, response)`: the whole answer of a command is never logged.
-        let whole_response_logs: Vec<&str> = production
-            .lines()
-            .filter(|l| l.contains("{:?}") && l.contains(", response)") && l.contains("info!("))
-            .collect();
+        // No log call formats a command's response whole (`{:?}` with `response` in the call), on
+        // one line or wrapped over several.
+        let mut whole_response_logs: Vec<String> = Vec::new();
+        for mac in ["info!(", "warn!(", "debug!(", "trace!(", "error!("] {
+            for (at, _) in production.match_indices(mac) {
+                let call = production[at..].split(");").next().unwrap_or("");
+                if (call.contains("{:?}") || call.contains(":?}")) && call.contains("response") {
+                    whole_response_logs.push(call.lines().next().unwrap_or("").trim().to_string());
+                }
+            }
+        }
         assert!(whole_response_logs.is_empty(), "a command's response is logged whole: {whole_response_logs:?}");
 
-        // No script the app evaluates in a page posts credentials to it.
-        let delivering: Vec<&str> = production
-            .lines()
-            .filter(|l| l.contains("postMessage") && (l.contains("credentials") || l.contains("password")))
-            .collect();
-        assert!(delivering.is_empty(), "the app posts credentials into a page: {delivering:?}");
+        // No statement in the app's own code posts credentials into a page: not in main.rs and not
+        // in ipc/autofill.rs (where the delivery now lives), and across wrapped lines. The chrome's
+        // own `window.ipc.postMessage(..)` to the app is the other direction and is fine.
+        let autofill = include_str!("ipc/autofill.rs").replace("\r\n", "\n");
+        let autofill_production = autofill.split("#[cfg(test)]").next().unwrap_or("");
+        for (file, text) in [("main.rs", production.as_str()), ("ipc/autofill.rs", autofill_production)] {
+            for statement in text.split(';') {
+                let posts_to_page = statement.contains("postMessage") && !statement.contains("ipc.postMessage");
+                if posts_to_page && (statement.contains("credentials") || statement.contains("password")) {
+                    panic!("{file} posts credentials into a page: {}", statement.trim().lines().next().unwrap_or(""));
+                }
+            }
+        }
         assert!(
-            !production.contains("hiwave_autofill_credentials"),
+            !production.contains("hiwave_autofill_credentials") && !autofill_production.contains("hiwave_autofill_credentials"),
             "the credential message type is back in the app"
         );
     }
