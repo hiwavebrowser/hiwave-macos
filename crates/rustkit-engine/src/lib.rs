@@ -3662,7 +3662,7 @@ impl Engine {
                         };
                         inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5382,7 +5382,7 @@ impl Engine {
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
         view.script_log.extend(stopped);
         answer
     }
@@ -5557,21 +5557,21 @@ impl Engine {
                 }))
             });
             if load_stopped {
-                log_script_stopped("event:load", 0, take_script_js_overrun());
+                log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "event:load".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "event:load".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5583,7 +5583,7 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -5599,21 +5599,21 @@ impl Engine {
                 }))
             });
             if timer_stopped {
-                log_script_stopped("timers", 0, take_script_js_overrun());
+                log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
                     source: "timers".into(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 }),
                 Err(_) => {
                     log.push(ScriptRecord {
                         source: "timers".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     });
                     stopped = true;
@@ -5625,7 +5625,7 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -8260,7 +8260,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::Threw(message),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8269,7 +8269,7 @@ impl Engine {
                     let record = ScriptRecord {
                         source: "network".into(),
                         bytes: 0,
-                        elapsed_ms: 0,
+                        elapsed_ms: step_started.elapsed().as_millis() as u64,
                         outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                     };
                     inspector_glue::log_script(log, &inspector, record);
@@ -8280,11 +8280,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: 0,
+                    elapsed_ms: step_started.elapsed().as_millis() as u64,
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -8339,6 +8339,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // The script time of every slice, for the errors the timers reported (H19c).
+            let mut timers_ms: u64 = 0;
             loop {
                 if nav_cancel::cancelled(watch) {
                     return;
@@ -8351,6 +8353,7 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
+                timers_ms += step_started.elapsed().as_millis() as u64;
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
@@ -8381,7 +8384,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::Threw(strip(e)),
                             },
                         );
@@ -8395,7 +8398,7 @@ impl Engine {
                             ScriptRecord {
                                 source: "timers".into(),
                                 bytes: 0,
-                                elapsed_ms: 0,
+                                elapsed_ms: step_started.elapsed().as_millis() as u64,
                                 outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
                             },
                         );
@@ -8444,7 +8447,7 @@ impl Engine {
                     return;
                 }
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, "timers");
+            inspector_glue::drain_reports(bindings, &inspector, log, "timers", timers_ms);
         }
         if yielded {
             return;
@@ -9687,7 +9690,7 @@ impl Engine {
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source);
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source, 0);
         }
 
         if let Some(view) = self.views.get_mut(&id) {
