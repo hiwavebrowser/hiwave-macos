@@ -695,6 +695,15 @@ pub(crate) struct BoxlessStyle {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_img_source_with_no_pick_yet_is_1x() {
+        // A derived Default gave 0.0, which divides a natural size by zero if either density is
+        // read before a pick records one (Prometheus LOW on #1039).
+        let source = ImgSource::default();
+        assert_eq!(source.wanted_density, 1.0);
+        assert_eq!(source.shown_density, 1.0);
+    }
+
     fn build_view(lay: &Rc<ViewLayout>) -> BuildView {
         BuildView {
             id: EngineViewId::new(),

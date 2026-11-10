@@ -571,3 +571,17 @@ fn the_detached_list_is_pruned_after_a_give_up() {
     let left = page.engine.views[&page.view].lay.loaded_images.borrow().detached.len();
     assert_eq!(left, 0, "detached entries left after the give-up");
 }
+
+/// Prometheus on #1039 (LOW): an image that never enters the document picks its source by the
+/// same E54b rule as one in the document, so `new Image()` with a `srcset` at DPR 2 fetches the 2x
+/// candidate and never the 1x (detached_img_elements goes through pick_image_source with the
+/// view's Env, not the old first-candidate pick).
+#[test]
+fn a_detached_image_picks_its_srcset_candidate_for_the_dpr() {
+    let config = EngineConfig { device_pixel_ratio: 2.0, subresource_budget_ms: 5_000, ..EngineConfig::default() };
+    let mut page = load_with("", vec![a("/one.png"), b("/two.png")], config);
+    page.run("var p=new Image();p.srcset='/one.png 1x, /two.png 2x';0");
+    page.settle();
+    assert_eq!(page.server.served("/two.png").len(), 1, "the 2x candidate is fetched at DPR 2");
+    assert!(page.server.served("/one.png").is_empty(), "and the 1x one is not");
+}
