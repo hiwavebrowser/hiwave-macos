@@ -2024,6 +2024,18 @@ fn create_flex_item<'a>(
     } else {
         max_main
     };
+    // CSS Sizing 3 §5.2: an author minimum above the maximum wins. Raising
+    // the maximum to it once here makes every later clamp agree, whatever
+    // its order (the frozen hypothetical size, `flex: none`, the cross and
+    // stretch paths all did max(min).min(max) and took the max: an input
+    // with `min-width: 80px; max-width: 50px` in a 300px row was 50,
+    // Chromium 148 80; #985's last R1 HOLD). Only a specified minimum: the
+    // automatic one is itself clamped by the maximum (css-flexbox-1 §4.5).
+    let max_main = if css_min_main > 0.0 {
+        max_main.max(spec_main_to_border_box(css_min_main))
+    } else {
+        max_main
+    };
     // Check if the cross size is explicitly set (not auto)
     // Per CSS spec, items with explicit cross size should NOT be stretched
     let explicit_cross_length = match main_axis {
@@ -2084,6 +2096,14 @@ fn create_flex_item<'a>(
     };
     let max_cross = if max_cross.is_finite() {
         spec_cross_to_border_box(max_cross).max(cross_pb + control_cross_edges)
+    } else {
+        max_cross
+    };
+    // The same on the cross axis: `min-height: 40px; max-height: 30px` in a
+    // row is 40 stretched or not (Chromium 148). The intrinsic floor above
+    // is not an author minimum and does not raise the maximum.
+    let max_cross = if css_min_cross > 0.0 {
+        max_cross.max(spec_cross_to_border_box(css_min_cross))
     } else {
         max_cross
     };
