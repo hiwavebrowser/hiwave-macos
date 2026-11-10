@@ -46,11 +46,15 @@ fn main() {
 
     static FOCUS_URL: AtomicUsize = AtomicUsize::new(0);
     static SELECT_TAB_2: AtomicUsize = AtomicUsize::new(0);
+    // What the menu ran, in order, with when.
+    static RAN: std::sync::Mutex<Vec<(&'static str, Instant)>> = std::sync::Mutex::new(Vec::new());
     extern "C" fn focus_url(_this: &Object, _sel: Sel, _sender: id) {
         FOCUS_URL.fetch_add(1, Ordering::SeqCst);
+        RAN.lock().unwrap().push(("l", Instant::now()));
     }
     extern "C" fn select_tab_2(_this: &Object, _sel: Sel, _sender: id) {
         SELECT_TAB_2.fetch_add(1, Ordering::SeqCst);
+        RAN.lock().unwrap().push(("2", Instant::now()));
     }
 
     const CMD: u64 = 1 << 20;
@@ -272,6 +276,71 @@ fn main() {
         check(
             took.is_some_and(|t| t < GATE) && count(&FOCUS_URL) == before + 2,
             format!("two held Cmd+L: first menu run after {took:?}, {} runs in all", count(&FOCUS_URL) - before),
+        );
+
+        // 8. Two quick presses while the page's thread is held (a second
+        //    Cmd+2 30 ms after the first, then a Cmd+L): each waits out its
+        //    own bound, and the menu runs them in the order pressed, none
+        //    before its own bound and each inside the gate (#1015 R1
+        //    nit 4). A later one can run some tens of ms past its bound:
+        //    its timer waits on the main thread behind the menu run before
+        //    it (measured 102 / 129 / 151 ms after the three presses). The
+        //    page's answers, when they come, run nothing more.
+        RAN.lock().unwrap().clear();
+        let gap = Duration::from_millis(30);
+        let (_, quiet) = mpsc::channel::<(u64, bool)>();
+        let first_at = Instant::now();
+        let first = press(19, "2");
+        run(gap, &quiet);
+        let second_at = Instant::now();
+        let second = press(19, "2");
+        run(gap, &quiet);
+        let third_at = Instant::now();
+        let third = press(37, "l");
+        run(Duration::from_millis(400), &quiet);
+        let ran = RAN.lock().unwrap().clone();
+        let names: Vec<&str> = ran.iter().map(|(name, _)| *name).collect();
+        let after: Vec<Duration> = ran
+            .iter()
+            .zip([first_at, second_at, third_at])
+            .map(|((_, at), pressed)| at.saturating_duration_since(pressed))
+            .collect();
+        let slack = Duration::from_millis(5);
+        check(
+            names == ["2", "2", "l"]
+                && after.iter().all(|t| *t >= BOUND - slack && *t < GATE)
+                && ran.windows(2).all(|w| w[1].1 >= w[0].1 + gap - slack),
+            format!("Cmd+2, Cmd+2, Cmd+L 30 ms apart, page held: the menu ran {names:?} in press order, each {after:?} after its own press"),
+        );
+        for token in [third, second, first] {
+            finish_key_equivalent(token, false);
+        }
+        finish_key_equivalent(first, true);
+        let runs = RAN.lock().unwrap().len();
+        check(runs == 3, format!("their late answers run nothing more ({runs} runs)"));
+
+        // 9. The page took the chord (it is running the chord's default)
+        //    before the bound, and its answer comes after: the menu does
+        //    not run (#1015 R1 nit 1). A chord whose wait ran out is no
+        //    longer the page's to take.
+        let before = count(&FOCUS_URL);
+        let token = press(37, "l");
+        run(Duration::from_millis(40), &quiet);
+        let took = rustkit_viewhost::claim_key_equivalent(token);
+        run(Duration::from_millis(300), &quiet);
+        finish_key_equivalent(token, true);
+        check(
+            took && count(&FOCUS_URL) == before,
+            format!("a chord the page took at 40 ms and answered at 340 ms: the page's ({} menu runs)", count(&FOCUS_URL) - before),
+        );
+        let before = count(&FOCUS_URL);
+        let token = press(37, "l");
+        run(Duration::from_millis(300), &quiet);
+        let took = rustkit_viewhost::claim_key_equivalent(token);
+        finish_key_equivalent(token, false);
+        check(
+            !took && count(&FOCUS_URL) == before + 1,
+            format!("a chord whose wait ran out is the menu's, not the page's to take ({} menu runs)", count(&FOCUS_URL) - before),
         );
 
         assert!(failures.is_empty(), "{} failed: {failures:#?}", failures.len());
