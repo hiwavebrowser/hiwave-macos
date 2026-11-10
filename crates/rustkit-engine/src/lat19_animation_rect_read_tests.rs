@@ -190,3 +190,88 @@ fn a_rect_read_in_a_width_web_animation_frame_paints_every_frame_at_a_bounded_co
     assert!(s.forced_layouts <= s0.forced_layouts + N as u64, "at most one forced layout a frame: {s:?}");
     assert!(s.relayouts <= s0.relayouts + N as u32, "at most one relayout a frame: {s:?}");
 }
+
+// ---- #1057 R1 (Prometheus): the no-build read must not answer from boxes
+// older than the last forced layout. Chrome for Testing 148.0.7778.216
+// (headless probe, the PR body): each read below includes every write
+// before it, the transform with the new size.
+
+const SMALL: &str = "<!doctype html><style>body{margin:0}#a{width:50px;height:20px;background:green}#b{height:10px}</style>\
+    <div id=a></div><div id=b></div><script>var a=document.getElementById('a'),b=document.getElementById('b'),\
+    kf=[{transform:'translateX(100px)'},{transform:'translateX(100px)'}];</script>";
+
+/// `#a` already runs a transform animation (`translateX(10px)`), painted
+/// over a few frames: its style is captured, so a layer write in a task is
+/// placed by the no-build path, not refused for want of a capture.
+fn small_animating() -> (Engine, EngineViewId, crate::script_net_tests::Server) {
+    let (mut engine, view, server) = load(SMALL);
+    run(
+        &mut engine,
+        view,
+        "window.pre=a.animate([{transform:'translateX(10px)'},{transform:'translateX(10px)'}],{duration:100000})",
+    );
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    assert_eq!(read(&mut engine, view, &rect("a")), "10,50", "the running animation is painted");
+    (engine, view, server)
+}
+
+fn rect(r: &str) -> String {
+    format!("(function(){{var q={r}.getBoundingClientRect();return q.left+','+q.width}})()")
+}
+
+/// One task: a width write, a read (a full forced layout that is not
+/// painted), a transform animation, a read. Chrome: `10,200` then `100,200`.
+#[test]
+fn a_rect_read_after_a_forced_layout_and_a_transform_write_sees_both() {
+    let (mut engine, view, _server) = small_animating();
+    run(
+        &mut engine,
+        view,
+        &format!(
+            "a.style.width='200px';var r1={};a.animate(kf,{{duration:100000}});var r2={};window.__r=r1+'|'+r2;",
+            rect("a"),
+            rect("a")
+        ),
+    );
+    assert_eq!(read(&mut engine, view, "window.__r"), "10,200|100,200");
+}
+
+/// A class toggle and an inserted sheet before the layer write (R1 nit 1):
+/// Chrome `10,300` then `100,300`.
+#[test]
+fn a_rect_read_after_a_class_and_sheet_write_and_a_transform_write_sees_both() {
+    let (mut engine, view, _server) = small_animating();
+    run(
+        &mut engine,
+        view,
+        &format!(
+            "b.className='x';a.className='wide';var s=document.createElement('style');\
+             s.textContent='.wide{{width:300px !important}}';document.head.appendChild(s);\
+             var q1={};a.animate(kf,{{duration:100000}});var q2={};window.__r=q1+'|'+q2;",
+            rect("a"),
+            rect("a")
+        ),
+    );
+    assert_eq!(read(&mut engine, view, "window.__r"), "10,300|100,300");
+}
+
+/// The same across two frame callbacks of one frame (no paint between
+/// them): Chrome `10,220` then `100,220`.
+#[test]
+fn a_rect_read_in_a_later_callback_with_no_paint_between_sees_the_forced_layout() {
+    let (mut engine, view, _server) = small_animating();
+    run(
+        &mut engine,
+        view,
+        &format!(
+            "requestAnimationFrame(function(){{a.style.width='220px';window.__c1={};}});\
+             requestAnimationFrame(function(){{a.animate(kf,{{duration:100000}});window.__c2={};}});",
+            rect("a"),
+            rect("a")
+        ),
+    );
+    frame(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "window.__c1+'|'+window.__c2"), "10,220|100,220");
+}
