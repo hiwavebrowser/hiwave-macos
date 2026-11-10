@@ -39,6 +39,9 @@ use std::time::{Duration, Instant};
 /// How long a Cmd chord waits for the page to say whether it claimed it.
 pub const CHORD_ANSWER_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Red stub (#1023 R1): the give-up bound for a started chord.
+pub const STARTED_CHORD_GIVE_UP: Duration = Duration::from_secs(6);
+
 /// What became of a held chord.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChordFate<E> {
@@ -192,6 +195,21 @@ impl<E> HeldChords<E> {
         }
         self.ran_out.push_back(token);
         Some(ChordFate::ToMenu(held.event))
+    }
+
+    /// Red stub (#1023 R1 item 1).
+    pub fn give_up_at(&self, _token: u64) -> Option<Instant> {
+        None
+    }
+
+    /// Red stub (#1023 R1 item 1).
+    pub fn give_up(&mut self, _token: u64) -> Option<ChordFate<E>> {
+        None
+    }
+
+    /// Red stub (#1023 R1 item 2).
+    pub fn release_due(&mut self) -> Vec<(u64, ChordFate<E>)> {
+        Vec::new()
     }
 
     pub fn len(&self) -> usize {
@@ -411,6 +429,84 @@ mod tests {
         }
         assert!(!chords.begin(1), "forgotten, still timed out");
         assert!(chords.begin(RAN_OUT_KEPT as u64 + 2), "a later token the view never held is the page's");
+    }
+
+    // #1023 R1 item 1: a started chord that is never answered is released.
+
+    #[test]
+    fn a_started_chord_never_answered_is_given_up_to_the_menu() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        assert_eq!(chords.expire(1), None, "the page is on it at 100 ms");
+        assert_eq!(chords.len(), 1, "held for the answer");
+        assert_eq!(chords.give_up_at(1), Some(t0 + STARTED_CHORD_GIVE_UP));
+        // No answer ever comes (the page's thread died).
+        assert_eq!(chords.give_up(1), Some(ChordFate::ToMenu('l')), "given up: to the menu, once");
+        assert!(chords.is_empty(), "nothing stays held");
+        assert_eq!(chords.give_up(1), None);
+        assert!(!chords.claim(1), "a late claim is refused");
+        assert_eq!(chords.answer(1, true, t0), None, "and a late answer dropped");
+        // A chord the page answered is not given up.
+        chords.hold(2, 'l', t0);
+        assert!(chords.begin(2));
+        assert!(chords.answer(2, false, t0).is_some());
+        assert_eq!(chords.give_up_at(2), None);
+        assert_eq!(chords.give_up(2), None);
+    }
+
+    // #1023 R1 item 2: presses reach the menu in order.
+
+    #[test]
+    fn a_chord_behind_a_started_one_waits_for_its_answer() {
+        // Cmd+L reaches the page in time, its listener runs long; Cmd+D
+        // comes 30 ms later and cannot be reached while the listener runs.
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        chords.hold(2, 'd', t0 + Duration::from_millis(30));
+        assert_eq!(chords.expire(1), None);
+        assert_eq!(chords.expire(2), None, "Cmd+D does not run ahead of Cmd+L's answer");
+        assert!(chords.release_due().is_empty(), "nothing due while Cmd+L's listener runs");
+        // Cmd+L's listener returns without cancelling: Cmd+L to the menu,
+        // then Cmd+D.
+        assert_eq!(chords.answer(1, false, t0).map(|(f, _)| f), Some(ChordFate::ToMenu('l')));
+        assert_eq!(chords.release_due(), vec![(2, ChordFate::ToMenu('d'))]);
+        assert!(chords.is_empty());
+        assert!(!chords.begin(2), "Cmd+D went to the menu: the page does not hear it");
+    }
+
+    #[test]
+    fn a_waiting_chord_the_page_reaches_is_the_pages() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        chords.hold(2, 'd', t0);
+        assert_eq!(chords.expire(2), None, "waits behind Cmd+L");
+        // The page answers Cmd+L and reaches Cmd+D before the answer
+        // crosses to the main thread.
+        assert!(chords.begin(2), "still held: the page hears it");
+        assert_eq!(chords.answer(1, true, t0).map(|(f, _)| f), Some(ChordFate::PageKept('l')));
+        assert!(chords.release_due().is_empty(), "Cmd+D is the page's to answer");
+        assert_eq!(chords.answer(2, false, t0).map(|(f, _)| f), Some(ChordFate::ToMenu('d')));
+    }
+
+    #[test]
+    fn a_give_up_releases_the_chords_waiting_behind_it() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        chords.hold(1, 'l', t0);
+        assert!(chords.begin(1));
+        chords.hold(2, 'd', t0);
+        chords.hold(3, 't', t0);
+        assert_eq!(chords.expire(2), None);
+        assert_eq!(chords.expire(3), None);
+        assert_eq!(chords.give_up(1), Some(ChordFate::ToMenu('l')));
+        assert_eq!(chords.release_due(), vec![(2, ChordFate::ToMenu('d')), (3, ChordFate::ToMenu('t'))], "in press order");
+        assert!(chords.is_empty());
     }
 
     /// #1015 delta R1 (b): a timed-out token that fell out of the memory is
