@@ -1,0 +1,14 @@
+<!doctype html><!-- settings x3 (board bd10a85d): .blocklist-item .remove-btn is 16 tall in Chrome 143 and 22.8 in RustKit, so
+  #focusBlocklist is 46.8 vs 40 and everything below it on settings.html sits ~7px low (93 of 128 geometry diffs at 1280x800 are that y shift).
+  Button: font-size:16px; line-height:1; padding:0 4px; border:none. #lh1/#p0/#b0 split the three, #all has all of them.
+  Likely the B18(3) family (author padding:0 on <button> keeps the UA padding). Measurement on this page: PENDING (gated runner). -->
+<style>body{margin:0;font:12.8px Arial}div{margin:8px}
+.i{display:flex;align-items:center;gap:4px;padding:4px 8px;background:#ccc;width:max-content}
+.r{background:none;border:none;padding:0 4px;font-size:16px;line-height:1}</style>
+<div class="i" id="item"><span>example.com</span><button class="r" id="rm">&times;</button></div>
+<div><button class="r" id="rmx">x</button></div>
+<div><button id="lh1" style="font-size:16px;line-height:1">x</button></div>
+<div><button id="p0" style="font-size:16px;padding:0">x</button></div>
+<div><button id="b0" style="font-size:16px;border:none">x</button></div>
+<div><button id="all" style="font-size:16px;line-height:1;padding:0;border:none">x</button></div>
+<div><span id="sp" style="display:inline-block;font-size:16px;line-height:1">&times;</span></div>
