@@ -773,10 +773,11 @@ fn a_served_listener_record_keeps_its_place_in_the_script_log() {
 
 /// The app's find-in-page script, run while an image arrives and before a
 /// page script that replaces the text (as a hydrating page does). In
-/// RustKit content the script stops at `Range.surroundContents`, which is
-/// not callable here, after it has added its `<style>`; it does so after
-/// the load too (a separate gap). The pin: the find is answered at once,
-/// wraps no text, and the page's own script and load are untouched.
+/// RustKit content it wraps each match with `Range.surroundContents` (CH2.E47:
+/// it used to throw there, after adding its `<style>`, so nothing was ever
+/// highlighted). The pin: the find is answered at once with its count, the
+/// match is wrapped before the page's own script runs (the script sees the
+/// mark), and the script's replacement of the text and the load are untouched.
 #[test]
 fn find_in_page_mid_load_then_a_hydrating_script() {
     const FIND: &str = include_str!("../../hiwave-app/src/ui/find_in_page.js");
@@ -798,16 +799,14 @@ document.getElementById('main').textContent = 'hydrated hello world';</script>"#
     let answer = wait(&mut rx, Duration::from_secs(20));
     let waited = sent.elapsed();
     assert!(waited < SERVED, "find waited {waited:?}");
-    assert!(
-        answer.as_ref().is_some_and(|r| r.as_ref().is_err_and(|e| e.contains("surroundContents") || e.contains("not a callable"))),
-        "find mid-load: {answer:?}"
-    );
+    assert_eq!(answer, Some(Ok("String(\"1\")".to_string())), "find mid-load");
     load.wait_complete();
     let (state, _) = load.eval(
         "String(window.sawMark) + ',' + document.getElementById('main').textContent + ',' + document.readyState",
         Duration::from_secs(5),
     );
-    assert_eq!(state.as_deref(), Some("String(\"false,hydrated hello world,complete\")"));
+    // The find wrapped "hello" before the page's script ran, so the script saw the mark.
+    assert_eq!(state.as_deref(), Some("String(\"true,hydrated hello world,complete\")"));
 }
 
 /// The app's autofill scripts mid-load. On macOS the autofill helper is

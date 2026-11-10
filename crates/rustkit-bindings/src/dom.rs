@@ -4350,8 +4350,9 @@ const WRAPPERS_JS: &str = r#"
         if (r.start.node === r.end.node) {
             if (n.nodeType === 3 || n.nodeType === 8) {
                 var data = n.data.slice(r.start.offset, r.end.offset);
-                if (!cutting) frag.appendChild(g.document.createTextNode(data));
-                else n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
+                // Cutting hands the removed text back too (extractContents, surroundContents).
+                frag.appendChild(g.document.createTextNode(data));
+                if (cutting) n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
             } else {
                 var kids = Array.prototype.slice.call(n.childNodes, r.start.offset, r.end.offset);
                 kids.forEach(function (k) {
@@ -4390,6 +4391,74 @@ const WRAPPERS_JS: &str = r#"
     }
     Range.prototype.cloneContents = function () { return contentsOf(this, false); };
     Range.prototype.deleteContents = function () { contentsOf(this, true); };
+    // DOM §5.5 extractContents: what deleteContents removes, handed back.
+    Range.prototype.extractContents = function () { return contentsOf(this, true); };
+    function isInclusiveAncestor(ancestor, node) {
+        for (; node; node = node.parentNode) if (node === ancestor) return true;
+        return false;
+    }
+    // DOM §5.5 insertNode: split a Text start node, insert before the reference
+    // node, and (for a collapsed range) put the end after what went in.
+    Range.prototype.insertNode = function (node) {
+        var r = slots(this, 'insertNode');
+        if (node == null || !node[SLOT]) {
+            throw new TypeError("Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        var s = r.start.node;
+        if (s.nodeType === 8 || (s.nodeType === 3 && !s.parentNode) || s === node) {
+            throw new DOMException("Failed to execute 'insertNode' on 'Range': The node to be inserted cannot be placed at the range start.", 'HierarchyRequestError');
+        }
+        var wasCollapsed = r.start.node === r.end.node && r.start.offset === r.end.offset;
+        var ref;
+        var parent;
+        if (s.nodeType === 3) {
+            var off = r.start.offset;
+            parent = s.parentNode;
+            ref = g.document.createTextNode(s.data.slice(off));
+            s.data = s.data.slice(0, off);
+            parent.insertBefore(ref, s.nextSibling);
+            // The end boundary that sat in the cut-off tail moves with it.
+            if (!wasCollapsed && r.end.node === s && r.end.offset > off) {
+                r.end = { node: ref, offset: r.end.offset - off };
+            }
+        } else {
+            ref = r.start.offset < s.childNodes.length ? s.childNodes[r.start.offset] : null;
+            parent = s;
+        }
+        if (node === ref) ref = ref.nextSibling;
+        var newOffset = (ref ? childIndex(parent, ref) : nodeLength(parent)) + (node.nodeType === 11 ? node.childNodes.length : 1);
+        parent.insertBefore(node, ref);
+        if (wasCollapsed) r.end = { node: parent, offset: newOffset };
+    };
+    // DOM §5.5 surroundContents: refuse a range that cuts an element in two,
+    // empty `newParent`, move the contents into it, and select it.
+    Range.prototype.surroundContents = function (newParent) {
+        var r = slots(this, 'surroundContents');
+        if (newParent == null || !newParent[SLOT]) {
+            throw new TypeError("Failed to execute 'surroundContents' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        function partiallyContained(node) {
+            return node.nodeType !== 3 && isInclusiveAncestor(node, r.start.node) !== isInclusiveAncestor(node, r.end.node);
+        }
+        for (var a = r.start.node; a; a = a.parentNode) {
+            if (partiallyContained(a)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        for (var b = r.end.node; b; b = b.parentNode) {
+            if (partiallyContained(b)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        if (newParent.nodeType === 9 || newParent.nodeType === 10 || newParent.nodeType === 11) {
+            throw new DOMException("Failed to execute 'surroundContents' on 'Range': The node provided is of an invalid type.", 'InvalidNodeTypeError');
+        }
+        var fragment = contentsOf(this, true);
+        while (newParent.firstChild) newParent.removeChild(newParent.firstChild);
+        this.insertNode(newParent);
+        newParent.appendChild(fragment);
+        this.selectNode(newParent);
+    };
     function rangeContext(node) {
         if (node.nodeType === 1) return node;
         if (node.nodeType === 3 || node.nodeType === 8) return node.parentElement;
