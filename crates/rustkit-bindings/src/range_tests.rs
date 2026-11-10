@@ -190,6 +190,47 @@ fn extract_contents_hands_back_what_it_removes() {
     );
 }
 
+// ---- find_in_page.js must not rewrite the page beyond the wrapped matches (#1024 R1 nit 1) ----
+
+const FIND_JS: &str = include_str!("../../hiwave-app/src/ui/find_in_page.js");
+
+fn find_page(setup: &str) -> DomBindings {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html("<html><head></head><body><div id=keep></div><p id=hit></p></body></html>").unwrap());
+    b.set_document(doc).unwrap();
+    b.evaluate(setup).unwrap();
+    b.evaluate(FIND_JS).unwrap();
+    b
+}
+
+#[test]
+fn find_leaves_the_pages_own_adjacent_text_nodes_alone() {
+    // Two adjacent text nodes the page made on purpose (a framework holds both). The old
+    // find ended with document.body.normalize(), which merged them.
+    let b = find_page(
+        "var k = document.getElementById('keep'); k.appendChild(document.createTextNode('xx ')); k.appendChild(document.createTextNode('yy ')); \
+         document.getElementById('hit').appendChild(document.createTextNode('say hello now'));",
+    );
+    assert_eq!(
+        ev(&b, "var k = document.getElementById('keep'); var a = k.firstChild, c = k.lastChild; var r = window.__hiwaveFind.run({query: 'hello', case_sensitive: false, direction: 'reset'}); [r.count, k.childNodes.length, k.firstChild === a, k.lastChild === c, a.data, c.data].join('|')"),
+        "1|2|true|true|xx |yy "
+    );
+}
+
+#[test]
+fn clearing_a_find_puts_every_node_back_exactly_as_it_was() {
+    let b = find_page(
+        "var h = document.getElementById('hit'); h.appendChild(document.createTextNode('hello a hello b hello')); h.appendChild(document.createElement('i')).textContent = 'hello in i';",
+    );
+    assert_eq!(
+        ev(&b, "var h = document.getElementById('hit'); var t = h.firstChild, i = h.lastChild; var before = h.innerHTML; \
+                var r = window.__hiwaveFind.run({query: 'hello', case_sensitive: false, direction: 'reset'}); var marked = h.querySelectorAll('.zen-find-match').length; \
+                window.__hiwaveFind.run({query: '', direction: 'reset'}); \
+                [r.count, marked, h.childNodes.length, h.firstChild === t, h.lastChild === i, h.innerHTML === before, t.data, h.querySelectorAll('.zen-find-match').length].join('|')"),
+        "4|4|2|true|true|true|hello a hello b hello|0"
+    );
+}
+
 #[test]
 fn create_contextual_fragment_parses_in_context_and_runs_scripts_on_insert() {
     let (b, _) = bound();
