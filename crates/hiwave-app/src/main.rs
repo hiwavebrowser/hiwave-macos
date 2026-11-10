@@ -1639,6 +1639,16 @@ fn handle_shelf_find_ipc(body: &str, content_proxy: &tao::event_loop::EventLoopP
     }
 }
 
+/// The Inspector panel's script for an element picked in the content
+/// page: select it by `path` and show `styles_json`.
+fn inspector_picked_script(path: &str, styles_json: &str) -> String {
+    format!(
+        "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath('{}'); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
+        path.replace("'", "\\'"),
+        styles_json
+    )
+}
+
 /// The Inspector panel's `window.ipc` messages. A function, not the
 /// handler closure, so the RustKit Inspector (CH3.A4) can feed it the same
 /// messages.
@@ -6210,11 +6220,7 @@ fn main() {
                     UserEvent::InspectorElementPicked { path, styles } => {
                         // Element was picked in content webview, update inspector
                         let styles_json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
-                        let script = format!(
-                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath('{}'); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
-                            path.replace("'", "\\'"),
-                            styles_json
-                        );
+                        let script = inspector_picked_script(&path, &styles_json);
                         let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorPickerStopped => {

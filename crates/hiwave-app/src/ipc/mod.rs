@@ -4,6 +4,7 @@
 //! and the Rust backend via WebView IPC.
 
 pub mod commands;
+pub mod inspector_payload;
 
 use serde::{Deserialize, Serialize};
 use serde_json;
