@@ -2931,8 +2931,22 @@ fn distribute_main_axis(
         }
     };
 
-    // Position items
-    let mut main_pos = initial_offset;
+    // Position items. `initial_offset` is measured from the main-start
+    // edge. A reverse line's main start is the far physical edge (right in
+    // row-reverse, bottom in column-reverse), and `main_position` is a
+    // physical offset, so the line is mirrored: its physical start sits at
+    // `container_main - initial_offset - extent`. Without it a reverse line
+    // was justified from the near edge: `row-reverse` flex-start packed
+    // left and flex-end right, the opposite of Chrome 148, fitting or not
+    // (from #1051's review, nit 2).
+    let main_pos_from_start = if reverse {
+        let extent: f32 = line.items.iter().map(|i| i.outer_main_size()).sum::<f32>()
+            + spacing * (line.items.len().saturating_sub(1)) as f32;
+        container_main - initial_offset - extent
+    } else {
+        initial_offset
+    };
+    let mut main_pos = main_pos_from_start;
     let items_to_position: Vec<_> = if reverse {
         (0..line.items.len()).rev().collect()
     } else {
