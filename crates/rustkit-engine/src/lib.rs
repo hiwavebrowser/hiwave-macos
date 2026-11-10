@@ -40284,7 +40284,9 @@ mod page_script_tests {
     use std::net::TcpListener;
 
     /// Serve `routes` (path -> body) on 127.0.0.1 until the test exits;
-    /// anything else is a 404. Paths starting `/slow` answer after 3s.
+    /// anything else is a 404. Paths starting `/slow` answer after 3s, and
+    /// paths starting `/stall` after 20s (a stall long enough that a bound
+    /// well clear of the load's own cost still tells it from a dropped one).
     /// Each connection gets its own thread, so concurrent fetches overlap.
     fn serve(routes: Vec<(&'static str, &'static str, String)>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -40307,6 +40309,8 @@ mod page_script_tests {
                     let path = request.split_whitespace().nth(1).unwrap_or("/");
                     if path.starts_with("/slow") {
                         std::thread::sleep(std::time::Duration::from_secs(3));
+                    } else if path.starts_with("/stall") {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
                     }
                     let (status, content_type, body) = routes
                         .iter()
@@ -40577,12 +40581,12 @@ document.currentScript.remove();
         // apple.com on the real-site board: one stylesheet never answered,
         // and the network client's 30s timeout ate the whole capture.
         let page = r#"<html><head>
-<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/stall.css">
 <link rel="stylesheet" href="/fast.css">
-</head><body><img src="/slow.png"><img src="/slow.svg">hi</body></html>"#;
+</head><body><img src="/stall.png"><img src="/stall.svg">hi</body></html>"#;
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
-            ("/slow.css", "text/css", "body { color: red }".into()),
+            ("/stall.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
         let config = EngineConfig {
@@ -40590,8 +40594,14 @@ document.currentScript.remove();
             ..EngineConfig::default()
         };
         let (engine, view, took) = load_timed(config, port);
+        // The stalled responses come after 20s, so an engine that waited for
+        // them takes 20s or more; one that drops them at the 500 ms budget
+        // takes what the load itself costs (about 2.4s in an unoptimised
+        // build on a quiet 12-core box, which the old 2.5s bound sat 0.1s
+        // above: a slower or busier runner failed it without having waited).
+        // 8s is a bound that machine speed does not reach and a wait does.
         assert!(
-            took < std::time::Duration::from_millis(2_500),
+            took < std::time::Duration::from_secs(8),
             "waited for the stalled subresources: {took:?}"
         );
         // The sheet that did arrive still applies — and it must be the fast
