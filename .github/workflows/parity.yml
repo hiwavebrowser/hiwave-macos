@@ -327,6 +327,23 @@ jobs:
         # installed, and died on ModuleNotFoundError the first time CI ran it.
         run: python3 -m pip install --disable-pip-version-check pyyaml
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: tools/parity_oracle
+        # CI2: test_wpt_tier1's fonts-ready pin launches the oracle's
+        # Playwright (headless: true, so chrome-headless-shell). `npm ci`
+        # installs the package, not its browser; without this the pin can only
+        # skip here (it skips on a missing executable, for local seats) and is
+        # live on the Mac alone. Same recipe as the selector-key job above.
+        run: npx playwright install --with-deps chromium-headless-shell
+
       - name: Run every instrument guard
         run: |
           set -euo pipefail

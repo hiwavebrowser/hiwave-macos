@@ -737,12 +737,20 @@ impl EndpointSide {
                 }
             }
             PageInput::CommandKey { key_code, key, shift, alt, token } => {
-                // The chord's edit runs only while the window still holds
-                // the chord for this page: one whose wait ran out went to
-                // the menu, whose Paste/Undo is the edit (M1e).
-                let claimed = engine.handle_command_key_if(view, key_code, &key, shift, alt, &mut || {
-                    rustkit_viewhost::claim_key_equivalent(token)
-                });
+                // A chord whose wait ran out went to the menu, which is its
+                // one actor: the page does not hear its keydown (M1g; a
+                // timeout-path divergence, Chrome has no timeout). Otherwise
+                // the chord's edit runs only while the window still holds
+                // the chord for this page (M1e: the menu's Paste/Undo is the
+                // edit of a chord that timed out while its keydown ran).
+                let claimed = if rustkit_viewhost::begin_key_equivalent(token) {
+                    engine.handle_command_key_if(view, key_code, &key, shift, alt, &mut || {
+                        rustkit_viewhost::claim_key_equivalent(token)
+                    })
+                } else {
+                    tracing::debug!(token, "Cmd chord's wait ran out: the menu has it, the page does not hear it");
+                    false
+                };
                 self.emit(PageEvent::KeyEquivalentDone { token, claimed });
             }
             PageInput::Ime(input) => {

@@ -286,7 +286,12 @@ enum UserEvent {
     ToggleTabMute { id: String },
     // Autofill
     TriggerAutofill,
-    SendAutofillCredentials { credentials_json: String },
+    /// The content helper asked for the picker list (`domain` is what it
+    /// named, if anything); answered by `ipc::autofill`.
+    AutofillRequested { domain: Option<String> },
+    /// The content helper's picker sent a pick (one fill per arming; the
+    /// gate does not prove the person, rather than the page, chose it).
+    AutofillPick { id: String },
     // Vault settings events (from settings webview)
     GetVaultStatus,
     UnlockVault(String),
@@ -884,6 +889,22 @@ fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     Cow::Borrowed(url)
+}
+
+/// Autofill's key for the content view (the active tab) and the view's
+/// current top-level URL as the app reads it from the view, never from the
+/// page. RustKit pages (macOS) have no autofill IPC path: `None`.
+fn autofill_view_and_url(
+    state: &Arc<Mutex<AppState>>,
+    content: &UnifiedContentWebView,
+) -> Option<(String, String)> {
+    #[allow(unreachable_patterns)]
+    let url = match content {
+        UnifiedContentWebView::Wry(v) => v.url().ok()?,
+        _ => return None,
+    };
+    let view = state.lock().ok()?.shell.get_active_tab()?.id.0.to_string();
+    Some((view, url))
 }
 
 /// A page URL for an info line (CH3.A6): whole only when IPC bodies are
@@ -1637,6 +1658,23 @@ fn handle_shelf_find_ipc(body: &str, content_proxy: &tao::event_loop::EventLoopP
             let _ = content_proxy.send_event(UserEvent::FindInPageResult(result));
         }
     }
+}
+
+/// `text` as a JavaScript string literal (JSON string syntax, quotes
+/// included), for data that goes into a script the app builds. Escaping
+/// quotes by hand misses backslashes and line breaks.
+fn js_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// The Inspector panel's script for an element picked in the content
+/// page: select it by `path` and show `styles_json`.
+fn inspector_picked_script(path: &str, styles_json: &str) -> String {
+    format!(
+        "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath({}); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
+        js_string(path),
+        styles_json
+    )
 }
 
 /// The Inspector panel's `window.ipc` messages. A function, not the
@@ -3090,6 +3128,9 @@ fn main() {
 
         WebViewBuilder::new()
         .with_html(ABOUT_HTML)
+        // Autofill helper at document start, top frame only, so its frozen
+        // `window.hiwaveAutofill` is in place before page script runs.
+        .with_initialization_script_for_main_only(AUTOFILL_HELPER, true)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
         .with_bounds(content_bounds)
@@ -3375,28 +3416,14 @@ fn main() {
                         info!("Tab audio state changed from content: playing={}", playing);
                         let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
                     }
-                    IpcMessage::GetCredentialsForAutofill { ref domain } => {
-                        info!("Getting credentials for autofill: {}", domain);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        info!("Autofill response: {:?}", response);
-                        match response {
-                            ipc::IpcResponse::Success { data } => {
-                                let json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
-                                info!("Sending {} credentials to page", json.len());
-                                let _ = content_proxy_ipc.send_event(UserEvent::SendAutofillCredentials {
-                                    credentials_json: json,
-                                });
-                            }
-                            ipc::IpcResponse::Error { ref message } => {
-                                warn!("Autofill error: {}", message);
-                                // Show error alert on content page
-                                let script = format!(
-                                    "alert('[HiWave Autofill] {}');",
-                                    message.replace('\'', "\\'")
-                                );
-                                let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                            }
-                        }
+                    // Autofill: decided in the event loop by `ipc::autofill`,
+                    // which reads the view's own URL.
+                    IpcMessage::GetCredentialsForAutofill { domain } => {
+                        let domain = (!domain.is_empty()).then(|| domain.clone());
+                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillRequested { domain });
+                    }
+                    IpcMessage::AutofillPick { id } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillPick { id: id.clone() });
                     }
                     // Handle analytics and other commands that need responses sent back to content
                     IpcMessage::GetTodayStats
@@ -3417,18 +3444,33 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
                     }
                     // Inspector IPC handlers from content webview
+                    // The page can post these itself: each payload is read
+                    // into the shape the injected scripts send, and one
+                    // that does not fit is dropped (SEC1b).
                     IpcMessage::InspectorDomTreeResult { tree } => {
+                        let Some(tree) = ipc::inspector_payload::dom_tree(tree) else {
+                            warn!("inspector: dropped a malformed DOM tree from the content page");
+                            return;
+                        };
                         let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
                     }
                     IpcMessage::InspectorElementStylesResult { styles } => {
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped malformed element styles from the content page");
+                            return;
+                        };
                         let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
                     }
                     IpcMessage::InspectorElementPicked { path, styles } => {
+                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
+                            warn!("inspector: dropped a malformed picked element from the content page");
+                            return;
+                        };
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked {
                             path: path.clone(),
-                            styles: styles.clone(),
+                            styles,
                         });
                     }
                     IpcMessage::InspectorPickerStopped => {
@@ -3439,6 +3481,10 @@ fn main() {
                     }
                     // Console IPC handlers
                     IpcMessage::InspectorConsoleMessage { entry } => {
+                        let Some(entry) = ipc::inspector_payload::console_entry(entry) else {
+                            warn!("inspector: dropped a malformed console line from the content page");
+                            return;
+                        };
                         let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
                         let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
                     }
@@ -4538,8 +4584,6 @@ fn main() {
                             let _ = content_for_events.evaluate_script(CONTEXT_MENU_HELPER);
                             info!("Injecting audio detector into content webview");
                             let _ = content_for_events.evaluate_script(AUDIO_DETECTOR);
-                            info!("Injecting autofill helper into content webview");
-                            let _ = content_for_events.evaluate_script(AUTOFILL_HELPER);
                             info!("Injecting console interceptor into content webview");
                             let _ = content_for_events.evaluate_script(CONSOLE_INJECT);
                         }
@@ -6090,20 +6134,42 @@ fn main() {
                         let _ = proxy.send_event(UserEvent::SyncTabs);
                     }
                     UserEvent::TriggerAutofill => {
+                        // An app-side action (chrome, menu, app shortcut):
+                        // arm one request for this view at its current origin.
                         info!("Triggering autofill");
-                        // Focus the password field if any
+                        if let Some((view, url)) = autofill_view_and_url(&state_for_events, &content_for_events) {
+                            if let Ok(mut s) = state_for_events.lock() {
+                                ipc::autofill::arm_autofill(&mut s, &view, &url, std::time::Instant::now());
+                            }
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if(window.hiwaveAutofill) { hiwaveAutofill.trigger(); }"
                         );
                     }
-                    UserEvent::SendAutofillCredentials { ref credentials_json } => {
-                        info!("Sending autofill credentials to page");
-                        // Send credentials to the page via window.postMessage
-                        let script = format!(
-                            "window.postMessage({{ type: 'hiwave_autofill_credentials', credentials: {} }}, '*');",
-                            credentials_json
-                        );
-                        let _ = content_for_events.evaluate_script(&script);
+                    UserEvent::AutofillRequested { ref domain } => {
+                        let entries = autofill_view_and_url(&state_for_events, &content_for_events)
+                            .and_then(|(view, url)| {
+                                let mut s = state_for_events.lock().ok()?;
+                                Some(ipc::autofill::answer_content_autofill_request(
+                                    &mut s, &view, &url, domain.as_deref(), std::time::Instant::now(),
+                                ))
+                            })
+                            .unwrap_or_default();
+                        info!("Autofill picker: {} entries", entries.len());
+                        if !entries.is_empty() {
+                            let _ = content_for_events.evaluate_script(&ipc::autofill::picker_script(&entries));
+                        }
+                    }
+                    UserEvent::AutofillPick { ref id } => {
+                        let script = autofill_view_and_url(&state_for_events, &content_for_events)
+                            .and_then(|(view, url)| {
+                                let mut s = state_for_events.lock().ok()?;
+                                ipc::autofill::autofill_fill_script(&mut s, &view, &url, id, std::time::Instant::now())
+                            });
+                        if let Some(script) = script {
+                            info!("Autofill: filling the picked entry");
+                            let _ = content_for_events.evaluate_script(&script);
+                        }
                     }
                     // Inspector event handlers
                     UserEvent::OpenInspector => {
@@ -6213,11 +6279,7 @@ fn main() {
                     UserEvent::InspectorElementPicked { path, styles } => {
                         // Element was picked in content webview, update inspector
                         let styles_json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
-                        let script = format!(
-                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath('{}'); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
-                            path.replace("'", "\\'"),
-                            styles_json
-                        );
+                        let script = inspector_picked_script(&path, &styles_json);
                         let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorPickerStopped => {
@@ -6230,8 +6292,8 @@ fn main() {
                             return;
                         }
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -6267,8 +6329,8 @@ fn main() {
                     }
                     UserEvent::InspectorScrollToElement { path } => {
                         let script = format!(
-                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
-                            path.replace("'", "\\'")
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement({}); }}",
+                            js_string(&path)
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
@@ -6295,14 +6357,14 @@ fn main() {
                         let script = format!(r#"
                             (function() {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_styles_result',
                                         styles: styles
                                     }}));
                                 }}
                             }})();
-                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        "#, js_string(&path));
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorExpand { path } => {
@@ -6314,19 +6376,19 @@ fn main() {
                         // Open inspector and select the element
                         let _ = proxy.send_event(UserEvent::OpenInspector);
                         // Delay the selection to allow inspector to initialize
-                        let path_escaped = path.replace("'", "\\'");
+                        let path_literal = js_string(&path);
                         let script = format!(r#"
                             setTimeout(() => {{
                                 if (window.__hiwaveInspector) {{
-                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    const styles = window.__hiwaveInspector.getElementStyles({});
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_element_picked',
-                                        path: '{}',
+                                        path: {},
                                         styles: styles
                                     }}));
                                 }}
                             }}, 200);
-                        "#, path_escaped, path_escaped);
+                        "#, path_literal, path_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     // Console events
@@ -6347,11 +6409,11 @@ fn main() {
                             return;
                         }
                         // Execute JavaScript in content webview
-                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let code_literal = js_string(&code);
                         let script = format!(r#"
                             (function() {{
                                 try {{
-                                    const result = eval('{}');
+                                    const result = eval({});
                                     const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
                                     window.ipc.postMessage(JSON.stringify({{
                                         cmd: 'inspector_console_message',
@@ -6376,7 +6438,7 @@ fn main() {
                                     }}));
                                 }}
                             }})();
-                        "#, escaped_code);
+                        "#, code_literal);
                         let _ = content_for_events.evaluate_script(&script);
                     }
                 }
