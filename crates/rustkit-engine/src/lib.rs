@@ -21014,7 +21014,7 @@ impl SelectorMatcher {
             compound.matches_ancestor_in_chain(ancestors, idx)
         };
         let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
-            let _relational = compound.needs_node().then(|| {
+            let _relational = compound.needs_node_as_sibling().then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
             });
             compound.matches_sibling_in_chain(prev, ancestors)
@@ -21087,8 +21087,9 @@ impl SelectorMatcher {
                             let Some(key) = dom_sibling_key(node) else {
                                 return false;
                             };
-                            let _relational =
-                                compound.needs_node().then(|| RelationalNodeScope::enter(Some(node.clone())));
+                            let _relational = compound
+                                .needs_node_as_sibling()
+                                .then(|| RelationalNodeScope::enter(Some(node.clone())));
                             compound.matches_sibling_in_chain(&key, above)
                         };
                         let matched = match combinator.as_str() {
@@ -41785,6 +41786,10 @@ thread_local! {
     /// from 1 too, and every node outlives the build.
     static HAS_MEMO: std::cell::RefCell<Option<HashMap<(usize, String), bool>>> =
         const { std::cell::RefCell::new(None) };
+    /// Where each element the walk named sits among its siblings, by node address, for
+    /// one build (CH2.E51; installed and cleared with [`HAS_MEMO`] by `HasMemoScope`).
+    static STRUCTURAL_CONTEXT: std::cell::RefCell<Option<HashMap<usize, SiblingContext>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -42060,6 +42065,7 @@ impl HasMemoScope {
             let fresh = m.is_none();
             if fresh {
                 *m = Some(HashMap::new());
+                STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = Some(HashMap::new()));
             }
             fresh
         }))
@@ -42070,8 +42076,49 @@ impl Drop for HasMemoScope {
     fn drop(&mut self) {
         if self.0 {
             HAS_MEMO.with(|m| *m.borrow_mut() = None);
+            STRUCTURAL_CONTEXT.with(|c| *c.borrow_mut() = None);
         }
     }
+}
+
+/// The tree-structural pseudo-classes (Selectors 4 §14), by name.
+const STRUCTURAL_PSEUDOS: &[&str] = &[
+    "first-child",
+    "last-child",
+    "only-child",
+    "nth-child",
+    "nth-last-child",
+    "first-of-type",
+    "last-of-type",
+    "only-of-type",
+    "nth-of-type",
+    "nth-last-of-type",
+];
+
+/// Whether the structural pseudo-class `name(arg)` holds for `node`, its
+/// position read from the tree by the one evaluator the subject uses
+/// (`match_pseudo_class`). The position (`SiblingContext`, which costs a scan
+/// of the parent's children) is memoised per node for the build, in
+/// [`STRUCTURAL_CONTEXT`] (the DOM does not change inside a build):
+/// `tr:nth-child(even) td` asks about the same `tr` once for every cell in
+/// it, and does not allocate to ask.
+fn structural_holds(node: &Rc<Node>, name: &str, arg: Option<&str>) -> bool {
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return true;
+    };
+    let address = Rc::as_ptr(node) as usize;
+    let tag = lower_tag(tag_name);
+    let known = STRUCTURAL_CONTEXT.with(|m| m.borrow().as_ref().and_then(|m| m.get(&address).copied()));
+    let sib = known.unwrap_or_else(|| {
+        let sib = dom_sibling_context(node, &tag, Engine::node_has_children(node));
+        STRUCTURAL_CONTEXT.with(|m| {
+            if let Some(m) = m.borrow_mut().as_mut() {
+                m.insert(address, sib);
+            }
+        });
+        sib
+    });
+    SelectorMatcher.match_pseudo_class(name, arg, &tag, sib, attributes)
 }
 
 /// Whether the element the compound under test is for matches
@@ -42368,6 +42415,16 @@ struct AncestorCompound {
     /// One entry per `:is()`/`:where()` in the compound: some alternative
     /// must match.
     any_of: Vec<AnyOf>,
+    /// The tree-structural pseudo-classes (`:first-child`, `:nth-child(2)`,
+    /// ...), as (name, argument). The chain carries no sibling position, so
+    /// they are decided against the DOM element the walk names
+    /// (`RELATIONAL_NODE`), with the position read from the tree and
+    /// memoised for the build (CH2.E51). Without a named element they stay
+    /// permissive, as before.
+    structural: Vec<(String, Option<String>)>,
+    /// `:not(<one structural pseudo-class>)` members (`:not(:first-child)`):
+    /// decided the same way, and none may hold. `undecided` too, as `structural`.
+    not_structural: Vec<(String, Option<String>)>,
     /// The `[...]` parts, brackets off. Tested only against an ancestor
     /// that carries its attributes (`AncestorKey`).
     attrs: Vec<String>,
@@ -42530,6 +42587,13 @@ impl AncestorCompound {
                                         false => Some(AncestorCompound::parse(member.trim())),
                                     };
                                     match parsed {
+                                        // `:not(:first-child)`: a member that is one structural
+                                        // pseudo-class and nothing else is decided against the
+                                        // DOM element the walk names (CH2.E51).
+                                        Some(m) if m.is_one_structural_pseudo() => {
+                                            out.not_structural.extend(m.structural);
+                                            out.undecided = true;
+                                        }
                                         // `:not(:hover)`: nothing is, so it excludes nothing.
                                         Some(m) if m.never => {}
                                         Some(m) if !m.undecided => {
@@ -42561,8 +42625,19 @@ impl AncestorCompound {
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
                             (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
-                            // Structural and the rest need context the tuple
-                            // does not carry: permissive.
+                            // Structural pseudo-classes: the position is not in
+                            // the tuple, so it is read from the DOM element
+                            // the walk names (CH2.E51). Still `undecided`
+                            // (inside `:not()` a maybe excludes nothing),
+                            // and `:nth-child(.. of S)` stays permissive.
+                            (n, a) if STRUCTURAL_PSEUDOS.contains(&n)
+                                && !a.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(" of ")) =>
+                            {
+                                out.structural.push((name.clone(), arg.clone()));
+                                out.undecided = true;
+                            }
+                            // The rest need context the tuple does not
+                            // carry: permissive.
                             _ => out.undecided = true,
                         }
                         i = next;
@@ -42632,19 +42707,23 @@ impl AncestorCompound {
     /// `:is()` members decided against that ancestor's own chain.
     fn matches_ancestor_in_chain(&self, ancestors: &[Ancestor], idx: usize) -> bool {
         let ancestor = &ancestors[idx];
-        self.matches_ancestor(ancestor) && {
-            let (tag, classes, id, attributes) = &**ancestor;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
-        }
+        self.matches_ancestor(ancestor)
+            && self.structural_hold_for_the_named_node()
+            && {
+                let (tag, classes, id, attributes) = &**ancestor;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
+            }
     }
 
     /// [`Self::matches_sibling`], with the complex `:is()` members decided
     /// against the sibling's chain, which is the subject's.
     fn matches_sibling_in_chain(&self, prev: &SiblingKey, ancestors: &[Ancestor]) -> bool {
-        self.matches_sibling(prev) && {
-            let (tag, classes, id, _) = prev;
-            self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
-        }
+        self.matches_sibling(prev)
+            && self.node_parts_hold(prev, true)
+            && {
+                let (tag, classes, id, _) = prev;
+                self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
+            }
     }
 
     /// Every `:is()` with a complex member holds for the element known by
@@ -42742,7 +42821,80 @@ impl AncestorCompound {
     /// [`RELATIONAL_NODE`]: a `:has()` reads its subtree, and a complex
     /// `:is()` member's own walk reads its DOM siblings.
     fn needs_node(&self) -> bool {
-        self.relational || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+        self.relational || self.has_structural() || self.any_of.iter().any(|alts| !alts.complex.is_empty())
+    }
+
+    /// The structural pseudo-classes against the DOM element the walk
+    /// named for this ancestor (`RELATIONAL_NODE`); permissive without one.
+    fn structural_hold_for_the_named_node(&self) -> bool {
+        if !self.has_structural() {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        self.structural_holds_for(&node)
+    }
+
+    /// A structural pseudo-class, or a `:not()` of one, is in the compound.
+    fn has_structural(&self) -> bool {
+        !self.structural.is_empty() || !self.not_structural.is_empty()
+    }
+
+    /// Every structural pseudo-class holds for `node` and no `:not()` one does.
+    fn structural_holds_for(&self, node: &Rc<Node>) -> bool {
+        self.structural.iter().all(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+            && !self.not_structural.iter().any(|(name, arg)| structural_holds(node, name, arg.as_deref()))
+    }
+
+    /// The compound is exactly one structural pseudo-class: no tag, class,
+    /// id, attribute, state, `:is()`, `:not()` or `:has()`.
+    fn is_one_structural_pseudo(&self) -> bool {
+        self.structural.len() == 1
+            && !self.never
+            && self.tag.is_none()
+            && self.classes.is_empty()
+            && self.id.is_none()
+            && self.attrs.is_empty()
+            && self.state.is_empty()
+            && self.not_state.is_empty()
+            && self.any_of.is_empty()
+            && self.none_of.is_empty()
+            && self.not_structural.is_empty()
+            && self.has.is_empty()
+            && !self.relational
+    }
+
+    /// [`Self::needs_node`] for a compound left of `+` / `~`: an earlier
+    /// sibling's key carries no attributes either (`SiblingKey`), so its
+    /// `[...]` and `:not([...])` parts are read from the DOM element too.
+    fn needs_node_as_sibling(&self) -> bool {
+        self.needs_node() || !self.attrs.is_empty() || !self.none_of.is_empty()
+    }
+
+    /// The parts of the compound a key tuple cannot decide, for the DOM
+    /// element the walk names (`RELATIONAL_NODE`): its structural
+    /// pseudo-classes and, for an earlier sibling (`attrs_too`), its
+    /// attribute selectors. Permissive where no element is named.
+    fn node_parts_hold(&self, key: &SiblingKey, attrs_too: bool) -> bool {
+        if !self.has_structural() && !(attrs_too && (!self.attrs.is_empty() || !self.none_of.is_empty())) {
+            return true;
+        }
+        let Some(node) = RELATIONAL_NODE.with(|n| n.borrow().clone()) else {
+            return true;
+        };
+        if !self.structural_holds_for(&node) {
+            return false;
+        }
+        if !attrs_too || (self.attrs.is_empty() && self.none_of.is_empty()) {
+            return true;
+        }
+        let NodeType::Element { attributes, .. } = &node.node_type else {
+            return true;
+        };
+        let (tag, classes, id, _) = key;
+        self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id.as_ref(), Some(attributes)))
     }
 }
 
@@ -44081,9 +44233,13 @@ impl SelectorReads {
                         "" => {}
                         // `:has()` on an ancestor reads its subtree, which
                         // the chain key does not hold.
+                        // A structural pseudo-class on an ancestor reads
+                        // that ancestor's place among its siblings (CH2.E51),
+                        // which the chain key does not hold either: elements
+                        // alike in every key can differ in it.
                         " " | ">" => {
                             self.note_ancestor(compound);
-                            positional |= compound.relational;
+                            positional |= compound.relational || compound.has_structural();
                         }
                         _ => positional = true,
                     }
