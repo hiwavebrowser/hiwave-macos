@@ -110,6 +110,12 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Load as the app does: what the page asks of the network after its
+    /// `load` event is the live loop's (`--live-ms`), not the load's
+    /// (`EngineConfig::post_load_requests_live`).
+    #[arg(long)]
+    post_load_live: bool,
+
     /// Run the page's CSS animations and transitions as the app does (the
     /// parity config holds them still so a frame is reproducible). For
     /// `--live-ms` measurements of animation frames; a frame taken with it
@@ -1925,6 +1931,7 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
         config.script_budget_ms = budget;
     }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    config.post_load_requests_live = args.post_load_live;
     if args.animations {
         config.disable_animations = false;
     }
@@ -2007,6 +2014,8 @@ mod tests {
     fn the_live_loop_is_turned_only_when_asked() {
         assert_eq!(parsed(&[]).live_ms, None);
         assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
+        assert!(!capture_config(&parsed(&[]), None).post_load_requests_live);
+        assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
     }
 
     // The board is measured at the engine's 5 s script budget, and the live
