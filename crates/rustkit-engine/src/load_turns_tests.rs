@@ -412,6 +412,31 @@ fn a_link_clicked_during_the_image_wait_navigates_once_and_the_old_load_fires_no
     assert_eq!(path.as_deref(), Some("String(\"/next\")"));
 }
 
+/// LAT15b: a link to a place in the same page (`href="#t"`), clicked while the image arrives, is a
+/// navigation inside the document (HTML 7.4.2.3.3): the page scrolls, the URL gets the fragment,
+/// and the LOAD KEEPS GOING (Chrome). It must not be handed to the window as a navigation, which
+/// cancels the load and loads the page again.
+#[test]
+fn a_fragment_link_clicked_during_the_image_wait_scrolls_and_the_load_goes_on() {
+    let page = r##"<!doctype html><body style="margin:0">
+<a id="link" href="#t" style="display:block;width:400px;height:200px;background:rgb(0,160,0)">jump</a>
+<div style="height:1500px"></div><div id="t" style="height:40px">target</div><div style="height:1500px"></div>
+<img src="/slow.jpg" width="100" height="100">
+<script>window.addEventListener('load', function () { fetch('/beacon?load'); });</script>"##;
+    let fixture = serve(vec![("/page", html(page)), ("/slow.jpg", slow_image(2_000)), ("/beacon", html("ok"))]);
+    let mut load = Load::start(&fixture, "/page");
+    load.follow = true;
+    load.wait_main();
+    assert!(load.click(200.0, 100.0, Duration::from_secs(20)).is_some());
+    // Past the image's arrival, so the load can end.
+    let nav = load.nav;
+    assert!(load.until(Duration::from_secs(15), |l| l.completed(nav).is_some()), "the load of the clicked page completes");
+    assert!(load.followed.is_empty(), "the fragment link was handed to the window as a navigation: {:?}", load.followed);
+    assert_eq!(fixture.requests("/page").len(), 1, "the page was loaded once, not again");
+    let (state, _) = load.eval("location.hash + ',' + (window.scrollY > 1000) + ',' + document.readyState", Duration::from_secs(5));
+    assert_eq!(state.as_deref(), Some("String(\"#t,true,complete\")"));
+}
+
 /// A navigation sent while the load waits is not applied at a safe point:
 /// the commands behind it wait for it, in order.
 #[test]
