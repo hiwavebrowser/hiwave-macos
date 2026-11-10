@@ -126,3 +126,38 @@ fn a_buttons_line_is_normal_unless_the_button_itself_declares_one() {
     // The button's OWN line-height still counts: 16 (1 x 16px) + 0 padding + 4 border.
     assert!(close(h[4], 20.0), "#own: line-height:1 on the button itself is 16 + 0 + 4 = 20, got {}", h[4]);
 }
+
+/// The campaign case itself (websuite/micro/form-controls, its shared reset inlined): every button
+/// and `input type=submit/button` is the 19 px Chrome for Testing 148 measured
+/// (baselines/chrome-148/micro/form-controls/layout-rects.json: 35.875/93.66/167.03 wide buttons,
+/// two inputs, all 19 tall at y 475), and the `.test4` button with an explicit 200 x 50 stays 50
+/// under `box-sizing: border-box` (a declared height and the three-part sum do not double-count).
+#[test]
+fn the_form_controls_case_buttons_are_the_height_chrome_measured() {
+    const CASE: &str = include_str!("../../../websuite/micro/form-controls/index.html");
+    const RESET: &str = include_str!("../../../websuite/common/parity-reset.css");
+    let link = "<link rel=\"stylesheet\" href=\"../../common/parity-reset.css\">";
+    assert!(CASE.contains(link), "the case still links the shared reset");
+    let page = CASE.replace(link, &format!("<style>{RESET}</style>"));
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 800 })
+        .expect("view");
+    engine.load_html(view, &page).expect("load_html");
+    let out = engine
+        .execute_script(
+            view,
+            "String(Array.prototype.map.call(document.querySelectorAll(\
+             'button, input[type=submit], input[type=button], input[type=reset]'),\
+             function (e) { return Math.round(e.getBoundingClientRect().height); }).join(','))",
+        )
+        .unwrap();
+    let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out);
+    let heights: Vec<f64> = text.split(',').filter_map(|n| n.parse().ok()).collect();
+    assert!(heights.len() >= 7, "the case has at least 7 buttons: {text}");
+    for (i, h) in heights.iter().enumerate() {
+        let want = if *h == 50.0 { 50.0 } else { 19.0 };
+        assert!(close(*h, want), "button {i} is {h} px, Chrome measured 19 (or the explicit 50): {text}");
+    }
+    assert_eq!(heights.iter().filter(|h| **h == 50.0).count(), 1, "exactly the .test4 button is 50: {text}");
+}

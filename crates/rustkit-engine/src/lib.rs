@@ -15582,6 +15582,9 @@ impl layout_ctx::LayoutCtx {
         ) {
             style.padding_v_declared = true;
         }
+        if matches!(property, "line-height" | "font") {
+            style.line_height_declared = true;
+        }
         if matches!(
             property,
             "border"

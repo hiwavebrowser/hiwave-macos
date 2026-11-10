@@ -373,7 +373,16 @@ pub(crate) fn form_control_intrinsic_size(
         if is_button {
             let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
             let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
-            button_line.unwrap_or_else(|| content_line(font_size)) + pad + border
+            // A button's line-height is `normal` unless declared on the button itself (see
+            // `ComputedStyle::line_height_declared`): the inherited one is reset by the UA font.
+            let line = button_line.unwrap_or_else(|| {
+                if style.line_height_declared {
+                    content_line(font_size)
+                } else {
+                    normal_line_height(style, font_size)
+                }
+            });
+            line + pad + border
         } else if fully_declared {
             normal_line_height(style, font_size) + author_pb_v
         } else if author_pb_v > 0.0 {
@@ -13407,6 +13416,7 @@ mod tests {
         style.font_size = Length::Px(16.0);
         style.font_family = "Arial".to_string();
         style.line_height = rustkit_css::LineHeight::Px(20.0);
+        style.line_height_declared = true; // the cascade flags a line-height on the button itself
         let ascii = form_control_intrinsic_size(&style, &button("Share")).1;
         let emoji = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
         assert_eq!(ascii, 20.0 + UA_BUTTON_PADDING_V + UA_BUTTON_BORDER_V, "ascii: line + UA padding + UA border");
