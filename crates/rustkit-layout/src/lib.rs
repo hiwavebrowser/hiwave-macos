@@ -456,7 +456,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // #modeSelector is 31), and RustKit does not carry
                 // `appearance` yet — taking the +2 moved chrome's whole
                 // sidebar 2px down on 12 board rows.
-                // `appearance: none` drops the arrow well (Chromium 143: 79
+                // `appearance: none` drops the arrow well (Chrome 148: 79
                 // wide for 99 with it, form_control_decoration_tests).
                 let well = if style.appearance == rustkit_css::Appearance::None {
                     0.0
@@ -12755,7 +12755,7 @@ impl DisplayList {
 
                 // `appearance: none` drops the native parts, the arrow and
                 // the label's 4px inset: the label paints as a text field's
-                // value does (Chromium 143, form_control_decoration_tests).
+                // value does (Chrome 148, form_control_decoration_tests).
                 let kind = if layout_box.style.appearance == rustkit_css::Appearance::None {
                     TextControlKind::Text
                 } else {

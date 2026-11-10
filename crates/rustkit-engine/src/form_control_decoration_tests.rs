@@ -12,8 +12,10 @@
 //! - `appearance` was not carried, so an `appearance: none` select kept the
 //!   arrow, the 4px label inset and the 20px arrow well.
 //!
-//! Every expected number is Chromium 143.0.7499.4's (the repo's pinned
-//! oracle), headless at 240x60, on the page in the test.
+//! Every expected number is Chrome for Testing 148.0.7778.216's (the parity
+//! baseline, `PARITY_CHROME_PATH` set to the pinned CfT), headless at
+//! 240x60 with the parity launch flags, on the page in the test. Chromium
+//! 143.0.7499.4 (Playwright's bundled build) gives the same numbers.
 
 use super::*;
 
