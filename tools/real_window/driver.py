@@ -3192,6 +3192,51 @@ class Driver:
                       "%.1f s" % (time.time() - t))
             self.close_page()
 
+    def m1f_escape_stops_with_sidebar(self):
+        """M1f: with the sidebar open and a page still loading (an image the server holds 8 s), one Escape in the address bar stops the load and leaves the sidebar open; typed text is reverted first."""
+        c = "m1f_escape_stops_with_sidebar"
+        if not self.open_page(c, "m1d_keys.html?slowimg"):
+            return
+        if not self.can_input:
+            return self.not_run(c, "Escape", self.why_not("Accessibility"))
+        self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        widths = re.findall(r'"cmd":"set_sidebar_width","width":(\d+)', self.app.log_text())
+        self.expect(c, "the sidebar is open (the seed profile's default)", bool(widths) and int(widths[-1]) > 0,
+                    "last set_sidebar_width: %s" % (widths[-1] if widths else "none"))
+        loading = not re.search(r"Navigation finished[^\n]*m1d_keys", self.app.log_text())
+        # The address bar, right of the sidebar and the nav buttons (as
+        # a2_chrome_typed_url clicks it).
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the address bar", bool(clicked))
+        time.sleep(0.4)
+        # Typed text first: Escape reverts it and does not stop the load.
+        self.hw("type", pid, "zz")
+        time.sleep(0.3)
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        time.sleep(0.6)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "Escape over typed text reverted it: no stop, sidebar untouched",
+                    "Stopping load" not in after and "set_sidebar_width" not in after,
+                    "stop: %s; sidebar posts: %d" % ("Stopping load" in after, after.count("set_sidebar_width")))
+        # Nothing typed now: one Escape stops the load; the sidebar stays.
+        esc_from = len(self.app.log_text())
+        self.hw("key", pid, 53)
+        stopped = self.app.wait_log(r"Stopping load", 1.5, esc_from)
+        time.sleep(0.5)
+        after = self.app.log_text()[esc_from:]
+        self.expect(c, "one Escape stopped the load",
+                    bool(stopped) and "Stop: nothing loading" not in after,
+                    "page was loading at the start: %s; stop: %s; %s" % (
+                        loading, bool(stopped), "nothing loading" if "Stop: nothing loading" in after else "a load was cancelled"))
+        self.expect(c, "the sidebar stayed open", "set_sidebar_width" not in after,
+                    "sidebar posts after Escape: %d" % after.count("set_sidebar_width"))
+        self.close_page()
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
@@ -3205,7 +3250,7 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
               "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
-              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading"]
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1f_escape_stops_with_sidebar"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

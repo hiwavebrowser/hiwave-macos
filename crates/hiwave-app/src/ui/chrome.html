@@ -5867,9 +5867,12 @@
                 // for internal pages so placeholder text stays useful.
                 try {
                     const active = tabs.find(t => t.is_active);
-                    if (active && document.activeElement !== urlInput && !urlInputWasFocused) {
+                    if (active) {
                         const shown = (active.url && !active.url.startsWith('hiwave://')) ? active.url : '';
-                        if (urlInput.value !== shown) urlInput.value = shown;
+                        urlBarPageUrl = shown;
+                        if (document.activeElement !== urlInput && !urlInputWasFocused) {
+                            if (urlInput.value !== shown) urlInput.value = shown;
+                        }
                     }
                 } catch (e) { console.log('[UrlBar] sync skipped:', e); }
                 currentTabs = tabs;
@@ -6056,6 +6059,7 @@
                 // person is typing in the bar (edited since it was focused
                 // or since Enter). After Enter the committed URL shows, as
                 // before (a redirect's final URL).
+                urlBarPageUrl = url;
                 if (document.activeElement === input && urlInputEdited) return;
                 if (input.value !== url) input.value = url;
             },
@@ -6464,6 +6468,10 @@
         // Whether the person has typed in the bar since it was focused or
         // since Enter: the app's URL waits until then (`updateUrl`).
         var urlInputEdited = false;
+        // The page's URL as the bar shows it when nothing is typed (M1f:
+        // Escape puts it back). `var`: the app's early state can arrive
+        // before this line runs.
+        var urlBarPageUrl = '';
         urlInput.addEventListener('input', () => { urlInputEdited = true; });
         urlInput.addEventListener('blur', () => { urlInputEdited = false; });
         urlInput.addEventListener('keydown', (e) => {
@@ -6607,6 +6615,29 @@
                 if (document.body.classList.contains('focus-mode')) {
                     e.preventDefault();
                     sendIpc('exit_focus_mode', {});
+                    return;
+                }
+                // M1f: Escape in the address bar is the address bar's, as
+                // Chrome's omnibox takes it (OmniboxViewViews skips the
+                // browser's accelerators for Escape; OmniboxEditModel::
+                // OnEscapeKeyPressed). Typed text: put the page's URL back,
+                // selected, keep the focus and leave a load alone ("If the
+                // user was in the midst of editing, don't cancel any
+                // underlying page load"). Nothing typed: stop the load and
+                // leave the bar. Chrome's omnibox only leaves (focuses the
+                // page) and the page's Escape then stops the load; a RustKit
+                // page has no Escape-stops, so the one press does both. The
+                // sidebar and the find bar are not the address bar's Escape.
+                if (document.activeElement === urlInput) {
+                    e.preventDefault();
+                    if (urlInputEdited) {
+                        urlInputEdited = false;
+                        urlInput.value = urlBarPageUrl;
+                        urlInput.select();
+                        return;
+                    }
+                    sendIpc('stop');
+                    urlInput.blur();
                     return;
                 }
                 if (findModalOpen) {
