@@ -18,6 +18,8 @@
   //   preventl cancel the keydown of Cmd+L (a page that keeps it, M1e)
   //   slowimg  add an image the server holds 8 s, so the page is still loading
   //   busy     hold the page's thread 1.5 s of every 1.6 s
+  //   slowl=N  a keydown listener that runs N ms on Cmd+L, not cancelling
+  //            it (M1g: the chord is the page's until it answers)
   var q = location.search;
   var tag = (q.match(/tab=(\d+)/) || [0, '0'])[1];
   function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
@@ -38,6 +40,16 @@
       }
     });
   });
+  var slowl = +((q.match(/slowl=(\d+)/) || [0, '0'])[1]);
+  if (slowl > 0) {
+    document.addEventListener('keydown', function (e) {
+      if (e.metaKey && e.key.toLowerCase() === 'l') {
+        var t = Date.now();
+        while (Date.now() - t < slowl) {}
+        beacon('m1g-slowl-done');
+      }
+    });
+  }
   if (q.indexOf('slowimg') >= 0) {
     var img = new Image();
     img.src = '/slowimg/00ff00.png?ms=8000';

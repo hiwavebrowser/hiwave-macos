@@ -23,6 +23,17 @@
 //! is the page's to answer: its wait running out then sends nothing to the
 //! menu, and the page's answer (claimed or not) decides, as in Chrome.
 //!
+//! Two bounds on that (#1023 R1): a started chord that is never answered
+//! (the page's thread died, the view was torn down mid-dispatch) is given
+//! up after [`STARTED_CHORD_GIVE_UP`] and goes to the menu, so it neither
+//! stays held nor leaks its `NSEvent`; a listener that just runs long is
+//! stopped first by the app's 5 s live turn budget, whose end lets the
+//! page answer. And later chords keep their order: one whose wait runs out
+//! while an earlier chord's keydown is still running in the page (it
+//! cannot have been reached) waits for that chord's answer and then goes
+//! to the menu ([`HeldChords::release_due`]), rather than running ahead of
+//! it.
+//!
 //! Why 100 ms: it is the response budget a press has before the delay is
 //! felt (RAIL: respond to input within 100 ms), and far above what an idle
 //! page thread takes to run a keydown listener and answer (the in-time
@@ -39,7 +50,15 @@ use std::time::{Duration, Instant};
 /// How long a Cmd chord waits for the page to say whether it claimed it.
 pub const CHORD_ANSWER_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Red stub (#1023 R1): the give-up bound for a started chord.
+/// How long a chord whose keydown the page has started ([`HeldChords::begin`])
+/// waits for the page's answer before the view gives up on it
+/// ([`HeldChords::give_up`]) and sends it to the menu. The answer normally
+/// comes as soon as the listeners return, and the app stops an input
+/// event's listeners at its live turn budget (5 s, `LIVE_TURN_BUDGET_MS` in
+/// hiwave-app), so this is set past that: it is for a page that never
+/// answers at all (its thread died, its view was torn down mid-dispatch),
+/// whose chord would otherwise stay held and its `NSEvent` retained for
+/// good (#1023 R1 item 1).
 pub const STARTED_CHORD_GIVE_UP: Duration = Duration::from_secs(6);
 
 /// What became of a held chord.
@@ -66,6 +85,10 @@ struct Held<E> {
     page_has_it: bool,
     /// The page has started the chord's keydown ([`HeldChords::begin`]).
     page_started: bool,
+    /// Its wait ran out while an earlier chord's keydown was still running
+    /// in the page: it goes to the menu after that chord is answered
+    /// ([`HeldChords::release_due`]), keeping the presses in order.
+    deferred: bool,
 }
 
 /// The chords the view holds for the page, by token, with when each was
@@ -114,7 +137,7 @@ impl<E> HeldChords<E> {
     /// asked. `since_press_ms` in the log is the other clock, press to
     /// menu, and is what the real-window gate reads.
     pub fn hold(&mut self, token: u64, event: E, at: Instant) {
-        self.held.push(Held { token, event, taken: at, page_has_it: false, page_started: false });
+        self.held.push(Held { token, event, taken: at, page_has_it: false, page_started: false, deferred: false });
     }
 
     /// When `token`'s wait ends, while it is held. The timer is armed for
@@ -180,36 +203,80 @@ impl<E> HeldChords<E> {
     /// early still releases the chord.
     pub fn expire(&mut self, token: u64) -> Option<ChordFate<E>> {
         let at = self.held.iter().position(|h| h.token == token)?;
-        // The page is running the chord's keydown: its answer decides.
-        if self.held[at].page_started && !self.held[at].page_has_it {
+        // The page is running the chord's keydown: its answer decides (or,
+        // if it never comes, `give_up`).
+        if self.held[at].page_started {
+            return None;
+        }
+        // An earlier chord's keydown is still running in the page, so the
+        // page cannot have reached this one. Sending it to the menu now
+        // would run it ahead of the earlier chord's answer (Cmd+L with a
+        // slow listener, then Cmd+D: the bookmark before the address bar,
+        // #1023 R1 item 2). It waits for that answer; Chrome too handles a
+        // window's key events one after the other.
+        if self.held[..at].iter().any(|h| h.page_started) {
+            self.held[at].deferred = true;
             return None;
         }
         let held = self.held.remove(at);
         if held.page_has_it {
             return Some(ChordFate::PageKept(held.event));
         }
+        self.remember_ran_out(token);
+        Some(ChordFate::ToMenu(held.event))
+    }
+
+    /// When `token`, whose keydown the page has started and not answered,
+    /// is given up on: the timer for [`give_up`](Self::give_up) is armed
+    /// for this. `None`: not held, or the page has not started it.
+    pub fn give_up_at(&self, token: u64) -> Option<Instant> {
+        self.held
+            .iter()
+            .find(|h| h.token == token && h.page_started)
+            .map(|h| h.taken + STARTED_CHORD_GIVE_UP)
+    }
+
+    /// The page started `token`'s keydown and has not answered in
+    /// [`STARTED_CHORD_GIVE_UP`]: the chord goes to the menu (or stays the
+    /// page's if it took the default), and a late answer or claim for it
+    /// is refused like a timed-out chord's. `None`: it was answered. Call
+    /// [`release_due`](Self::release_due) after it.
+    pub fn give_up(&mut self, token: u64) -> Option<ChordFate<E>> {
+        let at = self.held.iter().position(|h| h.token == token && h.page_started)?;
+        let held = self.held.remove(at);
+        if held.page_has_it {
+            return Some(ChordFate::PageKept(held.event));
+        }
+        self.remember_ran_out(token);
+        Some(ChordFate::ToMenu(held.event))
+    }
+
+    /// Chords whose wait ran out behind an earlier started chord
+    /// ([`expire`](Self::expire)) and that nothing earlier holds back any
+    /// more, oldest first: to the menu. Call after an answer or a give-up.
+    pub fn release_due(&mut self) -> Vec<(u64, ChordFate<E>)> {
+        let mut out = Vec::new();
+        loop {
+            let Some(at) = self.held.iter().position(|h| h.deferred && !h.page_started) else {
+                break;
+            };
+            if self.held[..at].iter().any(|h| h.page_started) {
+                break;
+            }
+            let held = self.held.remove(at);
+            self.remember_ran_out(held.token);
+            out.push((held.token, ChordFate::ToMenu(held.event)));
+        }
+        out
+    }
+
+    fn remember_ran_out(&mut self, token: u64) {
         if self.ran_out.len() == RAN_OUT_KEPT {
             if let Some(forgotten) = self.ran_out.pop_front() {
                 self.forgotten_through = self.forgotten_through.max(forgotten);
             }
         }
         self.ran_out.push_back(token);
-        Some(ChordFate::ToMenu(held.event))
-    }
-
-    /// Red stub (#1023 R1 item 1).
-    pub fn give_up_at(&self, _token: u64) -> Option<Instant> {
-        None
-    }
-
-    /// Red stub (#1023 R1 item 1).
-    pub fn give_up(&mut self, _token: u64) -> Option<ChordFate<E>> {
-        None
-    }
-
-    /// Red stub (#1023 R1 item 2).
-    pub fn release_due(&mut self) -> Vec<(u64, ChordFate<E>)> {
-        Vec::new()
     }
 
     pub fn len(&self) -> usize {
@@ -410,11 +477,13 @@ mod tests {
         assert!(chords.begin(2));
         assert_eq!(chords.expire(2), None);
         assert_eq!(chords.answer(2, true, t0).map(|(f, _)| f), Some(ChordFate::PageKept('l')));
-        // Started, then took the default, then the wait ran out: the page's.
+        // Started, then took the default, then the wait ran out: the page's,
+        // released by its answer.
         chords.hold(3, 'v', t0);
         assert!(chords.begin(3));
         assert!(chords.claim(3));
-        assert_eq!(chords.expire(3), Some(ChordFate::PageKept('v')));
+        assert_eq!(chords.expire(3), None);
+        assert_eq!(chords.answer(3, true, t0).map(|(f, _)| f), Some(ChordFate::PageKept('v')));
         assert!(chords.is_empty());
         assert!(chords.ran_out.is_empty(), "none of these timed out");
     }

@@ -3241,6 +3241,48 @@ class Driver:
             (self.out / ("%s.%s.app.log" % (c, query))).write_text(self.app.log_text())
             self.close_page()
 
+    def m1g_cmd_l_slow_listener(self):
+        """M1g (#1023 R1 item 5): a page whose Cmd+L keydown listener runs 300 ms, then one whose listener runs 2 s (neither cancels): Cmd+L reaches the address bar once, after the listener; the time from the press is reported."""
+        c = "m1g_cmd_l_slow_listener"
+        env = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+        for ms_listen in (300, 2000):
+            what = "a %d ms listener" % ms_listen
+            if not self.open_page(c, "m1d_keys.html?slowl=%d" % ms_listen, env=env):
+                return
+            if not self.can_input:
+                return self.not_run(c, "Cmd+L", self.why_not("Accessibility"))
+            self.fixture.wait("beacon?m1d-t0-ready", 10, self.since)
+            pid = self.app.proc.pid
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, win["w"] * 0.7, win["h"] * 0.35)
+            time.sleep(0.6)
+            mark = self.fixture.mark()
+            log_from, t = len(self.app.log_text()), time.time()
+            self.hw("key", pid, 37, "cmd")
+            took = self.app.wait_log(r'menu event id="focus_url"', ms_listen / 1000.0 + 5, log_from)
+            wall = (time.time() - t) * 1000
+            time.sleep(0.8)
+            log = self.app.log_text()[log_from:]
+            chord = self.CHORD_TO_MENU.search(log)
+            focus = self.FOCUS_URL_EVENT.search(log)
+            ms = None
+            if chord and focus:
+                pressed = self.log_epoch(chord.group(1)) - int(chord.group(2)) / 1000.0
+                ms = round((self.log_epoch(focus.group(1)) - pressed) * 1000, 1)
+            heard = len(self.fixture.seen("beacon?m1g-slowl-done", mark)) > 0
+            why = re.search(r'why="([^"]*)"', chord.group(0)) if chord else None
+            self.expect(c, "%s: the page heard Cmd+L and its listener ran" % what, heard)
+            self.expect(c, "%s: Cmd+L took the address bar after the listener, from the page's answer" % what,
+                        bool(took) and ms is not None and ms >= ms_listen and why is not None
+                        and why.group(1) == "the page did not claim it",
+                        "%s ms from the press (driver wall clock %.0f ms); why: %s" % (
+                            ms, wall, why.group(1) if why else "no chord-to-menu line"))
+            runs = len(re.findall(r'menu event id="focus_url"', log))
+            self.expect(c, "%s: one focus_url" % what, runs == 1, "%d focus_url" % runs)
+            self.note(c, "%s: press to address bar" % what, "INFO", "%s ms" % ms)
+            (self.out / ("%s.%d.app.log" % (c, ms_listen))).write_text(self.app.log_text())
+            self.close_page()
+
     def m1e_page_keeps_cmd_l(self):
         """M1e: a page that cancels Cmd+L's keydown in time keeps it, as in Chromium (IDC_FOCUS_LOCATION is not in kReservedCommandIds): the address bar does not take it and the page hears it."""
         c = "m1e_page_keeps_cmd_l"
@@ -3274,7 +3316,8 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url",
               "m1_cmd_w_repeat", "m1_cmd_w_after_clicks", "m1d_tab_shortcuts",
-              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l"]
+              "m1d_page_keeps_cmd_digits", "m1d_cmd_l_while_loading", "m1e_page_keeps_cmd_l",
+              "m1g_cmd_l_slow_listener"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
