@@ -56,6 +56,15 @@ fn chain(n: u32) -> String {
     format!("window.n = 0; function step() {{ if (++window.n < {n}) Promise.resolve().then(step); }} step();")
 }
 
+/// The same chain with work in each step (an inner loop), so a job costs real time however fast
+/// the interpreter is: the timeout test must not depend on a cheap job taking ~50 us (#1038's
+/// optimised rustkit-js makes it several times cheaper and would thin the margin out).
+fn costly_chain(n: u32) -> String {
+    format!(
+        "window.n = 0; window.acc = 0; function step() {{ for (var i = 0; i < 5000; i++) window.acc += i;          if (++window.n < {n}) Promise.resolve().then(step); }} step();"
+    )
+}
+
 /// The live app's engine: the script budget interrupts a running script, microtask drains
 /// included, so a long budget lets a long (finite) chain finish.
 fn live_config(budget_ms: u64) -> EngineConfig {
@@ -97,10 +106,11 @@ fn without_the_budget_interrupt_the_cap_still_bounds_a_runaway_chain() {
 #[test]
 fn the_wall_clock_job_timeout_still_fires_when_the_cap_is_out_of_reach() {
     // The sibling: neither limit is left unpinned. A 300 ms timeout against a chain of 120 000 jobs
-    // (several seconds even on a fast machine in a debug build) ends it with the timeout's message,
-    // not the cap's, because it is checked each loop turn and the cap would take far longer.
+    // that each loop 5 000 times (tens of seconds at any speed the interpreter reaches, so the
+    // margin does not thin out as rustkit-js gets faster) ends it with the timeout's message, not
+    // the cap's, because it is checked each loop turn and the cap would take far longer.
     let config = EngineConfig { script_budget_ms: 300, ..EngineConfig::default() };
-    let (mut engine, view, took) = load(config, &chain(LONG_CHAIN));
+    let (mut engine, view, took) = load(config, &costly_chain(LONG_CHAIN));
     let text = format!("{:#?}", engine.script_log(view));
     assert!(text.contains("Job queue execution timeout"), "the timeout must be what ended it: {text}");
     assert!(!text.contains("Job queue iteration limit"), "not the cap: {text}");
