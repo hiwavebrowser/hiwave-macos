@@ -1399,7 +1399,7 @@ impl PageEndpoint {
 /// redraws the page. Not what starts or ends a document (a navigation, a
 /// reload, an HTML load, Stop, Close), a live turn (timers must not run
 /// inside a load), or the test hooks.
-fn runs_mid_load(cmd: &PageCmd) -> bool {
+pub(crate) fn runs_mid_load(cmd: &PageCmd) -> bool {
     match cmd {
         PageCmd::Input(_)
         | PageCmd::Resize { .. }

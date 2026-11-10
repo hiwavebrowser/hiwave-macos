@@ -4937,6 +4937,24 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // The engine reports that an `<img>`'s image failed to load (a 404, a
+    // failed connection, bytes that do not decode, its budget spent): the
+    // element is marked with the `src`/`srcset` that failed, which is what
+    // `img.complete` reads (web_reflect.js), and hears `error`.
+    var failedImages = new WeakMap();
+    Object.defineProperty(Document.prototype, '__rkImageFailed', {
+        value: function (id) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+            target.dispatchEvent(new Event('error'));
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    Object.defineProperty(Document.prototype, '__rkImageFailedFor', {
+        value: function (img) { return failedImages.get(img) || null; },
+        configurable: true, enumerable: false, writable: true
+    });
     // The engine's CSS transitions report their phases (css-transitions-2
     // §4): a trusted TransitionEvent that bubbles; `transitionend` can be
     // cancelled, the others not. An element taken out of the document

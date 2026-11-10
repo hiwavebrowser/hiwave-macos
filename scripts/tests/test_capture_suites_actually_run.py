@@ -13,7 +13,7 @@ This guard holds the `capture-suites` lane (F2c) to:
 1. It exists and invokes `cargo test -p parity-capture` (binary crate, no `--lib`).
 2. It does not pass `--no-run`.
 3. It is BLOCKING: no `continue-on-error`.
-4. It runs on macos-14 (same CoreText / headless surface as F2/F2b).
+4. It runs on macos-15 (same CoreText / headless surface as F2/F2b).
 5. It publishes receipts to `$GITHUB_STEP_SUMMARY`.
 6. It is not conditioned away on pull requests.
 
@@ -77,8 +77,8 @@ def test_the_lane_is_blocking():
     )
 
 
-def test_the_lane_runs_on_macos14():
-    assert _lane()["runs-on"] == "macos-14", "capture-suites must run on macos-14"
+def test_the_lane_runs_on_macos15():
+    assert _lane()["runs-on"] == "macos-15", "capture-suites must run on macos-15"
 
 
 def test_the_receipt_reaches_the_job_summary():
