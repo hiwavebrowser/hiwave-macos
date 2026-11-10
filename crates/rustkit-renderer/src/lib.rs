@@ -67,6 +67,21 @@ pub use screenshot::CaptureMetadata;
 mod shaders;
 
 pub use glyph::*;
+/// The smoothing probe the glyph-mask law follows (`glyph::coverage_for`).
+#[cfg(target_os = "macos")]
+pub use rustkit_text::macos::{smooth_behavior, smooth_behavior_of, SmoothBehavior};
+
+/// Log the CoreGraphics smoothing probe the glyph-mask law follows, once
+/// per process (a `None` from a font that failed to load is otherwise
+/// silent: every glyph would take the undilated outline).
+#[cfg(target_os = "macos")]
+fn log_smooth_probe_once() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        let (behavior, how) = rustkit_text::macos::smooth_probe();
+        tracing::info!(?behavior, how, "CoreGraphics font smoothing probe (glyph-mask law)");
+    });
+}
 pub use pipeline::*;
 pub use screenshot::*;
 
@@ -622,6 +637,8 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RendererError> {
+        #[cfg(target_os = "macos")]
+        log_smooth_probe_once();
         // Create uniform buffer
         let uniforms = Uniforms {
             viewport_size: [800.0, 600.0],
@@ -3245,6 +3262,7 @@ impl Renderer {
                 ascent,
                 run,
                 faces,
+                undilated,
             } => {
                 // SHAPED-RUN CONTRACT (S0): a command that carries its run
                 // is painted from the run. The family-list path below is
@@ -3253,7 +3271,7 @@ impl Renderer {
                 // record (`faces`) for which face draws each character.
                 let painted_from_run = run
                     .as_deref()
-                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent));
+                    .is_some_and(|run| self.draw_glyph_run(run, *x, *y, *color, *ascent, *undilated));
                 if !painted_from_run {
                     self.draw_text_with_metrics(
                         text,
@@ -3267,6 +3285,7 @@ impl Renderer {
                         advances.as_deref(),
                         *ascent,
                         faces.as_deref(),
+                        *undilated,
                     );
                 }
             }
@@ -5886,6 +5905,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
 
@@ -5981,6 +6001,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
         self.pop_clip();
@@ -6059,6 +6080,7 @@ impl Renderer {
                 None,
                 Some(ascent),
                 None,
+                false,
             );
         }
         
@@ -6124,6 +6146,9 @@ impl Renderer {
         layout_ascent: Option<f32>,
         layout_faces: Option<&[rustkit_text::GlyphFace]>,
     ) {
+        // Skia's luminance for a non-plain paint, once per command.
+        let gradient_coverage =
+            crate::glyph::coverage_for(crate::glyph::GRADIENT_TEXT_LUMINANCE, false);
         let stops = match gradient {
             rustkit_css::Gradient::Linear(g) => &g.stops,
             rustkit_css::Gradient::Radial(g) => &g.stops,
@@ -6228,6 +6253,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage: gradient_coverage,
             };
             let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
@@ -6385,13 +6411,17 @@ impl Renderer {
         y: f32,
         color: Color,
         layout_ascent: Option<f32>,
+        undilated: bool,
     ) -> bool {
         // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        // The glyph-mask law for the run's colour (`glyph::coverage_for`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let key_for = |glyph_id: u16| RunGlyphKey {
             face: run.face.id,
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage,
         };
 
         // Every glyph's bitmap first, so a missing face is known before a
@@ -6487,8 +6517,12 @@ impl Renderer {
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
         layout_faces: Option<&[rustkit_text::GlyphFace]>,
+        undilated: bool,
     ) {
         let mut cursor_x = x;
+        // The glyph-mask law for this colour, once per command
+        // (`glyph::coverage_for` costs three `powf`).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
         let c = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
@@ -6555,6 +6589,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage,
             };
             // ADVANCE CONTRACT: layout's advance wins when present so
             // painted ink tracks measured width 1:1; the atlas advance is
@@ -10791,6 +10826,7 @@ mod shaped_run_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
@@ -10892,6 +10928,7 @@ mod shaped_run_measured_face_tests {
             glyph_id: run.glyphs[0].glyph_id,
             font_size: 140,
             subpixel_phase: 0,
+            coverage: 0,
         };
         let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
         assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
@@ -10922,6 +10959,7 @@ mod shaped_run_windows_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
