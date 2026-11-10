@@ -163,3 +163,147 @@ fn an_element_scroll_keeps_the_web_font_when_another_view_painted() {
         assert_eq!(face, "Ahem", "{text:?} is shaped in the page's face ({width} px wide)");
     }
 }
+
+// ---------------------------------------------------------------------------
+// E56: a web font holds while ANOTHER THREAD installs its own faces.
+//
+// The app runs each tab's engine on its own content thread (`Content
+// thread: on`), and the browser chrome's engine on the window thread. The
+// registered-face slot those engines point at their view's partition was one
+// process-wide slot: a tab on thread B installing its site's faces between
+// thread A's install and A's shaping made A shape with B's set, so A's
+// lines fell back to the next family on that frame and came back on the
+// next (ebay search with nine tabs open, Pete's recording of 2026-11-10:
+// "Trending auctions" changed width by ~6 px frame to frame and the card
+// titles reflowed). It only starts once the page's own faces have arrived:
+// before that every set A could see lacks them alike.
+
+const NOTO_REGULAR: &[u8] = include_bytes!("../../../baselines/common/fonts/NotoSans-Regular.ttf");
+const NOTO_BOLD: &[u8] = include_bytes!("../../../baselines/common/fonts/NotoSans-Bold.ttf");
+
+/// A bold heading and a regular paragraph in one web family with a face
+/// per weight, beside a spinner that keeps the page painting.
+const WEIGHTED: &str = r#"<!doctype html><html><head><style>
+@font-face { font-family: E56Sans; src: url(/r.ttf) format("truetype"); font-weight: 400; }
+@font-face { font-family: E56Sans; src: url(/b.ttf) format("truetype"); font-weight: 700; }
+body { margin: 20px; font: 16px/20px E56Sans, Helvetica; background: white; color: black; }
+h2 { margin: 0 0 10px 0; font-size: 24px; line-height: 30px; font-weight: 700; }
+p { margin: 0; }
+#spin { position: absolute; left: 340px; top: 150px; width: 20px; height: 20px; background: #08f;
+  animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style></head><body><h2>Trending auctions</h2><p>Telephoto zoom lens and hood</p>
+<div id=spin></div></body></html>"#;
+
+fn weighted_page() -> (Engine, EngineViewId, Server) {
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", WEIGHTED.as_bytes().to_vec()),
+        ("/r.ttf", "font/ttf", NOTO_REGULAR.to_vec()),
+        ("/b.ttf", "font/ttf", NOTO_BOLD.to_vec()),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let page = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt().block_on(engine.load_url(page, url)).expect("load page");
+    rt().block_on(engine.pump_live(page, 16));
+    (engine, page, server)
+}
+
+fn assert_weighted_faces(lines: &[(String, String, f32)], when: &str) {
+    for (text, face, width) in lines {
+        let want = if text.contains("Trending") { "NotoSans-Bold" } else { "NotoSans-Regular" };
+        assert_eq!(face, want, "{when}: {text:?} is shaped in its weight's web face ({width} px wide)");
+    }
+}
+
+/// Bold and regular lines keep their own web faces and widths on every
+/// frame while another thread keeps installing a different site's faces.
+#[test]
+fn web_faces_hold_while_another_thread_installs_its_own() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let (mut engine, page, _server) = weighted_page();
+    let before = lines(&engine, page);
+    assert!(before.iter().any(|(t, ..)| t.contains("Trending")), "the heading is a line: {before:?}");
+    assert_weighted_faces(&before, "before the other thread");
+
+    // Another tab's content thread: it points the slot at ITS partition
+    // before each of its own layouts, as `install_web_fonts_for` does.
+    let stop = Arc::new(AtomicBool::new(false));
+    let installs = Arc::new(AtomicUsize::new(0));
+    let other = {
+        let (stop, installs) = (stop.clone(), installs.clone());
+        std::thread::spawn(move || {
+            let faces = [rustkit_layout::webfonts::WebFontFace {
+                family: "OtherSiteFace".into(),
+                weight: 400,
+                italic: false,
+                data: std::sync::Arc::new(AHEM.to_vec()),
+            }];
+            while !stop.load(Ordering::Relaxed) {
+                rustkit_layout::webfonts::install("other-site#1", &faces);
+                installs.fetch_add(1, Ordering::Relaxed);
+                std::thread::yield_now();
+            }
+        })
+    };
+    while installs.load(Ordering::Relaxed) == 0 {
+        std::thread::yield_now();
+    }
+
+    let mut seen = Vec::new();
+    for frame in 0..24 {
+        rt().block_on(engine.pump_live(page, 16));
+        if frame % 6 == 5 {
+            // A full frame as well as the paint-only ones.
+            engine.relayout_for(page, RelayoutCause::StylesheetLoaded).expect("relayout");
+        }
+        seen.push((frame, lines(&engine, page)));
+    }
+    stop.store(true, Ordering::Relaxed);
+    other.join().expect("other thread");
+
+    for (frame, now) in seen {
+        assert_weighted_faces(&now, &format!("frame {frame}"));
+        assert_eq!(now, before, "frame {frame}: every line keeps its face and width");
+    }
+}
+
+/// Exclusion for the same symptom on ONE thread: a second view in another
+/// partition painting its own web font between this page's paint-only and
+/// full frames leaves the bold and regular faces alone.
+#[test]
+fn web_faces_hold_by_weight_when_another_view_on_the_thread_paints() {
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", WEIGHTED.as_bytes().to_vec()),
+        ("/r.ttf", "font/ttf", NOTO_REGULAR.to_vec()),
+        ("/b.ttf", "font/ttf", NOTO_BOLD.to_vec()),
+        ("/other", "text/html", PAGE.as_bytes().to_vec()),
+        ("/Ahem.ttf", "font/ttf", AHEM.to_vec()),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut view = || {
+        engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+            .expect("view")
+    };
+    let (page, other) = (view(), view());
+    let url = |host: &str, path: &str| Url::parse(&format!("http://{host}:{}{path}", server.port)).unwrap();
+    rt().block_on(engine.load_url(page, url("127.0.0.1", "/"))).expect("load page");
+    rt().block_on(engine.load_url(other, url("localhost", "/other"))).expect("load other");
+    rt().block_on(engine.pump_live(page, 16));
+    let before = lines(&engine, page);
+    assert_weighted_faces(&before, "first frame");
+    for frame in 0..12 {
+        rt().block_on(engine.pump_live(other, 16));
+        if frame % 4 == 3 {
+            engine.relayout_for(page, RelayoutCause::StylesheetLoaded).expect("relayout");
+        } else {
+            rt().block_on(engine.pump_live(page, 16));
+        }
+        assert_eq!(lines(&engine, page), before, "frame {frame}: every line keeps its face and width");
+    }
+}
