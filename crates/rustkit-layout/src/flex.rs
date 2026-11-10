@@ -2879,7 +2879,18 @@ fn distribute_main_axis(
         free_space
     };
 
-    let unsafe_space = if signed_free_space < 0.0 { signed_free_space } else { free_space };
+    // Not in a container whose main size is 0 (Pete's option 2, 11-06): a
+    // `position: fixed; inset: 0` overlay inside a zero-size fixed wrapper
+    // is still sized against the wrapper here, not the viewport (CH2.B15),
+    // and unsafe centring there pushed a consent dialog off the left edge
+    // where nothing can click it. Chrome does centre unsafely in a 0-wide
+    // container; this keeps the start until B15 sizes fixed boxes against
+    // the viewport (pinned as gaps in flex_justify_overflow_tests).
+    let unsafe_space = if signed_free_space < 0.0 && container_main > 0.0 {
+        signed_free_space
+    } else {
+        free_space
+    };
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
         // `center` / `flex-end` place the signed space (auto margins take
