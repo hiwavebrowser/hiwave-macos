@@ -4296,16 +4296,18 @@
                         return '<div class="context-menu-divider"></div>';
                     }
                     const disabled = item.disabled ? ' disabled' : '';
-                    const dataAction = item.action ? ` data-action="${item.action}"` : '';
-                    const tabAttr = item.tabId ? ` data-tab-id="${item.tabId}"` : '';
+                    // Labels carry workspace names; every value is escaped.
+                    const dataAction = item.action ? ` data-action="${escapeHtml(item.action)}"` : '';
+                    const tabAttr = item.tabId ? ` data-tab-id="${escapeHtml(item.tabId)}"` : '';
                     const workspaceAttr = item.workspaceId
-                        ? ` data-workspace-id="${item.workspaceId}"`
+                        ? ` data-workspace-id="${escapeHtml(item.workspaceId)}"`
                         : '';
                     const urlAttr = item.url ? ` data-url="${encodeURIComponent(item.url)}"` : '';
                     const textAttr = item.text ? ` data-text="${encodeURIComponent(item.text)}"` : '';
-                    const icon = item.icon ? `<span class="icon">${item.icon}</span>` : '';
-                    const tooltip = item.label ? ` title="${item.label}"` : '';
-                    return `<button type="button" class="context-menu-item${disabled}"${dataAction}${tabAttr}${workspaceAttr}${urlAttr}${textAttr}${tooltip}>${icon}<span>${item.label}</span></button>`;
+                    const icon = item.icon ? `<span class="icon">${escapeHtml(item.icon)}</span>` : '';
+                    const label = escapeHtml(item.label || '');
+                    const tooltip = item.label ? ` title="${label}"` : '';
+                    return `<button type="button" class="context-menu-item${disabled}"${dataAction}${tabAttr}${workspaceAttr}${urlAttr}${textAttr}${tooltip}>${icon}<span>${label}</span></button>`;
                 })
                 .join('');
 
@@ -5418,10 +5420,6 @@
             }
         }
 
-        function escapeAttr(value = '') {
-            return value.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        }
-
         function handleDownloadAction(event) {
             event.stopPropagation();
             const button = event.currentTarget;
@@ -5454,7 +5452,7 @@
                     const fileName = download.file_name || 'Download';
                     const url = download.url || '';
                     const path = download.path || '';
-                    const safePath = escapeAttr(path);
+                    const safePath = escapeHtml(path);
                     const hasPath = Boolean(path);
                     const statusText = formatDownloadStatus(download.status);
                     return `
@@ -6897,7 +6895,7 @@
                 const fileName = dl.file_name || dl.filename || 'Download';
                 const statusText = dl.status === 'completed' ? 'Complete' : (dl.status || 'Pending');
                 return `
-                    <div class="right-panel-item" title="${escapeAttr(dl.path || dl.url || '')}">
+                    <div class="right-panel-item" title="${escapeHtml(dl.path || dl.url || '')}">
                         <div class="right-panel-item-title">${escapeHtml(fileName)}</div>
                         <div class="right-panel-item-meta">${escapeHtml(statusText)}</div>
                     </div>
@@ -6918,15 +6916,30 @@
                 rightHistoryList.innerHTML = '<div class="right-panel-empty">No history yet</div>';
                 return;
             }
+            // The URL is page data: it goes in as an escaped attribute and
+            // text only. The click is handled once on the list (below),
+            // never by an inline handler built from the URL.
             rightHistoryList.innerHTML = filtered.map(h => {
-                const safeUrl = escapeAttr(h.url || '');
                 return `
-                    <div class="right-panel-item" data-url="${safeUrl}" onclick="sendIpc('navigate', {url:'${safeUrl}'})">
+                    <div class="right-panel-item" data-url="${escapeHtml(h.url || '')}">
                         <div class="right-panel-item-title">${escapeHtml(h.title || 'Untitled')}</div>
                         <div class="right-panel-item-url">${escapeHtml(h.url || '')}</div>
                     </div>
                 `;
             }).join('');
+        }
+
+        if (rightHistoryList) {
+            rightHistoryList.addEventListener('click', (event) => {
+                const item = event.target && event.target.closest
+                    ? event.target.closest('.right-panel-item')
+                    : null;
+                if (!item) return;
+                const url = item.dataset.url;
+                if (url) {
+                    sendIpc('navigate', { url });
+                }
+            });
         }
 
         if (rightSidebarDownloadsBtn) {
