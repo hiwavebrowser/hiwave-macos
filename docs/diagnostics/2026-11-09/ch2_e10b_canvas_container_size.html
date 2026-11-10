@@ -1,7 +1,7 @@
 <!doctype html><!-- CH2.E10b (report x6: #activityChart/#protectionChart 0x0 vs Chrome 143 910x300). Each canvas is sized from one
   query of its 40px-high relative parent, the way Chart.js 4.4 getMaximumSize does: p = getBoundingClientRect at parse time,
-  a = getBoundingClientRect / b = clientWidth/Height / g = getComputedStyle in a microtask after DOMContentLoaded. Expected (Chrome 143): all 800x40.
-  RustKit develop bd10a85d: MEASUREMENT PENDING (gated runner). A canvas at 0 wide names the query that read no layout. -->
+  a = getBoundingClientRect / b = clientWidth/Height / g = getComputedStyle in a microtask after DOMContentLoaded.
+  Measured 2026-11-10 03:05 ET, bd10a85d vs Chrome 143.0.7499.4, 800x600: p/a/b/g all 800x40 in both (diff 0.000%). Reduced page does not go 0x0. -->
 <style>body{margin:0}.c{position:relative;height:40px;margin-bottom:4px}canvas{display:block;background:#08f}</style>
 <div class="c"><canvas id="p"></canvas></div><div class="c"><canvas id="a"></canvas></div>
 <div class="c"><canvas id="b"></canvas></div><div class="c"><canvas id="g"></canvas></div>
