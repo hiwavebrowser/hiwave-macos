@@ -485,6 +485,7 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 mod computed_read;
+pub(crate) mod image_source;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
