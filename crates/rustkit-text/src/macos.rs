@@ -1384,7 +1384,6 @@ impl GlyphRasterizer {
 
         unsafe {
             use core_text::font::CTFontRef;
-            use std::os::raw::c_void;
 
             let font_ref = self.font.as_concrete_TypeRef();
 
@@ -1404,31 +1403,6 @@ impl GlyphRasterizer {
                     bounding_rects: *mut CGRect,
                     count: isize,
                 ) -> CGRect;
-                
-                fn CTFontDrawGlyphs(
-                    font: CTFontRef,
-                    glyphs: *const u16,
-                    positions: *const CGPoint,
-                    count: usize,
-                    context: *mut c_void,
-                );
-
-                // Subpixel controls. CoreGraphics grid-fits glyph origins by
-                // default, which silently ROUNDS AWAY the offset we pass —
-                // measured on this tree: at 36px, requesting 0.25px moved the
-                // ink 0.0px and requesting 0.5px moved it a full 1.0px.
-                // Quantization must be off for fractional positioning to
-                // survive at all.
-                fn CGContextSetAllowsFontSubpixelPositioning(
-                    c: *mut c_void,
-                    allows: bool,
-                );
-                fn CGContextSetShouldSubpixelPositionFonts(c: *mut c_void, should: bool);
-                fn CGContextSetAllowsFontSubpixelQuantization(
-                    c: *mut c_void,
-                    allows: bool,
-                );
-                fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
             }
             
             // Get glyph advance
@@ -1511,7 +1485,6 @@ impl GlyphRasterizer {
 
         unsafe {
             use core_text::font::CTFontRef;
-            use std::os::raw::c_void;
 
             extern "C" {
                 fn CTFontGetAdvancesForGlyphs(
@@ -1529,14 +1502,6 @@ impl GlyphRasterizer {
                     bounding_rects: *mut CGRect,
                     count: isize,
                 ) -> CGRect;
-                
-                fn CTFontDrawGlyphs(
-                    font: CTFontRef,
-                    glyphs: *const u16,
-                    positions: *const CGPoint,
-                    count: usize,
-                    context: *mut c_void,
-                );
             }
             
             let font_ref = font.as_concrete_TypeRef();
