@@ -2074,6 +2074,24 @@ fn end_script_turn(bindings: &DomBindings) {
     SCRIPT_STAMP.with(|stamp| bindings.end_turn(stamp));
 }
 
+/// How many jobs one microtask drain may run before the executor refuses more (H19c).
+///
+/// The cap exists so a runaway promise recursion cannot hang the page. When the engine has the
+/// script-budget interrupt on (`interrupt_scripts_at_budget`, the live app), that interrupt is the
+/// guard that actually bounds the time: Boa reads the view's control word at every call, microtask
+/// jobs included, so an endless chain is stopped at the budget (measured: ~8.6k jobs in a 400 ms
+/// budget). Then the cap can be the loop limit, and a legitimate chain of more than 100 000 jobs
+/// (Chrome runs 200 000 `.then`s in 17 ms) is not killed. Without the interrupt (the default
+/// config, tests, embedders that do not arm the watchdog) nothing else bounds a drain, so the
+/// old 100 000 cap stays.
+fn microtask_job_cap(config: &EngineConfig) -> u64 {
+    if config.interrupt_scripts_at_budget {
+        config.script_loop_iteration_limit
+    } else {
+        config.script_loop_iteration_limit.min(100_000)
+    }
+}
+
 /// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
 /// script about to run on `bindings`, and returns when it started. `None`
 /// when scripts are not interrupted (the board).
@@ -7642,7 +7660,7 @@ impl Engine {
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
 
         // Execution order: classic, defer (module scripts run here, in
         // document order with them), async (stable within each). A module
@@ -8933,7 +8951,7 @@ impl Engine {
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9385,7 +9403,7 @@ impl Engine {
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
             let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
-                max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
+                max_job_iterations: microtask_job_cap(&self.config),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
@@ -9528,7 +9546,7 @@ impl Engine {
         };
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
-        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        bindings.set_max_job_iterations(microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
 
