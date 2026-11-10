@@ -550,6 +550,8 @@ mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_percent_basis_tests;
 #[cfg(all(test, feature = "headless"))]
+mod flex_aspect_ratio_tests;
+#[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_budget_tests;
