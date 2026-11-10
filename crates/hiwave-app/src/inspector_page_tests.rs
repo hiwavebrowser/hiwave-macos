@@ -440,21 +440,15 @@ fn a_zero_message_shows_as_zero() {
     assert_eq!(shown(&mut engine, view), "0");
 }
 
-/// autofill.js (injected into content pages) escapes quotes as well as
-/// `& < >`, so what it builds is safe in an attribute value too.
+/// autofill.js (injected into content pages) builds no markup from what it
+/// shows: #1034 replaced its string escaping (`escapeHtml` into `innerHTML`)
+/// with `textContent`, so there is no escaper left to test. This pins the
+/// source instead: no HTML-parsing sink, and `textContent` for the text.
 #[test]
-fn the_autofill_escaper_escapes_quotes() {
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-    let view = engine
-        .create_headless_view(Bounds::new(0, 0, 400, 200))
-        .expect("view");
-    engine.load_html(view, "<html><body><p>page</p></body></html>").expect("page");
-    engine.execute_script(view, crate::AUTOFILL_HELPER).expect("autofill helper");
-    let out = eval(
-        &mut engine,
-        view,
-        "var r = window.hiwaveAutofill.escapeHtml('a\"b\\'c<d>&e'); \
-         String(r === 'a&quot;b&#39;c&lt;d&gt;&amp;e')",
-    );
-    assert_eq!(out, "true");
+fn the_autofill_helper_builds_no_markup_from_entries() {
+    let src = crate::AUTOFILL_HELPER;
+    for sink in ["innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"] {
+        assert!(!src.contains(sink), "autofill.js uses {sink}");
+    }
+    assert!(src.contains("textContent"), "autofill.js sets its text with textContent");
 }

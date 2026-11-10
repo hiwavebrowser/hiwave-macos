@@ -708,6 +708,9 @@ pub struct AppState {
 
     /// Session start time (for analytics)
     pub session_start_time: Instant,
+
+    /// Autofill: the pending user-requested fill, if any. Runtime only.
+    pub autofill: crate::ipc::autofill::AutofillGate,
 }
 
 impl AppState {
@@ -785,6 +788,7 @@ impl AppState {
             tab_audio_playing: HashMap::new(),
             tab_audio_muted: HashMap::new(),
             session_start_time: Instant::now(),
+            autofill: Default::default(),
         })
     }
 
