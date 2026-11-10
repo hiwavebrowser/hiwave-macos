@@ -307,3 +307,64 @@ fn web_faces_hold_by_weight_when_another_view_on_the_thread_paints() {
         assert_eq!(lines(&engine, page), before, "frame {frame}: every line keeps its face and width");
     }
 }
+
+// ---------------------------------------------------------------------------
+// E56 (R1 nit): the page's faces travel with its frame.
+//
+// A content-thread page's frame is drawn on the WINDOW thread, and the slot
+// is now one per thread. A line that is not one frozen glyph run (here: an
+// emoji in it) is drawn per character, and its rasterizer resolves the
+// family by name on the drawing thread. That thread's slot holds the
+// chrome's faces or none, so the page's web family must come with the
+// commit, not from whatever the drawing thread installed last.
+
+/// One line of Ahem squares with an emoji after them: not a frozen run.
+const PER_CHAR: &str = r#"<!doctype html><html><head><style>
+@font-face { font-family: E56Ahem; src: url(/Ahem.ttf) format("truetype"); }
+body { margin: 20px; font: 20px/20px E56Ahem, Helvetica; background: white; color: black; }
+</style></head><body><p style="margin:0">XXXXX &#x1F600;</p></body></html>"#;
+
+#[test]
+fn a_committed_frame_draws_its_web_font_on_a_thread_that_did_not_install_it() {
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", PER_CHAR.as_bytes().to_vec()),
+        ("/Ahem.ttf", "font/ttf", AHEM.to_vec()),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let page = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 80 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt().block_on(engine.load_url(page, url)).expect("load page");
+    rt().block_on(engine.pump_live(page, 16));
+
+    // The line goes the per-character way, which resolves its family by
+    // name when drawn.
+    let per_char = engine.views[&page]
+        .display_list
+        .as_ref()
+        .expect("a display list")
+        .commands
+        .iter()
+        .any(|c| matches!(c, DisplayCommand::Text { text, run: None, .. } if text.contains('X')));
+    assert!(per_char, "the Ahem line is drawn per character (no frozen run)");
+    let drawn_here = first_line_pixels(&engine, page);
+    assert!(dark(&drawn_here) > 1800, "drawn where it was laid out: {} dark px", dark(&drawn_here));
+
+    // The window thread: its slot never held the page's faces.
+    rustkit_layout::webfonts::clear();
+    let commit = engine.presenter.as_ref().and_then(|p| p.latest(page).cloned()).expect("a commit");
+    let viewhost_id = engine.views[&page].viewhost_id;
+    let presenter = engine.presenter.as_mut().expect("presenter");
+    presenter.commit(page, commit);
+    presenter
+        .present(page, viewhost_id, true, &engine.lctx.image_manager)
+        .expect("present");
+    let drawn_there = first_line_pixels(&engine, page);
+    assert!(
+        dark(&drawn_there) > 1800,
+        "drawn on a thread that did not install the page's faces: {} dark px (laid out: {})",
+        dark(&drawn_there),
+        dark(&drawn_here)
+    );
+}
