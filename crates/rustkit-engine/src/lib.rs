@@ -12470,6 +12470,9 @@ impl layout_ctx::LayoutCtx {
                     }
                     other => other,
                 };
+                // TX2: the bare generic `monospace` takes the 13px fixed-font
+                // default where a parent with another family had 16px.
+                style.apply_fixed_font_default(parent_style);
 
                 // `line-height` is an inherited property, but rustkit only inherited it into text
                 // nodes (see the NodeType::Text arm), never from one element to a descendant
@@ -14109,6 +14112,8 @@ impl layout_ctx::LayoutCtx {
         pseudo_style.display = rustkit_css::Display::Inline;
         if let Some(parent) = parent {
             pseudo_style.font_size = parent.font_size.clone();
+            pseudo_style.font_size_keyword = parent.font_size_keyword;
+            pseudo_style.font_size_absolute = parent.font_size_absolute;
             pseudo_style.font_family = parent.font_family.clone();
             pseudo_style.font_weight = parent.font_weight;
             pseudo_style.font_style = parent.font_style;
@@ -14245,6 +14250,8 @@ impl layout_ctx::LayoutCtx {
             rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
+        // TX2, as for an element.
+        pseudo_style.apply_fixed_font_default(parent);
 
         // As for an element: no style (or `none`) on a side, no width.
         zero_width_of_styleless_sides(&mut pseudo_style);
@@ -14369,6 +14376,8 @@ impl layout_ctx::LayoutCtx {
         // any centered-container heading left-aligned.
         if let Some(parent) = parent_style {
             style.font_size = parent.font_size.clone();
+            style.font_size_keyword = parent.font_size_keyword;
+            style.font_size_absolute = parent.font_size_absolute;
             style.font_family = parent.font_family.clone();
             style.font_weight = parent.font_weight;
             style.font_style = parent.font_style;
@@ -15573,7 +15582,11 @@ impl Engine {
             "color" => style.color = parent.color,
             "opacity" => style.opacity = parent.opacity,
             "font-family" => style.font_family = parent.font_family.clone(),
-            "font-size" => style.font_size = parent.font_size.clone(),
+            "font-size" => {
+                style.font_size = parent.font_size.clone();
+                style.font_size_keyword = parent.font_size_keyword;
+                style.font_size_absolute = parent.font_size_absolute;
+            }
             "font-weight" => style.font_weight = parent.font_weight,
             "font-style" => style.font_style = parent.font_style,
             "font-stretch" => style.font_stretch = parent.font_stretch,
@@ -15581,6 +15594,8 @@ impl Engine {
             "font" => {
                 style.font_family = parent.font_family.clone();
                 style.font_size = parent.font_size.clone();
+                style.font_size_keyword = parent.font_size_keyword;
+                style.font_size_absolute = parent.font_size_absolute;
                 style.font_weight = parent.font_weight;
                 style.font_style = parent.font_style;
                 style.font_stretch = parent.font_stretch;
@@ -15933,7 +15948,36 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "font-size" => {
-                if let Some(length) = parse_length(value) {
+                // Size keywords (css-fonts-4 §2.5): the size from Blink's
+                // table, and the keyword kept so a bare `monospace` family
+                // takes it from the fixed-font row (apply_fixed_font_default).
+                let keyword = match value.trim().to_ascii_lowercase().as_str() {
+                    "xx-small" => 1,
+                    "x-small" => 2,
+                    "small" => 3,
+                    "medium" => 4,
+                    "large" => 5,
+                    "x-large" => 6,
+                    "xx-large" => 7,
+                    "xxx-large" => 8,
+                    _ => 0,
+                };
+                if keyword > 0 {
+                    style.font_size = rustkit_css::Length::Px(
+                        rustkit_css::ComputedStyle::font_size_for_keyword(keyword, false),
+                    );
+                    style.font_size_keyword = keyword;
+                    style.font_size_absolute = false;
+                } else if let Some(length) = parse_length(value) {
+                    // em/% of the inherited size keep its absoluteness;
+                    // any other length is the author's own.
+                    if !matches!(
+                        length,
+                        rustkit_css::Length::Em(_) | rustkit_css::Length::Percent(_)
+                    ) {
+                        style.font_size_absolute = true;
+                    }
+                    style.font_size_keyword = 0;
                     style.font_size = length;
                 }
             }
@@ -17355,7 +17399,11 @@ impl layout_ctx::LayoutCtx {
             "appearance" | "-webkit-appearance" => {
                 style.appearance = rustkit_css::Appearance::Auto
             }
-            "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
+            "font-size" => {
+                style.font_size = rustkit_css::Length::Px(16.0);
+                style.font_size_keyword = 4;
+                style.font_size_absolute = false;
+            }
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
