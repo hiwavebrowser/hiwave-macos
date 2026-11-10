@@ -6059,9 +6059,13 @@
                 // person is typing in the bar (edited since it was focused
                 // or since Enter). After Enter the committed URL shows, as
                 // before (a redirect's final URL).
-                urlBarPageUrl = url;
+                // An internal page shows an empty bar (its placeholder),
+                // as the tab sync (`renderTabs`) shows it, so the two agree
+                // and Escape's revert puts back what the bar showed.
+                const shown = (url && !url.startsWith('hiwave://')) ? url : '';
+                urlBarPageUrl = shown;
                 if (document.activeElement === input && urlInputEdited) return;
-                if (input.value !== url) input.value = url;
+                if (input.value !== shown) input.value = shown;
             },
 
             // Update active tab title
@@ -6081,6 +6085,7 @@
 
             // Set loading state
             setLoading: function(loading) {
+                pageLoading = !!loading;
                 setClass(document.getElementById('loadingIndicator'), 'active', loading);
             },
 
@@ -6472,6 +6477,16 @@
         // Escape puts it back). `var`: the app's early state can arrive
         // before this line runs.
         var urlBarPageUrl = '';
+        // Whether the active page is loading, as the app last said
+        // (`setLoading`). `var` for the same reason.
+        var pageLoading = false;
+        // Escape's stop (M1f nit): only a page that is loading is stopped.
+        // State the app sent and the chrome has not applied yet is applied
+        // first, so a load that just started is seen.
+        function stopIfLoading() {
+            if (typeof window.__hiwaveFlushState === 'function') window.__hiwaveFlushState();
+            if (pageLoading) sendIpc('stop');
+        }
         urlInput.addEventListener('input', () => { urlInputEdited = true; });
         urlInput.addEventListener('blur', () => { urlInputEdited = false; });
         urlInput.addEventListener('keydown', (e) => {
@@ -6618,25 +6633,27 @@
                     return;
                 }
                 // M1f: Escape in the address bar is the address bar's, as
-                // Chrome's omnibox takes it (OmniboxViewViews skips the
-                // browser's accelerators for Escape; OmniboxEditModel::
-                // OnEscapeKeyPressed). Typed text: put the page's URL back,
-                // selected, keep the focus and leave a load alone ("If the
-                // user was in the midst of editing, don't cancel any
-                // underlying page load"). Nothing typed: stop the load and
-                // leave the bar. Chrome's omnibox only leaves (focuses the
-                // page) and the page's Escape then stops the load; a RustKit
-                // page has no Escape-stops, so the one press does both. The
-                // sidebar and the find bar are not the address bar's Escape.
+                // Chrome 148's omnibox takes it. OmniboxViewViews::
+                // SkipDefaultKeyEventProcessing returns true for Escape, so
+                // no browser accelerator (IDC_CLOSE_FIND_OR_STOP) sees it:
+                // the sidebar and the find bar stay. OmniboxEditModel::
+                // OnEscapeKeyPressed then reverts the text to the page's URL
+                // and selects it, whatever was selected; if the user was
+                // editing it stops there, focus kept and the load left alone
+                // ("If the user was in the midst of editing, don't cancel
+                // any underlying page load"); otherwise it blurs the omnibox
+                // and focuses the page, and returns true. Chrome stops the
+                // load on the NEXT Escape, in the page. DIVERGENCE: a RustKit
+                // page has no Escape-stops, so here the not-editing Escape
+                // also stops a loading page: one press, not two.
                 if (document.activeElement === urlInput) {
                     e.preventDefault();
-                    if (urlInputEdited) {
-                        urlInputEdited = false;
-                        urlInput.value = urlBarPageUrl;
-                        urlInput.select();
-                        return;
-                    }
-                    sendIpc('stop');
+                    const wasEditing = urlInputEdited;
+                    urlInputEdited = false;
+                    urlInput.value = urlBarPageUrl;
+                    urlInput.select();
+                    if (wasEditing) return;
+                    stopIfLoading();
                     urlInput.blur();
                     return;
                 }

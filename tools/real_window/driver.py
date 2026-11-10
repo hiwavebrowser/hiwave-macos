@@ -3195,7 +3195,10 @@ class Driver:
     def m1f_escape_stops_with_sidebar(self):
         """M1f: with the sidebar open and a page still loading (an image the server holds 8 s), one Escape in the address bar stops the load and leaves the sidebar open; typed text is reverted first."""
         c = "m1f_escape_stops_with_sidebar"
-        if not self.open_page(c, "m1d_keys.html?slowimg"):
+        # The sidebar opened explicitly by the chrome's own toggle once it
+        # boots (#1022 R1 nit 6), not left to the seed profile's default.
+        env = {"HIWAVE_RUSTKIT_CHROME_EVAL": "sidebarOpen = false; sidebar.classList.add('collapsed'); toggleSidebar();"}
+        if not self.open_page(c, "m1d_keys.html?slowimg", env=env):
             return
         if not self.can_input:
             return self.not_run(c, "Escape", self.why_not("Accessibility"))
@@ -3203,7 +3206,7 @@ class Driver:
         pid = self.app.proc.pid
         code, win = self.hw("window", pid)
         widths = re.findall(r'"cmd":"set_sidebar_width","width":(\d+)', self.app.log_text())
-        self.expect(c, "the sidebar is open (the seed profile's default)", bool(widths) and int(widths[-1]) > 0,
+        self.expect(c, "the sidebar is open (opened by the chrome's toggle)", bool(widths) and int(widths[-1]) > 0,
                     "last set_sidebar_width: %s" % (widths[-1] if widths else "none"))
         loading = not re.search(r"Navigation finished[^\n]*m1d_keys", self.app.log_text())
         # The address bar, right of the sidebar and the nav buttons (as
