@@ -1563,8 +1563,16 @@ fn layout_flex_container_at(
             // is `auto` (css-sizing-3 §5.1), and is sized by the items. The
             // block pre-pass's stack of them, left in `content.height`, is
             // not that: a result card's `height: 100%` row kept the 30px of
-            // its picture while its link was 294 tall (LAY1).
-            container.dimensions.content.height = content_size;
+            // its picture while its link was 294 tall (LAY1). Its
+            // `min-height` and `max-height` hold as for `auto`.
+            container.dimensions.content.height = if matches!(
+                container.style.height,
+                rustkit_css::Length::Auto | rustkit_css::Length::FitContent
+            ) {
+                content_size
+            } else {
+                content_size.min(style_max_inner_main).max(style_min_inner_main)
+            };
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
                 rustkit_css::Length::Px(px) => Some(px),
