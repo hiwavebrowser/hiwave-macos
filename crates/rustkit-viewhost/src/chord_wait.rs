@@ -306,4 +306,20 @@ mod tests {
         assert_eq!(chords.ran_out.len(), RAN_OUT_KEPT);
         assert!(!chords.claim(RAN_OUT_KEPT as u64 + 4), "the newest is remembered");
     }
+
+    /// #1015 delta R1 (b): a timed-out token that fell out of the memory is
+    /// still the menu's. Forgetting fails safe: the page skips the edit.
+    #[test]
+    fn a_forgotten_timed_out_token_is_still_not_the_pages() {
+        let mut chords = HeldChords::new();
+        let t0 = Instant::now();
+        for token in 1..=(RAN_OUT_KEPT as u64 + 5) {
+            chords.hold(token, (), t0);
+            chords.expire(token);
+        }
+        for token in 1..=5 {
+            assert!(!chords.claim(token), "forgotten token {token} is not claimable");
+        }
+        assert!(chords.claim(RAN_OUT_KEPT as u64 + 100), "a token the view never held is still the page's");
+    }
 }
