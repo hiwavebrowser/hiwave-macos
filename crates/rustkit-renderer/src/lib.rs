@@ -56,6 +56,8 @@ mod glyph_grid;
 mod scroll_cost_tests;
 #[cfg(test)]
 mod layer_cost_tests;
+#[cfg(test)]
+mod clip_mask_cache_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod face_cache_tests;
 pub use frame_stats::FrameStats;
@@ -3030,6 +3032,7 @@ impl Renderer {
             cached.used = frame;
             return ClipMask { key: Some(key), rect };
         }
+        self.stats.clip_masks_rasterized += 1;
         let coverage = clip_mask_coverage(&screen, even_odd, left as i32, top as i32, w, h);
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
