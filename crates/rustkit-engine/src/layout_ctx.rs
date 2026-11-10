@@ -461,10 +461,6 @@ impl LayoutCtx {
 /// only reads, apart from the three outputs at the end.
 #[derive(Default)]
 pub(crate) struct ViewLayout {
-    /// The density (image pixels per CSS pixel) of the image each `<img>` (raw NodeId) was last
-    /// built with: `srcset` picks a 2x image for a 1x box, and its natural size is the decoded
-    /// size over that density (E54b).
-    pub(crate) image_densities: RefCell<HashMap<usize, f32>>,
     /// Currently focused DOM node.
     pub(crate) focused_node: Cell<Option<rustkit_dom::NodeId>>,
     /// The element the pointer is over and the elements above it (raw
@@ -616,8 +612,14 @@ pub(crate) struct FailedImages {
 pub(crate) struct ImgSource {
     /// The absolute URL its `src` (or `srcset` pick) names now.
     pub(crate) wanted: String,
+    /// The density (image pixels per CSS pixel) of the pick `wanted` names (E54b): `srcset` picks
+    /// a 2x image for a 1x box, and its natural size is the decoded size over that density.
+    pub(crate) wanted_density: f32,
     /// The last loaded image it painted.
     pub(crate) shown: Option<String>,
+    /// The density of the pick `shown` came from. During a pending swap the box paints `shown`,
+    /// so its natural size divides by THIS, never by the new pick's `wanted_density`.
+    pub(crate) shown_density: f32,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box

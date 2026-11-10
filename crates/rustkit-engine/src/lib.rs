@@ -11902,22 +11902,26 @@ impl layout_ctx::LayoutCtx {
         ) = (&mut layout_box.box_type, hints)
         {
             // The box may paint an `<img>`'s previous image while its new
-            // `src` loads (LAT9): once the new one is in, it paints that.
+            // `src` loads (LAT9): once the new one is in, it paints that. The density is that of
+            // the image actually painted (E54b): the old image is not divided by the new pick's.
+            let mut density = 1.0_f32;
             if let Some(node) = layout_box.node_id {
                 let wanted = self
                     .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted.clone()))
                     .flatten();
                 if let Some(wanted) = wanted {
-                    if let Some(paint) = self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted)) {
+                    let wanted_density = self
+                        .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted_density))
+                        .flatten()
+                        .unwrap_or(1.0);
+                    if let Some((paint, painted_density)) =
+                        self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted, wanted_density))
+                    {
                         *url = paint;
+                        density = painted_density;
                     }
                 }
             }
-            let density = layout_box
-                .node_id
-                .and_then(|node| self.with_building_lay(|lay| lay.image_densities.borrow().get(&node).copied()))
-                .flatten()
-                .unwrap_or(1.0);
             (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h, density);
         }
         1 + layout_box
@@ -11936,7 +11940,13 @@ impl layout_ctx::LayoutCtx {
     /// Chrome). An empty `src` takes nothing over. Records `src` as the
     /// element's wanted URL, which a reused tree resolves again
     /// ([`Self::refresh_image_sizes`]).
-    fn img_src_to_paint(&self, lay: &layout_ctx::ViewLayout, node: usize, src: &str) -> String {
+    fn img_src_to_paint(
+        &self,
+        lay: &layout_ctx::ViewLayout,
+        node: usize,
+        src: &str,
+        density: f32,
+    ) -> (String, f32) {
         let ready = |url: &str| {
             Url::parse(url).is_ok_and(|u| {
                 u.scheme() == "data" || self.image_manager.is_cached(&u) || self.svg_cache.borrow().contains_key(u.as_str())
@@ -11947,19 +11957,21 @@ impl layout_ctx::LayoutCtx {
         if entry.wanted != src {
             entry.wanted = src.to_string();
         }
+        entry.wanted_density = density;
         if ready(src) {
             if entry.shown.as_deref() != Some(src) {
                 entry.shown = Some(src.to_string());
             }
-            return src.to_string();
+            entry.shown_density = density;
+            return (src.to_string(), density);
         }
         if lay.failed_images.borrow().urls.contains(src) {
             entry.shown = None;
-            return src.to_string();
+            return (src.to_string(), density);
         }
         match &entry.shown {
-            Some(shown) if !src.is_empty() && shown != src && ready(shown) => shown.clone(),
-            _ => src.to_string(),
+            Some(shown) if !src.is_empty() && shown != src && ready(shown) => (shown.clone(), entry.shown_density),
+            _ => (src.to_string(), density),
         }
     }
 
@@ -12476,11 +12488,9 @@ impl layout_ctx::LayoutCtx {
                         .resolve_resource_url(&src)
                         .map(|u| u.to_string())
                         .unwrap_or(src);
-                    let src = self
-                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src))
-                        .unwrap_or(src);
-
-                    self.with_building_lay(|lay| lay.image_densities.borrow_mut().insert(node.id.raw(), density));
+                    let (src, density) = self
+                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src, density))
+                        .unwrap_or((src, density));
                     let (natural_width, natural_height) =
                         self.img_natural_size(&src, explicit_width, explicit_height, density);
 
