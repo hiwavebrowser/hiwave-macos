@@ -7,8 +7,10 @@
 //! label were clipped away, but its drop-down arrow is a `Polyline`, and the
 //! renderer pushed line, polygon and circle vertices with no clip at all.
 //!
-//! Every expected number is Chromium 143.0.7499.4's (the repo's pinned
-//! oracle) on the same page at 240x60, headless, ink counted over the frame.
+//! Every expected number is Chrome for Testing 148.0.7778.216's (the parity
+//! baseline, `PARITY_CHROME_PATH` set to the pinned CfT), headless at
+//! 240x60 with the parity launch flags, on the page in the test. Chromium
+//! 143.0.7499.4 (Playwright's bundled build) gives the same numbers.
 
 use super::*;
 
