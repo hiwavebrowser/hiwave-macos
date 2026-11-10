@@ -177,3 +177,85 @@ fn escape_outside_the_address_bar_still_closes_the_sidebar() {
     assert!(!app.sidebar_open(), "Escape closed the sidebar: {cmds:?}");
     assert!(!cmds.iter().any(|c| c == "stop"), "and did not stop as well: {cmds:?}");
 }
+
+/// Nothing typed on a page that is not loading: Escape leaves the bar and
+/// sends no stop (#1022 R1 nit 3: no `Stop: nothing loading`).
+#[test]
+fn escape_on_a_loaded_page_leaves_the_bar_without_a_stop() {
+    let app = App::with_tabs(1);
+    app.open_sidebar();
+    app.set_loading(false);
+    app.cmd_l();
+    app.posted_cmds();
+
+    app.escape();
+
+    let cmds = app.posted_cmds();
+    assert!(!cmds.iter().any(|c| c == "stop"), "nothing loading, no stop: {cmds:?}");
+    assert!(!app.bar_focused(), "the bar let go of the focus");
+    assert!(app.sidebar_open(), "the sidebar stays open: {cmds:?}");
+}
+
+/// A caret placed in the bar, nothing typed (not all selected): Chrome's
+/// OnEscapeKeyPressed reverts and selects all, then (not editing) leaves
+/// the omnibox. Here too, and a loading page is stopped.
+#[test]
+fn escape_with_a_caret_and_nothing_typed_leaves_the_bar_and_stops_a_load() {
+    let app = App::with_tabs(1);
+    app.set_loading(true);
+    app.cmd_l();
+    app.chrome
+        .eval("document.getElementById('urlInput').setSelectionRange(3, 3);")
+        .expect("caret");
+    app.posted_cmds();
+
+    app.escape();
+
+    let cmds = app.posted_cmds();
+    assert_eq!(cmds.iter().filter(|c| *c == "stop").count(), 1, "{cmds:?}");
+    assert!(!app.bar_focused());
+    assert_eq!(app.bar_text(), "http://127.0.0.1/p0");
+}
+
+/// The find bar open, focus in the address bar: Escape is the address
+/// bar's (Chrome: the omnibox takes Escape ahead of IDC_CLOSE_FIND_OR_STOP);
+/// the find bar stays open.
+#[test]
+fn escape_in_the_address_bar_leaves_the_find_bar_open() {
+    let app = App::with_tabs(1);
+    app.set_loading(true);
+    app.chrome.eval("openFindModal();").expect("open the find bar");
+    // Its input takes the focus on a timer; let that run first.
+    app.end_turn();
+    let find_open = || app.chrome.read("document.getElementById('findModal').classList.contains('open')") == "true";
+    assert!(find_open(), "the find bar is open");
+    app.cmd_l();
+    app.type_text("abc");
+    app.posted_cmds();
+
+    app.escape();
+    assert_eq!(app.bar_text(), "http://127.0.0.1/p0", "the first Escape reverts the bar");
+    assert!(find_open(), "and leaves the find bar open");
+
+    app.escape();
+    let cmds = app.posted_cmds();
+    assert_eq!(cmds.iter().filter(|c| *c == "stop").count(), 1, "the second stops the load: {cmds:?}");
+    assert!(find_open(), "the find bar is still open: {cmds:?}");
+}
+
+/// An internal page shows an empty bar; typed text over it reverts to
+/// empty, not to the hiwave:// URL (#1022 R1 nit 4).
+#[test]
+fn escape_on_an_internal_page_reverts_to_an_empty_bar() {
+    let app = App::with_tabs(1);
+    crate::chrome_url(&app.chrome, "hiwave://about");
+    app.end_turn();
+    assert_eq!(app.bar_text(), "", "an internal page shows the placeholder");
+    app.cmd_l();
+    app.type_text("xyz");
+
+    app.escape();
+
+    assert_eq!(app.bar_text(), "", "reverted to what the bar showed");
+    assert!(app.bar_focused());
+}
