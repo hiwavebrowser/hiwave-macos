@@ -610,6 +610,8 @@ mod live_timer_slice_tests;
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
+#[cfg(test)]
+mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1577,8 +1579,10 @@ pub struct EngineConfig {
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
     /// Iterations any single loop in a page script may run before Boa
-    /// throws an error the script cannot catch. Boa has no wall-clock
-    /// interrupt; this is what stops `while (true) {}` from hanging a load.
+    /// throws an error the script cannot catch. It is the guard for a config
+    /// without `interrupt_scripts_at_budget`; with the watchdog on, the time
+    /// budget stops a runaway and this is only a backstop. 10M ended a
+    /// legitimate heavy loop in 50 to 70 ms in an optimized build (JS1).
     pub script_loop_iteration_limit: u64,
     /// Wall-clock budget for each subresource phase of a load (stylesheets,
     /// then web fonts, then images). A fetch not finished when its phase's
@@ -1653,7 +1657,7 @@ impl Default for EngineConfig {
             disable_animations: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
-            script_loop_iteration_limit: 10_000_000,
+            script_loop_iteration_limit: 1_000_000_000,
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
@@ -24055,6 +24059,12 @@ impl EngineBuilder {
     /// (`EngineConfig::script_budget_ms`).
     pub fn script_budget_ms(mut self, ms: u64) -> Self {
         self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// Iterations one loop may run (`EngineConfig::script_loop_iteration_limit`).
+    pub fn script_loop_iteration_limit(mut self, limit: u64) -> Self {
+        self.config.script_loop_iteration_limit = limit;
         self
     }
 
