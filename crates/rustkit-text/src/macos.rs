@@ -1031,11 +1031,18 @@ pub enum SmoothBehavior {
 
 /// [`SmoothBehavior`] of this machine, probed on first use.
 pub fn smooth_behavior() -> SmoothBehavior {
-    static BEHAVIOR: std::sync::OnceLock<SmoothBehavior> = std::sync::OnceLock::new();
-    *BEHAVIOR.get_or_init(probe_smooth_behavior)
+    smooth_probe().0
 }
 
-fn probe_smooth_behavior() -> SmoothBehavior {
+/// The probe's result and how it was reached: `"probed"`, or why it fell
+/// back to `None` (the probe font or its glyph did not load). The renderer
+/// logs this once, so a silent `None` (every glyph undilated) is visible.
+pub fn smooth_probe() -> (SmoothBehavior, &'static str) {
+    static PROBE: std::sync::OnceLock<(SmoothBehavior, &'static str)> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(probe_smooth_behavior)
+}
+
+fn probe_smooth_behavior() -> (SmoothBehavior, &'static str) {
     use std::os::raw::c_void;
     extern "C" {
         fn CTFontDrawGlyphs(
@@ -1053,14 +1060,14 @@ fn probe_smooth_behavior() -> SmoothBehavior {
         ) -> bool;
     }
     let Ok(font) = font::new_from_name("Helvetica", 16.0) else {
-        return SmoothBehavior::None;
+        return (SmoothBehavior::None, "Helvetica did not load: treated as no smoothing");
     };
     let font_ref = font.as_concrete_TypeRef();
     let mut glyph = [0u16; 1];
     let ch = ['W' as u16];
     // SAFETY: one character in, one glyph out; the font outlives the call.
     if !unsafe { CTFontGetGlyphsForCharacters(font_ref, ch.as_ptr(), glyph.as_mut_ptr(), 1) } {
-        return SmoothBehavior::None;
+        return (SmoothBehavior::None, "Helvetica has no 'W': treated as no smoothing");
     }
     let draw = |smooth: bool| -> Vec<u8> {
         let space = CGColorSpace::create_device_rgb();
@@ -1079,7 +1086,7 @@ fn probe_smooth_behavior() -> SmoothBehavior {
         ctx.data()[..16 * 16 * 4].to_vec()
     };
     let (plain, smoothed) = (draw(false), draw(true));
-    smooth_behavior_of(&plain, &smoothed)
+    (smooth_behavior_of(&plain, &smoothed), "probed")
 }
 
 /// The decision of [`probe_smooth_behavior`] from its two BGRX bitmaps.

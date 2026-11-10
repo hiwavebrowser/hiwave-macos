@@ -70,6 +70,18 @@ pub use glyph::*;
 /// The smoothing probe the glyph-mask law follows (`glyph::coverage_for`).
 #[cfg(target_os = "macos")]
 pub use rustkit_text::macos::{smooth_behavior, smooth_behavior_of, SmoothBehavior};
+
+/// Log the CoreGraphics smoothing probe the glyph-mask law follows, once
+/// per process (a `None` from a font that failed to load is otherwise
+/// silent: every glyph would take the undilated outline).
+#[cfg(target_os = "macos")]
+fn log_smooth_probe_once() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        let (behavior, how) = rustkit_text::macos::smooth_probe();
+        tracing::info!(?behavior, how, "CoreGraphics font smoothing probe (glyph-mask law)");
+    });
+}
 pub use pipeline::*;
 pub use screenshot::*;
 
@@ -616,6 +628,8 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RendererError> {
+        #[cfg(target_os = "macos")]
+        log_smooth_probe_once();
         // Create uniform buffer
         let uniforms = Uniforms {
             viewport_size: [800.0, 600.0],

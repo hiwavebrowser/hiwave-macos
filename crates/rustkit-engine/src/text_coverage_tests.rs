@@ -49,7 +49,21 @@ fn ink(color: &str, background: [u8; 3], extra: &str) -> u64 {
         .sum()
 }
 
+/// The Chrome 148 ink numbers were measured on a Mac whose smoothing is
+/// `some`; elsewhere the dilated pins skip, loudly.
+fn seat_smooths_some(test: &str) -> bool {
+    let b = rustkit_renderer::smooth_behavior();
+    if b != rustkit_renderer::SmoothBehavior::Some {
+        eprintln!("SKIP {test}: this Mac's CoreGraphics smoothing is {b:?}, the pins assume `some`");
+        return false;
+    }
+    true
+}
+
 fn assert_ink(color: &str, background: [u8; 3], extra: &str, chrome: u64) {
+    if extra.is_empty() && !seat_smooths_some(color) {
+        return;
+    }
     let got = ink(color, background, extra);
     let ratio = got as f64 / chrome as f64;
     eprintln!("text ink {color} {extra}: {got} vs Chrome 148 {chrome} ({ratio:.3}x)");
@@ -157,6 +171,9 @@ fn ahem_square(extra: &str) -> (usize, usize, u64) {
 /// The undilated square (develop) has the 400 and no fringe.
 #[test]
 fn an_ahem_square_carries_chromes_light_fringe() {
+    if !seat_smooths_some("ahem") {
+        return;
+    }
     let (solid, partial, ink) = ahem_square("");
     eprintln!("ahem default: solid {solid} partial {partial} ink {ink} (Chrome 148: 400, 62, 104105)");
     assert_eq!(solid, 400, "the em square itself");
@@ -182,8 +199,9 @@ fn the_smoothing_probe_decides_as_skia_does() {
     assert_eq!(smooth_behavior_of(&plain, &plain), SmoothBehavior::None);
     assert_eq!(smooth_behavior_of(&plain, &[0, 0, 0, 0, 140, 140, 140, 0]), SmoothBehavior::Some);
     assert_eq!(smooth_behavior_of(&plain, &[0, 0, 0, 0, 120, 140, 160, 0]), SmoothBehavior::Subpixel);
-    // This seat (and the Mac the ink pins above were measured on): `some`.
-    assert_eq!(rustkit_renderer::smooth_behavior(), SmoothBehavior::Some);
+    // The live probe on this machine only reports, it is not pinned: the
+    // ink pins above skip on a Mac whose smoothing is not `some`.
+    eprintln!("this Mac's smoothing probe: {:?}", rustkit_renderer::smooth_behavior());
 }
 
 /// Where smoothing has no effect every run takes the undilated outline (as
