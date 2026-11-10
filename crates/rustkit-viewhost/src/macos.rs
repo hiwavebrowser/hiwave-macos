@@ -243,6 +243,18 @@ pub fn finish_key_equivalent(token: u64, claimed: bool) {
     }
 }
 
+/// The page, from its own thread, before it runs the default of the Cmd
+/// chord `token` (the edit in a focused text field): whether the chord is
+/// still the page's. False once the chord's wait ran out and it went to the
+/// menu (M1e, #1015 R1 nit 1): the menu's Paste or Undo is then the one
+/// edit, and the page's late keydown must not paste or undo again. True
+/// makes the chord the page's: it no longer goes to the menu at the
+/// deadline. Any thread.
+#[cfg(target_os = "macos")]
+pub fn claim_key_equivalent(token: u64) -> bool {
+    KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).claim(token)
+}
+
 /// A held chord goes on to the main menu, and its retain is dropped.
 #[cfg(target_os = "macos")]
 unsafe fn chord_to_menu(event: id, token: u64, why: &'static str, waited: std::time::Duration) {
@@ -270,23 +282,41 @@ extern "C" {
     );
 }
 
-/// Arm `token`'s wait (M1e): on the main queue, `CHORD_ANSWER_TIMEOUT`
-/// from now, a chord the page has not answered goes to the menu. The main
+/// Arm `token`'s wait (M1e): on the main queue, at the chord's deadline
+/// (`CHORD_ANSWER_TIMEOUT` from when the view took it), a chord the page
+/// has not answered or taken goes to the menu. The main
 /// run loop serves the main queue in its common modes, so the timer fires
 /// while the app's event loop waits, whatever the page's thread is doing.
 #[cfg(target_os = "macos")]
 fn arm_chord_wait(token: u64) {
     extern "C" fn ran_out(context: *mut std::ffi::c_void) {
         let token = context as usize as u64;
-        let event = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).expire(token);
-        if let Some(event) = event {
-            info!(token, timeout_ms = CHORD_ANSWER_TIMEOUT.as_millis() as u64, "Cmd chord: no answer from the page in time, to the menu");
-            unsafe { chord_to_menu(event as id, token, "the page did not answer in time", CHORD_ANSWER_TIMEOUT) };
+        let fate = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner()).expire(token);
+        match fate {
+            // Answered first: nothing is held.
+            None => {}
+            // One debug line a timeout (R1 nit 5), from `chord_to_menu`.
+            Some(ChordFate::ToMenu(event)) => unsafe {
+                chord_to_menu(event as id, token, "the page did not answer in time", CHORD_ANSWER_TIMEOUT);
+            },
+            // The page is already running the chord's default; its answer
+            // is on the way and finds nothing held.
+            Some(ChordFate::PageKept(event)) => unsafe {
+                debug!(token, "Cmd chord the page took before its wait ran out");
+                let _: () = msg_send![event as id, release];
+            },
         }
     }
     const DISPATCH_TIME_NOW: u64 = 0;
+    // The rest of the wait, from when the chord was taken (`deadline`).
+    let left = KEY_EQUIVALENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .deadline(token)
+        .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or(CHORD_ANSWER_TIMEOUT);
     unsafe {
-        let when = dispatch_time(DISPATCH_TIME_NOW, CHORD_ANSWER_TIMEOUT.as_nanos() as i64);
+        let when = dispatch_time(DISPATCH_TIME_NOW, left.as_nanos() as i64);
         dispatch_after_f(when, std::ptr::addr_of!(_dispatch_main_q), token as usize as *mut std::ffi::c_void, ran_out);
     }
 }
