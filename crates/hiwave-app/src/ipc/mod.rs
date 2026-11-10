@@ -3,6 +3,7 @@
 //! This module handles communication between the JavaScript frontend
 //! and the Rust backend via WebView IPC.
 
+pub mod autofill;
 pub mod commands;
 
 use serde::{Deserialize, Serialize};
