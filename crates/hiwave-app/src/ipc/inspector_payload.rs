@@ -13,23 +13,132 @@
 // Only the WebKit content path (not built on macOS) calls these.
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// A console line as `console_inject.js` builds it. The `doc` is the
+/// RustKit path's document number; a WebKit line has none.
+#[derive(Deserialize, Serialize)]
+struct ConsoleEntry {
+    id: u64,
+    level: String,
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timestamp: Option<f64>,
+    #[serde(default)]
+    stack: Vec<StackFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doc: Option<u32>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum StackFrame {
+    Parsed {
+        #[serde(rename = "fn")]
+        function: String,
+        file: String,
+        line: u32,
+        col: u32,
+    },
+    Raw {
+        raw: String,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum NodeKind {
+    Element,
+    Text,
+    Comment,
+    Document,
+    Unknown,
+}
+
+/// A DOM tree node as `inspector_inject.js` builds it.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DomNode {
+    #[serde(rename = "type")]
+    kind: NodeKind,
+    #[serde(default)]
+    path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default)]
+    classes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attributes: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_content: Option<String>,
+    #[serde(default)]
+    children: Vec<DomNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    children_omitted: Option<u32>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Rect {
+    top: f64,
+    left: f64,
+    width: f64,
+    height: f64,
+}
+
+/// An element's styles as `inspector_inject.js` builds them.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ElementStyles {
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default)]
+    classes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rect: Option<Rect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    box_model: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    computed_styles: BTreeMap<String, String>,
+}
+
+/// Read `value` as `T` and write it back: wrong types fail, fields `T`
+/// does not have are left behind.
+fn retyped<T: for<'de> Deserialize<'de> + Serialize>(value: &Value) -> Option<Value> {
+    let typed: T = T::deserialize(value).ok()?;
+    serde_json::to_value(typed).ok()
+}
 
 /// A console line, as `console_inject.js` sends it. `None`: drop it.
 pub fn console_entry(entry: &Value) -> Option<Value> {
-    Some(entry.clone())
+    let level_is_a_word = entry
+        .get("level")
+        .and_then(Value::as_str)
+        .is_some_and(|l| !l.is_empty() && l.len() <= 32 && l.bytes().all(|b| b.is_ascii_alphanumeric()));
+    if !level_is_a_word {
+        return None;
+    }
+    retyped::<ConsoleEntry>(entry)
 }
 
 /// The DOM tree, as `inspector_inject.js` sends it (`null` when the page
 /// has no document element). `None`: drop it.
 pub fn dom_tree(tree: &Value) -> Option<Value> {
-    Some(tree.clone())
+    retyped::<Option<DomNode>>(tree)
 }
 
 /// An element's styles, as `inspector_inject.js` sends them (`null` when
 /// the path names no element). `None`: drop it.
 pub fn element_styles(styles: &Value) -> Option<Value> {
-    Some(styles.clone())
+    retyped::<Option<ElementStyles>>(styles)
 }
 
 #[cfg(test)]

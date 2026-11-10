@@ -168,10 +168,14 @@
             input.dispatchEvent(new Event('change', { bubbles: true }));
         },
 
+        // Text or a quoted attribute value: & < > " '.
         escapeHtml: function(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            return String(text == null ? '' : text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
     };
 
