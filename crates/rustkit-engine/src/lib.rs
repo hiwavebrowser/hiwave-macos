@@ -556,6 +556,8 @@ mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod image_load_event_tests;
+#[cfg(all(test, feature = "headless"))]
 mod scroll_paints_first_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_after_yielded_load_tests;
@@ -1062,6 +1064,8 @@ struct ImagePlan {
     svg_urls: Vec<Url>,
     /// Images already in a cache that the pass counts as loaded.
     already_loaded: usize,
+    /// The URLs only an `<img>` outside the document asks for (E54).
+    offscreen: std::collections::HashSet<Url>,
     /// Each image's own budget, counted from when its request starts
     /// (`subresource_budget_ms`; LAT9).
     budget: std::time::Duration,
@@ -1114,11 +1118,26 @@ struct FetchedImages {
     /// It is not a failure to the page: nothing of it is kept, the element
     /// goes on painting what it painted and reads as still loading.
     gave_up: Vec<String>,
+    /// Loaded images that no box shows (E54): the image of an `<img>` that
+    /// is in no document tree. Its element hears `load`; the page is not
+    /// laid out again for it.
+    offscreen: usize,
+}
+
+/// An event the engine owes an `<img>` (raw NodeId) about its image (E54).
+enum ImageEvent {
+    /// The image is in: its own size, and the URL it came from (empty for
+    /// a `data:` URL, which is the element's own `src`).
+    Load { node: usize, width: u32, height: u32, url: String },
+    /// Its load failed.
+    Error { node: usize },
+    /// The engine gave up on it: no event, a pending `decode()` resolves.
+    GaveUp { node: usize },
 }
 
 impl FetchedImages {
     fn loaded(count: usize, svgs: Vec<(String, rustkit_svg::SvgDocument)>) -> Self {
-        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new() }
+        Self { loaded: count, svgs, failed: Vec::new(), gave_up: Vec::new(), offscreen: 0 }
     }
 
     /// The image's load failed: the page is told ([`FetchedImages::failed`]).
@@ -1476,6 +1495,7 @@ impl ViewState {
         self.lay.checked_states.borrow_mut().clear();
         self.lay.shown_images.borrow_mut().clear();
         *self.lay.failed_images.borrow_mut() = layout_ctx::FailedImages::default();
+        *self.lay.loaded_images.borrow_mut() = layout_ctx::LoadedImages::default();
         self.lay.select_popup.borrow_mut().take();
         self.lay.select_popup_release.set(false);
         self.lay.select_popup_opening_press.set(false);
@@ -5619,6 +5639,20 @@ impl Engine {
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
             self.refresh_layout_for_script(id, &bindings);
+            // E54: the images that have settled hear `load` or `error`
+            // before the window's `load` (the live turns since the yield
+            // told most of them already). Nothing is waited for here.
+            self.note_image_writes_of(id, &bindings);
+            let (_, events) = self.image_events_due(id, false);
+            if !events.is_empty() {
+                let (caught, _) = with_script_js(&bindings, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::fire_image_events(&bindings, &events)))
+                });
+                stopped = caught.is_err();
+                self.refresh_layout_for_script(id, &bindings);
+            }
+        }
+        if !stopped {
             // The same lines the blocking load logs. A yielded tail used to
             // fire `load` without them, so a live run never showed
             // `source=event:load`.
@@ -6231,7 +6265,11 @@ impl Engine {
             .views
             .get(&id)
             .is_some_and(|v| v.images_planned_for != v.frame_generation);
-        if out.relaid_out || unplanned {
+        // A `src` script wrote starts that image's load over (E54), also
+        // with no layout to show for it: the same value again, or an image
+        // that is in no document.
+        let rewritten = self.note_image_writes(id);
+        if out.relaid_out || unplanned || rewritten {
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
             }
@@ -6294,10 +6332,17 @@ impl Engine {
                 view.images_planned_for = view.frame_generation;
             }
         }
-        // Images that settled as failed (LAT9-r1): the old image of a
-        // swapped `src` goes, and the elements hear `error`. What a
-        // listener wrote may name images of its own (a fallback `src`).
-        if self.settle_failed_images(id) {
+        // Images that settled (E54, LAT9-r1): each `<img>` whose image is
+        // in hears `load`; for one that failed, the old image of a swapped
+        // `src` goes and the element hears `error`. What a listener wrote
+        // may name images of its own (the real `src`, a fallback).
+        let (image_layout, more_image_events) = self.settle_image_events(id);
+        if more_image_events {
+            // The rest are due at once, after the frame this turn made.
+            out.yielded_for_frame = true;
+            out.next_timer_ms = Some(0);
+        }
+        if image_layout {
             out.relaid_out = true;
             if let Some(view) = self.views.get_mut(&id) {
                 view.images_planned_for = view.frame_generation;
@@ -6309,7 +6354,7 @@ impl Engine {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => debug!(?id, error = %e, "Failed to look for images an error listener added"),
+                Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -8316,17 +8361,54 @@ impl Engine {
             // with those the load handler and the timers add.
             let after_load = post_load_live && source != "event:DOMContentLoaded";
             let leaving = self.config.follows_script_navigation && bindings.navigation_requested();
-            if after_load && source == "event:load" && !leaving {
-                match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
-                    None => return,
-                    Some(Ok(0)) => {}
-                    Some(Ok(count)) => {
-                        info!(count, "Loaded images added by page scripts before load");
-                        if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
-                            warn!(?e, "relayout after images added before load failed");
+            // E54: before the window's `load`, every image that has settled
+            // hears its own `load` or `error`. The images of the markup
+            // arrived before the scripts ran; what the scripts added is
+            // waited for here (as the app loads a page), one subresource
+            // budget at most, and an image still out then goes on as live
+            // work and hears its event when it arrives. A handler may name
+            // another image (a placeholder's `onload` setting the real
+            // `src`): that one gets one more wait of the same length, and
+            // no further round, so the window's `load` is at most two
+            // budgets behind the scripts whatever the handlers do.
+            let mut round = 0;
+            while source == "event:load" {
+                round += 1;
+                self.note_image_writes_of(id, bindings);
+                if after_load && !leaving {
+                    match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
+                        None => return,
+                        Some(Ok(0)) => {}
+                        Some(Ok(count)) => {
+                            info!(count, "Loaded images added by page scripts before load");
+                            if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
+                                warn!(?e, "relayout after images added before load failed");
+                            }
                         }
+                        Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
                     }
-                    Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
+                }
+                let (_, events) = self.image_events_due(id, false);
+                if events.is_empty() {
+                    break;
+                }
+                info!(count = events.len(), "Images settled before load: firing load/error");
+                // Not sliced like the live turn's events: the whole batch
+                // runs here under the load's one script budget, which can
+                // stop it (R1 probe e).
+                let record = run(bindings, "event:image".to_string(), 0, &|_| {
+                    Self::fire_image_events(bindings, &events);
+                    Ok(())
+                });
+                if record.outcome != ScriptOutcome::Ran {
+                    inspector_glue::log_script(log, &inspector, record);
+                }
+                if poisoned.get() || nav_cancel::cancelled(watch) {
+                    return;
+                }
+                self.refresh_layout_for_script(id, bindings);
+                if round == 2 {
+                    break;
                 }
             }
             info!(%source, "Running page lifecycle step");
@@ -9344,6 +9426,11 @@ impl Engine {
                     }
                 }
                 Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+            }
+            // Those images hear `load` or `error` now (E54); with
+            // `post_load_requests_live` the live loop tells them.
+            if !post_load_live && !leaving && !self.nav_superseded(id, generation) {
+                self.settle_image_events(id);
             }
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after script-added images");
@@ -18660,15 +18747,6 @@ impl Engine {
             .collect()
     }
 
-    /// Each `<img>` (raw NodeId) and the absolute URL of the image it asks
-    /// for, by the rule [`Self::discover_images`] fetches by.
-    fn img_sources(document: &Document, base_url: Option<&Url>) -> Vec<(usize, Url)> {
-        Self::img_elements(document, base_url)
-            .into_iter()
-            .map(|(node, _, url)| (node, url))
-            .collect()
-    }
-
     /// Every `<img>` that names an image: its raw NodeId, the source as
     /// written, and that resolved.
     fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
@@ -18938,7 +19016,31 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let elements = Self::img_elements(document.as_ref(), base_url);
+        let mut elements = Self::img_elements(document.as_ref(), base_url);
+        // The URLs the document itself shows, when an `<img>` outside it
+        // asks for one too (E54): what only such an element asks for is
+        // fetched, and no layout follows its arrival.
+        let detached = Self::detached_img_elements(document.as_ref(), base_url, &view.lay.loaded_images.borrow().detached, &elements);
+        let shown: std::collections::HashSet<Url> = match detached.is_empty() {
+            true => Default::default(),
+            false => elements.iter().map(|(_, _, url)| url.clone()).collect(),
+        };
+        let mut offscreen: std::collections::HashSet<Url> =
+            detached.iter().map(|(_, _, url)| url.clone()).filter(|url| !shown.contains(url)).collect();
+        elements.extend(detached);
+        // An `<img>` showing a loaded image it has not heard `load` for
+        // (E54): events are due. One that has heard costs a map lookup.
+        {
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.due {
+                let failed = view.lay.failed_images.borrow();
+                loaded.due = elements.iter().any(|(node, _, url)| {
+                    loaded.heard.get(node) != Some(&layout_ctx::LoadedImages::key(url.as_str()))
+                        && !failed.urls.contains(url.as_str())
+                        && (self.lctx.image_manager.is_cached(url) || self.lctx.svg_cache.borrow().contains_key(url.as_str()))
+                });
+            }
+        }
         // The `<img>` elements asking for a URL that has failed: who is
         // owed an `error` (LAT9-r1). Nothing is collected on a page with
         // no failed image.
@@ -18966,6 +19068,9 @@ impl Engine {
             false => std::collections::HashSet::new(),
         };
         let inspector = view.inspector.clone();
+        for (_, url) in &backgrounds {
+            offscreen.remove(url);
+        }
         images.extend(backgrounds);
         if only_new {
             images.retain(|(_, url)| !view.images_attempted.contains(url));
@@ -19010,6 +19115,15 @@ impl Engine {
             }
         }
         if let Some(view) = self.views.get(&id) {
+            // Nor given up on: its elements hear what this request brings.
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !loaded.gave_up.is_empty() {
+                for url in pending.iter().chain(&svg_urls) {
+                    loaded.gave_up.remove(url.as_str());
+                }
+            }
+        }
+        if let Some(view) = self.views.get(&id) {
             let mut failed = view.lay.failed_images.borrow_mut();
             if !failed.urls.is_empty() {
                 // A URL asked for again is in flight again, not failed.
@@ -19042,6 +19156,7 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded: loaded,
+            offscreen,
             budget,
             wait_until: now + budget,
             start_by: now + budget * IMAGE_PASS_START_BUDGETS,
@@ -19074,6 +19189,7 @@ impl Engine {
             pending,
             svg_urls,
             already_loaded,
+            offscreen,
             budget,
             wait_until: _,
             start_by,
@@ -19109,7 +19225,14 @@ impl Engine {
             };
             let on_page = job.url.scheme() == "data";
             let url = job.url.clone();
-            let work = Self::fetch_one_image(job);
+            let unshown = offscreen.contains(&url);
+            let work = async move {
+                let mut fetched = Self::fetch_one_image(job).await;
+                if unshown {
+                    fetched.offscreen += std::mem::take(&mut fetched.loaded);
+                }
+                fetched
+            };
             let fetch: script_net::LiveFuture<FetchedImages> = if on_page {
                 Box::pin(work)
             } else {
@@ -19272,6 +19395,7 @@ impl Engine {
                 next = pending.next() => match next {
                     Some(fetched) => {
                         out.loaded += fetched.loaded;
+                        out.offscreen += fetched.offscreen;
                         out.svgs.extend(fetched.svgs);
                         out.failed.extend(fetched.failed);
                         out.gave_up.extend(fetched.gave_up);
@@ -19298,11 +19422,22 @@ impl Engine {
     /// The last part: keep what a fetch brought. Returns how many images
     /// the pass loaded.
     fn keep_fetched_images(&mut self, id: EngineViewId, fetched: FetchedImages) -> usize {
+        if fetched.loaded + fetched.offscreen > 0 || !fetched.svgs.is_empty() {
+            // Their elements hear `load` (E54).
+            if let Some(view) = self.views.get(&id) {
+                view.lay.loaded_images.borrow_mut().due = true;
+            }
+        }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
-            // Not failures: nothing is recorded, so the elements keep what
-            // they paint and hear nothing.
+            // Not failures: the elements keep what they paint and hear no
+            // event; only a `decode()` waiting on them is settled (E54 R1).
             debug!(count = fetched.gave_up.len(), "Images given up on (budget or pass cap)");
+            if let Some(view) = self.views.get(&id) {
+                let mut loaded = view.lay.loaded_images.borrow_mut();
+                loaded.gave_up.extend(fetched.gave_up);
+                loaded.due = true;
+            }
         }
         if !fetched.failed.is_empty() {
             if let Some(view) = self.views.get(&id) {
@@ -19314,26 +19449,144 @@ impl Engine {
         fetched.loaded
     }
 
-    /// LAT9-r1: what a settled image failure does to the page, on the live
-    /// turn after it arrives. An `<img>` still painting its previous image
-    /// for a `src` that has now failed is laid out again, as the broken
-    /// image a failed first load gives; then each `<img>` whose image
-    /// failed hears `error`, once for that `src` (Chrome for Testing
-    /// 148.0.7778.216: after a failed swap the old image is gone, `error`
-    /// has fired once, `complete` is true, `naturalWidth` 0). Returns
-    /// whether it laid out.
-    fn settle_failed_images(&mut self, id: EngineViewId) -> bool {
+    /// The `<img>` elements script gave a `src` outside the document
+    /// (`detached`, raw NodeIds) that still are outside it and name an
+    /// image, as [`Self::img_elements`] lists those inside. One that is in
+    /// `listed` (it has been inserted since, or sits in a shadow tree) is
+    /// left to that list.
+    fn detached_img_elements(
+        document: &Document,
+        base_url: Option<&Url>,
+        detached: &[usize],
+        listed: &[(usize, String, Url)],
+    ) -> Vec<(usize, String, Url)> {
+        if detached.is_empty() {
+            return Vec::new();
+        }
+        let listed: std::collections::HashSet<usize> = listed.iter().map(|(node, _, _)| *node).collect();
+        detached
+            .iter()
+            .filter(|node| !listed.contains(node))
+            .filter_map(|&raw| {
+                let node = document.get_node(rustkit_dom::NodeId::new(raw))?;
+                let NodeType::Element { attributes, .. } = &node.node_type else {
+                    return None;
+                };
+                let src = attributes
+                    .get("srcset")
+                    .and_then(|ss| Self::pick_from_srcset(ss))
+                    .or_else(|| attributes.get("src").cloned())?;
+                let url = match base_url {
+                    Some(base) => base.join(&src).ok()?,
+                    None => Url::parse(&src).ok()?,
+                };
+                Some((raw, src, url))
+            })
+            .collect()
+    }
+
+    /// Whether `node` is in the document's own tree.
+    fn in_document_tree(document: &Document, node: &Rc<Node>) -> bool {
+        let mut top = node.clone();
+        while let Some(parent) = top.parent() {
+            top = parent;
+        }
+        Rc::ptr_eq(&top, document.root())
+    }
+
+    /// E54: script wrote these `<img>` elements' `src` or `srcset`
+    /// (`DomBindings::take_image_writes`). Each one's load starts over: it
+    /// hears `load` or `error` again for what it names now, also when the
+    /// value is the one it had (Chrome fires `load` again). One that is in
+    /// no document tree is remembered, so that its image is fetched.
+    /// Returns whether there was a write.
+    fn note_image_writes_of(&mut self, id: EngineViewId, bindings: &DomBindings) -> bool {
+        self.note_image_writes_list(id, bindings.take_image_writes())
+    }
+
+    /// [`Self::note_image_writes_of`] with the view's own bindings.
+    fn note_image_writes(&mut self, id: EngineViewId) -> bool {
+        let writes = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map(|bindings| bindings.take_image_writes())
+            .unwrap_or_default();
+        self.note_image_writes_list(id, writes)
+    }
+
+    fn note_image_writes_list(&mut self, id: EngineViewId, writes: Vec<usize>) -> bool {
+        if writes.is_empty() {
+            return false;
+        }
         let Some(view) = self.views.get(&id) else {
             return false;
         };
+        let Some(document) = view.document.as_ref() else {
+            return false;
+        };
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        for raw in writes {
+            loaded.heard.remove(&raw);
+            loaded.gave_up_heard.remove(&raw);
+            failed.heard.remove(&raw);
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(raw))
+                .is_some_and(|node| !Self::in_document_tree(document.as_ref(), &node));
+            if outside && !loaded.detached.contains(&raw) {
+                loaded.detached.push(raw);
+            }
+        }
+        loaded.due = true;
+        failed.due = true;
+        true
+    }
+
+    /// An image's own size once it is in: the decoded raster, or an SVG's
+    /// width and height. `None` while it is not loaded.
+    fn loaded_image_size(&self, url: &Url) -> Option<(u32, u32)> {
+        if let Some(image) = self.lctx.image_manager.get_cached(url) {
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        if let Some(svg) = self.lctx.svg_cache.borrow().get(url.as_str()) {
+            let (width, height) = svg.get_size(300.0, 150.0);
+            return Some((width.round() as u32, height.round() as u32));
+        }
+        if url.scheme() == "data" {
+            let image = self.lctx.image_manager.load_blocking(url.clone()).ok()?;
+            return Some((image.natural_width as u32, image.natural_height as u32));
+        }
+        None
+    }
+
+    /// E54, LAT9-r1: the events the document's images are owed, once a
+    /// load has settled. Each `<img>` whose image is in is owed `load`,
+    /// once for that image (Chrome for Testing 148.0.7778.216: `load` once
+    /// per successful load, at the element; inside it `complete` is true
+    /// and `naturalWidth` the image's own). Each whose image failed is owed
+    /// `error`, once for that `src` (after a failed swap the old image is
+    /// gone, `complete` is true, `naturalWidth` 0); with `relayout`, an
+    /// `<img>` still painting its previous image for a `src` that has now
+    /// failed is laid out again first, as the broken image a failed first
+    /// load gives. An image the engine gave up on is owed nothing. The
+    /// list is made before any listener runs: a listener may write the
+    /// DOM, and what it wrote is the next round's. Returns whether it laid
+    /// out, and the events in document order.
+    fn image_events_due(&mut self, id: EngineViewId, relayout: bool) -> (bool, Vec<ImageEvent>) {
+        let Some(view) = self.views.get(&id) else {
+            return (false, Vec::new());
+        };
         {
             let mut failed = view.lay.failed_images.borrow_mut();
-            if !failed.due {
-                return false;
+            let mut loaded = view.lay.loaded_images.borrow_mut();
+            if !failed.due && !loaded.due {
+                return (false, Vec::new());
             }
             failed.due = false;
+            loaded.due = false;
         }
-        let stale = {
+        let stale = relayout && {
             let failed = view.lay.failed_images.borrow();
             view.lay.shown_images.borrow().values().any(|image| {
                 image.shown.as_ref().is_some_and(|shown| *shown != image.wanted) && failed.urls.contains(&image.wanted)
@@ -19347,43 +19600,161 @@ impl Engine {
             }
         }
         let Some(view) = self.views.get(&id) else {
-            return relaid_out;
+            return (relaid_out, Vec::new());
         };
-        let (Some(document), Some(bindings)) = (view.document.as_ref(), view.bindings.as_ref()) else {
-            return relaid_out;
+        let Some(document) = view.document.as_ref() else {
+            return (relaid_out, Vec::new());
         };
-        // The elements whose image failed and that have not heard so. The
-        // list is made before any listener runs: a listener may write the
-        // DOM, and what it wrote is the next turn's.
-        let mut hear = Vec::new();
-        {
-            let mut failed = view.lay.failed_images.borrow_mut();
-            let mut still_failed = std::collections::HashSet::new();
-            for (node, url) in Self::img_sources(document.as_ref(), view.url.as_ref()) {
-                let url = url.to_string();
-                if !failed.urls.contains(&url) {
-                    continue;
+        let mut events = Vec::new();
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        let mut elements = Self::img_elements(document.as_ref(), view.url.as_ref());
+        let detached = Self::detached_img_elements(document.as_ref(), view.url.as_ref(), &loaded.detached, &elements);
+        elements.extend(detached);
+        let mut still_failed = std::collections::HashSet::new();
+        let mut still_loaded = std::collections::HashSet::new();
+        let mut still_gave_up = std::collections::HashSet::new();
+        for (node, _, url) in elements {
+            let name = url.to_string();
+            if loaded.gave_up.contains(&name) {
+                still_gave_up.insert(node);
+                let key = layout_ctx::LoadedImages::key(&name);
+                if loaded.gave_up_heard.get(&node) != Some(&key) {
+                    loaded.gave_up_heard.insert(node, key);
+                    events.push(ImageEvent::GaveUp { node });
                 }
-                still_failed.insert(node);
-                if failed.heard.get(&node) != Some(&url) {
-                    failed.heard.insert(node, url);
-                    hear.push(node);
-                }
+                continue;
             }
-            failed.heard.retain(|node, _| still_failed.contains(node));
+            if failed.urls.contains(&name) {
+                still_failed.insert(node);
+                if failed.heard.get(&node) != Some(&name) {
+                    failed.heard.insert(node, name);
+                    events.push(ImageEvent::Error { node });
+                }
+            } else if loaded.heard.get(&node) == Some(&layout_ctx::LoadedImages::key(&name)) {
+                still_loaded.insert(node);
+            } else if let Some((width, height)) = self.loaded_image_size(&url) {
+                still_loaded.insert(node);
+                loaded.heard.insert(node, layout_ctx::LoadedImages::key(&name));
+                // A `data:` URL is the element's own `src`: script reads
+                // it from there, and it is not sent a second time.
+                let url = if url.scheme() == "data" { String::new() } else { name };
+                events.push(ImageEvent::Load { node, width, height, url });
+            }
         }
-        if hear.is_empty() {
-            return relaid_out;
+        failed.heard.retain(|node, _| still_failed.contains(node));
+        loaded.heard.retain(|node, _| still_loaded.contains(node));
+        loaded.gave_up_heard.retain(|node, _| still_gave_up.contains(node));
+        // An image outside the document that has heard, or that the engine
+        // gave up on, is done with; so is one whose node is gone (R1 nit 2).
+        loaded.detached.retain(|node| {
+            !still_failed.contains(node)
+                && !still_loaded.contains(node)
+                && !still_gave_up.contains(node)
+                && document.get_node(rustkit_dom::NodeId::new(*node)).is_some()
+        });
+        (relaid_out, events)
+    }
+
+    /// Tell the elements. A listener's exception is queued in the bindings
+    /// like any other listener's.
+    fn fire_image_events(bindings: &DomBindings, events: &[ImageEvent]) {
+        for event in events {
+            let _ = match event {
+                ImageEvent::Load { node, width, height, url } => bindings.fire_image_load(*node, *width, *height, url),
+                ImageEvent::Error { node } => bindings.fire_image_error(*node),
+                ImageEvent::GaveUp { node } => bindings.fire_image_gave_up(*node),
+            };
         }
-        debug!(count = hear.len(), "Images failed: firing error");
-        for node in hear {
-            let _ = bindings.fire_image_error(node);
+    }
+
+    /// [`Self::image_events_due`], fired at the view's own bindings on a
+    /// live turn, and what the listeners wrote laid out. Returns whether it
+    /// laid out, and whether events are left for the next turn.
+    ///
+    /// The handlers are the turn's script like its timers: each is charged
+    /// to the turn's budget of JavaScript time (`live_turn_budget_ms`) and
+    /// can be stopped by it. Once the budget is spent the rest keep their
+    /// turn and go out on the next one, after this one's frame. They are
+    /// not spread thinner than that: on a recorded search page the image
+    /// handlers wrote a style and read a rect, a forced layout each (0.7 s
+    /// there), and a turn per handler paid for a second layout between
+    /// every two.
+    fn settle_image_events(&mut self, id: EngineViewId) -> (bool, bool) {
+        let (mut relaid_out, events) = self.image_events_due(id, true);
+        if events.is_empty() {
+            return (relaid_out, false);
         }
-        match self.flush_script_dom_writes(id, Some(RelayoutCause::Other("image_failed"))) {
+        let Some(bindings) = self.views.get(&id).and_then(|view| view.bindings.as_ref()) else {
+            return (relaid_out, false);
+        };
+        let mut fired = 0;
+        for event in &events {
+            if fired > 0 && script_js_exhausted() {
+                break;
+            }
+            // As the yielded tail does: a panic in the engine while a
+            // listener runs is caught here and ends this turn's events; the
+            // rest are owed to the next turn (R1 nit 7).
+            let (caught, _) = with_script_js(bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::fire_image_events(bindings, std::slice::from_ref(event))
+                }))
+            });
+            fired += 1;
+            if caught.is_err() {
+                warn!(?id, "An image listener's turn panicked; its other events wait for the next turn");
+                break;
+            }
+        }
+        info!(count = fired, left = events.len() - fired, "Images settled: firing load/error");
+        let more = fired < events.len();
+        if more {
+            self.owe_image_events(id, &events[fired..]);
+        }
+        match self.flush_script_dom_writes(id, Some(RelayoutCause::Other("image_event"))) {
             Ok(wrote) => relaid_out |= wrote,
-            Err(e) => debug!(?id, error = %e, "relayout after image error listeners failed"),
+            Err(e) => debug!(?id, error = %e, "relayout after image listeners failed"),
         }
-        relaid_out
+        (relaid_out, more)
+    }
+
+    /// Events [`Self::image_events_due`] listed that were not fired: their
+    /// elements have not heard, and are due again.
+    fn owe_image_events(&mut self, id: EngineViewId, unfired: &[ImageEvent]) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(document) = view.document.as_ref() else {
+            return;
+        };
+        let mut failed = view.lay.failed_images.borrow_mut();
+        let mut loaded = view.lay.loaded_images.borrow_mut();
+        for event in unfired {
+            let node = match event {
+                ImageEvent::Load { node, .. } => {
+                    loaded.heard.remove(node);
+                    *node
+                }
+                ImageEvent::Error { node } => {
+                    failed.heard.remove(node);
+                    *node
+                }
+                ImageEvent::GaveUp { node } => {
+                    loaded.gave_up_heard.remove(node);
+                    *node
+                }
+            };
+            // One outside the document was dropped from the list as heard.
+            let outside = document
+                .get_node(rustkit_dom::NodeId::new(node))
+                .is_some_and(|n| !Self::in_document_tree(document.as_ref(), &n));
+            if outside && !loaded.detached.contains(&node) {
+                loaded.detached.push(node);
+            }
+        }
+        failed.due = true;
+        loaded.due = true;
     }
 
     /// Who a subresource request comes from: the document URL and the
