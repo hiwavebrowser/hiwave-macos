@@ -2254,3 +2254,103 @@ mod workspace_state_file_tests {
         assert!(tmp.exists(), "unreadable session file: the temp file stays");
     }
 }
+
+/// M4b item 3: the four other small state files (`settings.json`, `focus_mode.json`,
+/// `user-blocklist.json`, `visit_history.json`) were plain `fs::write` with loaders that silently
+/// fell back to defaults, so one bad byte erased the user's settings on the next save.
+#[cfg(test)]
+mod other_state_files_tests {
+    use super::*;
+
+    fn config(name: &str) -> AppConfig {
+        let dir = std::env::temp_dir().join(format!("hiwave_otherfiles_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = AppConfig::default();
+        config.data_dir = dir.clone();
+        config.download_dir = dir.join("downloads");
+        config
+    }
+
+    fn tmp_files(config: &AppConfig) -> Vec<String> {
+        std::fs::read_dir(&config.data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// Each file with unparsable content is kept aside, and the app starts with defaults.
+    fn assert_kept_aside(config: &AppConfig, file: &str) {
+        let kept = config.data_dir.join(format!("{file}.corrupt"));
+        assert_eq!(std::fs::read(&kept).unwrap(), b"{ not json", "{file}: the bytes are kept");
+        assert!(!config.data_dir.join(file).exists(), "{file}: moved out of the way, not overwritten");
+    }
+
+    #[test]
+    fn an_unparsable_settings_file_is_kept_aside() {
+        let config = config("settings");
+        std::fs::write(config.data_dir.join("settings.json"), "{ not json").unwrap();
+        let s = AppState::new(config.clone()).unwrap();
+        assert_eq!(s.user_settings.theme, UserSettings::default().theme);
+        assert_kept_aside(&config, "settings.json");
+    }
+
+    #[test]
+    fn an_unparsable_focus_mode_file_is_kept_aside() {
+        let config = config("focus");
+        std::fs::write(config.data_dir.join("focus_mode.json"), "{ not json").unwrap();
+        let _ = AppState::new(config.clone()).unwrap();
+        assert_kept_aside(&config, "focus_mode.json");
+    }
+
+    #[test]
+    fn an_unparsable_blocklist_file_is_kept_aside() {
+        let config = config("blocklist");
+        std::fs::write(config.data_dir.join("user-blocklist.json"), "{ not json").unwrap();
+        let s = AppState::new(config.clone()).unwrap();
+        assert!(s.user_blocklist.domains.is_empty());
+        assert_kept_aside(&config, "user-blocklist.json");
+    }
+
+    #[test]
+    fn an_unparsable_visit_history_file_is_kept_aside() {
+        let config = config("history");
+        std::fs::write(config.data_dir.join("visit_history.json"), "{ not json").unwrap();
+        let mut s = AppState::new(config.clone()).unwrap();
+        assert!(!s.load_visit_history().unwrap());
+        assert_kept_aside(&config, "visit_history.json");
+    }
+
+    #[test]
+    fn the_four_saves_leave_the_file_and_no_temp_file() {
+        let config = config("saves");
+        let mut s = AppState::new(config.clone()).unwrap();
+        s.user_blocklist.add_domain("blocked.test".to_string());
+        s.user_blocklist.save(&s.blocklist_path()).unwrap();
+        s.save_settings().unwrap();
+        s.save_focus_config().unwrap();
+        s.save_visit_history().unwrap();
+        for file in ["user-blocklist.json", "settings.json", "focus_mode.json", "visit_history.json"] {
+            assert!(config.data_dir.join(file).exists(), "{file} was written");
+        }
+        assert!(tmp_files(&config).is_empty(), "no temp file left: {:?}", tmp_files(&config));
+        // And they read back.
+        let again = AppState::new(config.clone()).unwrap();
+        assert!(again.user_blocklist.domains.contains("blocked.test"));
+    }
+
+    #[test]
+    fn a_save_that_cannot_create_its_temp_file_leaves_the_good_settings() {
+        let config = config("settings_tmp");
+        let s = AppState::new(config.clone()).unwrap();
+        s.save_settings().unwrap();
+        let good = std::fs::read(config.data_dir.join("settings.json")).unwrap();
+        let tmp = config.data_dir.join(format!("settings.json.{}.tmp", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(s.save_settings().is_err());
+        assert_eq!(std::fs::read(config.data_dir.join("settings.json")).unwrap(), good);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+}
