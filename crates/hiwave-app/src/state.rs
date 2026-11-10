@@ -2347,6 +2347,23 @@ mod other_state_files_tests {
     }
 
     #[test]
+    fn a_non_utf8_visit_history_is_kept_aside_not_overwritten() {
+        // read_to_string reports invalid UTF-8 as an I/O error, so the history used to leave
+        // through `?` without being kept aside, and the next save overwrote it (Prometheus R1 on
+        // #1018, nit 1).
+        let config = config("history_binary");
+        std::fs::write(config.data_dir.join("visit_history.json"), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
+        let mut s = AppState::new(config.clone()).unwrap();
+        assert!(!s.load_visit_history().unwrap(), "starts empty without an error");
+        assert_eq!(
+            std::fs::read(config.data_dir.join("visit_history.json.corrupt")).unwrap(),
+            vec![0xff, 0xfe, 0x00, 0x9f],
+            "the bytes are kept"
+        );
+        assert!(!config.data_dir.join("visit_history.json").exists(), "moved out of the way");
+    }
+
+    #[test]
     fn the_four_saves_leave_the_file_and_no_temp_file() {
         let config = config("saves");
         let mut s = AppState::new(config.clone()).unwrap();
