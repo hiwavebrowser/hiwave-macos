@@ -40,6 +40,35 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Read a small JSON state file for a loader that falls back to defaults. Missing file: `None`.
+/// Content that does not parse: the file is kept aside (`keep_aside`) so the next save does not
+/// destroy it, and `None`. An I/O error: logged, `None`, the file left alone.
+fn load_json_keep_aside<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!("{what} could not be read ({err}); using defaults");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(value) => {
+            sweep_stale_temps(path);
+            Some(value)
+        }
+        Err(err) => {
+            match keep_aside(path) {
+                Ok(kept) => tracing::warn!("{what} is not valid ({err}); kept as {} and using defaults", kept.display()),
+                Err(rename_err) => tracing::warn!(
+                    "{what} is not valid ({err}) and could not be moved aside ({rename_err}); using defaults"
+                ),
+            }
+            None
+        }
+    }
+}
+
 /// Rename an unusable file to `<name>.corrupt`, then `.corrupt-1`, `.corrupt-2`, ... (never over
 /// an earlier one), and return where it went. The caller then starts empty without the next save
 /// destroying the only copy.
@@ -190,14 +219,7 @@ pub struct UserBlocklist {
 impl UserBlocklist {
     /// Load blocklist from file
     pub fn load(path: &PathBuf) -> Self {
-        if !path.exists() {
-            return Self::default();
-        }
-
-        match std::fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        load_json_keep_aside(path, "The blocklist").unwrap_or_default()
     }
 
     /// Save blocklist to file
@@ -205,7 +227,7 @@ impl UserBlocklist {
         let data = serde_json::to_string_pretty(self).map_err(|e| {
             hiwave_core::HiWaveError::Config(format!("Failed to serialize blocklist: {}", e))
         })?;
-        std::fs::write(path, data)?;
+        write_atomic(path, data.as_bytes())?;
         Ok(())
     }
 
@@ -794,12 +816,7 @@ impl AppState {
 
     /// Load focus mode config from file
     fn load_focus_config(path: &std::path::Path) -> FocusModeConfig {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Ok(config) = serde_json::from_str(&contents) {
-                return config;
-            }
-        }
-        FocusModeConfig::default()
+        load_json_keep_aside(path, "The focus mode config").unwrap_or_default()
     }
 
     /// Save focus mode config to disk
@@ -807,7 +824,7 @@ impl AppState {
         let path = self.focus_config_path();
         let json = serde_json::to_string_pretty(&self.focus_mode_config)
             .map_err(|e| hiwave_core::HiWaveError::Config(format!("Failed to serialize focus config: {}", e)))?;
-        std::fs::write(&path, json)?;
+        write_atomic(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -1335,10 +1352,23 @@ impl AppState {
             Ok(snapshot) => {
                 self.visit_history = snapshot.records;
                 self.next_visit_id = snapshot.next_id.max(1);
+                sweep_stale_temps(&path);
                 Ok(true)
             }
             Err(err) => {
-                tracing::warn!("Invalid visit history data: {}", err);
+                // Keep the unreadable history aside so the next save does not erase it.
+                match keep_aside(&path) {
+                    Ok(kept) => tracing::warn!(
+                        "Invalid visit history data ({}); kept as {} and starting empty",
+                        err,
+                        kept.display()
+                    ),
+                    Err(rename_err) => tracing::warn!(
+                        "Invalid visit history data ({}) and it could not be moved aside ({})",
+                        err,
+                        rename_err
+                    ),
+                }
                 Ok(false)
             }
         }
@@ -1352,7 +1382,7 @@ impl AppState {
         let data = serde_json::to_string_pretty(&snapshot).map_err(|err| {
             hiwave_core::HiWaveError::Config(format!("Failed to save visit history: {}", err))
         })?;
-        std::fs::write(self.visit_history_path(), data)?;
+        write_atomic(&self.visit_history_path(), data.as_bytes())?;
         Ok(())
     }
 
@@ -1857,14 +1887,7 @@ impl Default for UserSettings {
 impl UserSettings {
     /// Load settings from the given path, returning defaults if not found
     pub fn load(path: &Path) -> Self {
-        if !path.exists() {
-            return Self::default();
-        }
-
-        match fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        load_json_keep_aside(path, "The settings file").unwrap_or_default()
     }
 
     /// Save settings to the given path
@@ -1872,7 +1895,7 @@ impl UserSettings {
         let data = serde_json::to_string_pretty(self).map_err(|e| {
             hiwave_core::HiWaveError::Config(format!("Failed to serialize settings: {}", e))
         })?;
-        fs::write(path, data)?;
+        write_atomic(path, data.as_bytes())?;
         Ok(())
     }
 }
