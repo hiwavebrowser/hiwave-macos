@@ -16551,6 +16551,13 @@ impl layout_ctx::LayoutCtx {
             // css-overflow-3 §5.1. Not inherited (a block owns its line
             // boxes). The two-value form and `<string>` fallback are
             // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "appearance" | "-webkit-appearance" => {
+                style.appearance = if value.trim().eq_ignore_ascii_case("none") {
+                    rustkit_css::Appearance::None
+                } else {
+                    rustkit_css::Appearance::Auto
+                };
+            }
             "text-overflow" => {
                 style.text_overflow = if value
                     .split_whitespace()
@@ -17050,6 +17057,9 @@ impl layout_ctx::LayoutCtx {
             // Not inherited either: `initial` and `unset` undo a reset's
             // `* { box-sizing: inherit }`.
             "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,
+            "appearance" | "-webkit-appearance" => {
+                style.appearance = rustkit_css::Appearance::Auto
+            }
             "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,

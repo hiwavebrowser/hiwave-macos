@@ -2125,6 +2125,17 @@ impl Overflow {
 
 /// `text-overflow` (css-overflow-3 §5.1): how inline content that overflows
 /// its line box in the inline direction is rendered, on a block container
+/// css-ui-4 §7.1 `appearance` (and its `-webkit-` alias). Only `none`
+/// changes anything here: a form control without its native parts (a
+/// drop-down's arrow, its arrow well and label inset). Every other keyword
+/// is `auto`. Not inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    Auto,
+    None,
+}
+
 /// whose `overflow` is other than `visible`. Not inherited — the block
 /// owns its line boxes, so the block owns the ellipsis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3185,6 +3196,8 @@ pub struct ComputedStyle {
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// `appearance` / `-webkit-appearance`; see [`Appearance`].
+    pub appearance: Appearance,
     /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
     /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
     /// value: the legacy flexbox is not laid out, except in the line-clamp
