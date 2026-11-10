@@ -1125,7 +1125,7 @@ fn ipc_log_shape(body: &str, response: &ipc::IpcResponse) -> String {
         .unwrap_or_else(|| "unknown".to_string());
     match response {
         ipc::IpcResponse::Success { data } => {
-            let bytes = serde_json::to_string(data).map(|s| s.len()).unwrap_or(0);
+            let bytes = serde_json::to_vec(data).map(|v| v.len()).unwrap_or(0);
             format!("{name}: success, {bytes} bytes")
         }
         ipc::IpcResponse::Error { .. } => format!("{name}: error"),
@@ -1183,7 +1183,7 @@ fn handle_chrome_ipc(
             }
             IpcMessage::CloseTab { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Close tab response: {:?}", response);
+                info!("Close tab response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 // Navigate to the new active tab after closing
@@ -1204,7 +1204,7 @@ fn handle_chrome_ipc(
                     .map(|active_id| id.parse::<u64>().ok() == Some(active_id))
                     .unwrap_or(false);
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Tab activation response: {:?}", response);
+                info!("Tab activation response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 if !already_active {
                     if let ipc::IpcResponse::Success { data } = response {
@@ -1221,7 +1221,7 @@ fn handle_chrome_ipc(
             IpcMessage::ExecuteCommand { ref id } => {
                 let _cmd_id = id.clone();
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Command execution response: {:?}", response);
+                info!("Command execution response: {}", ipc_log_shape(body, &response));
 
                 if let ipc::IpcResponse::Success { data } = response {
                     if let Some(result) = data.get("result") {
@@ -1275,13 +1275,13 @@ fn handle_chrome_ipc(
             }
             IpcMessage::CreateWorkspace { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Create workspace response: {:?}", response);
+                info!("Create workspace response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
             }
             IpcMessage::ActivateWorkspace { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Activate workspace response: {:?}", response);
+                info!("Activate workspace response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let active_url = chrome_state
@@ -1294,23 +1294,23 @@ fn handle_chrome_ipc(
             }
             IpcMessage::DeleteWorkspace { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Delete workspace response: {:?}", response);
+                info!("Delete workspace response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
             }
             IpcMessage::RenameWorkspace { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Rename workspace response: {:?}", response);
+                info!("Rename workspace response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
             }
             IpcMessage::SetMode { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Set mode response: {:?}", response);
+                info!("Set mode response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::OpenSettings => {
                 let _ = chrome_proxy.send_event(UserEvent::OpenSettings);
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Open settings response: {:?}", response);
+                info!("Open settings response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::CloseSettings => {
                 let _ = chrome_proxy.send_event(UserEvent::CloseSettings);
@@ -1323,13 +1323,13 @@ fn handle_chrome_ipc(
             }
             IpcMessage::AddToShelf { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Add to shelf response: {:?}", response);
+                info!("Add to shelf response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
             }
             IpcMessage::RestoreFromShelf { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Restore from shelf response: {:?}", response);
+                info!("Restore from shelf response: {}", ipc_log_shape(body, &response));
                 let _ =
                     chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
@@ -1345,7 +1345,7 @@ fn handle_chrome_ipc(
             }
             IpcMessage::MoveTabToWorkspace { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Move tab response: {:?}", response);
+                info!("Move tab response: {}", ipc_log_shape(body, &response));
                 let _ =
                     chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
@@ -1353,23 +1353,23 @@ fn handle_chrome_ipc(
             }
             IpcMessage::LockPage { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Lock page response: {:?}", response);
+                info!("Lock page response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
             }
             IpcMessage::UnlockPage { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Unlock page response: {:?}", response);
+                info!("Unlock page response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
             }
             IpcMessage::GetStaleLocks { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get stale locks response: {:?}", response);
+                info!("Get stale locks response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::DeleteFromShelf { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Delete from shelf response: {:?}", response);
+                info!("Delete from shelf response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::UpdateActiveTabUrl { ref url } => {
                 let _ = chrome_proxy.send_event(UserEvent::UpdateActiveTabUrl(url.clone()));
@@ -1406,17 +1406,17 @@ fn handle_chrome_ipc(
             // Focus mode IPC handlers
             IpcMessage::EnterFocusMode => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Enter focus mode response: {:?}", response);
+                info!("Enter focus mode response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::EnterFocusMode);
             }
             IpcMessage::ExitFocusMode => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Exit focus mode response: {:?}", response);
+                info!("Exit focus mode response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::ExitFocusMode);
             }
             IpcMessage::ToggleFocusMode => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Toggle focus mode response: {:?}", response);
+                info!("Toggle focus mode response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
             }
             IpcMessage::ToggleInspector => {
@@ -1424,16 +1424,16 @@ fn handle_chrome_ipc(
             }
             IpcMessage::GetFocusModeStatus => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get focus mode status response: {:?}", response);
+                info!("Get focus mode status response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncFocusModeStatus);
             }
             IpcMessage::GetFocusModeConfig => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get focus mode config response: {:?}", response);
+                info!("Get focus mode config response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::SaveFocusModeConfig { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Save focus mode config response: {:?}", response);
+                info!("Save focus mode config response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::FocusScrollProgress { .. } => {
                 let _ = ipc::commands::handle_message(&chrome_state, msg);
@@ -1457,54 +1457,54 @@ fn handle_chrome_ipc(
             }
             IpcMessage::AddToFocusBlocklist { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Add to focus blocklist response: {:?}", response);
+                info!("Add to focus blocklist response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::RemoveFromFocusBlocklist { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Remove from focus blocklist response: {:?}", response);
+                info!("Remove from focus blocklist response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::BlockAndClose { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Block and close response: {:?}", response);
+                info!("Block and close response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
             }
             IpcMessage::GetBlocklist => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get blocklist response: {:?}", response);
+                info!("Get blocklist response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
             }
             IpcMessage::UnblockDomain { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Unblock domain response: {:?}", response);
+                info!("Unblock domain response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
             }
             IpcMessage::GetDownloads => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get downloads response: {:?}", response);
+                info!("Get downloads response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::ClearDownloads => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Clear downloads response: {:?}", response);
+                info!("Clear downloads response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncDownloads);
             }
             IpcMessage::GetVisitHistory => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Get visit history response: {:?}", response);
+                info!("Get visit history response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
             }
             IpcMessage::ClearVisitHistory => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Clear visit history response: {:?}", response);
+                info!("Clear visit history response: {}", ipc_log_shape(body, &response));
                 let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
             }
             IpcMessage::OpenDownload { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Open download response: {:?}", response);
+                info!("Open download response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::ShowDownloadInFolder { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
-                info!("Show download response: {:?}", response);
+                info!("Show download response: {}", ipc_log_shape(body, &response));
             }
             IpcMessage::GetSidebarWidth => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
@@ -1592,7 +1592,7 @@ fn handle_shelf_ipc(
                 IpcMessage::ExecuteCommand { ref id } => {
                     let _cmd_id = id.clone();
                     let response = ipc::commands::handle_message(shelf_state, msg);
-                    info!("Command execution response: {:?}", response);
+                    info!("Command execution response: {}", ipc_log_shape(body, &response));
                     // Close shelf after executing command
                     let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
 
@@ -2591,11 +2591,20 @@ mod chrome_ipc_log_tests {
         let source = include_str!("main.rs").replace("\r\n", "\n");
         // Everything but this module, whose own strings name what it looks for.
         let this = source.find("#[cfg(test)]\nmod chrome_ipc_log_tests").unwrap();
-        let after = this + source[this..].find("#[cfg(test)]\nmod lazy_panel_tests").unwrap();
+        let after = this
+            + source[this..]
+                .find("#[cfg(test)]\nmod lazy_panel_tests")
+                .expect("the module after chrome_ipc_log_tests moved: update this pin's end marker");
         let production = format!("{}{}", &source[..this], &source[after..]);
-        let whole_response_logs: Vec<&str> =
-            production.lines().filter(|l| l.contains("IPC response:") && l.contains("{:?}")).collect();
-        assert!(whole_response_logs.is_empty(), "a chrome IPC response is logged whole: {whole_response_logs:?}");
+        // Any `info!(.., {:?}, response)`: the whole answer of a command is never logged. The one
+        // exception is the content page's autofill answer in the non-macOS block, which #1034
+        // rewrites; remove the exception with it.
+        let whole_response_logs: Vec<&str> = production
+            .lines()
+            .filter(|l| l.contains("{:?}") && l.contains(", response)") && l.contains("info!("))
+            .filter(|l| !l.contains("Autofill response:"))
+            .collect();
+        assert!(whole_response_logs.is_empty(), "a command's response is logged whole: {whole_response_logs:?}");
 
         // The event variant and the arm that handles it: the line above each is the gate.
         for needle in ["SendAutofillCredentials { credentials_json: String }", "SendAutofillCredentials { ref credentials_json }"] {
@@ -3403,7 +3412,7 @@ fn main() {
                     url: Some(url.clone()),
                 },
             );
-            info!("New window redirected to tab: {:?}", response);
+            info!("New window redirected to tab: {}", ipc_log_shape("", &response));
             let _ = content_proxy4.send_event(UserEvent::SyncTabs);
             let _ = content_proxy4.send_event(UserEvent::Navigate(url));
             false
