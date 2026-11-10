@@ -369,11 +369,11 @@ pub(crate) fn form_control_intrinsic_size(
     // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not, so a bare button is the model too (the
     // old 19 px blob was RustKit's own number). Inputs and selects keep their own rule: they ignore `line-height`
     // here, and compose only a declared box.
-    let single_line_box = |blob: f32, is_button: bool| {
+    let single_line_box = |blob: f32, is_button: bool, button_line: Option<f32>| {
         if is_button {
             let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
             let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
-            content_line(font_size) + pad + border
+            button_line.unwrap_or_else(|| content_line(font_size)) + pad + border
         } else if fully_declared {
             normal_line_height(style, font_size) + author_pb_v
         } else if author_pb_v > 0.0 {
@@ -403,7 +403,7 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false)),
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -434,12 +434,13 @@ pub(crate) fn form_control_intrinsic_size(
             // its text used (an emoji lifts Arial 14px from 16 to 23 in
             // Chrome 148: report's "📱 Share to Social" is 39 tall where
             // "Export as JSON" is 32). ASCII never reaches a fallback face.
-            let height = if author_pb_v > 0.0 && !label.is_ascii() && label_metrics.ascent > 0.0 {
-                normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
-                    + author_pb_v
-            } else {
-                single_line_box(19.0 * ua_scale, true)
-            };
+            // CB3b (Prometheus nit 1): the same three-part sum as an ASCII label; only the LINE
+            // differs. A declared `line-height` wins over the fallback face, as for any line.
+            let fallback_line = (!label.is_ascii()
+                && label_metrics.ascent > 0.0
+                && matches!(style.line_height, rustkit_css::LineHeight::Normal))
+            .then(|| normal_line_height(style, font_size).max(used_font_line_height(&label_metrics)));
+            let height = single_line_box(19.0 * ua_scale, true, fallback_line);
             (button_border_box_width(style, font_size, label_metrics.width), height)
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
@@ -503,7 +504,7 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false))
+                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
             }
         }
     }
@@ -13375,6 +13376,9 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The page declares `border: none` too (the cascade flags both axes, CB3b).
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
         let plain = FormControlType::Button {
             label: "Export as JSON".to_string(),
             button_type: "button".to_string(),
@@ -13385,6 +13389,74 @@ mod tests {
         };
         assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
         assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
+    }
+
+    #[test]
+    fn test_a_non_ascii_button_label_goes_through_the_same_three_part_sum() {
+        // Prometheus nit 1 on #1037: the non-ASCII branch kept the old rule (no UA border when
+        // padding was declared, `line-height` ignored). The label only changes the LINE (the
+        // fallback face united with `normal`); padding and border are the same sum. Deterministic
+        // on any machine: a declared line-height wins over the fallback face, so the emoji label
+        // is exactly the ASCII label's height; and a bare emoji button is never shorter than a
+        // bare ASCII one (its line is `normal` united with the fallback).
+        let button = |label: &str| FormControlType::Button {
+            label: label.to_string(),
+            button_type: "button".to_string(),
+        };
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        let ascii = form_control_intrinsic_size(&style, &button("Share")).1;
+        let emoji = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(ascii, 20.0 + UA_BUTTON_PADDING_V + UA_BUTTON_BORDER_V, "ascii: line + UA padding + UA border");
+        assert_eq!(emoji, ascii, "a declared line-height wins over the fallback face");
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_v_declared = true;
+        let emoji_padded = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(emoji_padded, 20.0 + 16.0 + UA_BUTTON_BORDER_V, "declared padding keeps the UA border");
+        let bare = ComputedStyle::new();
+        let bare_ascii = form_control_intrinsic_size(&bare, &button("Share")).1;
+        let bare_emoji = form_control_intrinsic_size(&bare, &button("\u{1F4F1} Share")).1;
+        assert!(bare_emoji >= bare_ascii, "an emoji label is never shorter: {bare_emoji} vs {bare_ascii}");
+    }
+
+    #[test]
+    #[ignore = "BACKLOG (Prometheus #1037 nit 3): not measured on Chrome CfT 148 yet"]
+    fn backlog_a_fully_declared_input_and_select_box_is_line_plus_author_padding_and_border() {
+        // `fully_declared` (padding AND border declared, zero and `none` included) now also reaches
+        // `<input>` and `<select>`, which used to keep the 19 px blob when the declared values were
+        // all zero. The new rule is the CSS box model (normal line + 0 + 0 = 15 at the UA font).
+        // Unpinned until Chrome CfT 148 gives the number for `input{padding:0;border:none}` and
+        // the select equivalent; then replace the 15.0 below with it and drop `ignore`.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(40.0 / 3.0);
+        style.font_family = "Arial".to_string();
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
+        let input = FormControlType::TextInput {
+            value: String::new(),
+            placeholder: String::new(),
+            input_type: "text".to_string(),
+        };
+        assert_eq!(form_control_intrinsic_size(&style, &input).1, 15.0);
+    }
+
+    #[test]
+    #[ignore = "BACKLOG (Prometheus #1037 nit 2): the flags are per axis, not per side"]
+    fn backlog_one_declared_side_does_not_drop_the_ua_part_of_the_other_side() {
+        // `padding-top: 0` alone keeps the UA bottom padding in Chrome (1px), and `border-style: solid`
+        // alone keeps the UA 2px width. RustKit flags the axis, so it drops both. Needs per-side flags
+        // in rustkit-css; until then this documents the expected value.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(0.0);
+        style.padding_v_declared = true;
+        let button = FormControlType::Button { label: "Go".to_string(), button_type: "button".to_string() };
+        let h = form_control_intrinsic_size(&style, &button).1;
+        assert_eq!(h, 18.0 + 1.0 + UA_BUTTON_BORDER_V, "line 18 + the UA 1px bottom padding + the UA border");
     }
 
     #[test]
