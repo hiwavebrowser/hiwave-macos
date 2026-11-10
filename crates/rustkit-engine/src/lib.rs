@@ -566,6 +566,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
@@ -9994,6 +9996,14 @@ impl Engine {
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
+        // The list shapes every line of text, and shaping resolves family
+        // names: THIS view's declared faces must be the ones that resolve.
+        // A relayout installed them when it started; the frames that build
+        // a list over the boxes already laid out (a paint-only animation
+        // frame, an element scroll) come here with whatever the last view
+        // to paint left installed, and shaped the page's text in the
+        // fallback font when that was another view (E52).
+        self.install_web_fonts(id);
         let selected = self.selection_paint(id, root_box);
         let caret = self.caret_paint(id, root_box);
         let text_caret = match caret {
