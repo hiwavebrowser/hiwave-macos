@@ -52,6 +52,7 @@ fn ink(color: &str, background: [u8; 3], extra: &str) -> u64 {
 fn assert_ink(color: &str, background: [u8; 3], extra: &str, chrome: u64) {
     let got = ink(color, background, extra);
     let ratio = got as f64 / chrome as f64;
+    eprintln!("text ink {color} {extra}: {got} vs Chrome 148 {chrome} ({ratio:.3}x)");
     assert!(
         (0.96..=1.04).contains(&ratio),
         "{color} on {background:?} {extra}: ink {got}, Chrome 148 {chrome} ({ratio:.3}x)"
@@ -113,4 +114,60 @@ fn antialiased_inherits_from_the_root() {
     };
     let ratio = got as f64 / 304_446.0;
     assert!((0.96..=1.04).contains(&ratio), "inherited antialiased: ink {got} ({ratio:.3}x of Chrome 148)");
+}
+
+
+const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+/// (solid pixels, partially covered pixels, ink) of a 20px Ahem "X" (a
+/// full em square) at (10, 10) on white, after the web font has loaded.
+fn ahem_square(extra: &str) -> (usize, usize, u64) {
+    use base64::Engine as _;
+    let uri = format!(
+        "data:font/ttf;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(AHEM)
+    );
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: WIDTH, height: HEIGHT })
+        .expect("view");
+    let html = format!(
+        "<!doctype html><style>@font-face{{font-family:Ahem;src:url({uri})}}</style><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:10px;top:10px;font:20px/20px Ahem;color:#000;{extra}\">X</div></body>"
+    );
+    engine.load_html(view, &html).expect("load_html");
+    engine.render_view(view).expect("render");
+    let path = std::env::temp_dir().join(format!(
+        "rustkit-text-coverage-ahem-{}-{:?}.ppm",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    engine.capture_frame(view, path.to_str().unwrap()).expect("capture");
+    let ppm = std::fs::read(&path).expect("frame");
+    let _ = std::fs::remove_file(&path);
+    let px = &ppm[ppm.len() - WIDTH as usize * HEIGHT as usize * 3..];
+    let cov: Vec<u8> = px.chunks_exact(3).map(|p| 255 - p[1]).collect();
+    let solid = cov.iter().filter(|c| **c == 255).count();
+    let partial = cov.iter().filter(|c| **c > 0 && **c < 255).count();
+    let ink = cov.iter().map(|c| *c as u64).sum::<u64>();
+    (solid, partial, ink)
+}
+
+/// Chrome 148 dilates Ahem too: 400 solid pixels and a light fringe of 62
+/// partial ones (row above at 53/255, right column at 26/255), ink 104105.
+/// The undilated square (develop) has the 400 and no fringe.
+#[test]
+fn an_ahem_square_carries_chromes_light_fringe() {
+    let (solid, partial, ink) = ahem_square("");
+    eprintln!("ahem default: solid {solid} partial {partial} ink {ink} (Chrome 148: 400, 62, 104105)");
+    assert_eq!(solid, 400, "the em square itself");
+    assert!((50..=75).contains(&partial), "fringe pixels {partial}, Chrome 148 62");
+    let ratio = ink as f64 / 104_105.0;
+    assert!((0.98..=1.02).contains(&ratio), "ink {ink} ({ratio:.3}x of Chrome 148)");
+}
+
+/// `antialiased`: Chrome 148 draws the hard square, 400 solid, 0 partial.
+#[test]
+fn an_antialiased_ahem_square_has_no_fringe() {
+    let (solid, partial, _) = ahem_square("-webkit-font-smoothing:antialiased");
+    assert_eq!((solid, partial), (400, 0));
 }

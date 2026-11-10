@@ -455,6 +455,9 @@ pub struct Renderer {
 
     // State stacks
     clip_stack: Vec<ClipEntry>,
+    /// The `undilated` flag of the Text command being drawn (false outside
+    /// one): which glyph-mask law its glyphs are keyed and drawn with.
+    text_undilated: bool,
     /// Scratch buffer for `draw_clipped_quad`. Lives on the renderer so the
     /// hot path allocates once, not once per quad.
     clip_pieces: Vec<(Rect, f32)>,
@@ -803,6 +806,7 @@ impl Renderer {
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
             clip_stack: Vec::new(),
+            text_undilated: false,
             clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
@@ -2886,7 +2890,11 @@ impl Renderer {
                 ascent,
                 run,
                 faces,
+                undilated,
             } => {
+                // The glyph masks' coverage law for this command (see
+                // `GlyphCache::coverage_for`): read by both paths below.
+                self.text_undilated = *undilated;
                 // SHAPED-RUN CONTRACT (S0): a command that carries its run
                 // is painted from the run. The family-list path below is
                 // for commands without one, and for a run whose face the
@@ -2910,6 +2918,7 @@ impl Renderer {
                         faces.as_deref(),
                     );
                 }
+                self.text_undilated = false;
             }
 
             DisplayCommand::TextDecoration {
@@ -5862,6 +5871,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage: crate::glyph::coverage_for(crate::glyph::GRADIENT_TEXT_LUMINANCE, false),
             };
             let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
@@ -6021,11 +6031,13 @@ impl Renderer {
         layout_ascent: Option<f32>,
     ) -> bool {
         // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
+        let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], self.text_undilated);
         let key_for = |glyph_id: u16| RunGlyphKey {
             face: run.face.id,
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage,
         };
 
         // Every glyph's bitmap first, so a missing face is known before a
@@ -6189,6 +6201,7 @@ impl Renderer {
                 font_style,
                 web_face,
                 face,
+                coverage: crate::glyph::coverage_for([color.r, color.g, color.b], self.text_undilated),
             };
             // ADVANCE CONTRACT: layout's advance wins when present so
             // painted ink tracks measured width 1:1; the atlas advance is
@@ -10251,6 +10264,7 @@ mod shaped_run_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 
@@ -10352,6 +10366,7 @@ mod shaped_run_measured_face_tests {
             glyph_id: run.glyphs[0].glyph_id,
             font_size: 140,
             subpixel_phase: 0,
+            coverage: 0,
         };
         let (bitmap, ..) = rasterize_run_glyph(&key, 14.0).expect("drawn");
         assert!(bitmap.iter().any(|&v| v > 128), "the glyph has ink");
@@ -10382,6 +10397,7 @@ mod shaped_run_windows_paint_tests {
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
             subpixel_phase: 0,
+            coverage: 0,
         }
     }
 

@@ -2373,6 +2373,7 @@ impl SvgText {
                 ascent: Some(0.0),
                 run: None,
                 faces: None,
+                undilated: false,
             });
         }
     }

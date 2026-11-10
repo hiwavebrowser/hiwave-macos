@@ -53,6 +53,12 @@ pub struct GlyphKey {
     /// same character takes different bitmaps under different faces (`©` in
     /// Helvetica, `©️` in Apple Color Emoji), so the face is in the key.
     pub face: FaceKey,
+    /// The mask's coverage law, from [`coverage_for`]: 0 is the undilated
+    /// outline; `1 + b` is the dilated (CoreGraphics-smoothed) mask with
+    /// Skia's pre-blend for luminance bucket `b` baked in. Glyphs of text
+    /// in different buckets are different bitmaps, as in Skia's strike
+    /// cache (the luminance colour is part of its descriptor).
+    pub coverage: u8,
 }
 
 /// How a [`GlyphKey`] names its face (see [`GlyphKey::face`]).
@@ -93,6 +99,95 @@ pub struct RunGlyphKey {
     pub font_size: u32, // Fixed-point (size * 10), as `GlyphKey`
     /// As `GlyphKey::subpixel_phase`, and frozen at 0 for the same reason.
     pub subpixel_phase: u8,
+    /// As [`GlyphKey::coverage`].
+    pub coverage: u8,
+}
+
+/// The coverage law for a text run drawn in `rgb`: what Chrome's Skia does
+/// for A8 text on macOS (Chromium 148; this seat's CoreGraphics smoothing
+/// behaviour is `some`, measured with `SkCTFontGetSmoothBehavior`'s probe).
+///
+/// - `undilated` (`-webkit-font-smoothing: antialiased`, `text-rendering:
+///   geometricPrecision`: Blink sets hinting none): the outline's coverage,
+///   no pre-blend (`SkTypeface_Mac::onFilterRec` calls `ignorePreBlend`
+///   for unhinted A8 since `SK_GAMMA_APPLY_TO_A8` is not defined on mac).
+///   Returns 0.
+/// - otherwise the smoothed mask (`SkScalerContext_Mac::generateImage`)
+///   and the mask pre-blend of the luminance colour halved ("CoreGraphics
+///   smoothed text without subpixel coverage blitting goes from a gamma of
+///   2.0 for black foreground to a gamma of 1.0 for white foreground"),
+///   canonicalised to 3 bits (`SkTMaskGamma<3,3,3>::CanonicalColor`).
+///   Returns `1 + bucket`.
+///
+/// Other platforms keep their masks: 0.
+pub fn coverage_for(rgb: [u8; 3], undilated: bool) -> u8 {
+    if undilated || !cfg!(target_os = "macos") {
+        return 0;
+    }
+    // SkPaintPriv::ComputeLuminanceColor: the luminance of the colour in
+    // the sRGB colour space (SK_GAMMA_SRGB), as an 8-bit gray.
+    let lin = |c: u8| srgb_to_linear(c as f32 / 255.0);
+    let y = 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+    let lum = (255.0 * linear_to_srgb(y)).round() as u32;
+    let halved = lum / 2;
+    1 + (halved >> 5) as u8
+}
+
+/// The luminance colour Skia uses for a paint that is not a plain colour
+/// (a gradient): `SkPaintPriv::ComputeLuminanceColor`'s 0x7F807F.
+pub const GRADIENT_TEXT_LUMINANCE: [u8; 3] = [0x7F, 0x80, 0x7F];
+
+fn srgb_to_linear(x: f32) -> f32 {
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(x: f32) -> f32 {
+    if x <= 0.003_130_8 {
+        x * 12.92
+    } else {
+        1.055 * x.max(0.0).powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Skia's mask pre-blend table for coverage law `coverage` (see
+/// [`coverage_for`]), `None` for 0: `SkTMaskGamma_build_correcting_lut`
+/// with contrast 0 (onFilterRec sets it; CoreGraphics dilates for
+/// contrast), sRGB luma (SK_GAMMA_SRGB) and the bucket's canonical colour
+/// `sk_t_scale255<3>(bucket)`.
+pub fn mask_preblend(coverage: u8) -> Option<[u8; 256]> {
+    if coverage == 0 {
+        return None;
+    }
+    let b = (coverage - 1).min(7) as u32;
+    let src_i = (b << 5) | (b << 2) | (b >> 1);
+    let src = src_i as f32 / 255.0;
+    let dst = 1.0 - src;
+    let (lin_src, lin_dst) = (srgb_to_linear(src), srgb_to_linear(dst));
+    let mut table = [0u8; 256];
+    for (i, out) in table.iter_mut().enumerate() {
+        let a = i as f32 / 255.0;
+        *out = if (src - dst).abs() < 1.0 / 256.0 {
+            (255.0 * a).round() as u8
+        } else {
+            let lin_out = lin_src * a + (1.0 - a) * lin_dst;
+            let v = linear_to_srgb(lin_out);
+            (255.0 * ((v - dst) / (src - dst))).round().clamp(0.0, 255.0) as u8
+        };
+    }
+    Some(table)
+}
+
+/// `bitmap` through `coverage`'s pre-blend (unchanged for 0).
+pub fn apply_mask_preblend(bitmap: &mut [u8], coverage: u8) {
+    if let Some(table) = mask_preblend(coverage) {
+        for v in bitmap.iter_mut() {
+            *v = table[*v as usize];
+        }
+    }
 }
 
 impl RunGlyphKey {
@@ -116,8 +211,11 @@ pub fn rasterize_run_glyph(
     #[cfg(target_os = "macos")]
     {
         let font = rustkit_text::macos::face_font(key.face, shaped_size)?;
-        rustkit_text::macos::GlyphRasterizer::for_face(font, key.raster_size())
-            .rasterize_glyph_id(key.glyph_id, 0.0)
+        let mut raster = rustkit_text::macos::GlyphRasterizer::for_face(font, key.raster_size())
+            .with_dilation(key.coverage != 0)
+            .rasterize_glyph_id(key.glyph_id, 0.0)?;
+        apply_mask_preblend(&mut raster.0, key.coverage);
+        Some(raster)
     }
     #[cfg(windows)]
     {
@@ -543,6 +641,7 @@ impl GlyphCache {
             key.font_weight,
             key.font_style == 1,
         )
+        .with_dilation(key.coverage != 0)
     }
 
     /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
@@ -759,8 +858,9 @@ impl GlyphCache {
         &mut self,
         queue: &wgpu::Queue,
         key: &GlyphKey,
-        raster: (Vec<u8>, u32, u32, f32, f32, f32),
+        mut raster: (Vec<u8>, u32, u32, f32, f32, f32),
     ) -> Option<GlyphEntry> {
+        apply_mask_preblend(&mut raster.0, key.coverage);
         let entry = self.upload_mask(queue, key, raster)?;
         self.entries.insert(key.clone(), entry.clone());
         Some(entry)
@@ -1137,6 +1237,7 @@ pub(crate) fn rasterize_char_for_test(
         font_style: 0,
         subpixel_phase: 0,
         web_face: 0,
+        coverage: 0,
         face: FaceKey::default(),
     };
     rasterize_glyph_directwrite(&key, size)
@@ -1438,6 +1539,7 @@ mod tests {
             font_style: 0,
             subpixel_phase: phase,
             web_face: 0,
+            coverage: 0,
             face: FaceKey::default(),
         }
     }
@@ -1586,6 +1688,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            coverage: 0,
             face: FaceKey::default(),
         };
 
@@ -1597,6 +1700,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            coverage: 0,
             face: FaceKey::default(),
         };
 
@@ -1613,6 +1717,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            coverage: 0,
             face: FaceKey::default(),
         };
 
@@ -1624,6 +1729,7 @@ mod tests {
             font_weight: 400,
             font_style: 0,
             web_face: 0,
+            coverage: 0,
             face: FaceKey::default(),
         };
 

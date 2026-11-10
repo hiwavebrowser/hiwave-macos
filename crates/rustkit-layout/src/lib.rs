@@ -8744,6 +8744,13 @@ pub enum DisplayCommand {
         /// on the legacy callers (paint then decides with the same function
         /// on its own font) and wherever `advances` is `None`.
         faces: Option<Vec<rustkit_text::GlyphFace>>,
+        /// The glyphs are drawn from the undilated outline (Skia's path for
+        /// unhinted text on macOS: `-webkit-font-smoothing: antialiased`,
+        /// `text-rendering: geometricPrecision`). `false`, the default, is
+        /// Chrome's normal macOS text: CoreGraphics-smoothed (dilated)
+        /// masks with Skia's mask pre-blend for the text colour
+        /// (`ComputedStyle::text_dilated`).
+        undilated: bool,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -12239,6 +12246,7 @@ impl DisplayList {
                     ascent: Some(seat_ascent),
                     run: line_run.map(std::sync::Arc::new),
                     faces,
+                    undilated: !style.text_dilated(),
                 });
 
                 // Draw text decorations
