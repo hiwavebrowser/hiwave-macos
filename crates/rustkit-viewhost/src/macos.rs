@@ -517,6 +517,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             }
         }
         extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
+            let keycode: u16 = unsafe { msg_send![event, keyCode] };
+            if crate::take_tab_up(view_id_of(this).raw(), keycode) {
+                return; // a claimed Ctrl+Tab's release: not the page's
+            }
             record_key(this, event, true, None);
         }
         // ---- NSTextInputClient (CH2.E3) ----
@@ -694,13 +698,34 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let pass = |event: id| -> bool { msg_send![super(this, superclass), performKeyEquivalent: event] };
                 let kind: u64 = msg_send![event, type];
                 let flags: u64 = msg_send![event, modifierFlags];
-                if kind != 10 || flags & (1 << 20) == 0 {
+                let cmd = flags & (1 << 20) != 0;
+                // Ctrl+Tab and its Shift/Option forms (M1d): AppKit offers
+                // them here and, unclaimed, the window takes them for its
+                // key-view loop, so keyDown: never sees them. They go to
+                // the key stream: Ctrl+Tab / Ctrl+Shift+Tab are the app's
+                // (next/previous tab, `is_tab_cycle_chord`, as Chromium
+                // reserves them); Ctrl+Option+Tab is the page's (#1012 R1
+                // nit 2), as in Chrome.
+                // keyCode is read only for a Ctrl keyDown: it raises on
+                // other events (`ctrl_tab_route`).
+                let route = crate::ctrl_tab_route(kind, flags, || msg_send![event, keyCode]);
+                let ctrl_tab = route != crate::CtrlTabRoute::NotCtrlTab;
+                let cycle = route == crate::CtrlTabRoute::Cycle;
+                if kind != 10 || !(cmd || ctrl_tab) {
                     return pass(event);
                 }
                 let window: id = msg_send![this, window];
                 let responder: id = if window == nil { nil } else { msg_send![window, firstResponder] };
                 if responder != this as *const Object as id {
                     return pass(event);
+                }
+                if ctrl_tab {
+                    record_key(this, event, false, None);
+                    if cycle {
+                        // The app's: its release is not the page's either.
+                        crate::owe_tab_up(view_id_of(this).raw());
+                    }
+                    return true;
                 }
                 let key = pending_key(event, false, None);
                 let plain = text_of(msg_send![event, charactersIgnoringModifiers]);

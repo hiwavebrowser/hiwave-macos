@@ -6738,12 +6738,17 @@
                 performFind(e.shiftKey ? 'prev' : 'next');
             }
 
-            // Ctrl+1-9 - Switch tabs
+            // Ctrl+1-8 - the Nth tab; Ctrl+9 - the last tab (Chrome, Safari).
+            // On macOS the Tab menu has the same items (Cmd+1..9) for when a
+            // page has the keyboard; cancelling here is what keeps the menu
+            // from switching a second time while the chrome has it (M1d).
             if (isCtrl && e.key >= '1' && e.key <= '9') {
                 e.preventDefault();
-                const tabIndex = parseInt(e.key) - 1;
-                if (currentTabs[tabIndex]) {
-                    sendIpc('activate_tab', { id: String(currentTabs[tabIndex].id) });
+                const tab = e.key === '9'
+                    ? currentTabs[currentTabs.length - 1]
+                    : currentTabs[parseInt(e.key) - 1];
+                if (tab) {
+                    sendIpc('activate_tab', { id: String(tab.id) });
                 }
             }
 
