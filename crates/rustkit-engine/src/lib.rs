@@ -10418,7 +10418,10 @@ impl Engine {
             return miss("no rule index");
         };
         if reads.hover.anywhere || reads.active.anywhere {
-            return miss("a rule reads the pseudo-class where no compound shows it");
+            // LAT20: with the shape of the selector, so a hand-test log says
+            // which form to place next.
+            let shape = reads.hover.anywhere_shape.or(reads.active.anywhere_shape).unwrap_or("unplaced");
+            return miss(&format!("a rule reads the pseudo-class where no compound shows it ({shape})"));
         }
         let focus_moved = focus_before != focus_now;
         if focus_moved && (reads.focus.anywhere || reads.focus_within.anywhere || reads.focus_visible.anywhere) {
@@ -43979,6 +43982,30 @@ struct PointerReads {
     /// (a `:has()` argument that starts with `+` or `~`, a member the
     /// selector parser rejects): any element may count.
     anywhere: bool,
+    /// LAT20: the shape of the first selector that set `anywhere`
+    /// (`anywhere_shape`), for the relayout line's `restyle_miss`: never
+    /// the selector's text.
+    anywhere_shape: Option<&'static str>,
+}
+
+/// LAT20: what a selector member that names a pointer pseudo-class the
+/// index could not place looks like, as a word for the log.
+fn anywhere_shape(member: &str) -> &'static str {
+    if member.contains('"') || member.contains('\'') {
+        "quoted"
+    } else if member.contains('\\') {
+        "escaped"
+    } else if member.contains(":has(") {
+        "has"
+    } else if member.contains(":host") || member.contains("::slotted") || member.contains("::part") {
+        "shadow"
+    } else if member.contains(":nth-") {
+        "nth_of"
+    } else if member.contains(":where(") {
+        "where"
+    } else {
+        "unplaced"
+    }
 }
 
 /// A [`PointerCompound`]'s tag, classes, id and attribute selectors.
@@ -44010,16 +44037,43 @@ fn pointer_mark_name(mark: &str) -> &'static str {
 }
 
 /// How many times `text` names the pseudo-class `name` (`":focus"`): not
-/// counting a longer name it starts (`:focus-within`, `:hovered`).
+/// counting a longer name it starts (`:focus-within`, `:hovered`), an
+/// escaped colon inside an identifier (`.md\:hover\:underline`), or one
+/// inside a quoted string (`[title=":hover"]`). LAT20: those are text, and
+/// counting them made the pointer index call the sheet's `:hover` reads
+/// "anywhere", so every pointer move laid the page out.
 fn pseudo_named(text: &str, name: &str) -> usize {
-    text.match_indices(name)
-        .filter(|(at, _)| {
-            !text[at + name.len()..]
-                .chars()
-                .next()
-                .is_some_and(|c| c == '-' || c == '_' || c.is_ascii_alphanumeric())
-        })
-        .count()
+    let bytes = text.as_bytes();
+    let mut count = 0;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            // The escaped character is part of an identifier or string.
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            // Bytes, not `str` slices: `i` may sit inside a multi-byte
+            // character of a non-ASCII class name.
+            None if bytes[i..].starts_with(name.as_bytes())
+                && !bytes
+                    .get(i + name.len())
+                    .is_some_and(|&c| c == b'-' || c == b'_' || c == b'\\' || c >= 0x80 || c.is_ascii_alphanumeric()) =>
+            {
+                count += 1;
+                i += name.len();
+                continue;
+            }
+            None => {}
+        }
+        i += 1;
+    }
+    count
 }
 
 /// One compound a pointer pseudo-class is read on (S22, reddit: one
@@ -44058,7 +44112,10 @@ impl PointerReads {
                 continue;
             }
             let found = self.note_prepared(&prepared, mark, 0);
-            self.anywhere |= found != named;
+            if found != named {
+                self.anywhere = true;
+                self.anywhere_shape.get_or_insert_with(|| anywhere_shape(member));
+            }
         }
     }
 
