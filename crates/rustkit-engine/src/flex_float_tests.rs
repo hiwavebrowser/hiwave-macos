@@ -23,15 +23,30 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // The item is a block holding only a 150px block (or, below, only a
+    // float): the engine makes it 18 tall, a line box it does not have
+    // (Chromium 10). The same in a flex container that is not floated
+    // (`display: flex; gap: 10px; width: 210px` around the same items), so
+    // it is not this row's; the placement and widths already match.
+    "a-float-flex-shrinks-to-an-auto-items-content",
+    // The flex item `#i` holds only the floated flex container: 18 tall in
+    // the engine, 10 in Chromium, as for a flex item holding only a plain
+    // float (`#i` around `float: left; width: 300px; height: 10px`).
+    "a-float-flex-inside-a-flex-item",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
 fn a_floated_flex_container_is_laid_out_as_a_flex_container_as_in_chrome() {
-    let data: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tools/parity_oracle/flex_float_cases.json"))
-            .expect("case file");
-    let (w, h) = (data["viewport"][0].as_u64().unwrap(), data["viewport"][1].as_u64().unwrap());
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tools/parity_oracle/flex_float_cases.json"
+    ))
+    .expect("case file");
+    let (w, h) = (
+        data["viewport"][0].as_u64().unwrap(),
+        data["viewport"][1].as_u64().unwrap(),
+    );
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
         .create_headless_view(Bounds::new(0, 0, w as u32, h as u32))
@@ -40,8 +55,12 @@ fn a_floated_flex_container_is_laid_out_as_a_flex_container_as_in_chrome() {
     let mut gaps_that_pass = Vec::new();
     for case in data["cases"].as_array().expect("cases") {
         let name = case["name"].as_str().unwrap();
-        let chrome = case["chrome_boxes"].as_str().expect("run grid_flexible_row_log.mjs --write");
-        engine.load_html(id, case["html"].as_str().unwrap()).expect("load_html");
+        let chrome = case["chrome_boxes"]
+            .as_str()
+            .expect("run grid_flexible_row_log.mjs --write");
+        engine
+            .load_html(id, case["html"].as_str().unwrap())
+            .expect("load_html");
         let value = engine.execute_script(id, BOXES).expect("script");
         let got = value
             .strip_prefix("String(\"")
@@ -53,7 +72,12 @@ fn a_floated_flex_container_is_laid_out_as_a_flex_container_as_in_chrome() {
             _ => {}
         }
     }
-    assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{} wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
     assert!(
         gaps_that_pass.is_empty(),
         "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
