@@ -626,9 +626,52 @@ pub fn is_color_face(font: &CTFont) -> bool {
     font.symbolic_traits() & K_CT_FONT_COLOR_GLYPHS_TRAIT != 0
 }
 
+/// The advance Chrome gives a glyph of Apple's emoji faces (Apple Color
+/// Emoji, and the system font's `.AppleColorEmojiUI`), or `None` for any
+/// other face.
+///
+/// Core Text's advance for these sbix faces carries the font's `trak`
+/// tracking and comes back rounded up: 19 at 14px, 21 at 16px. Chrome for
+/// Testing 148 places the next character 18 and 20 along. Measured at 30
+/// sizes from 6 to 40px (one `🔍` span each, CB7a), Chrome's advance is
+/// exactly the width of a full-size emoji's image box at that size
+/// (`CTFontGetBoundingRectsForGlyphs` of U+1F600, 1.25em up to 16px,
+/// tapering to 1em at 24px and above) rounded half up; Core Text's own
+/// advance is not, nor is the unscaled `hmtx` advance (1em) or a size-1
+/// font scaled up. Every glyph of the face takes the same advance, as in
+/// Chrome (a flag, whose own image is narrower, is 18 at 14px too).
+pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
+    if !is_color_face(font) || !font.family_name().contains("Apple Color Emoji") {
+        return None;
+    }
+    let reference = color_glyph_id(font, '\u{1F600}')?;
+    extern "C" {
+        fn CTFontGetBoundingRectsForGlyphs(
+            font: core_text::font::CTFontRef,
+            orientation: u32,
+            glyphs: *const u16,
+            bounding_rects: *mut CGRect,
+            count: isize,
+        ) -> CGRect;
+    }
+    let mut bounds = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+    // SAFETY: `font` is a live CTFont; one glyph id is read and one rect
+    // written.
+    unsafe {
+        CTFontGetBoundingRectsForGlyphs(font.as_concrete_TypeRef(), 0, &reference, &mut bounds, 1);
+    }
+    let width = bounds.size.width;
+    // f64::round rounds a half away from zero, as Chrome does here
+    // (17.5 at 14px is 18, 22.5 at 21px is 23).
+    (width > 0.0).then(|| width.round() as f32)
+}
+
 /// The horizontal advance of `glyph` in `font`, in CSS px at the font's
 /// size: what layout measures a character at and what paint owes for it.
 pub fn glyph_advance(font: &CTFont, glyph: u16) -> f32 {
+    if let Some(advance) = apple_emoji_advance(font) {
+        return advance;
+    }
     extern "C" {
         fn CTFontGetAdvancesForGlyphs(
             font: core_text::font::CTFontRef,
@@ -1725,7 +1768,9 @@ impl GlyphRasterizer {
             )
             .to_vec();
 
-            let advance = advance_size.width as f32;
+            // Layout's advance for the same face (`glyph_advance`), so the
+            // glyph is centred on the width layout gave it.
+            let advance = apple_emoji_advance(font).unwrap_or(advance_size.width as f32);
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
             // padded bitmap, not the outline. bearing_y is baseline_seat's
             // integer row count (INTEGER-BASELINE CONTRACT).
