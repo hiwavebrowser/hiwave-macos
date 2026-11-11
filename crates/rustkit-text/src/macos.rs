@@ -120,13 +120,26 @@ impl TextShaper {
         let mut advances: Vec<f32> = Vec::with_capacity(char_count);
         let mut x_pos: f64 = 0.0;
         
+        // The run's own face may be an Apple emoji face (`font-family:
+        // "Apple Color Emoji"`): its glyphs advance as Chrome places them,
+        // as they do when reached by fallback (#1072 R1 nit 4).
+        let emoji_advance = apple_emoji_advance(&self.font).map(f64::from);
         for (i, glyph_advance) in glyph_advances.iter().enumerate() {
+            // The second unit of a surrogate pair: Core Text puts the glyph
+            // in the first slot and .notdef (with its advance) in this one.
+            // It draws nothing and takes no space.
+            let trailing_surrogate = (0xDC00..=0xDFFF).contains(&utf16_chars[i]);
+            let width = match emoji_advance {
+                _ if trailing_surrogate => 0.0,
+                Some(a) if glyphs[i] != 0 && glyph_advance.width > 0.0 => a,
+                _ => glyph_advance.width,
+            };
             positions.push((x_pos as f32, 0.0));
-            advances.push(glyph_advance.width as f32);
-            x_pos += glyph_advance.width;
+            advances.push(width as f32);
+            x_pos += width;
             
             // Handle missing glyphs (glyph ID 0)
-            if glyphs[i] == 0 {
+            if glyphs[i] == 0 && !trailing_surrogate {
                 // Use a fallback advance for missing glyphs
                 let fallback_advance = self.font.pt_size() * 0.5;
                 if advances.last().map(|a| *a == 0.0).unwrap_or(false) {
@@ -1603,7 +1616,10 @@ impl GlyphRasterizer {
             // dilation), so it does not paint lighter or heavier.
             let bitmap = draw_coverage_mask(font_ref, glyph, CGPoint::new(draw_x, draw_y), width, height, self.dilate, sx > 0.0);
 
-            let advance = advance_size.width as f32;
+            // The face's advance as layout takes it (`glyph_advance`): an
+            // Apple emoji face's is Chrome's, not Core Text's tracked one
+            // (#1072 R1 nit 3).
+            let advance = apple_emoji_advance(font).unwrap_or(advance_size.width as f32);
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
             // padded bitmap, not the outline. bearing_y is baseline_seat's
             // integer row count (INTEGER-BASELINE CONTRACT).
