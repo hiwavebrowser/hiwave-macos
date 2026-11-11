@@ -3,7 +3,9 @@
 //! This module handles communication between the JavaScript frontend
 //! and the Rust backend via WebView IPC.
 
+pub mod autofill;
 pub mod commands;
+pub mod inspector_payload;
 
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -271,10 +273,15 @@ pub enum IpcMessage {
         playing: bool,
     },
 
-    // Autofill (vault integration)
+    // Autofill (vault integration). The two content messages are answered
+    // only through `ipc::autofill` (see there); `domain` is advisory.
     TriggerAutofill,
     GetCredentialsForAutofill {
+        #[serde(default)]
         domain: String,
+    },
+    AutofillPick {
+        id: String,
     },
     ToggleTabMute {
         id: String,
@@ -393,15 +400,6 @@ impl IpcResponse {
     }
 }
 
-/// Credential for autofill (includes password for form filling)
-#[derive(Debug, Clone, Serialize)]
-pub struct AutofillCredential {
-    pub id: i64,
-    pub domain: String,
-    pub username: String,
-    pub password: String,
-}
-
 /// Tab information for IPC responses
 #[derive(Debug, Clone, Serialize)]
 pub struct TabInfo {
@@ -508,7 +506,6 @@ pub const JS_BRIDGE: &str = r#"
         // Vault
         unlockVault: (password) => window.ipc.postMessage(JSON.stringify({ cmd: 'unlock_vault', password })),
         lockVault: () => window.ipc.postMessage(JSON.stringify({ cmd: 'lock_vault' })),
-        getCredentials: (domain) => window.ipc.postMessage(JSON.stringify({ cmd: 'get_credentials', domain })),
         saveCredential: (url, username, password) => window.ipc.postMessage(JSON.stringify({ cmd: 'save_credential', url, username, password })),
 
         // Focus mode

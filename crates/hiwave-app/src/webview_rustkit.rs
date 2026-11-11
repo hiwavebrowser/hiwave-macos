@@ -2045,6 +2045,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// The event loop asks for a turn twice per wake (before and after the
     /// input it drains), so a page whose interval spins ran two turns back
     /// to back and the window took no event between them.
+    /// The 200 ms hold spins in `spin()` calls: Boa's loop limit (row JS1) counts per call frame, so a bare loop's length depended on Boa's speed.
+    /// The hold is `< 202`: Date.now() has 1 ms granularity, so the hold needs a margin above the 200 ms bound.
     #[test]
     fn a_slow_live_turn_is_not_followed_at_once_by_another() {
         let url = slow_server(Duration::ZERO, "<p>x</p>");
@@ -2052,7 +2054,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 200) {} }, 100);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 202) { spin(); } }, 100);",
         );
         std::thread::sleep(Duration::from_millis(105));
         let first = Instant::now();
@@ -2076,6 +2078,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// #727 Atlas hold, item 3: a click that comes after a live turn the
     /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
     /// listener.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     #[test]
     fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
         let url = slow_server(
@@ -2086,8 +2089,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
-             setTimeout(function () { while (true) {} }, 1);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
+             setTimeout(function () { while (true) { spin(); } }, 1);",
         );
         std::thread::sleep(Duration::from_millis(5));
         let turn = Instant::now();
@@ -2454,10 +2457,11 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// M4 acceptance: with a page script spinning, a click is taken by the
     /// window within 100 ms, and the page hears it once the spin is
     /// stopped: queued, never dropped.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     fn a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(view: RustKitView) {
         let (base, _log) = logging_server(SPIN_PAGE);
         load_and_settle(&view, &base);
-        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let _ = read(&view, "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} setTimeout(function () { while (true) { spin(); } }, 30); 'armed'");
         let at = Instant::now() + Duration::from_millis(250);
         let late = wake_until(&view, at);
         view.mouse_down_at_point(10.0, 10.0);
@@ -2793,16 +2797,17 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
         assert_eq!(read(&view, "String(typeof window.spun)"), r#"String("number")"#);
     }
 
-    /// Stage 1: a bare `while (true) {}`. In the app it never reaches the
-    /// 15 s budget: the loop-iteration limit (10M back-edges) ends it first,
-    /// and until H19 nothing in the log said so (the load just took longer).
+    /// Stage 1: a bare `while (true) {}`. The 10M loop-iteration count that
+    /// used to end it first is gone (JS1: the limit is now a 1G backstop), so
+    /// the load-script budget (about 15 s) ends it, and the log says so
+    /// (until H19 nothing in the log said why the load just took longer).
     #[test]
     fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
         let (view, took, log) = load_spin(PURE_SPIN_PAGE);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
         let why: Vec<&str> = log
             .lines()
-            .filter(|line| line.contains("Script stopped at the loop-iteration limit"))
+            .filter(|line| line.contains("Script stopped at the script budget"))
             .collect();
         assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
         assert!(why[0].contains("source=inline#1"), "{}", why[0]);

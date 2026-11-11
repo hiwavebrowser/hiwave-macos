@@ -32,7 +32,7 @@ pub use traits::{ViewHostTrait, WindowHandle};
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    claim_key_equivalent, drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord,
+    begin_key_equivalent, claim_key_equivalent, drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord,
     set_view_cursor,
     set_view_tooltip,
 };
@@ -40,6 +40,12 @@ pub use macos::{
 /// page's (see the macOS `claim_key_equivalent`).
 #[cfg(not(target_os = "macos"))]
 pub fn claim_key_equivalent(_token: u64) -> bool {
+    true
+}
+/// No view holds Cmd chords for a menu here: the page hears every chord
+/// (see the macOS `begin_key_equivalent`).
+#[cfg(not(target_os = "macos"))]
+pub fn begin_key_equivalent(_token: u64) -> bool {
     true
 }
 #[cfg(target_os = "macos")]

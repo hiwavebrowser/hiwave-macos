@@ -208,8 +208,11 @@ impl Engine {
     /// edit to run. The window stops waiting for the page's answer after
     /// 100 ms and gives the chord to the menu (M1e); the menu's Paste or
     /// Undo then edits the field, and a page that reaches the chord late
-    /// must not edit again (#1015 R1 nit 1). The keydown is heard either
-    /// way. A refused default is not a claim.
+    /// must not edit again (#1015 R1 nit 1). A refused default is not a
+    /// claim. (Since M1g the page protocol dispatches a chord only if its
+    /// wait has not run out, and a chord whose keydown has started no
+    /// longer goes to the menu at the deadline, so on that path this is a
+    /// guard that holds.)
     pub fn handle_command_key_if(
         &mut self,
         id: EngineViewId,
