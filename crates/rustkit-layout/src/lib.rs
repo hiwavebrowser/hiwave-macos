@@ -1796,12 +1796,13 @@ impl TextLine {
         content_x: f32,
         content_y: f32,
         line_height: f32,
+        pitch: f32,
     ) -> Rect {
         let expansion =
             self.justify_space * Self::justification_opportunities(self.text.trim_end()) as f32;
         Rect {
             x: content_x + self.x_offset,
-            y: content_y + index as f32 * line_height,
+            y: content_y + index as f32 * pitch,
             width: self.width + expansion,
             height: line_height,
         }
@@ -2030,6 +2031,14 @@ pub struct LayoutBox {
     /// css-grid-1 §6), so its auto height encloses its floats. Set by the
     /// flex and grid containers on their in-flow children.
     pub formatting_root: bool,
+    /// SET2: the step between the lines of a WRAPPED text run when it is
+    /// larger than the run's own line-height: every line box is the union of
+    /// the block's strut and the run's box on the baseline (CSS2 §10.8), so a
+    /// 12.8px `line-height: 1.5` run (19.2) in a 16px system-ui block steps
+    /// 20.19 per line (Chrome for Testing 148). `None` steps by the run's
+    /// line-height. Set by the block that places the run; the run's content
+    /// height is then `line_height + (lines - 1) * pitch`.
+    pub text_line_pitch: Option<f32>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2089,6 +2098,7 @@ impl LayoutBox {
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
             formatting_root: false,
+            text_line_pitch: None,
         }
     }
 
@@ -2430,12 +2440,19 @@ impl LayoutBox {
             _ => return None,
         };
         let content = self.dimensions.content;
-        let line_height = content.height / lines.len() as f32;
+        // SET2: with a pitch the height is `line_height + (n - 1) * pitch`.
+        let (line_height, pitch) = match self.text_line_pitch {
+            Some(pitch) => (content.height - (lines.len() as f32 - 1.0) * pitch, pitch),
+            None => {
+                let lh = content.height / lines.len() as f32;
+                (lh, lh)
+            }
+        };
         Some(
             lines
                 .iter()
                 .enumerate()
-                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height))
+                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height, pitch))
                 .collect(),
         )
     }
@@ -2983,6 +3000,7 @@ impl LayoutBox {
 
         let container_width = containing_block.content.width;
         self.text_lines = None;
+        self.text_line_pitch = None;
         // Block-path text never starts mid-line; a box re-laid out here
         // (e.g. after a line wrap re-layout) must shed any stale phase-5
         // flow state from an earlier pass.
@@ -3098,12 +3116,46 @@ impl LayoutBox {
     /// content left, that text's line height)`. `None` when every
     /// descendant sits on one line. The last wrapped text descendant wins
     /// (it is the one the flow continues after).
+    /// SET2: give every wrapped text run in `b` (the run itself, or the
+    /// text inside an inline) the pitch of a line box that unites the
+    /// block's `strut` with the run's own box on the baseline, when that is
+    /// more than the run's line-height. Returns the run's own extents above
+    /// and below the baseline, its line-height and the pitch of the LAST
+    /// wrapped run (the one whose last line stays open), or `None` when
+    /// nothing in `b` wrapped.
+    fn set_wrapped_pitch(b: &mut LayoutBox, strut: (f32, f32)) -> Option<((f32, f32), f32, f32)> {
+        let mut out = None;
+        if let (BoxType::Text(_), Some(n)) = (&b.box_type, b.text_lines.as_ref().map(|l| l.len())) {
+            if n > 1 {
+                let own = Self::text_line_box_extents(&b.style);
+                let lh = b.dimensions.content.height / n as f32;
+                let union = own.0.max(strut.0) + own.1.max(strut.1);
+                let pitch = if union > lh + 0.01 { union } else { lh };
+                if pitch > lh {
+                    b.text_line_pitch = Some(pitch);
+                    b.dimensions.content.height = lh + (n as f32 - 1.0) * pitch;
+                }
+                out = Some((own, lh, pitch));
+            }
+        }
+        for c in &mut b.children {
+            if let Some(found) = Self::set_wrapped_pitch(c, strut) {
+                out = Some(found);
+            }
+        }
+        out
+    }
+
     fn inline_wrapped_tail(inline: &LayoutBox, container_left: f32) -> Option<(usize, f32, f32)> {
         fn walk(b: &LayoutBox, left: f32, out: &mut Option<(usize, f32, f32)>) {
             if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
                 if let Some(last) = lines.last().filter(|_| lines.len() > 1) {
                     let end = b.dimensions.content.x - left + last.x_offset + last.width;
-                    *out = Some((lines.len(), end.max(0.0), b.get_line_height()));
+                    *out = Some((
+                        lines.len(),
+                        end.max(0.0),
+                        b.text_line_pitch.unwrap_or_else(|| b.get_line_height()),
+                    ));
                 }
             }
             for c in &b.children {
@@ -3350,6 +3402,7 @@ impl LayoutBox {
         let line_count = text_lines.len();
         let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
         self.text_lines = Some(text_lines);
+        self.text_line_pitch = None;
         self.text_flow_first_offset = Some(first_line_offset);
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = line_top_y;
@@ -6423,9 +6476,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -6434,10 +6490,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -6446,7 +6501,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -6528,13 +6583,18 @@ impl LayoutBox {
                     // after the loop (the open last line is aligned by the
                     // recorded-lines pass when it eventually closes).
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -6763,7 +6823,7 @@ impl LayoutBox {
             }
             match (&c.text_flow_first_offset, &c.text_lines) {
                 (Some(_), Some(tls)) if tls.len() > 1 => {
-                    box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
+                    box_top + (tls.len() as f32 - 1.0) * c.text_line_pitch.unwrap_or_else(|| c.get_line_height())
                 }
                 _ => box_top,
             }
@@ -7536,9 +7596,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -7547,10 +7610,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -7559,7 +7621,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -7633,13 +7695,18 @@ impl LayoutBox {
                 } else {
                     // B2: closed lines aligned by align_split_close below.
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -12824,7 +12891,13 @@ impl DisplayList {
                         // the layout export's inline union (TextLine::
                         // fragment_rect). `x`/`content_y` are this box's
                         // content origin, which is what that rule takes.
-                        let frag = l.fragment_rect(i, x, content_y, line_height);
+                        let frag = l.fragment_rect(
+                            i,
+                            x,
+                            content_y,
+                            line_height,
+                            layout_box.text_line_pitch.unwrap_or(line_height),
+                        );
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             frag.x,
@@ -21782,7 +21855,7 @@ mod inline_fragment_union_tests {
             justify_space: 4.0,
         };
         // "a b c" has two separators, so the line spans 50 + 2 * 4.
-        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0).width, 58.0);
+        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0, 20.0).width, 58.0);
     }
 
     /// A single-run text box has no `text_lines`; its content rect already IS
