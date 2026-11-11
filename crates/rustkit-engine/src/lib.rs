@@ -11563,8 +11563,12 @@ impl layout_ctx::LayoutCtx {
                     break;
                 }
                 lay.container_passes.set(lay.container_passes.get() + 1);
+                // A build that starts later goes through `for_build` (BV1).
+                // Nothing moves the focus between these passes today (every
+                // writer of `focused_node` needs `&mut Engine`), so this
+                // reads the same focus; it keeps the rule in one place.
                 root_box = self.lay_out_document_pass(
-                    building.clone(),
+                    building.for_build(),
                     document,
                     external_stylesheets,
                     javascript_enabled,
