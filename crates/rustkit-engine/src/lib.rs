@@ -24193,6 +24193,7 @@ impl Engine {
                         dpr: building.dpr,
                         focus: lay.focused_node.get(),
                         external_sheets: sheets.clone(),
+                        external_sheet_owners: owners.clone(),
                     };
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
