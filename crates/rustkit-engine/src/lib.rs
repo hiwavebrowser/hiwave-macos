@@ -640,6 +640,8 @@ mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod button_line_height_tests;
+#[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
 mod record_elapsed_tests;
@@ -15754,6 +15756,32 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             return;
+        }
+
+        // Which vertical box sides the author declared, zero and `none` included: a form
+        // control keeps the UA's padding and border on a side nobody declared (CB3).
+        if matches!(
+            property,
+            "padding" | "padding-top" | "padding-bottom"
+        ) {
+            style.padding_v_declared = true;
+        }
+        if matches!(property, "line-height" | "font") {
+            style.line_height_declared = true;
+        }
+        if matches!(
+            property,
+            "border"
+                | "border-top"
+                | "border-bottom"
+                | "border-width"
+                | "border-style"
+                | "border-top-width"
+                | "border-bottom-width"
+                | "border-top-style"
+                | "border-bottom-style"
+        ) {
+            style.border_v_declared = true;
         }
 
         // Handle CSS-wide keywords
@@ -31648,7 +31676,8 @@ mod tests {
         // the UA 13.333px font), checkbox 13x13, textarea 15px/row + 2 —
         // RustKit's old blobs measured 28/32/16 and every section below slid
         // by the deficit. Author padding must still compose (DIG-1/DIG-2):
-        // a pad-8 button stays ~31.
+        // a pad-8 button is the 15 px line + 16 + the 4 px UA border (35; CB3b: Chrome CfT 148 measured
+        // on Linux and macOS, bare 16px Arial button 24, padding 8px 16px 38).
         let html = r#"<!DOCTYPE html>
             <html><body>
               <div><input type="text" placeholder="bare"></div>
@@ -31704,10 +31733,10 @@ mod tests {
 
         let expect = [
             ("bare text input", 19.0, 1.0),
-            ("bare button", 19.0, 1.0),
+            ("bare button", 21.0, 0.0),
             ("checkbox", 13.0, 1.0),
             ("default textarea (2 rows)", 32.0, 1.0),
-            ("author-padded button", 31.0, 1.0),
+            ("author-padded button", 35.0, 0.0),
         ];
         for ((name, want, tol), got) in expect.iter().zip(&heights) {
             assert!(

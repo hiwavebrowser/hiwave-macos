@@ -3162,6 +3162,17 @@ pub struct ComputedStyle {
     /// `z-index: auto` both leave `z_index` at 0, and only the computed
     /// style reads them apart (`0` / `auto`).
     pub z_index_declared: bool,
+    /// An author rule set a vertical padding (`padding`, `padding-top`/`-bottom`, a logical
+    /// form), zero included. A form control with no author padding keeps the UA's (CB3).
+    pub padding_v_declared: bool,
+    /// An author rule set a vertical border width or style (`border`, `border-top`/`-bottom`
+    /// and their width/style longhands, `border-width`, `border-style`), `none` and zero included.
+    pub border_v_declared: bool,
+    /// An author rule set `line-height` (or the `font` shorthand) on THIS element. A button's
+    /// line is `normal` otherwise, even though `line-height` inherits: Chrome's UA `font:
+    /// -webkit-small-control` on form controls resets it, so `html { line-height: 1.5 }` does not
+    /// make a bare button 5 px taller (CB3b).
+    pub line_height_declared: bool,
 
     // Transforms
     pub transform: TransformList,
