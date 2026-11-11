@@ -3804,17 +3804,6 @@ impl LayoutBox {
             }
         };
 
-        // `min-width` / `max-width` (CSS 2.1 §10.4), which a form control ignored: a `<button
-        // style="min-width: 100px">` was its label wide (Chrome for Testing 148: 100; CB3c, and
-        // the select Reduce measured in B22). A minimum wins over a maximum. A content-box
-        // control (text input, textarea) takes its padding and border on top, as `width` does.
-        let width = {
-            let max = self.replaced_length(&self.style.max_width, Some(width_base)).map(|m| m + extra_w);
-            let min = self.replaced_length(&self.style.min_width, Some(width_base)).map(|m| m + extra_w);
-            let clamped = max.map_or(width, |m| width.min(m));
-            min.map_or(clamped, |m| clamped.max(m))
-        };
-
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px + extra_h,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
