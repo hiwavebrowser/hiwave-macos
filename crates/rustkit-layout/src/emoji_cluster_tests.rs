@@ -56,3 +56,13 @@ fn a_partly_formed_zwj_sequence_is_one_advance_per_glyph() {
     let got = width(text, "Helvetica", 14.0);
     assert!((got - 36.0).abs() < 0.05, "man-bald + see-no-evil at 14px: {got}, Chromium 36");
 }
+
+/// A run whose own face is Apple Color Emoji folds its sequences too:
+/// `👍🏽` in `font: 14px "Apple Color Emoji"` is 18 in Chrome for Testing
+/// 148, one advance, as by fallback.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sequence_in_the_emoji_face_as_primary_is_one_advance() {
+    let got = width(SKIN, "Apple Color Emoji", 14.0);
+    assert!((got - 18.0).abs() < 0.05, "skin tone in the emoji face at 14px: {got}, Chromium 18");
+}
