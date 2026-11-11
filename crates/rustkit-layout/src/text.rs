@@ -3111,11 +3111,36 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(system.primary, "Segoe UI");
 
-        let apple = FontFamilyChain::from_css_value("-apple-system");
-        #[cfg(target_os = "macos")]
-        assert_eq!(apple.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(apple.primary, "Segoe UI");
+        let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
+        assert_eq!(blink.primary, system.primary);
+    }
+
+    /// `-apple-system` is WebKit's name for the system font. Chrome has never
+    /// supported it: it is an unknown family, skipped in the stack like any
+    /// font that is not installed (CB7b). Chrome for Testing 148 on macOS,
+    /// `getBoundingClientRect` of "Hello world" at 14px: `-apple-system`
+    /// alone is 67.27, as the default serif (Times) is, where the system
+    /// font is 72.34; `-apple-system, BlinkMacSystemFont` is the system
+    /// font; `-apple-system, "Segoe UI", Helvetica` is Helvetica (69.25).
+    #[test]
+    fn apple_system_is_an_unknown_family_as_in_chrome() {
+        let serif = FontFamilyChain::serif();
+        let alone = FontFamilyChain::from_css_value("-apple-system");
+        assert_eq!(alone.primary, serif.primary, "-apple-system alone is the default serif");
+        let system = FontFamilyChain::from_css_value("system-ui");
+        let then_blink = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont");
+        assert_eq!(then_blink.primary, system.primary, "the next family, the system font");
+        let stack = FontFamilyChain::from_css_value("-apple-system, \"Segoe UI\", Helvetica");
+        let mut walk = std::iter::once(stack.primary.as_str())
+            .chain(stack.fallbacks.iter().map(String::as_str));
+        assert!(
+            !walk.any(|f| f == system.primary || f.eq_ignore_ascii_case("-apple-system")),
+            "no system font ahead of Helvetica: {} {:?}",
+            stack.primary,
+            stack.fallbacks
+        );
+        assert_eq!(stack.primary, "Segoe UI");
+        assert_eq!(stack.fallbacks.first().map(String::as_str), Some("Helvetica"));
     }
 
     /// A generic keyword after families that are not installed resolves

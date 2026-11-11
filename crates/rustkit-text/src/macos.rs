@@ -2286,6 +2286,17 @@ mod tests {
         }
     }
 
+    /// Paint resolves `-apple-system` as Chrome does: an unknown family,
+    /// skipped (CB7b; Chrome for Testing 148, see the layout chain's pin).
+    #[test]
+    fn create_font_skips_apple_system_like_chrome() {
+        let ps = |family: &str| create_font(family, 14.0).expect("a font").postscript_name();
+        assert_eq!(ps("-apple-system"), ps("serif"), "alone: the default serif");
+        assert_eq!(ps("-apple-system, BlinkMacSystemFont"), ps("system-ui"));
+        assert_eq!(ps("BlinkMacSystemFont"), ps("system-ui"));
+        assert_eq!(ps("-apple-system, \"Segoe UI\", Helvetica"), "Helvetica");
+    }
+
     /// Paint draws the fallback glyph from that same face: the advance the
     /// rasteriser reports is Menlo's, not Apple Symbols'.
     #[test]
