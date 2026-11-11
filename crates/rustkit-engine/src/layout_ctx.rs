@@ -87,6 +87,8 @@ pub(crate) struct BuildView {
     pub(crate) url: Option<Url>,
     /// The viewport in CSS px: the headless bounds, else the host surface.
     pub(crate) viewport: Option<(f32, f32)>,
+    /// The device pixel ratio an `<img>`'s `srcset` is selected for (E54b).
+    pub(crate) dpr: f32,
     /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
     /// so the alternative was checking "is this node focused in ANY view",
     /// which would mark a node focused in one view while building another.
@@ -94,6 +96,9 @@ pub(crate) struct BuildView {
     /// The view's `<link>` sheets: the rule-index fingerprint vouches for
     /// them only when the build was handed this very list.
     pub(crate) external_sheets: Rc<Vec<rustkit_css::Stylesheet>>,
+    /// The `<link>` that owns each of `external_sheets`, for its place
+    /// among the `<style>` sheets (`sheet_document_order`).
+    pub(crate) external_sheet_owners: Rc<Vec<rustkit_dom::NodeId>>,
 }
 
 impl LayoutCtx {
@@ -441,8 +446,18 @@ impl LayoutCtx {
         self.building.borrow().as_ref().and_then(|b| b.focus)
     }
 
+    pub(crate) fn building_dpr(&self) -> f32 {
+        self.building.borrow().as_ref().map_or(1.0, |b| b.dpr)
+    }
+
     pub(crate) fn building_viewport(&self) -> Option<(f32, f32)> {
         self.building.borrow().as_ref().and_then(|b| b.viewport)
+    }
+
+    /// The owners of the building view's external sheets; empty outside
+    /// a view build.
+    pub(crate) fn building_external_sheet_owners(&self) -> Rc<Vec<rustkit_dom::NodeId>> {
+        self.building.borrow().as_ref().map(|b| b.external_sheet_owners.clone()).unwrap_or_default()
     }
 
     pub(crate) fn building_url(&self) -> Option<Url> {
@@ -661,12 +676,25 @@ pub(crate) struct FailedImages {
 }
 
 /// An `<img>`'s `src` and the image it painted last ([`ViewLayout::shown_images`]).
-#[derive(Default)]
 pub(crate) struct ImgSource {
     /// The absolute URL its `src` (or `srcset` pick) names now.
     pub(crate) wanted: String,
+    /// The density (image pixels per CSS pixel) of the pick `wanted` names (E54b): `srcset` picks
+    /// a 2x image for a 1x box, and its natural size is the decoded size over that density.
+    pub(crate) wanted_density: f32,
     /// The last loaded image it painted.
     pub(crate) shown: Option<String>,
+    /// The density of the pick `shown` came from. During a pending swap the box paints `shown`,
+    /// so its natural size divides by THIS, never by the new pick's `wanted_density`.
+    pub(crate) shown_density: f32,
+}
+
+/// An image with no pick yet is 1x: a derived `Default` would be 0.0, which divides a natural
+/// size by zero.
+impl Default for ImgSource {
+    fn default() -> Self {
+        Self { wanted: String::new(), wanted_density: 1.0, shown: None, shown_density: 1.0 }
+    }
 }
 
 /// What `getComputedStyle` reads for an element with no layout box
@@ -684,14 +712,25 @@ pub(crate) struct BoxlessStyle {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_img_source_with_no_pick_yet_is_1x() {
+        // A derived Default gave 0.0, which divides a natural size by zero if either density is
+        // read before a pick records one (Prometheus LOW on #1039).
+        let source = ImgSource::default();
+        assert_eq!(source.wanted_density, 1.0);
+        assert_eq!(source.shown_density, 1.0);
+    }
+
     fn build_view(lay: &Rc<ViewLayout>) -> BuildView {
         BuildView {
             id: EngineViewId::new(),
             lay: Some(lay.clone()),
             url: None,
+            dpr: 1.0,
             viewport: None,
             focus: None,
             external_sheets: Rc::default(),
+            external_sheet_owners: Rc::default(),
         }
     }
 

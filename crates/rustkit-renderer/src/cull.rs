@@ -170,6 +170,7 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
     Some(match cmd {
         C::PushClip(_)
         | C::PushClipRounded { .. }
+        | C::PushClipPath { .. }
         | C::PopClip
         | C::PushStackingContext { .. }
         | C::PopStackingContext

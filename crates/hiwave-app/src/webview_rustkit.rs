@@ -2797,16 +2797,17 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
         assert_eq!(read(&view, "String(typeof window.spun)"), r#"String("number")"#);
     }
 
-    /// Stage 1: a bare `while (true) {}`. In the app it never reaches the
-    /// 15 s budget: the loop-iteration limit (10M back-edges) ends it first,
-    /// and until H19 nothing in the log said so (the load just took longer).
+    /// Stage 1: a bare `while (true) {}`. The 10M loop-iteration count that
+    /// used to end it first is gone (JS1: the limit is now a 1G backstop), so
+    /// the load-script budget (about 15 s) ends it, and the log says so
+    /// (until H19 nothing in the log said why the load just took longer).
     #[test]
     fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
         let (view, took, log) = load_spin(PURE_SPIN_PAGE);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
         let why: Vec<&str> = log
             .lines()
-            .filter(|line| line.contains("Script stopped at the loop-iteration limit"))
+            .filter(|line| line.contains("Script stopped at the script budget"))
             .collect();
         assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
         assert!(why[0].contains("source=inline#1"), "{}", why[0]);

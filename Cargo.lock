@@ -2752,6 +2752,7 @@ dependencies = [
 name = "hiwave-shield-intercept"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "hiwave-shield",
  "http",
  "rustkit-net",
