@@ -760,7 +760,9 @@ pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)>
         static SHAPED: RefCell<HashMap<Key, Option<(u16, usize)>>> = RefCell::new(HashMap::new());
     }
     const MAX_ENTRIES: usize = 4096;
-    let key = (postscript_name_or_empty(face), (face.pt_size() as f32).to_bits(), cluster.to_string());
+    let Some(key) = shaped_cache_key(&postscript_name_or_empty(face), face.pt_size(), cluster) else {
+        return emoji_cluster_glyph_uncached(face, cluster);
+    };
     if let Some(hit) = SHAPED.with(|m| m.borrow().get(&key).copied()) {
         return hit;
     }
@@ -773,6 +775,11 @@ pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)>
         m.insert(key, shaped);
     });
     shaped
+}
+
+/// The shaped-sequence cache key for a face named `ps_name` at `size`.
+fn shaped_cache_key(ps_name: &str, size: f64, cluster: &str) -> Option<(String, u32, String)> {
+    Some((ps_name.to_string(), (size as f32).to_bits(), cluster.to_string()))
 }
 
 fn emoji_cluster_glyph_uncached(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
@@ -2577,6 +2584,15 @@ mod tests {
             assert_eq!(emoji_cluster_glyph(&face, family), first);
         }
         assert_eq!(emoji_cluster_lines(), before, "no CTLine for a sequence already shaped");
+    }
+
+    /// A face with no PostScript name (a downloaded face can lack one) is not
+    /// cached by name: two such faces would share an entry and one would
+    /// draw the other's glyph (Prometheus delta R1 LOW on #1076).
+    #[test]
+    fn a_nameless_face_is_not_cached_by_name() {
+        assert!(shaped_cache_key("", 14.0, "\u{1F44D}\u{1F3FD}").is_none());
+        assert!(shaped_cache_key("AppleColorEmoji", 14.0, "\u{1F44D}\u{1F3FD}").is_some());
     }
 
     /// Paint draws the fallback glyph from that same face: the advance the
