@@ -55,6 +55,11 @@ PINS = json.loads((HERE / "pins.json").read_text())["suites"]
 SUITES_DIR = pathlib.Path(os.environ.get("STRESS_SUITES", pathlib.Path.home() / "zg-measure" / "stress-suites"))
 LOCK = pathlib.Path.home() / ".claude" / "realwindow.lock"
 MIN_IDLE_S = 180
+# The Mac's load rule (2026-11-11): nothing starts at a 1-minute load of
+# START_LOAD or more, and a score counts only when the run started below
+# SCORE_LOAD. report.py discards the rest.
+START_LOAD = 6.0
+SCORE_LOAD = 3.0
 QUIET = (17 * 60, 19 * 60 + 30)  # no visible window, America/New_York
 MOTIONMARK_TESTS = ["Multiply", "Canvas Arcs", "Leaves", "Paths", "Canvas Lines", "Images", "Design", "Suits"]
 
@@ -231,6 +236,16 @@ class Sink:
 
 # ── guards ─────────────────────────────────────────────────────────────────
 
+def wait_for_load(limit, wait_s):
+    """Block until the 1-minute load is below `limit`; False if it never was."""
+    end = time.time() + wait_s
+    while os.getloadavg()[0] >= limit:
+        if time.time() >= end:
+            return False
+        time.sleep(15)
+    return True
+
+
 def eastern_minutes(offset_s=0):
     from zoneinfo import ZoneInfo
     now = datetime.datetime.now(ZoneInfo("America/New_York")) + datetime.timedelta(seconds=offset_s)
@@ -267,12 +282,11 @@ class WindowLock:
                         sys.exit(2)
                     time.sleep(10)
         try:
-            for when in (0, self.limit_s):
-                m = eastern_minutes(when)
-                if QUIET[0] <= m < QUIET[1]:
-                    raise SystemExit("a window would be up between 17:00 and 19:30 ET; not run")
-            if eastern_minutes() < QUIET[0] <= eastern_minutes() + self.limit_s / 60:
-                raise SystemExit("the run could last into 17:00 ET; not run")
+            # Neither the start nor the latest possible end may fall in the
+            # quiet window, and the run may not span it.
+            start, end = eastern_minutes(), eastern_minutes() + self.limit_s / 60.0
+            if start < QUIET[1] and end >= QUIET[0]:
+                raise SystemExit("a window could be up between 17:00 and 19:30 ET; not run")
             end = time.time() + self.wait_s
             while hid_idle_seconds() < MIN_IDLE_S:
                 if time.time() >= end:
@@ -495,6 +509,10 @@ def main():
     ap.add_argument("--trace", action="store_true", help="report every subtest start (more requests; for finding a hang)")
     ap.add_argument("--headed", action="store_true", help="chrome: a visible window (takes the real-window lock)")
     ap.add_argument("--lock-wait", type=int, default=1200, help="seconds to wait for the lock and for an idle seat")
+    ap.add_argument("--max-load", type=float, default=SCORE_LOAD,
+                    help="start only below this 1-minute load (default %.0f, where a score counts; at most %.0f, "
+                         "for runs that only look for where a suite stops)" % (SCORE_LOAD, START_LOAD))
+    ap.add_argument("--load-wait", type=int, default=1800, help="seconds to wait for the load to come down")
     ap.add_argument("--env", action="append", default=[], help="KEY=VALUE for the engine process (repeatable)")
     ap.add_argument("--until-exit", action="store_true",
                     help="hiwave-headless: never stop the engine early, so its event log (requests, script errors) is written")
@@ -504,6 +522,11 @@ def main():
     binary = pathlib.Path(args.binary).resolve()
     if not binary.is_file():
         sys.exit("no binary at %s" % binary)
+    max_load = min(args.max_load, START_LOAD)
+    if not wait_for_load(max_load, args.load_wait):
+        print("1-minute load %.1f stayed at or above %.1f for %d s; not run"
+              % (os.getloadavg()[0], max_load, args.load_wait), file=sys.stderr)
+        return 2
     root, pin = check_pin(args.suite)
     limit = args.timeout or SUITE[args.suite]["timeout"]
     stall = args.stall or SUITE[args.suite]["stall"]
@@ -543,6 +566,8 @@ def main():
     try:
         with (WindowLock(limit + 60, args.lock_wait) if visible else NoLock()):
             try:
+                if not wait_for_load(max_load, args.load_wait):
+                    raise SystemExit("load rose to %.1f while waiting for the window; not run" % os.getloadavg()[0])
                 load_before = os.getloadavg()
                 started = time.time()
                 record.t0 = record.last = started
@@ -608,6 +633,7 @@ def main():
         "detail": detail,
         "wall_s": wall,
         "load_avg_before": [round(x, 2) for x in load_before],
+        "load_valid": load_before[0] < SCORE_LOAD,
         "load_avg_after": [round(x, 2) for x in os.getloadavg()],
         "started": datetime.datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "exit_code": exit_code,
@@ -642,8 +668,8 @@ def main():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
     shutil.rmtree(work, ignore_errors=True)
-    print("%s %s %s: %s score=%s wall=%ss errors=%d -> %s"
-          % (args.suite, args.engine, label, status, "%.2f" % score if isinstance(score, (int, float)) else score,
+    print("%s %s %s: %s%s score=%s wall=%ss errors=%d -> %s"
+          % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0], "%.2f" % score if isinstance(score, (int, float)) else score,
              wall, len(record.errors), path))
     return 0 if status == "ok" else 1
 

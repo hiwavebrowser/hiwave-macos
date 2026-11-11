@@ -7,7 +7,8 @@
 Reads the run records run.py writes (default ~/zg-measure/stress-runs). Runs
 are grouped by suite, engine and label (run.py --label; by default the first
 8 of the binary's sha1). Partial runs (--only, --iterations) are left out
-unless --partial is given, and are never mixed with full ones.
+unless --partial is given, and are never mixed with full ones. A run that
+started at a 1-minute load of 3 or more is discarded (the `disc` column).
 
 --compare BASE CAND applies the landing rule to every suite and engine both
 labels have scores for: the candidate regresses when its median is below the
@@ -25,6 +26,7 @@ import pathlib
 import statistics
 import sys
 
+SCORE_LOAD = 3.0
 DEFAULT_DIR = pathlib.Path.home() / "zg-measure" / "stress-runs"
 
 
@@ -39,6 +41,9 @@ def load(dirs, partial):
             if r.get("schema") != 1 or bool(r.get("partial")) != partial:
                 continue
             r["_file"] = f.name
+            # The Mac's load rule: a run that started at a 1-minute load of
+            # SCORE_LOAD or more keeps its record but not its score.
+            r["_valid"] = r["load_avg_before"][0] < SCORE_LOAD
             runs.append(r)
     return runs
 
@@ -51,8 +56,12 @@ def groups(runs):
 
 
 def summary(rs):
+    discarded = len([r for r in rs if not r["_valid"]])
+    rs = [r for r in rs if r["_valid"]]
+    if not rs:
+        return {"n": 0, "n_ok": 0, "not_ok": [], "shas": [], "pins": [], "wall_s": None, "load": None, "discarded": discarded}
     ok = [r["score"] for r in rs if r["status"] == "ok" and isinstance(r.get("score"), (int, float))]
-    s = {"n": len(rs), "n_ok": len(ok), "not_ok": sorted({r["status"] for r in rs if r["status"] != "ok"}),
+    s = {"discarded": discarded, "n": len(rs), "n_ok": len(ok), "not_ok": sorted({r["status"] for r in rs if r["status"] != "ok"}),
          "shas": sorted({r["binary_sha1"][:10] for r in rs}), "pins": sorted({r["suite_sha"][:10] for r in rs}),
          "wall_s": round(statistics.median(r["wall_s"] for r in rs), 1),
          "load": round(max(r["load_avg_before"][0] for r in rs), 1)}
@@ -70,7 +79,7 @@ def sub_medians(rs):
     """Median of each sub-score over the runs that have it."""
     vals = {}
     for r in rs:
-        if r["status"] != "ok":
+        if r["status"] != "ok" or not r["_valid"]:
             continue
         for k, v in (r.get("sub_scores") or {}).items():
             if isinstance(v, (int, float)):
@@ -99,16 +108,18 @@ def main():
         return 0
 
     if not args.compare:
-        print("%-12s %-16s %-14s %5s %10s %21s %8s %7s %5s  %s"
-              % ("suite", "engine", "label", "N ok", "median", "min - max", "spread", "wall s", "load", "not ok"))
+        print("%-12s %-16s %-14s %5s %10s %21s %8s %7s %5s %4s  %s"
+              % ("suite", "engine", "label", "N ok", "median", "min - max", "spread", "wall s", "load", "disc", "not ok"))
         for (suite, engine, label), s in sorted(table.items()):
             rng = "%s - %s" % (fmt(s.get("min")), fmt(s.get("max"))) if "median" in s else "-"
-            print("%-12s %-16s %-14s %2d/%-2d %10s %21s %7s%% %7s %5s  %s"
+            print("%-12s %-16s %-14s %2d/%-2d %10s %21s %7s%% %7s %5s %4d  %s"
                   % (suite, engine, label[:14], s["n_ok"], s["n"], fmt(s.get("median")), rng,
-                     "%.1f" % s["spread_pct"] if "median" in s else "-", s["wall_s"], s["load"], ",".join(s["not_ok"])))
+                     "%.1f" % s["spread_pct"] if "median" in s else "-", s["wall_s"], s["load"], s["discarded"],
+                     ",".join(s["not_ok"])))
             if args.subs:
                 for name, v in sorted(sub_medians(g[(suite, engine, label)]).items()):
                     print("    %-48s %s" % (name, fmt(v)))
+        print("disc = runs left out because they started at a 1-minute load of %.0f or more" % SCORE_LOAD)
         return 0
 
     base, cand = args.compare

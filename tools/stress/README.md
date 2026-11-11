@@ -66,6 +66,16 @@ python3 tools/stress/run.py --suite speedometer --engine hiwave-headless --binar
     --timeout 60 --until-exit --keep
 ```
 
+## Load
+
+The Mac's rule (2026-11-11): a run starts only below a 1-minute load of 6,
+and its score counts only if it started below 3. `run.py` waits for the load
+to come under `--max-load` (default 3; up to 6 for a run that only looks for
+where a suite stops) for `--load-wait` seconds, then gives up with exit code
+2. Every record carries `load_avg_before`; `report.py` leaves out any run
+that started at 3 or more and counts it in its `disc` column. One suite run
+at a time, and none beside a cargo job.
+
 ## The run record
 
 One JSON file per run in `--out` (default `~/zg-measure/stress-runs`):

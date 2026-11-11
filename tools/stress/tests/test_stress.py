@@ -18,10 +18,10 @@ sys.path.insert(0, str(HERE))
 import run  # noqa: E402
 
 
-def record(tmp, suite, label, score, n, status="ok", partial=False):
+def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0):
     r = {"schema": 1, "suite": suite, "engine": "hiwave", "label": label, "status": status, "score": score,
          "partial": partial, "binary_sha1": label * 5, "suite_sha": "0" * 40, "wall_s": 60.0,
-         "load_avg_before": [2.0, 2.0, 2.0], "sub_scores": {}}
+         "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}}
     (tmp / ("%s_%s_%d.json" % (suite, label, n))).write_text(json.dumps(r))
 
 
@@ -64,6 +64,21 @@ def test_partial_runs_never_enter_a_full_comparison(tmp_path):
     record(tmp_path, "speedometer", "cand", 10.0, 1, partial=True)
     code, rows = compare(tmp_path)
     assert code == 0 and rows["speedometer"]["cand"]["n"] == 1, rows
+
+
+def test_a_run_started_under_load_keeps_its_record_but_not_its_score(tmp_path):
+    record(tmp_path, "speedometer", "base", 100.0, 0)
+    record(tmp_path, "speedometer", "cand", 100.0, 0)
+    record(tmp_path, "speedometer", "cand", 50.0, 1, load=3.0)  # started at load 3: discarded
+    code, rows = compare(tmp_path)
+    assert code == 0 and rows["speedometer"]["cand"]["n"] == 1 and rows["speedometer"]["cand"]["discarded"] == 1, rows
+
+
+def test_nothing_starts_at_or_above_the_load_limit(monkeypatch):
+    monkeypatch.setattr(run.os, "getloadavg", lambda: (6.5, 6.0, 6.0))
+    assert run.wait_for_load(run.START_LOAD, 0) is False
+    monkeypatch.setattr(run.os, "getloadavg", lambda: (2.9, 6.0, 6.0))
+    assert run.wait_for_load(run.SCORE_LOAD, 0) is True
 
 
 def test_the_server_adds_the_reporter_and_takes_the_result(tmp_path):
