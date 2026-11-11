@@ -417,3 +417,63 @@ fn container_query_is_answered_again_when_the_container_resizes() {
         .expect("resize");
     assert_eq!(read(&mut engine), ["0", "0", "0", "0", "0", "0", "17"]);
 }
+
+const CONTENT_SIZED_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-11/css_container_query_content_sized.html");
+
+/// #1070 R1 MED 2: `container-type: inline-size` applies inline-size
+/// containment, so a container whose width comes from its contents is
+/// sized as if empty. Chrome for Testing 148.0.7778.216 gives each
+/// `padding: 0 5px` container around a 300px child a width of 10, so
+/// `(min-width: 200px)` is false in all four: a `flex: 0 0 auto` item, an
+/// `inline-block`, `width: fit-content`, and a block in a float.
+/// rustkit-layout lays them out 310 wide, so its measurement must not
+/// answer the query.
+#[test]
+fn container_query_on_a_content_sized_container_is_false() {
+    let heights = offset_heights(CONTENT_SIZED_PAGE, 1280, 800, 4);
+    assert_eq!(heights, ["0", "0", "0", "0"]);
+}
+
+/// #1070 R1 MED 1: an `inline-size` container's height answers no query,
+/// so a write that only grows it is laid out in one build, as on a page
+/// without container queries; it was two (the height counted as a moved
+/// size and the measured pass ran again).
+#[test]
+fn a_height_change_inside_an_inline_size_container_takes_one_build() {
+    let page = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .c { container-type: inline-size; width: 400px }
+@container (min-width: 300px) { #k { height: 11px } }
+</style></head><body><div class="c"><div id="k"></div><div id="grow" style="height: 10px"></div></div></body></html>"#;
+    let server = serve_routes(vec![("/", "text/html", page.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let builds = |engine: &Engine| engine.views[&view].lay.layout_builds.get();
+    for h in [20, 30, 40] {
+        let before = builds(&engine);
+        let got = engine
+            .execute_script(
+                view,
+                &format!(
+                    "document.getElementById('grow').style.height = '{h}px'; \
+                     String(document.getElementById('k').offsetHeight)"
+                ),
+            )
+            .unwrap();
+        assert!(got.contains("11"), "the query still holds: {got}");
+        assert_eq!(builds(&engine) - before, 1, "one build for a {h}px height");
+    }
+}
