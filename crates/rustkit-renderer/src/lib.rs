@@ -11410,3 +11410,41 @@ mod clip_mask_coverage_tests {
         assert!(clip_mask_coverage(&tri, false, 0, 0, 0, 0).is_empty());
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod emoji_cluster_at_tests {
+    use super::*;
+
+    /// Paint keys a glyph by its emoji sequence only where layout folded
+    /// characters into it, and finds that out without segmenting graphemes
+    /// for every ordinary character every frame (Prometheus R1 MED 1 on
+    /// #1076): a plain primary-face run segments nothing.
+    #[test]
+    fn a_plain_run_segments_no_graphemes() {
+        let chars: Vec<char> = "Downloads and Tabs".chars().collect();
+        let faces = vec![rustkit_text::GlyphFace::Primary; chars.len()];
+        let before = rustkit_text::macos::emoji_cluster_segmentations();
+        for i in 0..chars.len() {
+            assert!(Renderer::emoji_cluster_at(&chars, Some(&faces), i).is_none());
+        }
+        assert_eq!(rustkit_text::macos::emoji_cluster_segmentations(), before);
+    }
+
+    /// A folded sequence is still found: the family's head carries it.
+    #[test]
+    fn a_folded_sequence_is_keyed_at_its_head() {
+        use rustkit_text::GlyphFace::{Fallback, Ignorable};
+        let chars: Vec<char> = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}!".chars().collect();
+        let faces = [
+            Fallback { emoji: true },
+            Ignorable,
+            Ignorable,
+            Ignorable,
+            Ignorable,
+            rustkit_text::GlyphFace::Primary,
+        ];
+        let got = Renderer::emoji_cluster_at(&chars, Some(&faces), 0);
+        assert_eq!(got.as_deref(), Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"));
+        assert!(Renderer::emoji_cluster_at(&chars, Some(&faces), 5).is_none());
+    }
+}

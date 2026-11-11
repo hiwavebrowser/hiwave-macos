@@ -714,9 +714,27 @@ fn apple_emoji_advance_uncached(font: &CTFont) -> Option<f32> {
 /// lone character.
 pub fn emoji_cluster_len(chars: &[char]) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
+    CLUSTER_SEGMENTATIONS.with(|c| c.set(c.get() + 1));
     // A cluster is short; the longest RGI sequences are ten code points.
     let head: String = chars.iter().take(16).collect();
     head.graphemes(true).next().map_or(1, |g| g.chars().count().max(1))
+}
+
+thread_local! {
+    static CLUSTER_SEGMENTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CLUSTER_LINES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many grapheme segmentations (`emoji_cluster_len`) this thread made:
+/// paint must not segment a run that has no folded emoji sequence.
+pub fn emoji_cluster_segmentations() -> u64 {
+    CLUSTER_SEGMENTATIONS.with(|c| c.get())
+}
+
+/// How many CTLines this thread built to shape emoji sequences
+/// (`emoji_cluster_glyph`): one per distinct (face, size, sequence).
+pub fn emoji_cluster_lines() -> u64 {
+    CLUSTER_LINES.with(|c| c.get())
 }
 
 /// The first glyph `face` shapes the emoji sequence `cluster` into, and how
@@ -747,6 +765,7 @@ pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)>
     unsafe {
         astr.set_attribute(range, kCTFontAttributeName, face);
     }
+    CLUSTER_LINES.with(|c| c.set(c.get() + 1));
     let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef());
     // (glyph, UTF-16 index of its first character), inked glyphs only:
     // selectors and joiners shape to none or to deleted (0xFFFF) ones.
@@ -2515,6 +2534,21 @@ mod tests {
         let shaped = shaper.shape("\u{1F50D}\u{1F50D}").expect("shapes");
         let total: f32 = shaped.advances.iter().sum();
         assert_eq!(total, 40.0, "two emoji in the emoji face at 16px");
+    }
+
+    /// An emoji sequence is shaped once per (face, size, sequence), not per
+    /// call: `shape` reruns on every relayout (Prometheus R1 MED 2 on #1076).
+    #[test]
+    fn an_emoji_sequence_is_shaped_once_per_face_and_size() {
+        let face = font::new_from_name("Apple Color Emoji", 14.0).expect("the emoji face");
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let first = emoji_cluster_glyph(&face, family);
+        assert!(first.is_some(), "the family is one glyph");
+        let before = emoji_cluster_lines();
+        for _ in 0..5 {
+            assert_eq!(emoji_cluster_glyph(&face, family), first);
+        }
+        assert_eq!(emoji_cluster_lines(), before, "no CTLine for a sequence already shaped");
     }
 
     /// Paint draws the fallback glyph from that same face: the advance the
