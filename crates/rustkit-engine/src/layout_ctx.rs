@@ -568,6 +568,10 @@ pub(crate) struct ViewLayout {
     /// ran them. Read by tests to pin that a relayout takes one pass.
     pub(crate) layout_passes: Cell<u32>,
     pub(crate) layout_builds: Cell<u32>,
+    /// INC5: this view's last layout, kept for the incremental path while
+    /// `RUSTKIT_INCREMENTAL_LAYOUT` is not `off`, and what that path did.
+    pub(crate) incremental_layout: RefCell<Option<crate::incremental_layout::Retained>>,
+    pub(crate) incremental_stats: RefCell<crate::incremental_layout::Stats>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
