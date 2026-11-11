@@ -120,13 +120,26 @@ impl TextShaper {
         let mut advances: Vec<f32> = Vec::with_capacity(char_count);
         let mut x_pos: f64 = 0.0;
         
+        // The run's own face may be an Apple emoji face (`font-family:
+        // "Apple Color Emoji"`): its glyphs advance as Chrome places them,
+        // as they do when reached by fallback (#1072 R1 nit 4).
+        let emoji_advance = apple_emoji_advance(&self.font).map(f64::from);
         for (i, glyph_advance) in glyph_advances.iter().enumerate() {
+            // The second unit of a surrogate pair: Core Text puts the glyph
+            // in the first slot and .notdef (with its advance) in this one.
+            // It draws nothing and takes no space.
+            let trailing_surrogate = (0xDC00..=0xDFFF).contains(&utf16_chars[i]);
+            let width = match emoji_advance {
+                _ if trailing_surrogate => 0.0,
+                Some(a) if glyphs[i] != 0 && glyph_advance.width > 0.0 => a,
+                _ => glyph_advance.width,
+            };
             positions.push((x_pos as f32, 0.0));
-            advances.push(glyph_advance.width as f32);
-            x_pos += glyph_advance.width;
+            advances.push(width as f32);
+            x_pos += width;
             
             // Handle missing glyphs (glyph ID 0)
-            if glyphs[i] == 0 {
+            if glyphs[i] == 0 && !trailing_surrogate {
                 // Use a fallback advance for missing glyphs
                 let fallback_advance = self.font.pt_size() * 0.5;
                 if advances.last().map(|a| *a == 0.0).unwrap_or(false) {
@@ -626,9 +639,52 @@ pub fn is_color_face(font: &CTFont) -> bool {
     font.symbolic_traits() & K_CT_FONT_COLOR_GLYPHS_TRAIT != 0
 }
 
+/// The advance Chrome gives a glyph of Apple's emoji faces (Apple Color
+/// Emoji, and the system font's `.AppleColorEmojiUI`), or `None` for any
+/// other face.
+///
+/// Core Text's advance for these sbix faces carries the font's `trak`
+/// tracking and comes back rounded up: 19 at 14px, 21 at 16px. Chrome for
+/// Testing 148 places the next character 18 and 20 along. Measured at 30
+/// sizes from 6 to 40px (one `🔍` span each, CB7a), Chrome's advance is
+/// exactly the width of a full-size emoji's image box at that size
+/// (`CTFontGetBoundingRectsForGlyphs` of U+1F600, 1.25em up to 16px,
+/// tapering to 1em at 24px and above) rounded half up; Core Text's own
+/// advance is not, nor is the unscaled `hmtx` advance (1em) or a size-1
+/// font scaled up. Every glyph of the face takes the same advance, as in
+/// Chrome (a flag, whose own image is narrower, is 18 at 14px too).
+pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
+    if !is_color_face(font) || !font.family_name().contains("Apple Color Emoji") {
+        return None;
+    }
+    let reference = color_glyph_id(font, '\u{1F600}')?;
+    extern "C" {
+        fn CTFontGetBoundingRectsForGlyphs(
+            font: core_text::font::CTFontRef,
+            orientation: u32,
+            glyphs: *const u16,
+            bounding_rects: *mut CGRect,
+            count: isize,
+        ) -> CGRect;
+    }
+    let mut bounds = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+    // SAFETY: `font` is a live CTFont; one glyph id is read and one rect
+    // written.
+    unsafe {
+        CTFontGetBoundingRectsForGlyphs(font.as_concrete_TypeRef(), 0, &reference, &mut bounds, 1);
+    }
+    let width = bounds.size.width;
+    // f64::round rounds a half away from zero, as Chrome does here
+    // (17.5 at 14px is 18, 22.5 at 21px is 23).
+    (width > 0.0).then(|| width.round() as f32)
+}
+
 /// The horizontal advance of `glyph` in `font`, in CSS px at the font's
 /// size: what layout measures a character at and what paint owes for it.
 pub fn glyph_advance(font: &CTFont, glyph: u16) -> f32 {
+    if let Some(advance) = apple_emoji_advance(font) {
+        return advance;
+    }
     extern "C" {
         fn CTFontGetAdvancesForGlyphs(
             font: core_text::font::CTFontRef,
@@ -1560,7 +1616,10 @@ impl GlyphRasterizer {
             // dilation), so it does not paint lighter or heavier.
             let bitmap = draw_coverage_mask(font_ref, glyph, CGPoint::new(draw_x, draw_y), width, height, self.dilate, sx > 0.0);
 
-            let advance = advance_size.width as f32;
+            // The face's advance as layout takes it (`glyph_advance`): an
+            // Apple emoji face's is Chrome's, not Core Text's tracked one
+            // (#1072 R1 nit 3).
+            let advance = apple_emoji_advance(font).unwrap_or(advance_size.width as f32);
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
             // padded bitmap, not the outline. bearing_y is baseline_seat's
             // integer row count (INTEGER-BASELINE CONTRACT).
@@ -1725,7 +1784,9 @@ impl GlyphRasterizer {
             )
             .to_vec();
 
-            let advance = advance_size.width as f32;
+            // Layout's advance for the same face (`glyph_advance`), so the
+            // glyph is centred on the width layout gave it.
+            let advance = apple_emoji_advance(font).unwrap_or(advance_size.width as f32);
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
             // padded bitmap, not the outline. bearing_y is baseline_seat's
             // integer row count (INTEGER-BASELINE CONTRACT).
@@ -2284,6 +2345,51 @@ mod tests {
             assert_eq!(Some(glyph), color_glyph_id(&face, ch), "{ch:?}");
             assert_eq!(face.pt_size(), 16.0, "{ch:?}: the fallback keeps the size");
         }
+    }
+
+    /// An Apple emoji glyph advances as far as Chrome for Testing 148 places
+    /// the next character (span widths of one `🔍` at each size, Helvetica
+    /// primary, CB7a). Core Text's tracked advance is a pixel wider at most
+    /// sizes (19 for Chrome's 18 at 14px), which put every emoji icon on the
+    /// chrome board 1 to 2px wide.
+    #[test]
+    fn an_apple_emoji_advances_as_chrome_places_it() {
+        let chrome: &[(f64, f32)] = &[
+            (6.0, 8.0), (8.0, 10.0), (9.0, 11.0), (10.0, 13.0), (10.5, 13.0), (11.0, 14.0),
+            (12.0, 15.0), (13.0, 16.0), (13.5, 17.0), (14.0, 18.0), (14.5, 18.0), (15.0, 19.0),
+            (16.0, 20.0), (17.0, 21.0), (18.0, 21.0), (19.0, 22.0), (20.0, 22.0), (21.0, 23.0),
+            (22.0, 23.0), (23.0, 24.0), (24.0, 24.0), (26.0, 26.0), (30.0, 30.0), (40.0, 40.0),
+        ];
+        for &(size, want) in chrome {
+            let helvetica = font::new_from_name("Helvetica", size).expect("Helvetica");
+            for ch in ['\u{1F50D}', '\u{1F6E1}', '\u{1F4C8}'] {
+                let (face, glyph) = fallback_face_for_presentation(&helvetica, ch, true).expect("a face");
+                let got = glyph_advance(&face, glyph);
+                assert_eq!(got, want, "{ch:?} at {size}px in {}: Chrome advances {want}", face.postscript_name());
+            }
+        }
+        // The system font's emoji face (`.AppleColorEmojiUI`) too: Chrome 18 / 20.
+        for (size, want) in [(14.0, 18.0), (16.0, 20.0)] {
+            let face = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+            let (emoji, glyph) = fallback_face_for_presentation(&face, '\u{1F6E1}', true).expect("a face");
+            assert_eq!(glyph_advance(&emoji, glyph), want, "UI emoji at {size}px");
+        }
+    }
+
+    /// Every path that reports an Apple emoji glyph's advance reports
+    /// Chrome's (#1072 R1 nits 3 and 4): the legacy mask fallback a caller
+    /// without layout's record reaches, and the shaper's own advances when
+    /// the run's PRIMARY face is Apple Color Emoji. Chrome for Testing 148:
+    /// `🔍` in `font: 14px "Apple Color Emoji"` is 18; two at 16px are 40.
+    #[test]
+    fn every_path_reports_the_apple_emoji_advance() {
+        let helvetica = GlyphRasterizer::with_style("Helvetica", 14.0, 400, false);
+        let (_, _, _, legacy, ..) = helvetica.rasterize_char('\u{1F50D}', 0.0).expect("rasterizes");
+        assert_eq!(legacy, 18.0, "legacy fallback advance under Helvetica at 14px");
+        let shaper = TextShaper::new("Apple Color Emoji", 16.0).expect("the emoji face");
+        let shaped = shaper.shape("\u{1F50D}\u{1F50D}").expect("shapes");
+        let total: f32 = shaped.advances.iter().sum();
+        assert_eq!(total, 40.0, "two emoji in the emoji face at 16px");
     }
 
     /// Paint draws the fallback glyph from that same face: the advance the

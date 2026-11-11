@@ -538,6 +538,12 @@ mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
 #[cfg(test)]
+mod appearance_apply_tests;
+#[cfg(test)]
+mod pointer_reads_has_tests;
+#[cfg(test)]
+mod pointer_reads_lat20_tests;
+#[cfg(test)]
 mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
@@ -571,6 +577,8 @@ mod script_scroll_tests;
 mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_percent_basis_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_aspect_ratio_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -644,6 +652,8 @@ mod navigation_release_tests;
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod button_line_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod button_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -737,6 +747,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_maximize_tracks_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
@@ -1591,6 +1603,9 @@ impl ViewState {
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
+        self.lay.container_sizes.borrow_mut().clear();
+        self.lay.container_trusted.borrow_mut().clear();
+        self.lay.container_rules.set(false);
         self.lay.incremental_layout.borrow_mut().take();
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
@@ -11497,6 +11512,84 @@ impl layout_ctx::LayoutCtx {
                 return tree;
             }
         }
+        let mut root_box = self.lay_out_document_pass(
+            building.clone(),
+            document,
+            external_stylesheets,
+            javascript_enabled,
+            bounds,
+            skip_hint,
+        );
+        // CQ1 (css-contain-3 §6.1): an `@container` query is answered with
+        // its container's laid-out content box, which the cascade cannot
+        // know before layout. The build answers with the sizes of the
+        // view's last layout; when this layout moved one, build and lay out
+        // again with the new sizes. A resize starts from the old sizes and
+        // settles the same way. Two more passes at most: a container whose
+        // size follows the rules it switches would otherwise never settle,
+        // and it keeps the last answer, as a later relayout would.
+        //
+        // A chain of more than two nested containers, each sized by the
+        // answer of the one outside it, can need more passes than that: the
+        // layout returns after the cap and the next relayout goes on from
+        // the sizes it stored. Such a layout is counted
+        // (`ViewLayout::container_unsettled`) and logged, so an oscillation
+        // shows instead of quietly tripling every relayout.
+        if let Some(lay) = lay.as_ref() {
+            if let Some(trusted) = container_query::take_trusted_containers() {
+                *lay.container_trusted.borrow_mut() = trusted;
+            }
+            for pass in 0..=2 {
+                if !lay.container_rules.get() {
+                    break;
+                }
+                let mut sizes = container_query::MeasuredContainers::new();
+                collect_container_sizes(&root_box, &lay.container_trusted.borrow(), &mut sizes);
+                let moved = {
+                    let used = lay.container_sizes.borrow();
+                    used.len() != sizes.len()
+                        || sizes.iter().any(|(node, (i, b))| {
+                            used.get(node)
+                                .is_none_or(|(ui, ub)| (ui - i).abs() > 0.01 || (ub - b).abs() > 0.01)
+                        })
+                };
+                *lay.container_sizes.borrow_mut() = sizes;
+                if !moved {
+                    break;
+                }
+                if pass == 2 {
+                    lay.container_unsettled.set(lay.container_unsettled.get() + 1);
+                    debug!("container query sizes still moving after the pass cap");
+                    break;
+                }
+                lay.container_passes.set(lay.container_passes.get() + 1);
+                root_box = self.lay_out_document_pass(
+                    building.clone(),
+                    document,
+                    external_stylesheets,
+                    javascript_enabled,
+                    bounds,
+                    false,
+                );
+                if let Some(trusted) = container_query::take_trusted_containers() {
+                    *lay.container_trusted.borrow_mut() = trusted;
+                }
+            }
+        }
+        root_box
+    }
+
+    /// One build and layout of `document` (`lay_out_document`).
+    fn lay_out_document_pass(
+        &self,
+        building: layout_ctx::BuildView,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
+        bounds: (u32, u32),
+        skip_hint: bool,
+    ) -> LayoutBox {
+        let lay = building.lay.clone();
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
@@ -11875,6 +11968,9 @@ impl layout_ctx::LayoutCtx {
             hover: self.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
             active: self.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
+            containers: self
+                .with_building_lay(|lay| containers_fingerprint(&lay.container_sizes.borrow()))
+                .unwrap_or(0),
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
@@ -12010,10 +12106,19 @@ impl layout_ctx::LayoutCtx {
             javascript_enabled,
         );
         let index_started = mark();
+        // CQ1: the view's last layout's container sizes answer the queries;
+        // `lay_out_document` lays out again while they move.
+        let measured_containers = self
+            .with_building_lay(|lay| {
+                lay.container_rules.set(prepared.any_container_rule);
+                lay.container_sizes.borrow().clone()
+            })
+            .unwrap_or_default();
         let _container_queries = container_query::DocumentScope::install(
             viewport,
             prepared.any_container_rule,
             prepared.container_first_letter,
+            measured_containers,
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -12160,9 +12265,10 @@ impl layout_ctx::LayoutCtx {
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
+        let html_node = document.document_element().map(|html| html.id.raw());
         let _html_container_scope = html_style
             .as_deref()
-            .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
+            .map(|s| container_query::ElementScope::enter(s, None, Some("html"), html_node));
 
         if let Some(lay) = self.building_lay() {
             lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
@@ -13531,6 +13637,7 @@ impl layout_ctx::LayoutCtx {
                         &layout_box.style,
                         parent_style,
                         Some(&tag_lower),
+                        Some(node.id.raw()),
                     );
                 // A floated `::first-letter` narrows later boxes like a
                 // floated `::before` (#782 HOLD 5); only the walk asks.
@@ -15964,6 +16071,16 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
+/// A size the child inherits: the parent's computed value. An `em` length
+/// computes to pixels in the parent's font (CSS Values 4 §6.1.1), so it is
+/// handed down as pixels; everything else is handed down as written.
+fn inherited_size(length: &rustkit_css::Length, parent: &ComputedStyle) -> rustkit_css::Length {
+    match (length, &parent.font_size) {
+        (rustkit_css::Length::Em(n), rustkit_css::Length::Px(font)) => rustkit_css::Length::Px(n * font),
+        _ => length.clone(),
+    }
+}
+
 impl Engine {
 
     /// Apply a single CSS property to a computed style.
@@ -16017,6 +16134,19 @@ impl Engine {
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
             "box-sizing" => style.box_sizing = parent.box_sizing,
+            // The box's sizes (LAY1): the parent's COMPUTED value, so a
+            // percentage stays a percentage and resolves against this box's
+            // own containing block, and an `em` length is the parent's
+            // (computed in the parent's font). A recorded search page's
+            // result cards are `a { width: inherit; height: inherit }` under
+            // a `width: 100%; height: 100%` box; the keyword used to leave the
+            // child at `auto`.
+            "width" => style.width = inherited_size(&parent.width, parent),
+            "height" => style.height = inherited_size(&parent.height, parent),
+            "min-width" => style.min_width = inherited_size(&parent.min_width, parent),
+            "min-height" => style.min_height = inherited_size(&parent.min_height, parent),
+            "max-width" => style.max_width = inherited_size(&parent.max_width, parent),
+            "max-height" => style.max_height = inherited_size(&parent.max_height, parent),
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
             "cursor" => style.cursor = parent.cursor,
@@ -16134,6 +16264,34 @@ impl layout_ctx::LayoutCtx {
         }
         if matches!(property, "line-height" | "font") {
             style.line_height_declared = true;
+        }
+        // The same, side by side (CB3c): top, right, bottom, left.
+        {
+            let sides = |name: &str| -> &'static [usize] {
+                match name {
+                    "padding" | "border" | "border-width" | "border-style" => &[0, 1, 2, 3],
+                    "padding-top" | "border-top" | "border-top-width" | "border-top-style" => &[0],
+                    "padding-right" | "border-right" | "border-right-width" | "border-right-style" => &[1],
+                    "padding-bottom" | "border-bottom" | "border-bottom-width" | "border-bottom-style" => &[2],
+                    "padding-left" | "border-left" | "border-left-width" | "border-left-style" => &[3],
+                    _ => &[],
+                }
+            };
+            if property.starts_with("padding") {
+                for &i in sides(property) {
+                    style.padding_declared[i] = true;
+                }
+            } else if property.starts_with("border") {
+                // A STYLE sets the width only when it is `none`/`hidden` (width 0); any other
+                // style alone leaves the UA's width.
+                let style_only = property.ends_with("-style");
+                let zeroing = value.split_whitespace().any(|t| matches!(t, "none" | "hidden"));
+                if !style_only || zeroing {
+                    for &i in sides(property) {
+                        style.border_declared[i] = true;
+                    }
+                }
+            }
         }
         if matches!(
             property,
@@ -24378,16 +24536,7 @@ impl Engine {
             if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
-                    let view = layout_ctx::BuildView {
-                        id,
-                        lay: Some(lay.clone()),
-                        url: building.url.clone(),
-                        viewport: building.viewport,
-                        dpr: building.dpr,
-                        focus: lay.focused_node.get(),
-                        external_sheets: sheets.clone(),
-                        external_sheet_owners: owners.clone(),
-                    };
+                    let view = building.for_build();
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
                     Some(Ok(geometry)) => return Some(geometry),
@@ -24417,16 +24566,7 @@ impl Engine {
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
-                layout_ctx::BuildView {
-                    id,
-                    lay: Some(lay.clone()),
-                    url: building.url.clone(),
-                    viewport: building.viewport,
-                    dpr: building.dpr,
-                    focus: lay.focused_node.get(),
-                    external_sheets: sheets.clone(),
-                    external_sheet_owners: owners.clone(),
-                },
+                building.for_build(),
                 &document,
                 &sheets,
                 javascript_enabled,
@@ -42442,7 +42582,7 @@ impl SubjectCompound {
 /// class on it as an ancestor or an earlier sibling (those are known by
 /// tag, classes and id). A page can spell it only by writing U+0001 into a
 /// class or an attribute name, and then styles that element as hovered.
-const HOVER_MARK: &str = "\u{1}hover";
+pub(crate) const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 /// The focused element (`:focus`) and it and its ancestors
 /// (`:focus-within`), marked like the two above: by the build
@@ -44651,21 +44791,21 @@ struct SelectorReads {
 /// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
 /// a rule's match from.
 #[derive(Default)]
-struct PointerReads {
+pub(crate) struct PointerReads {
     /// The compounds that carry it, without it, each with how far a rule
     /// reaches past a matching element's later siblings: an element none
     /// of them matches by tag, classes and id gains or loses the
     /// pseudo-class without any rule noticing.
-    compounds: Vec<PointerCompound>,
+    pub(crate) compounds: Vec<PointerCompound>,
     /// Index into `compounds` by tag, classes, id and attributes.
     seen: HashMap<PointerCompoundKey, usize>,
     /// Each `:has()` whose argument reads it (LAT3, a marketplace's
     /// `[data-x]:not(:has([data-x]:hover)):hover::after`).
-    has: Vec<HasPointer>,
+    pub(crate) has: Vec<HasPointer>,
     /// Some selector names it where neither `compounds` nor `has` shows it
     /// (a `:has()` argument that starts with `+` or `~`, a member the
     /// selector parser rejects): any element may count.
-    anywhere: bool,
+    pub(crate) anywhere: bool,
     /// LAT20: the shape of the first selector that set `anywhere`
     /// (`anywhere_shape`), for the relayout line's `restyle_miss`: never
     /// the selector's text.
@@ -44775,7 +44915,7 @@ struct PointerCompound {
 impl PointerReads {
     /// Record where `selector` reads `name` (`":hover"`), which the
     /// compound parser turns into the class `mark`.
-    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+    pub(crate) fn note(&mut self, selector: &str, name: &str, mark: &str) {
         if pseudo_named(selector, name) == 0 {
             return;
         }
@@ -46005,6 +46145,33 @@ fn spot_on_bar(bar: rustkit_layout::scroll::BarGeometry, x: f32, y: f32) -> Opti
     Some(ScrollbarSpot::Track(bar, if before { -1.0 } else { 1.0 }))
 }
 
+/// CQ1: the content-box size of every size container in a laid-out tree
+/// that the build met in a trusted frame (`trusted`), keyed by raw DOM node
+/// id. An element's first box is its principal box. The block size is
+/// kept only for `container-type: size`: an `inline-size` container's
+/// height answers no query, so a change of it alone must not cost another
+/// pass or a memo miss (#1070 R1 MED 1).
+fn collect_container_sizes(
+    b: &LayoutBox,
+    trusted: &std::collections::HashSet<usize>,
+    sizes: &mut container_query::MeasuredContainers,
+) {
+    if let Some(node) = b.node_id {
+        if b.style.container_type != rustkit_css::ContainerType::Normal && trusted.contains(&node) {
+            let c = b.dimensions.content;
+            let block = if b.style.container_type == rustkit_css::ContainerType::Size {
+                c.height
+            } else {
+                0.0
+            };
+            sizes.entry(node).or_insert((c.width, block));
+        }
+    }
+    for child in &b.children {
+        collect_container_sizes(child, trusted, sizes);
+    }
+}
+
 /// CH2.E7: the width of the root's (the viewport's) styled scrollbar when
 /// it shows, 0 when the root has none (the platform's overlay bar).
 fn root_scrollbar_width(root: &LayoutBox) -> f32 {
@@ -46238,6 +46405,20 @@ struct StyleMemoKey {
     /// resolve against the element's font, so a face arriving between two
     /// builds can change a cascade.
     fonts: usize,
+    /// CQ1: the laid-out container sizes the build answers `@container`
+    /// queries with (`containers_fingerprint`).
+    containers: u64,
+}
+
+/// A fingerprint of a view's measured container sizes: a build that answers
+/// its `@container` queries with other sizes is another cascade.
+fn containers_fingerprint(sizes: &container_query::MeasuredContainers) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<_> = sizes.iter().map(|(n, (i, b))| (*n, i.to_bits(), b.to_bits())).collect();
+    entries.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut h);
+    h.finish()
 }
 
 /// What the build in progress does with the memo.
@@ -47118,6 +47299,7 @@ mod incremental_restyle_tests {
                 hover: None,
                 active: None,
                 fonts: 0,
+                containers: 0,
             };
             let mut changed = original.clone();
             mutate(&mut changed);
@@ -47405,6 +47587,7 @@ mod incremental_restyle_tests {
             hover: None,
             active: None,
             fonts: 0,
+            containers: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
         let fresh_node = rustkit_dom::NodeId::new(8);
@@ -47463,6 +47646,7 @@ mod incremental_restyle_tests {
                 hover: None,
                 active: None,
                 fonts: 0,
+                containers: 0,
             })
             .expect("records");
         }
