@@ -119,7 +119,10 @@ fn a_half_height_child_of_an_inset_layer_is_half_the_layer() {
 /// the 32px content (Chrome: ab, pl and hf 600x32).
 #[test]
 fn a_percent_height_child_of_a_content_sized_layer_is_its_content() {
-    let l = layer(ComputedStyle::new(), [Some(0.0), Some(0.0), None, Some(0.0)]);
+    let l = layer(
+        ComputedStyle::new(),
+        [Some(0.0), Some(0.0), None, Some(0.0)],
+    );
     assert_eq!(
         shape(l, Length::Percent(100.0)),
         [(0.0, 32.0), (0.0, 32.0), (0.0, 32.0)]

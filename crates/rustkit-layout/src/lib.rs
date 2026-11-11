@@ -5274,6 +5274,7 @@ impl LayoutBox {
         // free space at all, and every item stays packed against the start
         // edge. Passing the containing block as well keeps step 11d's
         // re-derivation on the same number.
+        let mut relaid = false;
         if self.style.display.is_flex()
             && self.inset_definite_content_height(containing_block).is_some()
         {
@@ -5282,16 +5283,59 @@ impl LayoutBox {
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
+        } else if self.needs_percent_relayout_after_reanchor(containing_block) {
+            // The block path has the same hole for percentages: the children
+            // resolved `height: 100%` before this box had a height, so they
+            // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
+            // (a video player's backdrop) drew as a 32px strip in an 800px
+            // box where Chrome 148 fills the layer. The used height is known
+            // now and definite (CSS2 §10.6.4, or a percentage of the real
+            // containing block), so the children are laid out again against
+            // it. This box keeps the height it was given.
+            let height = self.dimensions.content.height;
+            self.mark_percent_height_bases(Some(height), containing_block);
+            self.layout_block_children(Some(height));
+            self.dimensions.content.height = height;
+            relaid = true;
         }
 
         // An `inset`-stretched box changes SIZE here, after its own children
         // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
         // an `inset: 0` slider sat 22px above the slider (settings' toggles,
         // n46). Its abspos children are re-anchored to the new padding box.
-        if self.dimensions.content.width != origin_w || self.dimensions.content.height != origin_h
+        // The relayout above put its abspos children back on the stand-in.
+        if relaid
+            || self.dimensions.content.width != origin_w
+            || self.dimensions.content.height != origin_h
         {
             self.reanchor_absolute_children();
         }
+    }
+
+    /// Whether `reanchor_absolute` must lay this block's children out again:
+    /// a plain block (not flex, grid, table or replaced) whose used height
+    /// only became definite against its real containing block (opposite
+    /// insets with `height: auto`, or a percentage / `calc()` height), with
+    /// an in-flow child whose height, `min-height` or `max-height` carries a
+    /// percentage. Anything else resolved nothing against the stand-in.
+    fn needs_percent_relayout_after_reanchor(&self, containing_block: &Dimensions) -> bool {
+        let has_percent = |l: &Length| match l {
+            Length::Percent(_) => true,
+            Length::Calc(sum) => sum.percent != 0.0,
+            _ => false,
+        };
+        matches!(self.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !(self.style.display.is_flex()
+                || self.style.display.is_grid()
+                || self.style.display.is_table())
+            && (has_percent(&self.style.height)
+                || self.inset_definite_content_height(containing_block).is_some())
+            && self.children.iter().any(|c| {
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && (has_percent(&c.style.height)
+                        || has_percent(&c.style.min_height)
+                        || has_percent(&c.style.max_height))
+            })
     }
 
     /// CSS 2.1 §10.1: the containing block of an absolutely positioned
