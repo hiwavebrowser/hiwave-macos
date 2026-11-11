@@ -396,17 +396,8 @@ pub struct JsNavigator {
     pub hardware_concurrency: usize,
 }
 
-/// `navigator.platform` for the OS the engine is built for, as Chromium
-/// reports it ("MacIntel" on every Mac, Apple silicon included).
-pub const NAVIGATOR_PLATFORM: &str = if cfg!(target_os = "macos") {
-    "MacIntel"
-} else if cfg!(windows) {
-    "Win32"
-} else if cfg!(target_arch = "aarch64") {
-    "Linux aarch64"
-} else {
-    "Linux x86_64"
-};
+/// `navigator.platform` (one value for the page and its workers).
+pub use rustkit_common::NAVIGATOR_PLATFORM;
 
 impl Default for JsNavigator {
     fn default() -> Self {

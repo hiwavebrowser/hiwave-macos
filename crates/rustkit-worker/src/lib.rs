@@ -727,7 +727,7 @@ impl WorkerNavigator {
             user_agent: "RustKit/1.0".to_string(),
             app_name: "RustKit".to_string(),
             app_version: "1.0".to_string(),
-            platform: "Win32".to_string(),
+            platform: rustkit_common::NAVIGATOR_PLATFORM.to_string(),
             language: "en-US".to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
             online: true,
