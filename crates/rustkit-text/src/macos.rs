@@ -2334,6 +2334,29 @@ mod tests {
         assert_eq!(ps(400, false), "Times-Roman");
     }
 
+    /// An italic system family paints the system font's italic, not the
+    /// default serif (Prometheus delta R1 MED on #1074). Chrome for Testing
+    /// 148 (CSS.getPlatformFontsForNode, 14px): italic system-ui and italic
+    /// BlinkMacSystemFont are .SFNS-RegularItalic, italic 700 is
+    /// .SFNS-BoldItalic.
+    #[test]
+    fn an_italic_system_family_paints_the_system_italic() {
+        use core_text::font_descriptor;
+        for family in ["system-ui", "BlinkMacSystemFont", "-apple-system, system-ui"] {
+            let regular = create_font_with_traits(family, 14.0, 400, true).expect("a font");
+            assert!(
+                !regular.postscript_name().starts_with("Times"),
+                "{family} italic is the system font, got {}",
+                regular.postscript_name()
+            );
+            assert_eq!(regular.family_name(), create_font("system-ui", 14.0).unwrap().family_name(), "{family}");
+            assert!(regular.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} italic trait");
+            let bold = create_font_with_traits(family, 14.0, 700, true).expect("a font");
+            assert!(bold.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} 700 italic trait");
+            assert!(bold.symbolic_traits() & font_descriptor::kCTFontBoldTrait != 0, "{family} 700 bold trait");
+        }
+    }
+
     /// Paint draws the fallback glyph from that same face: the advance the
     /// rasteriser reports is Menlo's, not Apple Symbols'.
     #[test]
