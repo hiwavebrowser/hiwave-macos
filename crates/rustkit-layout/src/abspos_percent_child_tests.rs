@@ -128,3 +128,86 @@ fn a_percent_height_child_of_a_content_sized_layer_is_its_content() {
         [(0.0, 32.0), (0.0, 32.0), (0.0, 32.0)]
     );
 }
+
+/// `left: 0; right: 0; top: 0; aspect-ratio: 16 / 9` in a 640px-wide box
+/// (Chrome for Testing 148.0.7778.216: ab, pl and hf 640x360): the ratio
+/// makes the layer's height definite once its width is stretched, so
+/// `height: 100%` children fill it. The engine sized the layer 360 and
+/// left pl and hf at their 32px content.
+#[test]
+fn a_percent_height_child_of_an_aspect_ratio_layer_fills_the_layer() {
+    let mut outer_style = ComputedStyle::new();
+    outer_style.width = Length::Px(640.0);
+    outer_style.height = Length::Px(500.0);
+    let mut outer = LayoutBox::with_position(BoxType::Block, outer_style, Position::Relative);
+    let mut s = ComputedStyle::new();
+    s.aspect_ratio = Some(16.0 / 9.0);
+    let mut l = layer(s, [Some(0.0), Some(0.0), None, Some(0.0)]);
+    let mut hf = block(Length::Percent(100.0));
+    hf.children.push(block(Length::Px(32.0)));
+    let mut pl = block(Length::Percent(100.0));
+    pl.children.push(hf);
+    l.children.push(pl);
+    outer.children.push(l);
+    let viewport = Dimensions {
+        content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+        ..Default::default()
+    };
+    outer.layout(&viewport);
+    let ab = &outer.children[0];
+    let heights = [
+        ab.dimensions.content.height,
+        ab.children[0].dimensions.content.height,
+        ab.children[0].children[0].dimensions.content.height,
+    ];
+    assert_eq!(heights, [360.0, 360.0, 360.0]);
+}
+
+/// `n` nested `position: absolute; inset: 0` > `position: relative;
+/// height: 100%` layers in a 600x400 relative box, the innermost holding a
+/// `height: 100%` box. Returns how many boxes the layout visited and the
+/// innermost box's height.
+fn nested_layers(n: usize) -> (u64, f32) {
+    let mut inner = block(Length::Percent(100.0));
+    for _ in 0..n {
+        let mut rel_style = ComputedStyle::new();
+        rel_style.height = Length::Percent(100.0);
+        let mut rel = LayoutBox::with_position(BoxType::Block, rel_style, Position::Relative);
+        rel.children.push(inner);
+        let mut l = layer(ComputedStyle::new(), [Some(0.0); 4]);
+        l.children.push(rel);
+        inner = l;
+    }
+    let mut outer_style = ComputedStyle::new();
+    outer_style.width = Length::Px(600.0);
+    outer_style.height = Length::Px(400.0);
+    let mut outer = LayoutBox::with_position(BoxType::Block, outer_style, Position::Relative);
+    outer.children.push(inner);
+    let viewport = Dimensions {
+        content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+        ..Default::default()
+    };
+    let before = crate::layout_visits();
+    outer.layout(&viewport);
+    let visits = crate::layout_visits() - before;
+    let mut b = &outer;
+    while let Some(c) = b.children.first() {
+        b = c;
+    }
+    (visits, b.dimensions.content.height)
+}
+
+/// #1043 R1 nit 1: the relayout `reanchor_absolute` adds for a stretched
+/// layer must not compound with nesting. Each level is three boxes; five
+/// levels must cost about five times one level, not 2.5^5 times. The
+/// innermost box fills the 400px box at every depth (Chrome 148: 400).
+#[test]
+fn nested_inset_layers_lay_out_in_time_linear_in_their_depth() {
+    let (one, h1) = nested_layers(1);
+    let (five, h5) = nested_layers(5);
+    assert_eq!((h1, h5), (400.0, 400.0));
+    assert!(
+        five <= 6 * one,
+        "five nested layers visited {five} boxes, one layer {one}: not linear in depth"
+    );
+}
