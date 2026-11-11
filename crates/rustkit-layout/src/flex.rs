@@ -1833,19 +1833,24 @@ fn create_flex_item<'a>(
     // A text input / textarea keeps its UA padding and border folded into
     // its border box (`dimensions` has none), so a content-box author size
     // gains them here as in block flow (CH2.B17).
-    let (control_main_pb, control_cross_pb) = match &layout_box.box_type {
+    // `control_*_edges` is the same extent whatever the box-sizing: the
+    // least the control's border box can be (CSS Sizing 3 floors the
+    // content box at zero), so a border-box `max-width: 10px` on 20px
+    // padding and 3px borders is 46 here as in block flow (CH2.B17b).
+    let (control_main_pb, control_cross_pb, control_main_edges, control_cross_edges) = match &layout_box.box_type {
         crate::BoxType::FormControl(control) => {
             let cb_width = match main_axis {
                 Axis::Horizontal => container_main,
                 Axis::Vertical => container_cross,
             };
             let (w, h) = layout_box.content_box_control_extra(control, cb_width);
+            let (ew, eh) = layout_box.control_edge_extent(control, cb_width);
             match main_axis {
-                Axis::Horizontal => (w, h),
-                Axis::Vertical => (h, w),
+                Axis::Horizontal => (w, h, ew, eh),
+                Axis::Vertical => (h, w, eh, ew),
             }
         }
-        _ => (0.0, 0.0),
+        _ => (0.0, 0.0, 0.0, 0.0),
     };
     let spec_main_to_border_box =
         |v: f32| if is_border_box { v } else { v + main_pb + control_main_pb };
@@ -2028,7 +2033,19 @@ fn create_flex_item<'a>(
             crate::BoxType::Block | crate::BoxType::Inline | crate::BoxType::AnonymousBlock
         );
     let max_main = if max_main.is_finite() {
-        spec_main_to_border_box(max_main)
+        spec_main_to_border_box(max_main).max(main_pb + control_main_edges)
+    } else {
+        max_main
+    };
+    // CSS Sizing 3 §5.2: an author minimum above the maximum wins. Raising
+    // the maximum to it once here makes every later clamp agree, whatever
+    // its order (the frozen hypothetical size, `flex: none`, the cross and
+    // stretch paths all did max(min).min(max) and took the max: an input
+    // with `min-width: 80px; max-width: 50px` in a 300px row was 50,
+    // Chromium 148 80; #985's last R1 HOLD). Only a specified minimum: the
+    // automatic one is itself clamped by the maximum (css-flexbox-1 §4.5).
+    let max_main = if css_min_main > 0.0 {
+        max_main.max(spec_main_to_border_box(css_min_main))
     } else {
         max_main
     };
@@ -2063,9 +2080,21 @@ fn create_flex_item<'a>(
     };
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
+    // An author's `min-height: 0` (or `min-width: 0` in a column) is a
+    // minimum too, not the absence of one: the intrinsic floor below is
+    // for items that said nothing. A 5px row stretching an input with
+    // `min-height: 0` reaches the input's padding and border, not its
+    // intrinsic height (Chromium 148: 24, not 39; #985 second HOLD).
+    let specified_min_cross_is_auto = matches!(
+        match main_axis {
+            Axis::Horizontal => &layout_box.style.min_height,
+            Axis::Vertical => &layout_box.style.min_width,
+        },
+        rustkit_css::Length::Auto
+    );
     let min_cross = if css_min_cross > 0.0 {
         spec_cross_to_border_box(css_min_cross)
-    } else if explicit_cross_size.is_some() {
+    } else if explicit_cross_size.is_some() || !specified_min_cross_is_auto {
         // An author-specified cross size is used as specified. The intrinsic
         // floor below is for CONTENT-sized items; applying it to an explicit
         // size makes any control smaller than its intrinsic box impossible to
@@ -2079,7 +2108,15 @@ fn create_flex_item<'a>(
         intrinsic_cross + cross_pb
     };
     let max_cross = if max_cross.is_finite() {
-        spec_cross_to_border_box(max_cross)
+        spec_cross_to_border_box(max_cross).max(cross_pb + control_cross_edges)
+    } else {
+        max_cross
+    };
+    // The same on the cross axis: `min-height: 40px; max-height: 30px` in a
+    // row is 40 stretched or not (Chromium 148). The intrinsic floor above
+    // is not an author minimum and does not raise the maximum.
+    let max_cross = if css_min_cross > 0.0 {
+        max_cross.max(spec_cross_to_border_box(css_min_cross))
     } else {
         max_cross
     };
@@ -2093,7 +2130,7 @@ fn create_flex_item<'a>(
     // same way: the base was then "past the hypothetical size", the item
     // froze before it could grow, and its siblings were placed as if it
     // were 0 wide.
-    let hypothetical_main_size = flex_basis.max(min_main).min(max_main).max(main_pb);
+    let hypothetical_main_size = flex_basis.max(min_main).min(max_main).max(main_pb + control_main_edges);
 
     FlexItem {
         layout_box,
@@ -2107,9 +2144,15 @@ fn create_flex_item<'a>(
         cross_size: 0.0,
         main_position: 0.0,
         cross_position: 0.0,
-        min_main_size: min_main,
+        // CSS Sizing 3: the content box floors at zero, so no size an item
+        // takes, however it is clamped (the final shrink, a frozen
+        // hypothetical, the cross size), goes below its padding and border;
+        // for a text control that includes the frame it folds into its box
+        // (#985 second HOLD: a 10px row shrank a border-box input with 20px
+        // padding and 3px borders to 10, Chromium keeps 46).
+        min_main_size: min_main.max(main_pb + control_main_edges),
         max_main_size: max_main,
-        min_cross_size: min_cross,
+        min_cross_size: min_cross.max(cross_pb + control_cross_edges),
         max_cross_size: max_cross,
         align_self,
         main_margin_start,
