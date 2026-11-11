@@ -2075,6 +2075,16 @@ fn create_flex_item<'a>(
         spec_main_to_border_box(css_min_main)
     } else if specified_min_is_auto && main_overflow_is_visible {
         let content_min = match main_axis {
+            // A size container (`container-type: inline-size` or `size`)
+            // has inline-size containment: its content does not size it,
+            // so its automatic minimum is its padding and border alone
+            // (css-contain-2 §3.2; Chromium 148: two `flex: 1` containers
+            // in a 200px row are 100 each though one holds 300px).
+            Axis::Horizontal
+                if layout_box.style.container_type != rustkit_css::ContainerType::Normal =>
+            {
+                crate::grid::horizontal_padding_border(&layout_box.style)
+            }
             Axis::Horizontal => {
                 crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
                     .unwrap_or_else(|| crate::grid::content_min_content_width(layout_box))

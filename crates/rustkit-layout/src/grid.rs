@@ -463,7 +463,13 @@ impl<'a> GridItem<'a> {
         // unbreakable content inside the item widens intrinsic and flexible
         // tracks. Scroll containers may shrink below their content and keep
         // the explicit-only contribution.
-        let auto_min = if style.overflow_x == Overflow::Visible {
+        // A size container's content does not size it (inline-size
+        // containment): its automatic minimum is its padding and border
+        // (Chromium 148: a `1fr 1fr` grid of 200 keeps a container holding
+        // 300px at 100).
+        let auto_min = if style.container_type != rustkit_css::ContainerType::Normal {
+            horizontal_padding_border(style)
+        } else if style.overflow_x == Overflow::Visible {
             grid_item_min_content_width(self.layout_box)
         } else {
             0.0
