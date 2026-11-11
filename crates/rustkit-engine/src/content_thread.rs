@@ -8,7 +8,11 @@
 //!
 //! The engine is constructed on the content thread. The presenter is not:
 //! a page engine publishes [`crate::FrameCommit`]s and the window draws
-//! them. Per-tab threads are M6; this is the one shared content thread.
+//! them. Each content view gets its own thread (`ContentThread::spawn` per
+//! tab), so the window draws frames built on several threads. Anything a
+//! frame's drawing reads from thread-local state goes in the commit: the
+//! `@font-face` set it was built with (`FrameCommit::web_fonts`, E56) is
+//! installed on the window thread before it is drawn.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};

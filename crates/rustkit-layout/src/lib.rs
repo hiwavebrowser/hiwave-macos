@@ -19,6 +19,7 @@ pub mod forms;
 pub mod selection;
 pub mod fragment;
 pub mod grid;
+pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
@@ -99,6 +100,7 @@ pub use images::{
     calculate_intrinsic_size, calculate_placeholder_size, render_background_image,
     render_broken_image, render_image, ImageLayoutInfo,
 };
+pub use incremental::layout_visits;
 pub use intrinsic_cache::IntrinsicSizingMode;
 pub use margin_collapse::{
     collapse_margins, establishes_bfc, is_margin_collapsible_through,
@@ -298,6 +300,21 @@ pub(crate) fn button_border_box_width(
 /// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
 /// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
 /// Chrome's 63.9x34 and everything below it sat a pixel high.
+/// What a `<button>` adds above and below its line when the author did not declare that side
+/// (CB3b): the UA padding (top + bottom) and the UA border (top + bottom). Height is the sum of
+/// three independent parts: the line (`line-height`, else `normal`), the vertical padding and the
+/// vertical border, each the author's when declared (zero and `none` included) and these otherwise.
+/// Measured on Chrome for Testing 148.0.7778.216 (the board's oracle), headless, 800x600, on BOTH
+/// Linux (Talos) and macOS (Atlas, 2026-11-10; computed font Arial on both): `<button
+/// style="font-size:16px">` is 24 px = an 18 px `normal` line + 1 px padding per side + 2 px
+/// outset border per side. These constants are the TOTALS over both sides (padding 2, border 4).
+/// The earlier 4 / 0 "Mac calibration" (bare 19, `padding: 8px 16px` = 31) was RustKit's own
+/// number, not Chrome's: Chrome has no Mac-specific button metrics. Also measured at 16px Arial:
+/// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
+/// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
+pub const UA_BUTTON_PADDING_V: f32 = 2.0;
+pub const UA_BUTTON_BORDER_V: f32 = 4.0;
+
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -322,21 +339,55 @@ pub(crate) fn form_control_intrinsic_size(
     // padding and the control fell to the bare 19px blob (new_tab's
     // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
     // high). Resolve every absolute unit the way the rest of layout does.
-    let author_pb_v = {
+    let (author_pad_v, author_border_v) = {
         let px = |l: &Length| match l {
             Length::Percent(_) | Length::Auto => 0.0,
             other => other.to_px(font_size, 16.0, 0.0),
         };
-        px(&style.padding_top)
-            + px(&style.padding_bottom)
-            + px(&style.border_top_width)
-            + px(&style.border_bottom_width)
+        (
+            px(&style.padding_top) + px(&style.padding_bottom),
+            px(&style.border_top_width) + px(&style.border_bottom_width),
+        )
     };
+    let author_pb_v = author_pad_v + author_border_v;
     // The content line is the control font's `normal` line (n58): Arial is
     // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
     // read 14.33 / 15, so every styled control was 0.7–1px short.
-    let single_line_box = |blob: f32| {
-        if author_pb_v > 0.0 {
+    // CB3: an author who declared BOTH a vertical padding and a vertical border (zero and `none`
+    // included) fully specified the box, so the CSS box model applies as written: the content
+    // line (`line-height` when the author set one, else `normal`) plus the author's padding and
+    // border. `button{font-size:16px;line-height:1;padding:0 4px;border:none}` is 16 px tall in
+    // Chrome; with no author size to compose, the calibrated UA blob (22.8 at 16px) was used.
+    let fully_declared = style.padding_v_declared && style.border_v_declared;
+    let content_line = |font_size: f32| match style.line_height {
+        rustkit_css::LineHeight::Number(n) => n * font_size,
+        rustkit_css::LineHeight::Px(px) => px,
+        rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
+    };
+    // CB3b: a BUTTON's height is three independent parts (Chrome for Testing 148: line-height:1 only
+    // 22, padding:0 only 22, border:none only 20, all three declared 16 at 16px Arial): the line
+    // (`line-height` when the author set one, else `normal`), the vertical padding and the vertical
+    // border, each the author's when declared (zero and `none` included) and the UA's
+    // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not, so a bare button is the model too (the
+    // old 19 px blob was RustKit's own number). Inputs and selects keep their own rule: they ignore `line-height`
+    // here, and compose only a declared box.
+    let single_line_box = |blob: f32, is_button: bool, button_line: Option<f32>| {
+        if is_button {
+            let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
+            let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
+            // A button's line-height is `normal` unless declared on the button itself (see
+            // `ComputedStyle::line_height_declared`): the inherited one is reset by the UA font.
+            let line = button_line.unwrap_or_else(|| {
+                if style.line_height_declared {
+                    content_line(font_size)
+                } else {
+                    normal_line_height(style, font_size)
+                }
+            });
+            line + pad + border
+        } else if fully_declared {
+            normal_line_height(style, font_size) + author_pb_v
+        } else if author_pb_v > 0.0 {
             normal_line_height(style, font_size) + author_pb_v
         } else {
             blob
@@ -363,7 +414,7 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -394,12 +445,13 @@ pub(crate) fn form_control_intrinsic_size(
             // its text used (an emoji lifts Arial 14px from 16 to 23 in
             // Chrome 148: report's "📱 Share to Social" is 39 tall where
             // "Export as JSON" is 32). ASCII never reaches a fallback face.
-            let height = if author_pb_v > 0.0 && !label.is_ascii() && label_metrics.ascent > 0.0 {
-                normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
-                    + author_pb_v
-            } else {
-                single_line_box(19.0 * ua_scale)
-            };
+            // CB3b (Prometheus nit 1): the same three-part sum as an ASCII label; only the LINE
+            // differs. A declared `line-height` wins over the fallback face, as for any line.
+            let fallback_line = (!label.is_ascii()
+                && label_metrics.ascent > 0.0
+                && matches!(style.line_height, rustkit_css::LineHeight::Normal))
+            .then(|| normal_line_height(style, font_size).max(used_font_line_height(&label_metrics)));
+            let height = single_line_box(19.0 * ua_scale, true, fallback_line);
             (button_border_box_width(style, font_size, label_metrics.width), height)
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
@@ -463,7 +515,7 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale))
+                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
             }
         }
     }
@@ -2522,6 +2574,7 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: Option<f32>,
     ) {
+        incremental::count_visit();
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -3051,6 +3104,7 @@ impl LayoutBox {
         floats: &FloatContext,
         first_band: (f32, f32),
     ) -> (usize, f32) {
+        incremental::count_visit();
         let BoxType::Text(ref text) = self.box_type else {
             return (0, 0.0);
         };
@@ -3624,6 +3678,14 @@ impl LayoutBox {
         if self.style.box_sizing == BoxSizing::BorderBox {
             return (0.0, 0.0);
         }
+        self.control_edge_extent(control, cb_width)
+    }
+
+    /// The horizontal and vertical extent of a text control's padding and
+    /// border (the author's where set, Chrome's UA values where not),
+    /// whatever its `box-sizing`: the least its border box can be.
+    /// `(0, 0)` for every other control.
+    pub(crate) fn control_edge_extent(&self, control: &FormControlType, cb_width: f32) -> (f32, f32) {
         let (ua_pad_v, ua_pad_h, ua_border) = match control {
             FormControlType::TextInput { input_type, .. } => {
                 let t = input_type.to_ascii_lowercase();
@@ -3761,6 +3823,35 @@ impl LayoutBox {
                 }
             }
         };
+
+        // CSS 2.1 §10.4 / §10.7: min/max sizes clamp a control as any box,
+        // max first, then min (min wins). They name the same box `width`
+        // and `height` do, so a content-box text control adds its padding
+        // and border (CH2.B17b: `min-width: 60px` was ignored, 28 wide where
+        // Chromium builds 68; `max-width: 40px` left a 100px input 108).
+        // A percentage height against an indefinite base does not apply.
+        let clamp = |size: f32, min: &Length, max: &Length, base: Option<f32>, extra: f32| {
+            let mut size = size;
+            if let Some(mx) = self.replaced_length(max, base) {
+                size = size.min(mx + extra);
+            }
+            if let Some(mn) = self.replaced_length(min, base) {
+                size = size.max(mn + extra);
+            }
+            size
+        };
+        let width = clamp(width, &self.style.min_width, &self.style.max_width, Some(width_base), extra_w);
+        let height = clamp(height, &self.style.min_height, &self.style.max_height, percent_height_base, extra_h);
+
+        // CSS Sizing 3 §3: the content box is floored at zero, so the
+        // border box is never smaller than the control's padding plus
+        // border, whichever box the author's lengths name. A content-box
+        // control gets that from `extra` above; a `box-sizing: border-box`
+        // one has `extra` 0, and `max-width: 10px` on 20px padding and 3px
+        // borders made a 10px box where Chromium builds 46 (#985 R1 HOLD).
+        let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
+        let width = width.max(edges_w);
+        let height = height.max(edges_h);
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
@@ -4276,6 +4367,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
+        incremental::count_visit();
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -13343,6 +13435,9 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The page declares `border: none` too (the cascade flags both axes, CB3b).
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
         let plain = FormControlType::Button {
             label: "Export as JSON".to_string(),
             button_type: "button".to_string(),
@@ -13353,6 +13448,75 @@ mod tests {
         };
         assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
         assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
+    }
+
+    #[test]
+    fn test_a_non_ascii_button_label_goes_through_the_same_three_part_sum() {
+        // Prometheus nit 1 on #1037: the non-ASCII branch kept the old rule (no UA border when
+        // padding was declared, `line-height` ignored). The label only changes the LINE (the
+        // fallback face united with `normal`); padding and border are the same sum. Deterministic
+        // on any machine: a declared line-height wins over the fallback face, so the emoji label
+        // is exactly the ASCII label's height; and a bare emoji button is never shorter than a
+        // bare ASCII one (its line is `normal` united with the fallback).
+        let button = |label: &str| FormControlType::Button {
+            label: label.to_string(),
+            button_type: "button".to_string(),
+        };
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        style.line_height_declared = true; // the cascade flags a line-height on the button itself
+        let ascii = form_control_intrinsic_size(&style, &button("Share")).1;
+        let emoji = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(ascii, 20.0 + UA_BUTTON_PADDING_V + UA_BUTTON_BORDER_V, "ascii: line + UA padding + UA border");
+        assert_eq!(emoji, ascii, "a declared line-height wins over the fallback face");
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_v_declared = true;
+        let emoji_padded = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(emoji_padded, 20.0 + 16.0 + UA_BUTTON_BORDER_V, "declared padding keeps the UA border");
+        let bare = ComputedStyle::new();
+        let bare_ascii = form_control_intrinsic_size(&bare, &button("Share")).1;
+        let bare_emoji = form_control_intrinsic_size(&bare, &button("\u{1F4F1} Share")).1;
+        assert!(bare_emoji >= bare_ascii, "an emoji label is never shorter: {bare_emoji} vs {bare_ascii}");
+    }
+
+    #[test]
+    #[ignore = "BACKLOG (Prometheus #1037 nit 3): not measured on Chrome CfT 148 yet"]
+    fn backlog_a_fully_declared_input_and_select_box_is_line_plus_author_padding_and_border() {
+        // `fully_declared` (padding AND border declared, zero and `none` included) now also reaches
+        // `<input>` and `<select>`, which used to keep the 19 px blob when the declared values were
+        // all zero. The new rule is the CSS box model (normal line + 0 + 0 = 15 at the UA font).
+        // Unpinned until Chrome CfT 148 gives the number for `input{padding:0;border:none}` and
+        // the select equivalent; then replace the 15.0 below with it and drop `ignore`.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(40.0 / 3.0);
+        style.font_family = "Arial".to_string();
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
+        let input = FormControlType::TextInput {
+            value: String::new(),
+            placeholder: String::new(),
+            input_type: "text".to_string(),
+        };
+        assert_eq!(form_control_intrinsic_size(&style, &input).1, 15.0);
+    }
+
+    #[test]
+    #[ignore = "BACKLOG (Prometheus #1037 nit 2): the flags are per axis, not per side"]
+    fn backlog_one_declared_side_does_not_drop_the_ua_part_of_the_other_side() {
+        // `padding-top: 0` alone keeps the UA bottom padding in Chrome (1px), and `border-style: solid`
+        // alone keeps the UA 2px width. RustKit flags the axis, so it drops both. Needs per-side flags
+        // in rustkit-css; until then this documents the expected value.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(0.0);
+        style.padding_v_declared = true;
+        let button = FormControlType::Button { label: "Go".to_string(), button_type: "button".to_string() };
+        let h = form_control_intrinsic_size(&style, &button).1;
+        assert_eq!(h, 18.0 + 1.0 + UA_BUTTON_BORDER_V, "line 18 + the UA 1px bottom padding + the UA border");
     }
 
     #[test]
@@ -13367,6 +13531,10 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The cascade flags a declared side (CB3b): `padding` and `border: none` are both the
+        // author's here, so no UA padding or border is added to the 14px line + 16.
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
         let control = FormControlType::Button {
             label: "Save".to_string(),
             button_type: "button".to_string(),

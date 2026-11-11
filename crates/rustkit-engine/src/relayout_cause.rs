@@ -246,6 +246,9 @@ pub struct RelayoutStats {
     /// Forced layouts: script read geometry after a DOM write in the same
     /// task, so the page was laid out (not painted) for the read.
     pub forced_layouts: u64,
+    /// LAT19: reads after a paint-only Web Animations write answered from
+    /// an animation frame over the published boxes instead of a build.
+    pub forced_frames: u64,
     /// Their time in milliseconds (LAT7; LAT1's sizing input).
     pub forced_ms: f64,
     /// Time spent in them, layout and the paint it ends with.
