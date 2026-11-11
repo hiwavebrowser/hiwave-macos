@@ -3438,17 +3438,13 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
         return None;
     }
 
-    // Two track shapes keep the generic walk's answer for now: a
-    // `fit-content()` track (its minimum is its items' minimum contribution,
-    // not their min-content) and a flexible track with a factor below 1
-    // (the items of a track the section 12.7.1 restart makes inflexible ask
-    // for nothing). On both the estimate below was further from Chromium
-    // than the walk: two `fit-content(80px)` columns of 150px words in
-    // `overflow: hidden` items were 300 in a 100px float (Chromium 100, the
-    // walk 150), and `0fr 2fr` around a 60px word with `min-width: 20px`
-    // was 100 (Chromium and the walk 60).
+    // One track shape keeps the generic walk's answer for now: a flexible
+    // track with a factor below 1 (the items of a track the section 12.7.1
+    // restart makes inflexible ask for nothing): `0fr 2fr` around a 60px
+    // word with `min-width: 20px` was 100 in the estimate (Chromium and the
+    // walk 60). A `fit-content()` track was the other until GR2 sized it
+    // from its items' minimum contribution (see `sized` below).
     let outside_the_estimate = |size: &TrackSize| match size {
-        TrackSize::FitContent(_) => true,
         TrackSize::Fr(fr) => *fr < 1.0,
         TrackSize::MinMax(_, high) => matches!(high.as_ref(), TrackSize::Fr(fr) if *fr < 1.0),
         _ => false,
@@ -3513,7 +3509,20 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
                 TrackSize::Auto | TrackSize::Percent(_) => {
                     Some(if min { floor(column) } else { content(column, false) })
                 }
-                TrackSize::FitContent(limit) => Some(content(column, min).min(limit.max(content(column, true)))),
+                // `fit-content(L)` is `minmax(auto, max-content)` clamped at
+                // L (css-grid-1 §7.2.4): under a min-content constraint its
+                // base, the items' minimum contribution (`floor`); under a
+                // max-content constraint min(L, max-content), never below
+                // that base (GR2). Two `fit-content(80px)` columns of 150px
+                // words in `overflow: hidden` items are 80 each, so 160 in
+                // a wide float and the float's 100 in a narrow one
+                // (Chromium 143); `fit-content(300px)` around a 240px row of
+                // boxes is 240 (Chromium 148).
+                TrackSize::FitContent(limit) => Some(if min {
+                    floor(column)
+                } else {
+                    floor(column).max(content(column, false).min(*limit))
+                }),
                 _ => None,
             }
         };
