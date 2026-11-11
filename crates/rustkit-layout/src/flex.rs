@@ -1193,12 +1193,20 @@ fn layout_flex_container_at(
                 // holding a 12px line or a 5px block kept the 18px guess as
                 // the line's height (Chrome for Testing 148: the line is the
                 // laid-out 14 / 5; CB6b, HiWave's `.shelf-item-header`).
-                // A stretched item keeps its size: it is the line's.
+                //
+                // So does a STRETCHED item while the line itself is still
+                // that guess (the container's height is auto, so nothing
+                // fixed it): the line is then re-derived from the laid-out
+                // items below and the re-stretch grows every stretched item
+                // to it (Chrome for Testing 148: one item holding a 5px block
+                // is 5; 5px and 9px items are both 9). A definite line keeps
+                // its stretched items. An item whose content flows to 0 is 0
+                // (a `height: 0` child; CB6c).
                 let laid_out = children_height + item.cross_pb();
                 if cross_axis == Axis::Vertical
-                    && children_height > 0.0
+                    && children_height >= 0.0
                     && laid_out < item.cross_size
-                    && !item.stretches(style.align_items)
+                    && (!item.stretches(style.align_items) || definite_inner_cross.is_none())
                 {
                     // Only an AUTHORED minimum floors it: without one,
                     // `min_cross_size` is that same one-line content floor.
@@ -1291,19 +1299,24 @@ fn layout_flex_container_at(
                 // `align-items: flex-start`, Chromium 32). Only an authored
                 // minimum counts here: without one `min_cross_size` is the
                 // one-line content floor, which is not a size to grow to.
-                let target = if item.stretches(style.align_items) {
-                    line.cross_size - item.cross_margin_start - item.cross_margin_end
-                } else if resolve_length(
+                let authored_min = resolve_length(
                     item.layout_box,
                     &item.layout_box.style.min_height,
                     definite_inner_cross.unwrap_or(0.0),
-                ) > 0.0
-                {
+                ) > 0.0;
+                let target = if item.stretches(style.align_items) {
+                    line.cross_size - item.cross_margin_start - item.cross_margin_end
+                } else if authored_min {
                     item.min_cross_size
                 } else {
                     continue;
                 };
-                let target = target.max(item.min_cross_size).min(item.max_cross_size);
+                // Only an authored `min-height` floors the stretch: without
+                // one `min_cross_size` is the one-line content guess, and a
+                // stretched item in a 5px line is 5 (CB6c; Chrome for
+                // Testing 148), not that guess.
+                let floor = if authored_min { item.min_cross_size } else { 0.0 };
+                let target = target.max(floor).min(item.max_cross_size);
                 let content_height = (target - item.cross_pb()).max(0.0);
                 if content_height > item.layout_box.dimensions.content.height {
                     item.cross_size = target;
