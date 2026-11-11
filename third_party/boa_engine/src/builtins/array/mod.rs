@@ -2667,18 +2667,11 @@ impl Array {
             // e. Set k to k + 1.
         }
         // 4. Sort items using an implementation-defined sequence of calls to SortCompare. If any such call returns an abrupt completion, stop before performing any further calls to SortCompare and return that Completion Record.
-        let mut sort_err = Ok(());
-        items.sort_by(|x, y| {
-            if sort_err.is_ok() {
-                sort_compare(x, y, context).unwrap_or_else(|err| {
-                    sort_err = Err(err);
-                    Ordering::Equal
-                })
-            } else {
-                Ordering::Equal
-            }
-        });
-        sort_err?;
+        // HIWAVE PATCH (sort): `Vec::sort_by` panics when the comparator is not a total order
+        // (Rust 1.81+), and a page's comparator can be anything (`a > b`, `Math.random() - 0.5`).
+        // This merge sort calls the comparator the same way for any answers, never panics, and
+        // stops at the first abrupt completion.
+        merge_sort_fallible(&mut items, &mut |x, y| sort_compare(x, y, context))?;
 
         // 5. Return items.
         Ok(items)
@@ -3699,4 +3692,54 @@ fn array_set_length(
 
     // 19. Return true.
     Ok(true)
+}
+
+/// HIWAVE PATCH (sort): a stable merge sort whose comparator may be inconsistent (not a total
+/// order) and may fail. Never panics; on `Err` it stops calling the comparator and returns it.
+/// For an inconsistent comparator the order is unspecified, as ECMA-262 allows.
+fn merge_sort_fallible<T: Clone>(
+    items: &mut Vec<T>,
+    compare: &mut dyn FnMut(&T, &T) -> JsResult<Ordering>,
+) -> JsResult<()> {
+    let len = items.len();
+    if len < 2 {
+        return Ok(());
+    }
+    let mut from = items.clone();
+    let mut to = items.clone();
+    let mut width = 1;
+    while width < len {
+        let mut start = 0;
+        while start < len {
+            let mid = (start + width).min(len);
+            let end = (start + 2 * width).min(len);
+            let (mut left, mut right, mut out) = (start, mid, start);
+            while left < mid && right < end {
+                // Take the right element only when it is strictly smaller: that keeps it stable.
+                if compare(&from[left], &from[right])? == Ordering::Greater {
+                    to[out] = from[right].clone();
+                    right += 1;
+                } else {
+                    to[out] = from[left].clone();
+                    left += 1;
+                }
+                out += 1;
+            }
+            while left < mid {
+                to[out] = from[left].clone();
+                left += 1;
+                out += 1;
+            }
+            while right < end {
+                to[out] = from[right].clone();
+                right += 1;
+                out += 1;
+            }
+            start = end;
+        }
+        std::mem::swap(&mut from, &mut to);
+        width *= 2;
+    }
+    *items = from;
+    Ok(())
 }

@@ -613,6 +613,8 @@ mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sort_comparator_tests;
+#[cfg(all(test, feature = "headless"))]
 mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
