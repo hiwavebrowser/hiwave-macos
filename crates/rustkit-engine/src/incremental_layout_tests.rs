@@ -520,3 +520,207 @@ fn a_web_font_landing_after_layout_measures_text_afresh() {
     assert_eq!(after.mismatches, 0, "{after:?}");
     assert!(after.last.starts_with("relaid"), "{after:?}");
 }
+
+/// Page shapes common on real sites (batch 59's A/B fallbacks were in
+/// boxes like these): cards with absolute badges and overlays, an inset
+/// background layer, a header with an absolute dropdown, a tooltip after
+/// the text, an image in a line, percentage heights, a list that grows,
+/// a fixed header and a flex shell. Synthetic, so a proxy for the A/B.
+const SHAPES: &[(&str, &str)] = &[
+    (
+        "card badges",
+        "<style>.card{position:relative;padding:8px;margin:8px 0;border:1px solid #ccc}\
+         .badge{position:absolute;top:4px;right:4px;width:30px;height:12px}</style>\
+         <main><div class=card><span class=badge>new</span><h3>One</h3><p>first card</p></div>\
+         <div class=card><span class=badge>hot</span><h3>Two</h3><p>second card</p></div>\
+         <div class=card><h3>Three</h3><p>third card</p></div></main>",
+    ),
+    (
+        "card overlay",
+        "<style>.tile{position:relative;padding:4px}.cap{position:absolute;left:0;right:0;bottom:0;height:16px}</style>\
+         <section><div class=tile><p>tile text one</p><div class=cap>caption</div></div>\
+         <div class=tile><p>tile text two</p><div class=cap>caption</div></div><p>after</p></section>",
+    ),
+    (
+        "inset layer",
+        "<style>.hero{position:relative;padding:20px}.bg{position:absolute;inset:0;z-index:-1}</style>\
+         <div><div class=hero><div class=bg></div><h1>Title</h1><p>hero text</p></div><p>below</p></div>",
+    ),
+    (
+        "header dropdown",
+        "<style>header{position:relative;padding:4px}.menu{position:absolute;top:100%;left:0;width:200px}</style>\
+         <header><nav>Home News Sport</nav><div class=menu><p>a</p><p>b</p></div></header>\
+         <main><article><p>story text one</p><p>story text two</p></article></main>",
+    ),
+    (
+        "tooltip after text",
+        "<div style='position:relative;padding:2px'><p>term</p><div style='position:absolute'>tip</div><p>more</p></div><p>end</p>",
+    ),
+    (
+        "image in a line",
+        "<div style='padding:1px'><p>text <img width=10 height=10> more text</p><p>next</p></div><p>end</p>",
+    ),
+    (
+        "percent heights",
+        "<div style='padding:1px'><div style='height:50%'><p>half</p></div><div style='min-height:10%'><p>min</p></div></div>",
+    ),
+    (
+        "growing list",
+        "<div style='padding:1px'><ul><li>one</li><li>two</li></ul><p>after the list</p></div>",
+    ),
+    (
+        "fixed header",
+        "<div style='position:fixed;top:0;left:0;right:0;height:20px'>bar</div>\
+         <div style='padding-top:24px'><p>body text one</p><p>body text two</p></div>",
+    ),
+    (
+        "flex shell",
+        "<div style='display:flex'><aside style='width:100px'>side</aside>\
+         <main style='flex:1'><div style='padding:1px'><p>column text</p><p>more column</p></div></main></div>",
+    ),
+];
+
+/// Load each shape, mutate its text nodes (grow, shrink), its images'
+/// heights and its lists, in verify mode; sum what the incremental path did.
+fn shapes_run() -> (incremental_layout::Stats, u32) {
+    let _mode = ModeGuard::set(Mode::Verify);
+    set_count_only_for_test(true);
+    let mut sum = incremental_layout::Stats::default();
+    let mut mutations = 0;
+    for (name, body) in SHAPES {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            })
+            .expect("view");
+        engine
+            .load_html(view, &format!("<!doctype html><html><body>{body}</body></html>"))
+            .expect("load_html");
+        let found = engine
+            .execute_script(
+                view,
+                "window.__inc = []; var all = document.body.getElementsByTagName('*'); \
+                 for (var i = 0; i < all.length; i++) { \
+                   for (var n = all[i].firstChild; n; n = n.nextSibling) { \
+                     if (n.nodeType === 3 && n.data.trim().length > 0) { window.__inc.push(n); break; } } } \
+                 window.__inc.length",
+            )
+            .expect("script");
+        let count = found
+            .trim_start_matches("Number(")
+            .trim_end_matches(')')
+            .parse::<f64>()
+            .map_or(0, |n| n as usize);
+        let mut scripts = Vec::new();
+        for k in 0..count {
+            scripts.push(format!("window.__inc[{k}].data = window.__inc[{k}].data + ' with a good deal more text to wrap'.repeat(5);"));
+            scripts.push(format!("window.__inc[{k}].data = 'x';"));
+        }
+        scripts.push("var im = document.querySelector('img'); if (im) im.setAttribute('height', '40');".into());
+        scripts.push("var ul = document.querySelector('ul'); if (ul) { var li = document.createElement('li'); li.textContent = 'three'; ul.appendChild(li); }".into());
+        for script in &scripts {
+            engine.execute_script(view, script).expect("mutate");
+            mutations += 1;
+        }
+        let s = stats(&engine, view);
+        eprintln!("shape {name}: relaid {} unchanged {} fallbacks {:?} mismatches {}", s.relaid, s.unchanged, s.fallbacks, s.mismatches);
+        sum.attempts += s.attempts;
+        sum.relaid += s.relaid;
+        sum.unchanged += s.unchanged;
+        sum.mismatches += s.mismatches;
+        for (why, n) in &s.fallbacks {
+            *sum.fallbacks.entry(why).or_insert(0) += n;
+        }
+    }
+    (sum, mutations)
+}
+
+/// Stage 4 (absolute boxes): every relayout over the real-site shapes but
+/// the first layouts, the fixed header's and the percentage heights' (the
+/// root would be the body) takes the incremental path, with 0 mismatches.
+#[test]
+fn real_site_shapes_take_the_incremental_path() {
+    let (s, mutations) = shapes_run();
+    let first = s.fallbacks.get("no_retained").copied().unwrap_or(0);
+    let relayouts = s.attempts - first;
+    let share = (s.relaid + s.unchanged) as f32 / relayouts.max(1) as f32;
+    eprintln!(
+        "real-site shapes: {} shapes, {mutations} mutations, {} relayouts after the first layouts, \
+         relaid {} unchanged {} ({:.0}% incremental), mismatches {}, fallbacks {:?}",
+        SHAPES.len(),
+        relayouts,
+        s.relaid,
+        s.unchanged,
+        share * 100.0,
+        s.mismatches,
+        s.fallbacks
+    );
+    assert_eq!(s.mismatches, 0);
+    assert_eq!(s.fallbacks.get("abspos_on_path"), None, "{:?}", s.fallbacks);
+}
+
+/// A card's absolute badge (`top`/`right`) sits in the card the change
+/// grows: it is re-anchored, not a reason to lay the page out.
+#[test]
+fn a_change_in_a_card_with_an_absolute_badge_is_relaid() {
+    let html = "<div><div style='position:relative;padding:4px'><span style='position:absolute;top:2px;right:2px'>new</span>\
+                <p id=t>card</p></div><p>after</p></div>";
+    verified(html, GROW);
+}
+
+/// A caption anchored to the bottom of the box that grows moves with its
+/// bottom edge.
+#[test]
+fn a_bottom_anchored_overlay_follows_the_growing_box() {
+    let html = "<div><div style='position:relative;padding:4px'><p id=t>tile</p>\
+                <div style='position:absolute;left:0;right:0;bottom:0;height:10px'>cap</div></div><p>after</p></div>";
+    verified(html, GROW);
+}
+
+/// An `inset: 0` layer stretches with the box that grows.
+#[test]
+fn an_inset_layer_stretches_with_the_growing_box() {
+    let html = "<div><div style='position:relative;padding:4px'><div style='position:absolute;inset:0'></div>\
+                <p id=t>hero</p></div><p>after</p></div>";
+    verified(html, GROW);
+}
+
+/// An absolute box after the change with `top` set does not move with the
+/// flow; one at its static position does.
+#[test]
+fn absolute_boxes_after_the_change_keep_or_follow_their_anchor() {
+    let html = "<div><div style='position:relative;padding:4px'><p id=t>text</p>\
+                <div style='position:absolute;top:3px;left:0'>pinned</div><div style='position:absolute'>static</div>\
+                <p>more</p></div><p>after</p></div>";
+    verified(html, GROW);
+}
+
+/// Stage 3 (margin chains): a wrapper with open edges whose first and last
+/// children's margins collapse through it is laid out alone when those
+/// margin chains are what they were; no padded ancestor is needed.
+#[test]
+fn a_wrapper_whose_edge_margins_stay_is_relaid_alone() {
+    let html = "<div><div><p>before</p><div id=t><p style='margin:20px 0'>first</p>\
+                <p style='margin:20px 0'>last</p></div><p>after</p></div></div>";
+    let script = "var t = document.getElementById('t'); var p = document.createElement('p'); \
+                  p.textContent = 'added in the middle'; t.insertBefore(p, t.lastElementChild);";
+    let stats = verified(html, script);
+    assert_eq!(stats.hoists, 0, "{stats:?}");
+}
+
+/// When the last child changes, the margin that collapses through the
+/// wrapper's bottom edge may change: that still falls back.
+#[test]
+fn a_wrapper_whose_last_margin_changes_falls_back() {
+    let html = "<div><div><p>before</p><div id=t><p style='margin:20px 0'>first</p></div><p>after</p></div></div>";
+    let script = "var p = document.createElement('p'); p.style.margin = '5px 0'; p.textContent = 'added'; \
+                  document.getElementById('t').appendChild(p);";
+    let on = mutate(Mode::On, html, script);
+    assert!(last_fallback(&on).starts_with("margin_collapse"), "{on:?}");
+    let verify = mutate(Mode::Verify, html, script);
+    assert_eq!(verify.mismatches, 0, "{verify:?}");
+}
