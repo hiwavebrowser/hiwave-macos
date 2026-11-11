@@ -188,7 +188,7 @@ pub struct FontMetrics {
 fn is_system_family(lower: &str) -> bool {
     matches!(
         lower,
-        "system-ui" | "-apple-system" | "blinkmacsystemfont" | ".applesystemuifont"
+        "system-ui" | "blinkmacsystemfont" | ".applesystemuifont"
     )
 }
 
@@ -828,6 +828,10 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
             return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
+        // Not a family Chrome knows (CB7b): skipped, as an uninstalled font is.
+        if lower == "-apple-system" {
+            continue;
+        }
         if is_system_family(&lower) {
             return Ok(font::new_ui_font_for_language(
                 font::kCTFontSystemFontType,
@@ -841,8 +845,12 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
             return Ok(f);
         }
     }
-    // Nothing in the list exists here: take Core Text's substitute rather
-    // than no font at all.
+    // Nothing in the list exists here: Chrome's default (standard) font,
+    // Times, as layout's chain takes (`FontFamilyChain::serif`); Core Text's
+    // own substitute only if that is missing too.
+    if let Some(f) = named_font(map_generic("serif", "serif"), size) {
+        return Ok(f);
+    }
     font::new_from_name(family, size).map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
@@ -865,6 +873,10 @@ fn create_font_with_traits(
             return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
+        // Not a family Chrome knows (CB7b): skipped, as an uninstalled font is.
+        if lower == "-apple-system" {
+            continue;
+        }
 
         // System font: resolve the real weighted face via kCTFontWeightTrait,
         // as Chrome/Skia do. "-Bold" name variants never exist for it, and the
@@ -2351,7 +2363,7 @@ mod tests {
     /// (8.44px wide, not 18).
     #[test]
     fn a_text_default_emoji_takes_the_cascade_face_like_chrome() {
-        let system = create_font("-apple-system", 14.0).expect("system font");
+        let system = create_font("system-ui", 14.0).expect("system font");
         let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
         let ps = |primary: &CTFont, ch: char| {
             fallback_face_for(primary, ch).map(|(f, _)| f.postscript_name()).unwrap_or_default()
@@ -2391,7 +2403,7 @@ mod tests {
         const ACE: &str = "AppleColorEmoji";
         // "" is the primary's own PostScript name.
         const P: &str = "";
-        let system = create_font("-apple-system", 14.0).expect("system font");
+        let system = create_font("system-ui", 14.0).expect("system font");
         let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
         let menlo = named_font("Menlo", 14.0).expect("Menlo is installed");
         type Row = (char, [&'static str; 3]);

@@ -187,13 +187,24 @@ impl FontFamilyChain {
 
     /// Resolve a CSS font-family value to a chain.
     pub fn from_css_value(value: &str) -> Self {
-        let families: Vec<&str> = value
+        let listed: Vec<&str> = value
             .split(',')
             .map(|s| s.trim().trim_matches('"').trim_matches('\''))
             .collect();
+        // `-apple-system` is WebKit's name for the system font; Chrome has
+        // never supported it, so it is an unknown family and the stack goes
+        // on to the next one (Chrome for Testing 148: `-apple-system` alone
+        // is the default serif, `-apple-system, "Segoe UI", Helvetica` is
+        // Helvetica). CB7b.
+        let families: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|f| !f.eq_ignore_ascii_case("-apple-system"))
+            .collect();
 
         if families.is_empty() {
-            return Self::sans_serif();
+            // Only unknown names: Chrome's default (standard) font.
+            return if listed.is_empty() { Self::sans_serif() } else { Self::serif() };
         }
 
         let primary = families[0];
@@ -203,7 +214,7 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
-            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
+            "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
@@ -217,10 +228,7 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui"
-                        || lower == "-apple-system"
-                        || lower == "blinkmacsystemfont"
-                    {
+                    if lower == "system-ui" || lower == "blinkmacsystemfont" {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
