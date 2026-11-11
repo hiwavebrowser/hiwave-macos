@@ -3663,6 +3663,17 @@ fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
             BoxSizing::ContentBox => w + padding_border,
         };
     }
+    // CQ2: a size container (`container-type: inline-size` or `size`) has
+    // inline-size containment, so its content does not size it: its min-
+    // and max-content widths are those of an empty box, its padding and
+    // border (and a length `min-width`) (css-contain-2 §3.2; Chromium 148:
+    // a `padding: 0 5px` container around a 300px child is 10 wide as a
+    // `flex: 0 0 auto` item, an inline-block, `fit-content` or in a float).
+    if style.container_type != rustkit_css::ContainerType::Normal
+        && style.writing_mode == rustkit_css::WritingMode::HorizontalTb
+    {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
+    }
 
     // A replaced box has no children to walk: its contribution is its own
     // width, which the walk below read as 0.
@@ -3999,6 +4010,12 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
         };
+    }
+    // CQ2: inline-size containment, as in `own_min_content_width`.
+    if style.container_type != rustkit_css::ContainerType::Normal
+        && style.writing_mode == rustkit_css::WritingMode::HorizontalTb
+    {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
     }
 
     // A replaced box has no children to walk: its contribution is its own

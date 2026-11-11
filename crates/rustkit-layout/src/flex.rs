@@ -3602,6 +3602,16 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, defin
                 // Nothing to measure is a 0 max-content width, not a line
                 // height: an empty `<div>` row item is 0 wide in Chrome 148.
                 Axis::Horizontal if layout_box.children.is_empty() => 0.0,
+                // CQ2: a size container's content does not size it
+                // (inline-size containment): its content size is 0, not the
+                // line-height fallback below (Chromium 148: a `flex: 0 0
+                // auto` container around 300px with `padding: 0 5px` is 10).
+                Axis::Horizontal
+                    if style.container_type != rustkit_css::ContainerType::Normal
+                        && style.writing_mode == rustkit_css::WritingMode::HorizontalTb =>
+                {
+                    0.0
+                }
                 Axis::Horizontal => {
                     let border_box = crate::grid::estimate_max_content_width(layout_box);
                     let content =

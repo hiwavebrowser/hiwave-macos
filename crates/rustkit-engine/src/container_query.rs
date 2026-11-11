@@ -42,11 +42,11 @@
 //! flex or grid item, which the estimate cannot see, is answered with its
 //! laid-out size, and a resize is answered again. A measurement is used
 //! only where the engine's layout is known to agree with Chrome's
-//! (`layout_trusted`), and not for a container sized by its own contents,
-//! whose inline-size containment rustkit-layout does not apply yet
-//! (`inline_size_from_contents`); elsewhere the fail-safe above still
-//! holds. Only the inline size moves a layout again: an `inline-size`
-//! container's height is not recorded. A chain of more than two nested
+//! (`layout_trusted`); elsewhere the fail-safe above still holds. A
+//! container sized by its contents is measured too: rustkit-layout applies
+//! inline-size containment to its intrinsic widths (CQ2), as Chrome does.
+//! Only the inline size moves a layout again: an `inline-size` container's
+//! height is not recorded. A chain of more than two nested
 //! containers, each sized by the answer of the one outside it, does not
 //! settle in one layout: the pass cap returns, the next relayout goes on
 //! from the stored sizes, and the cap is counted
@@ -58,8 +58,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use rustkit_css::{
-    AlignItems, AlignSelf, BoxSizing, ComputedStyle, ContainerType, Display, FlexBasis, Float,
-    Length, Overflow, Position, TrackRepeat, TrackSize, WritingMode,
+    BoxSizing, ComputedStyle, ContainerType, Display, Float, Length, Overflow, Position,
+    WritingMode,
 };
 
 /// A query container, as an `@container` condition sees it.
@@ -226,8 +226,7 @@ impl ElementScope {
                 node,
                 frame.trusted
                     && style.container_type != ContainerType::Normal
-                    && style.display != Display::None
-                    && !inline_size_from_contents(style, parent),
+                    && style.display != Display::None,
             ) {
                 state.trusted.insert(n);
             }
@@ -235,7 +234,6 @@ impl ElementScope {
                 if frame.trusted
                     && style.container_type != ContainerType::Normal
                     && style.display != Display::None
-                    && !inline_size_from_contents(style, parent)
                 {
                     frame.width = Some(inline);
                     frame.container = Some(Some(Container {
@@ -559,70 +557,6 @@ fn layout_trusted(
         && style.webkit_box.is_none()
         && !tag.is_some_and(|t| NOT_PLAIN_TAGS.iter().any(|n| t.eq_ignore_ascii_case(n)))
         && !parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared)
-}
-
-/// A size container whose inline size comes from its contents: a sizing
-/// keyword or `fit-content` width, an auto width on an `inline-block`
-/// (or other inline-level or table box), a row flex item whose basis is
-/// not a definite length, a column flex item that does not stretch, a grid
-/// item in a template with an intrinsic track. Chrome applies inline-size
-/// containment (css-contain-2 §3.2, css-conditional-5 §5.2) and sizes
-/// such a container as if it were empty (its padding and border: CfT 148
-/// gives 10 for a `padding: 0 5px` one around a 300px child in each of the
-/// four shapes of `container_query_on_a_content_sized_container_is_false`);
-/// rustkit-layout does not apply that containment yet, so its measurement
-/// is the content's width. Such a container stays on the fail-safe (#1070
-/// R1 MED 2). The container itself only: an ancestor sized by its
-/// contents (which include the container's) is not looked at.
-fn inline_size_from_contents(style: &ComputedStyle, parent: Option<&ComputedStyle>) -> bool {
-    if style.width_keywords != 0
-        || [&style.width, &style.min_width, &style.max_width]
-            .iter()
-            .any(|l| matches!(l, Length::FitContent))
-    {
-        return true;
-    }
-    if !matches!(style.width, Length::Auto) {
-        return false;
-    }
-    if !matches!(
-        style.display,
-        Display::Block | Display::Flex | Display::Grid
-    ) {
-        return true;
-    }
-    let Some(p) = parent else { return false };
-    if p.display.is_flex() {
-        return if p.flex_direction.is_row() {
-            !matches!(
-                style.flex_basis,
-                FlexBasis::Length(_) | FlexBasis::Percent(_)
-            )
-        } else {
-            match style.align_self {
-                AlignSelf::Auto => p.align_items != AlignItems::Stretch,
-                other => other != AlignSelf::Stretch,
-            }
-        };
-    }
-    if p.display.is_grid() {
-        fn intrinsic(t: &TrackSize) -> bool {
-            match t {
-                TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent => true,
-                TrackSize::FitContent(_) => true,
-                TrackSize::MinMax(a, b) => intrinsic(a) || intrinsic(b),
-                _ => false,
-            }
-        }
-        let template = &p.grid_template_columns;
-        return template.tracks.iter().any(|t| intrinsic(&t.size))
-            || template.repeats.iter().any(|(_, r)| match r {
-                TrackRepeat::Count(_, ts)
-                | TrackRepeat::AutoFill(ts)
-                | TrackRepeat::AutoFit(ts) => ts.iter().any(|t| intrinsic(&t.size)),
-            });
-    }
-    false
 }
 
 /// A box whose width follows from its parent's by the block rules alone,
