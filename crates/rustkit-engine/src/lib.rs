@@ -11529,8 +11529,7 @@ impl layout_ctx::LayoutCtx {
         // full anyway and compares.
         use incremental_layout::Mode as IncMode;
         let inc_mode = if lay.is_some() { incremental_layout::mode() } else { IncMode::Off };
-        let inc_key = incremental_layout::Key { bounds, cb_width, fonts: rustkit_layout::webfonts::generation() };
-        let scrollbar_pass = unlaid.is_some() || !remembered.is_empty() || root_bar_always;
+        let mut inc_key = incremental_layout::Key { bounds, cb_width, fonts: rustkit_layout::webfonts::generation() };
         let mut incremental: Option<LayoutBox> = None;
         let mut unchanged = false;
         let mut diffed = false;
@@ -11539,7 +11538,6 @@ impl layout_ctx::LayoutCtx {
             let mut stats = lay.incremental_stats.borrow_mut();
             stats.attempts += 1;
             match previous {
-                _ if scrollbar_pass => stats.fallback("scrollbar_pass"),
                 None => stats.fallback("no_retained"),
                 Some(prev) if prev.key != inc_key => stats.fallback("key_changed"),
                 Some(mut prev) => match prev.take_laid(&mut stats) {
@@ -11547,7 +11545,30 @@ impl layout_ctx::LayoutCtx {
                     Some(mut laid) => {
                         let _layout_time = time_stage(Stage::Layout);
                         diffed = true;
-                        match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut laid) {
+                        let relaid = rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut laid)
+                            .and_then(|done| {
+                                // The full pass's overflow pass (CH2.E7) on
+                                // the incremental tree: a styled bar that
+                                // comes or goes, or the root's, is the full
+                                // layout's second pass; anything else and
+                                // the incremental tree is what one pass
+                                // gives (its scroll extents are its
+                                // children's, spliced).
+                                if unlaid.is_some()
+                                    && scrollbar_pass_again(
+                                        &laid,
+                                        &remembered,
+                                        root_bar,
+                                        root_remembered,
+                                        cb_width,
+                                        bounds,
+                                    )
+                                {
+                                    return Err("scrollbar_changed");
+                                }
+                                Ok(done)
+                            });
+                        match relaid {
                             Ok(done) => {
                                 stats.visits += done.visits;
                                 stats.last_diff_ms = done.diff_ms;
@@ -11599,7 +11620,7 @@ impl layout_ctx::LayoutCtx {
         if use_incremental {
             retain_unlaid = Some(std::mem::replace(&mut root_box, incremental.take().expect("incremental tree")));
             passes = 1;
-        } else if inc_mode != IncMode::Off && !scrollbar_pass {
+        } else if inc_mode != IncMode::Off {
             retain_unlaid = Some(root_box.clone());
         }
         for pass in 0..4 {
@@ -11666,6 +11687,18 @@ impl layout_ctx::LayoutCtx {
             }
             if !again {
                 break;
+            }
+        }
+        // More than one pass: the next layout starts from this one's marks
+        // and root bar (`remembered`), so its unlaid tree is the last pass's.
+        if passes > 1 && retain_unlaid.is_some() {
+            if let Some(unlaid) = unlaid.as_ref() {
+                let mut marks = HashMap::new();
+                root_box.collect_scrollbar_marks(&mut marks);
+                let last = unlaid.clone();
+                last.apply_scrollbar_marks(&marks);
+                retain_unlaid = Some(last);
+                inc_key.cb_width = cb_width;
             }
         }
         if let Some(lay) = lay.as_ref() {
@@ -11746,6 +11779,31 @@ impl layout_ctx::LayoutCtx {
 /// The root post-passes: an empty body fills the viewport, and the root
 /// (canvas) box covers it. Returns what they changed, so the incremental
 /// path can take the tree back as layout left it.
+/// Whether the overflow pass after a first layout pass would ask for
+/// another (`lay_out_document`'s loop at pass 0): a styled bar marked or
+/// unmarked, or the root's bar shown or dropped.
+fn scrollbar_pass_again(
+    tree: &LayoutBox,
+    remembered: &HashMap<usize, (bool, bool)>,
+    root_bar: f32,
+    root_remembered: bool,
+    cb_width: f32,
+    bounds: (u32, u32),
+) -> bool {
+    if tree.mark_overflowing_scrollbars(!remembered.is_empty()) {
+        return true;
+    }
+    let root_overflows = tree.dimensions.margin_box().height > bounds.1 as f32 + 0.5;
+    (root_bar > 0.0
+        && cb_width >= bounds.0 as f32
+        && root_overflows
+        && !matches!(tree.style.overflow_y, rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip))
+        || (root_remembered
+            && !root_overflows
+            && tree.style.overflow_y != rustkit_css::Overflow::Scroll
+            && cb_width < bounds.0 as f32)
+}
+
 fn finish_root(root_box: &mut LayoutBox, bounds: (u32, u32)) -> incremental_layout::RawRoot {
     let mut raw = incremental_layout::RawRoot {
         root: (root_box.dimensions.content.width, root_box.dimensions.content.height),

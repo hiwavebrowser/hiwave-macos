@@ -25,9 +25,10 @@ over all of it. The `DirtySet` from restyle PR 1 is computed and only logged.
   compared (content, padding, border and margin edges, to 0.01 px, plus the tree
   shape and each text box's lines: count, break points, width, x offset and
   justification space, which fix where every glyph run is drawn). The page is
-  painted from the full tree. Verify does not compare scrollable overflow,
-  `scrollbar_overflows` or stacking contexts, so "0 mismatches" is box and
-  line equivalence, not full equivalence. Mismatches are counted on the view and logged as shapes only (the
+  painted from the full tree. Verify also compares element labels and,
+  since 2026-11-11, each scroller's scroll extent and styled bars' marks
+  (`overflow`); it does not compare stacking contexts, so "0 mismatches"
+  is box, line and scroll equivalence, not full equivalence. Mismatches are counted on the view and logged as shapes only (the
   box's child-index path, box kind and which edge moved), never text or URLs.
   Under `cfg(test)` a mismatch panics, so any engine test run with
   `RUSTKIT_INCREMENTAL_LAYOUT=verify` is an equivalence test.
@@ -170,8 +171,8 @@ until a stage names them.
    - Ancestors with `min-height`/`max-height` lengths grow when the old and
      new content heights are both on the unclamped side; otherwise the
      layout falls back (`ancestor_min_max`). Ancestors with non-visible
-     overflow grow like any block (a styled scrollbar is still
-     `scrollbar_pass`).
+     overflow grow like any block (a styled scrollbar that comes or goes is
+     `scrollbar_changed`, see Styled scrollbars).
    - Out-of-flow boxes anchor to their parent's padding box in RustKit
      (`reanchor_absolute_children`), so the check is now local: no absolute
      or fixed box may be a child of a growing ancestor or follow the path
@@ -219,13 +220,14 @@ until a stage names them.
      border box, as a formatting root (its children's margins do not
      collapse through it). Its border box must come out the same
      (`flex_item_resized` otherwise).
-   - **6b, row containers.** The main size is the width: the same rules
+   - **6b, row containers (parked 2026-11-11: the build, not layout, is
+     the larger cost of a relayout turn; see Timing).** The main size is the width: the same rules
      with `width`, laid out at the old width. The cross size is the hard
      part: a stretched item in a container whose height is auto sets the
      line's height, so either the item's `height` is a length, or the
      container's height is definite and the item's subtree reads no
      percentage height and anchors no absolute box to its bottom.
-   - **6c, content-sized items.** An item whose main size follows its
+   - **6c, content-sized items (parked with 6b).** An item whose main size follows its
      content (`flex-basis: auto` with an auto size) changes the
      algorithm's input. In a column container with an auto height,
      `justify-content: flex-start` and no `order` or reverse, the items
@@ -245,7 +247,7 @@ randomized sequences, restyle note §4 test 2) runs before the flag defaults to
 Full layout, with the reason counted on the view (`incremental_layout::Stats`)
 and shown on the relayout line. Since stage 2 a reason is the last one met
 while hoisting, when the root would have reached the body: `no_retained`,
-`key_changed`, `laid_not_kept`, `scrollbar_pass`, `root_changed`, `root_box`,
+`key_changed`, `laid_not_kept`, `root_changed`, `root_box`,
 `body_box` (the change is in the body's own children), `changed_not_block`,
 `changed_position`, `changed_float`, `changed_clear`, `changed_percent_height`,
 `subtree_fixed`, `subtree_float`, `margin_collapse_top`,
@@ -254,10 +256,28 @@ while hoisting, when the root would have reached the body: `no_retained`,
 `ancestor_container`, `ancestor_out_of_flow`, `ancestor_sized`,
 `ancestor_aspect_ratio`,
 `ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
-`fixed_after`, `geometry_moved`, `flex_item_resized` (a stage 6a root came
+`fixed_after`, `geometry_moved`, `scrollbar_changed`, `flex_item_resized` (a stage 6a root came
 out a different size), `root_large` (the relayout roots hold
 more than half of a tree of 2000 boxes or more: laying them out alone
 costs more than the full pass).
+
+## Styled scrollbars (2026-11-11)
+
+Until now any page whose tree could grow a styled (space-taking) scrollbar
+fell back (`scrollbar_pass`): the full layout runs an overflow pass
+(CH2.E7) and lays out again when a bar comes or goes. The incremental tree
+now goes through the same check (`scrollbar_pass_again`, the loop's pass-0
+test: a styled bar marked or unmarked, the root's bar shown or dropped);
+when it asks for another pass the layout falls back (`scrollbar_changed`),
+otherwise the incremental tree is what one full pass gives. A scroller's
+scroll extent is not stored: it is its children's reach
+(`element_scroll_max`), so a boundary scroller whose content was spliced
+has the right extent. Verify now compares the bars' marks and each
+scroller's extent (`overflow`), in shapes. When the full layout takes
+more than one pass, the tree kept for the next diff is the last pass's
+(marks and root bar as the next build will remember them). The corpus's
+37 `scrollbar_pass` fallbacks (all `fixtures/interactive.html`) are now
+relaid or unchanged, with 0 mismatches.
 
 ## Labels are not inputs (2026-11-11)
 

@@ -1111,6 +1111,17 @@ fn compare_into(
     if a.element_id != b.element_id || a.identity != b.identity {
         what.push("labels");
     }
+    // A scroller's extent (its children's reach) and its styled bars'
+    // marks (Prometheus #1064 MED): a boundary keeps its size while both
+    // follow its content.
+    if a.scrollbar_overflows.get() != b.scrollbar_overflows.get()
+        || (a.is_element_scroller() && {
+            let (x, y) = (a.element_scroll_max(), b.element_scroll_max());
+            !close(x.0, y.0) || !close(x.1, y.1)
+        })
+    {
+        what.push("overflow");
+    }
     // A line's break points, width, offset and justification space fix
     // where each of its glyph runs is drawn.
     let lines_close = match (&a.text_lines, &b.text_lines) {
@@ -1142,6 +1153,8 @@ fn compare_into(
                 BoxType::LineBreak => "br",
             };
             let (c, d) = (da.content, db.content);
+            // Shapes only (Pete's rule): the path, the kind, what differs
+            // and the rects; never a line's text, which is compared above.
             shown.push(format!(
                 "{path:?} {kind} {} ({:.1},{:.1} {:.1}x{:.1} vs {:.1},{:.1} {:.1}x{:.1})",
                 what.join("+"),
