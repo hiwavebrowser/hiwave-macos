@@ -10187,6 +10187,7 @@ impl Engine {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
             view.relayout_stats.last_build_ms = stages.build;
             view.relayout_stats.last_svg_ms = stages.svg;
+            view.relayout_stats.last_layout_ms = stages.layout;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -11549,6 +11550,7 @@ impl layout_ctx::LayoutCtx {
                         match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut laid) {
                             Ok(done) => {
                                 stats.visits += done.visits;
+                                stats.last_diff_ms = done.diff_ms;
                                 stats.last_visits = done.visits;
                                 stats.last_moved = done.moved;
                                 if done.roots.is_empty() {

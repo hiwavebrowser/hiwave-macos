@@ -199,9 +199,42 @@ until a stage names them.
    first box a changed float can reach (the float's top), with the float
    context rebuilt from the floats before it, which are kept on the laid-out
    tree. A float after B moves with the delta.
-6. **Flex, then grid.** A change inside a flex item re-lays the container
-   (its algorithm is global), and the container's height delta propagates as
-   in stage 1. Grid follows the same shape.
+6. **Flex, then grid.** Since stage 2 a change inside a flex item hoists
+   to the container, which is laid out whole; when the container is the
+   body (or its chain reaches it) the layout falls back (`ancestor_flex`,
+   40 on the corpus: two fixtures whose body is a column flex container).
+   A flex item can be the relayout root instead when nothing the
+   container's algorithm reads from it can change, so the algorithm would
+   give every item the size and place it had:
+   - **6a, column containers (implemented).** The container is a
+     single-line, block-level `flex-direction: column` box. The item's
+     main size is its `height`, a length (not a percentage), with
+     `flex-basis: auto`, and `min-height`/`max-height` lengths or unset;
+     no item shrank last time (the items' outer heights and the gaps fit
+     the container); its cross size is fixed (a `width` length, or
+     `auto` stretched, which is the container's width) and it is not
+     baseline-aligned; no auto margins. Then its flex base size,
+     hypothetical size and cross size are style alone, the algorithm's
+     answer is unchanged, and the item is laid out alone at its old
+     border box, as a formatting root (its children's margins do not
+     collapse through it). Its border box must come out the same
+     (`flex_item_resized` otherwise).
+   - **6b, row containers.** The main size is the width: the same rules
+     with `width`, laid out at the old width. The cross size is the hard
+     part: a stretched item in a container whose height is auto sets the
+     line's height, so either the item's `height` is a length, or the
+     container's height is definite and the item's subtree reads no
+     percentage height and anchors no absolute box to its bottom.
+   - **6c, content-sized items.** An item whose main size follows its
+     content (`flex-basis: auto` with an auto size) changes the
+     algorithm's input. In a column container with an auto height,
+     `justify-content: flex-start` and no `order` or reverse, the items
+     stack like blocks without margin collapsing: the delta moves the
+     later items and grows the container, as a growing block ancestor.
+     Elsewhere (rows, centring, `min-height` containers like
+     `multisurface_content`'s body) the container is laid out whole.
+   Grid follows the same shape once a track's size can be shown not to
+   depend on the changed item.
 
 Then the DirtySet replaces the diff (after restyle PR 3), and the soak (50k
 randomized sequences, restyle note §4 test 2) runs before the flag defaults to
@@ -221,7 +254,9 @@ while hoisting, when the root would have reached the body: `no_retained`,
 `ancestor_container`, `ancestor_out_of_flow`, `ancestor_sized`,
 `ancestor_aspect_ratio`,
 `ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
-`fixed_after`, `geometry_moved`.
+`fixed_after`, `geometry_moved`, `root_large` (the relayout roots hold
+more than half of a tree of 2000 boxes or more: laying them out alone
+costs more than the full pass).
 
 ## Labels are not inputs (2026-11-11)
 
@@ -278,6 +313,32 @@ way to the body.
   a mismatch.
 
 ## Timing
+
+Measured 2026-11-11 (`layout_timing_by_mode`, `#[ignore]`: run it with
+`cargo test --profile parity -p rustkit-engine --features headless --lib
+layout_timing_by_mode -- --ignored --nocapture`). Medians of 20 relayouts
+on a headless 1280x800 view, layout stage in ms, off / on / verify:
+
+| page | before the diff fix, on | off | on | verify | diff (on) |
+|---|---|---|---|---|---|
+| article, 6k elements, blocks: a paragraph rewritten | 6.72 | 4.21 | 2.91 | 6.98 | 2.62 |
+| same, hover on a nav link | 4.46 | 3.74 | 2.08 | 5.97 | 1.78 |
+| article in a flex shell: a paragraph rewritten | 20.17 | 8.30 | 14.35 (now `root_large`, full) | 24.01 | 2.99 |
+| same, hover | 4.54 | 8.51 | 2.03 | 10.73 | 1.71 |
+| the ten small shapes | | 0.03-0.06 | 0.03-0.07 | 0.05-0.14 | 0.004-0.009 |
+
+The diff compared five fields of every box through Debug strings; with
+structural equality it went from 6.4 to 2.6 ms on the article and the
+incremental path now beats the full pass there. What remains of the
+incremental layout stage is mostly the diff (the relayout of the root and
+the move of 3-5k later boxes are under 0.5 ms), so the next cut is the
+diff itself: the restyle `DirtySet` naming the changed boxes, or a style
+pointer comparison once the build shares styles. The build stage (7-8 ms
+on the article) is untouched by this work and is now the larger part of a
+relayout turn (turn medians: blocks 21.4 off, 18.7 on; flex shell hover
+27.7 off, 20.8 on). Verify runs both passes and the compare: its layout
+stage is the sum of off and on, and turns are 25-45% longer, so verify is
+for measurement, never for shipping.
 
 Stage 1 removes layout from the eligible relayouts; the build (restyle PRs 2
 and 3), the diff walk and the result clone remain O(n). The relayout line's

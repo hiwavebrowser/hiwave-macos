@@ -167,6 +167,8 @@ pub(crate) struct Stats {
     pub(crate) visits: u64,
     /// The last incremental relayout's boxes laid out.
     pub(crate) last_visits: u64,
+    /// The last incremental relayout's tree diff, in milliseconds.
+    pub(crate) last_diff_ms: f64,
     /// The last incremental relayout's boxes moved by the delta.
     pub(crate) last_moved: u64,
     /// The last layout's outcome, for the relayout line.

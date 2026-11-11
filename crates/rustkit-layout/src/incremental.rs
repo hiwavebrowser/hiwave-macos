@@ -58,6 +58,8 @@ pub struct Relaid {
     pub bounded: u32,
     /// The sum of the roots' border-box bottom deltas.
     pub delta: f32,
+    /// Time in the tree diff, in milliseconds.
+    pub diff_ms: f64,
 }
 
 /// One relayout root and where its delta stops.
@@ -82,7 +84,9 @@ pub fn relayout(
     laid: &mut LayoutBox,
 ) -> Result<Relaid, Fallback> {
     let mut out = Relaid::default();
+    let started = std::time::Instant::now();
     let changed = nest_free(changed_roots(old_unlaid, fresh, &mut out.compared)?);
+    out.diff_ms = started.elapsed().as_secs_f64() * 1000.0;
     if changed.is_empty() {
         refresh_labels(laid, fresh);
         return Ok(out);
@@ -95,6 +99,15 @@ pub fn relayout(
     plans.retain(|p| roots.contains(&p.root));
     plans.dedup_by(|a, b| a.root == b.root);
     plans.sort_by(|a, b| a.root.cmp(&b.root));
+    // A root holding most of the page costs more laid out alone than the
+    // full pass (a flex shell around the whole article: 14 ms against 8 on
+    // a 6k-element page, measured in the parity profile): fall back.
+    // On a small page both take microseconds: only large trees are checked.
+    let in_roots: u64 = plans.iter().filter_map(|p| at(fresh, &p.root)).map(count).sum();
+    let all = count(fresh);
+    if all >= 2000 && in_roots * 2 > all {
+        return Err("root_large");
+    }
     // Last first: a root's delta then moves the later roots already laid
     // out, and each is laid out at its own old position.
     for plan in plans.iter().rev() {
@@ -429,8 +442,65 @@ fn subtree_equal(a: &LayoutBox, b: &LayoutBox, compared: &mut u64) -> bool {
             .all(|(x, y)| subtree_equal(x, y, compared))
 }
 
-fn dbg_eq<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
-    format!("{a:?}") == format!("{b:?}")
+// Structural equality for the inputs the diff reads on every box (it was a
+// Debug-string comparison, two allocations per field per box: most of the
+// diff's time on a 6k-element page, Prometheus #1063 LOW 5). Each
+// destructures exhaustively, so a new field fails to compile until it is
+// compared. `==` on floats: -0 equals 0 and NaN differs, which is
+// conservative.
+fn opt_eq<T>(a: &Option<T>, b: &Option<T>, eq: impl Fn(&T, &T) -> bool) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => eq(x, y),
+        _ => false,
+    }
+}
+
+fn offsets_eq(a: &crate::PositionOffsets, b: &crate::PositionOffsets) -> bool {
+    let crate::PositionOffsets { top, right, bottom, left } = a;
+    *top == b.top && *right == b.right && *bottom == b.bottom && *left == b.left
+}
+
+fn stacking_eq(a: &crate::StackingContext, b: &crate::StackingContext) -> bool {
+    let crate::StackingContext { z_index, creates_context, positioned_children } = a;
+    *z_index == b.z_index
+        && *creates_context == b.creates_context
+        && *positioned_children == b.positioned_children
+}
+
+fn sticky_eq(a: &crate::scroll::StickyState, b: &crate::scroll::StickyState) -> bool {
+    let crate::scroll::StickyState { original_rect, stuck_rect, offsets, is_stuck } = a;
+    let crate::scroll::StickyOffsets { top, right, bottom, left } = offsets;
+    rect_eq(original_rect, &b.original_rect)
+        && opt_eq(stuck_rect, &b.stuck_rect, rect_eq)
+        && *top == b.offsets.top
+        && *right == b.offsets.right
+        && *bottom == b.offsets.bottom
+        && *left == b.offsets.left
+        && *is_stuck == b.is_stuck
+}
+
+fn lines_eq(a: &[crate::TextLine], b: &[crate::TextLine]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            let crate::TextLine { text, width, x_offset, justify_space } = x;
+            *text == y.text
+                && *width == y.width
+                && *x_offset == y.x_offset
+                && *justify_space == y.justify_space
+        })
+}
+
+fn floats_eq(a: &FloatContext, b: &FloatContext) -> bool {
+    let FloatContext { left_floats, right_floats } = a;
+    let side = |x: &[crate::FloatExclusion], y: &[crate::FloatExclusion]| {
+        x.len() == y.len()
+            && x.iter().zip(y).all(|(p, q)| {
+                let crate::FloatExclusion { rect, float_type } = p;
+                rect_eq(rect, &q.rect) && *float_type == q.float_type
+            })
+    };
+    side(left_floats, &b.left_floats) && side(right_floats, &b.right_floats)
 }
 
 fn rect_eq(a: &Rect, b: &Rect) -> bool {
@@ -468,7 +538,7 @@ fn box_type_eq(a: &BoxType, b: &BoxType) -> bool {
                 natural_height: h2,
             },
         ) => u1 == u2 && w1 == w2 && h1 == h2,
-        (BoxType::FormControl(x), BoxType::FormControl(y)) => dbg_eq(x, y),
+        (BoxType::FormControl(x), BoxType::FormControl(y)) => x == y,
         _ => false,
     }
 }
@@ -538,15 +608,11 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         && *pseudo_animation_key == b.pseudo_animation_key
         && scrollbar_overflows.get() == b.scrollbar_overflows.get()
         && dims_eq(dimensions, &b.dimensions)
-        && dbg_eq(offsets, &b.offsets)
-        && stacking_context.is_some() == b.stacking_context.is_some()
-        && (stacking_context.is_none() || dbg_eq(stacking_context, &b.stacking_context))
-        && sticky_state.is_some() == b.sticky_state.is_some()
-        && (sticky_state.is_none() || dbg_eq(sticky_state, &b.sticky_state))
-        && text_lines.is_some() == b.text_lines.is_some()
-        && (text_lines.is_none() || dbg_eq(text_lines, &b.text_lines))
-        && context_floats.is_some() == b.context_floats.is_some()
-        && (context_floats.is_none() || dbg_eq(context_floats, &b.context_floats))
+        && offsets_eq(offsets, &b.offsets)
+        && opt_eq(stacking_context, &b.stacking_context, stacking_eq)
+        && opt_eq(sticky_state, &b.sticky_state, sticky_eq)
+        && opt_eq(text_lines, &b.text_lines, |x, y| lines_eq(x, y))
+        && opt_eq(context_floats, &b.context_floats, floats_eq)
         && **style == *b.style
 }
 

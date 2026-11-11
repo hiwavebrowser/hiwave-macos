@@ -404,6 +404,15 @@ fn verify_mode_shows_no_mismatch_on_the_layout_corpus() {
             }
         }
         let s = stats(&engine, view);
+        if !s.fallbacks.is_empty() {
+            eprintln!(
+                "corpus page {}: relaid {} unchanged {} fallbacks {:?}",
+                page.strip_prefix(&root).unwrap_or(page).display(),
+                s.relaid,
+                s.unchanged,
+                s.fallbacks
+            );
+        }
         roots += s.roots;
         hoists += s.hoists;
         bounded += s.bounded;
@@ -723,4 +732,185 @@ fn a_wrapper_whose_last_margin_changes_relays_out_its_parent() {
                   document.getElementById('t').appendChild(p);";
     let stats = verified(html, script);
     assert_eq!(stats.hoists, 1, "{stats:?}");
+}
+
+/// An encyclopedia-sized article (about 6k elements): a header with a nav
+/// whose item grows on hover, an infobox floated beside the lead, 120
+/// sections of paragraphs with links, lists and a reference list. With
+/// `shell`, a sidebar and the article sit in a flex row, as on the live
+/// page; without it the article is in plain blocks.
+fn wiki_article(shell: bool) -> String {
+    let mut s = String::from(
+        "<!doctype html><html><head><style>body{margin:0;font:14px/1.6 sans-serif}\
+         header{display:flex;gap:12px;padding:8px;border-bottom:1px solid #ccc}\
+         .nav:hover{padding-bottom:6px} .shell{display:flex} aside{width:176px;flex:none}\
+         .content{flex:1;padding:16px} .infobox{float:right;width:260px;margin:0 0 8px 16px;border:1px solid #aaa}\
+         h2{border-bottom:1px solid #ddd;margin:24px 0 8px} p{margin:8px 0}</style></head><body>\
+         <header><a class=nav id=hov href='#'>Main page</a><a class=nav href='#'>Contents</a>\
+         <a class=nav href='#'>Random</a><input value=search></header>",
+    );
+    if shell {
+        s.push_str("<div class=shell><aside><ul>");
+        for i in 0..40 {
+            s.push_str(&format!("<li><a href='#'>Tool {i}</a></li>"));
+        }
+        s.push_str("</ul></aside>");
+    }
+    s.push_str("<div class=content><h1>Article</h1><table class=infobox>");
+    for i in 0..30 {
+        s.push_str(&format!("<tr><th>Field {i}</th><td>Value <a href='#'>{i}</a></td></tr>"));
+    }
+    s.push_str("</table><p>Lead paragraph beside the infobox, long enough to wrap a few times around it.</p>");
+    for i in 0..120 {
+        let id = if i == 60 { " id=t" } else { "" };
+        s.push_str(&format!(
+            "<h2>Section {i}</h2><p{id}>Text of section {i} with <a href='#'>a link</a>, <b>bold</b> and <i>italic</i> words.</p>\
+             <p>Second paragraph {i}, <a href='#'>another link</a> and more words to fill the line.</p>\
+             <ul><li>item a {i}</li><li>item b {i}</li><li>item c {i}</li></ul>\
+             <p>Third paragraph {i} with a citation<sup><a href='#'>[{i}]</a></sup>.</p>"
+        ));
+    }
+    s.push_str("<ol class=refs>");
+    for i in 0..200 {
+        s.push_str(&format!("<li><span>Reference {i}</span> <a href='#'>source</a></li>"));
+    }
+    s.push_str("</ol></div>");
+    if shell {
+        s.push_str("</div>");
+    }
+    s.push_str("</body></html>");
+    s
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// One page under `mode`: `runs` relayouts from `mutation` (called with the
+/// run index: the text grows on even runs and shrinks on odd ones; or a
+/// hover in and out). Medians of the layout stage, the build stage and the
+/// whole turn, in ms, and the outcome of the last relayout.
+fn time_runs(
+    mode: Mode,
+    html: &str,
+    runs: usize,
+    mut mutation: impl FnMut(&mut Engine, EngineViewId, usize),
+) -> (f64, f64, f64, String, f64) {
+    let _mode = ModeGuard::set(mode);
+    set_count_only_for_test(true);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    engine.load_html(view, html).expect("load_html");
+    for i in 0..2 {
+        mutation(&mut engine, view, i);
+    }
+    let (mut layout, mut build, mut total, mut diff) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in 0..runs {
+        let before = engine.relayout_stats(view).expect("view").relayouts;
+        let started = std::time::Instant::now();
+        mutation(&mut engine, view, i);
+        total.push(started.elapsed().as_secs_f64() * 1000.0);
+        let st = engine.relayout_stats(view).expect("view");
+        let relaid = st.relayouts > before;
+        layout.push(if relaid { st.last_layout_ms } else { 0.0 });
+        build.push(if relaid { st.last_build_ms } else { 0.0 });
+        diff.push(stats(&engine, view).last_diff_ms);
+    }
+    let last = stats(&engine, view).last;
+    (median(layout), median(build), median(total), last, median(diff))
+}
+
+fn text_mutation(selector: &'static str) -> impl FnMut(&mut Engine, EngineViewId, usize) {
+    move |engine, view, i| {
+        let text = if i % 2 == 0 {
+            "grown text that wraps onto more lines than it did before, ".repeat(6)
+        } else {
+            "short".to_string()
+        };
+        let script = format!(
+            "var e = document.querySelector('{selector}'); var n = e; \
+             while (n && n.nodeType !== 3) n = n.firstChild; if (n) n.data = '{text}';"
+        );
+        engine.execute_script(view, &script).expect("mutate");
+    }
+}
+
+/// INC5 timing (run explicitly: `--ignored`, in the parity profile): the
+/// layout stage per relayout with the flag off, on and verify, median of
+/// 20, over the real-site shapes and the article fixture.
+#[test]
+#[ignore]
+fn layout_timing_by_mode() {
+    const RUNS: usize = 20;
+    let mut pages: Vec<(String, String, &'static str)> = SHAPES
+        .iter()
+        .map(|(n, b)| (n.to_string(), format!("<!doctype html><html><body>{b}</body></html>"), "p"))
+        .collect();
+    pages.push(("article, flex shell".into(), wiki_article(true), "#t"));
+    pages.push(("article, blocks".into(), wiki_article(false), "#t"));
+    eprintln!("INC5 timing, median of {RUNS} relayouts (ms): layout off / on / verify; build off; turn off / on / verify; outcome on");
+    for (name, html, sel) in &pages {
+        let row: Vec<_> = [Mode::Off, Mode::On, Mode::Verify]
+            .into_iter()
+            .map(|m| time_runs(m, html, RUNS, text_mutation(sel)))
+            .collect();
+        eprintln!(
+            "TIMING text  {name:<22} layout {:>8.3} {:>8.3} {:>8.3}  diff(on) {:>7.3}  build {:>8.3}  turn {:>8.3} {:>8.3} {:>8.3}  {}",
+            row[0].0, row[1].0, row[2].0, row[1].4, row[0].1, row[0].2, row[1].2, row[2].2, row[1].3
+        );
+    }
+    for shell in [true, false] {
+        let html = wiki_article(shell);
+        let hover = |engine: &mut Engine, view: EngineViewId, i: usize| {
+            let at = if i % 2 == 0 { (20.0, 18.0) } else { (600.0, 400.0) };
+            engine.mouse_move_at_point(view, at.0, at.1);
+        };
+        let row: Vec<_> = [Mode::Off, Mode::On, Mode::Verify]
+            .into_iter()
+            .map(|m| time_runs(m, &html, RUNS, hover))
+            .collect();
+        eprintln!(
+            "TIMING hover article{:<14} layout {:>8.3} {:>8.3} {:>8.3}  diff(on) {:>7.3}  build {:>8.3}  turn {:>8.3} {:>8.3} {:>8.3}  {}",
+            if shell { ", flex shell" } else { ", blocks" },
+            row[0].0, row[1].0, row[2].0, row[1].4, row[0].1, row[0].2, row[1].2, row[2].2, row[1].3
+        );
+    }
+}
+
+/// A browser-chrome-like page: the body a fixed-height column flex
+/// container holding two fixed-height rows (`fixtures/multisurface_chrome`).
+const CHROME_LIKE: &str = "<style>*{margin:0;padding:0} body{height:72px;display:flex;flex-direction:column}\
+    .bar{height:40px;display:flex;align-items:center;gap:4px;padding:0 8px}\
+    .nav{height:32px;display:flex;align-items:center;gap:8px}\
+    .tab{height:32px;padding:0 16px;display:flex;align-items:center} .url{flex:1;height:28px}</style>\
+    <div class=bar><div class=tab><span id=t>New Tab</span></div><div class=tab><span>Docs</span></div></div>\
+    <div class=nav><div>back</div><div class=url><span>about:blank</span></div></div>";
+
+/// Stage 6a: a change inside an item of a column flex container whose
+/// height is a length lays out only that item; the container's algorithm
+/// would give every item the size and place it had.
+#[test]
+fn a_change_in_a_fixed_height_column_flex_item_relays_out_only_the_item() {
+    let stats = verified(CHROME_LIKE, GROW);
+    assert!(stats.hoists >= 1, "{stats:?}");
+}
+
+/// An item whose height follows its content changes what the algorithm
+/// reads: the container (here the body) is laid out whole.
+#[test]
+fn a_change_in_a_content_sized_column_flex_item_falls_back() {
+    let html = "<style>body{min-height:300px;display:flex;flex-direction:column;justify-content:center}</style>\
+                <div class=hero><p id=t>hero</p></div><div>after</div>";
+    let on = mutate(Mode::On, html, GROW);
+    assert_eq!(last_fallback(&on), "ancestor_flex", "{on:?}");
+    let verify = mutate(Mode::Verify, html, GROW);
+    assert_eq!(verify.mismatches, 0, "{verify:?}");
 }
