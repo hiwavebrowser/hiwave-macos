@@ -6396,6 +6396,11 @@ impl Renderer {
             ) {
                 return None;
             }
+            // Nothing folded into this character: the common case, decided
+            // without segmenting graphemes (Prometheus R1 MED 1 on #1076).
+            if faces.get(i + 1) != Some(&rustkit_text::GlyphFace::Ignorable) {
+                return None;
+            }
             // The head and the characters layout folded into it: the
             // `Ignorable` ones that follow, within its grapheme cluster.
             let n = rustkit_text::macos::emoji_cluster_len(&chars[i..]).min(chars.len() - i);

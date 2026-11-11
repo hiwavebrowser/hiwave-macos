@@ -748,6 +748,34 @@ pub fn emoji_cluster_lines() -> u64 {
 /// Layout folds the covered characters into the head's advance, and paint
 /// draws this glyph for them.
 pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    if cluster.chars().count() < 2 {
+        return None;
+    }
+    // One CTLine per (face, size, sequence): `shape` reruns on every
+    // relayout (Prometheus R1 MED 2 on #1076).
+    type Key = (String, u32, String);
+    thread_local! {
+        static SHAPED: RefCell<HashMap<Key, Option<(u16, usize)>>> = RefCell::new(HashMap::new());
+    }
+    const MAX_ENTRIES: usize = 4096;
+    let key = (postscript_name_or_empty(face), (face.pt_size() as f32).to_bits(), cluster.to_string());
+    if let Some(hit) = SHAPED.with(|m| m.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let shaped = emoji_cluster_glyph_uncached(face, cluster);
+    SHAPED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_ENTRIES {
+            m.clear();
+        }
+        m.insert(key, shaped);
+    });
+    shaped
+}
+
+fn emoji_cluster_glyph_uncached(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
     use core_foundation::attributed_string::CFMutableAttributedString;
     use core_foundation::base::CFRange;
     use core_foundation::string::CFString;
