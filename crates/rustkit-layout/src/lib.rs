@@ -71,6 +71,8 @@ mod relative_offset_unit_tests;
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
+#[cfg(test)]
+mod abspos_percent_child_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
@@ -1908,6 +1910,16 @@ pub struct LayoutBox {
     /// an auto-height out-of-flow parent (and the auto-height in-flow chain
     /// under it) sets it today; see `mark_percent_height_bases`.
     pub(crate) percent_height_is_auto: bool,
+    /// LAY1: the percentage base this box's in-flow children were last
+    /// laid out against on the block path (`None`: none, or not known). A
+    /// re-anchor that finds the same used height leaves them as they are.
+    pub(crate) children_percent_base: Option<f32>,
+    /// LAY1: an absolutely positioned box whose parent is its containing
+    /// block and knows its own height: that padding box, set by the parent
+    /// before the flow pass lays the box out, so the box's children are
+    /// laid out against its used height at once instead of again at the
+    /// re-anchor (nested `inset: 0` layers would cost 2.5x per level).
+    pub(crate) abspos_cb_hint: Option<Rect>,
     /// Set on the engine's layout root, an anonymous stand-in for `<html>`
     /// whose own style is the default (html's computed style only feeds
     /// inheritance): html's specified `height`. The root's children resolve
@@ -2002,6 +2014,8 @@ impl LayoutBox {
             text_lines: None,
             text_flow_first_offset: None,
             percent_height_is_auto: false,
+            children_percent_base: None,
+            abspos_cb_hint: None,
             root_element_height: None,
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
@@ -2613,6 +2627,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        self.children_percent_base = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -4420,6 +4435,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        self.children_percent_base = None;
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -4505,13 +4521,24 @@ impl LayoutBox {
         // Layout children. Percentage-height children resolve against THIS
         // box's height when it is definite (CSS 2.1 §10.5); the containing
         // block they are handed carries the flow cursor instead.
-        let definite_for_children =
+        let mut definite_for_children =
             self.definite_content_height_for_children(
                 definite_height.unwrap_or(0.0),
                 definite_height.is_some(),
             );
+        // An abspos box whose parent handed it its real containing block:
+        // the height its re-anchor will give it is known now.
+        if let Some(cb) = self.abspos_cb_hint.take() {
+            if definite_for_children.is_none() {
+                definite_for_children = self.abspos_used_content_height(&Dimensions {
+                    content: cb,
+                    ..Default::default()
+                });
+            }
+        }
         self.mark_percent_height_bases(definite_for_children, containing_block);
         self.layout_block_children(definite_for_children);
+        self.children_percent_base = definite_for_children;
 
         // Height depends on children - use definite_height for percentage resolution
         self.calculate_block_height(definite_height);
@@ -4589,11 +4616,21 @@ impl LayoutBox {
         // Knowable now, before any child flows: this box's own height when it
         // does not depend on its children. Children resolve percentage heights
         // against it (CSS 2.1 §10.5); `None` leaves them on the old path.
-        let definite_for_children =
+        let mut definite_for_children =
             self.definite_content_height_for_children(
                 percent_height_base.unwrap_or(containing_block.content.height),
                 percent_height_base.is_some(),
             );
+        // As in `layout_block_with_definite_height`: an abspos box handed
+        // its real containing block knows its used height now.
+        if let Some(cb) = self.abspos_cb_hint.take() {
+            if definite_for_children.is_none() {
+                definite_for_children = self.abspos_used_content_height(&Dimensions {
+                    content: cb,
+                    ..Default::default()
+                });
+            }
+        }
         self.mark_percent_height_bases(definite_for_children, containing_block);
 
         let mut child_margin_context = MarginCollapseContext::new();
@@ -4660,6 +4697,7 @@ impl LayoutBox {
                 float_context,
                 definite_for_children,
             );
+            self.children_percent_base = definite_for_children;
         }
 
         // Height depends on children
@@ -5302,6 +5340,7 @@ impl LayoutBox {
         // free space at all, and every item stays packed against the start
         // edge. Passing the containing block as well keeps step 11d's
         // re-derivation on the same number.
+        let mut relaid = false;
         if self.style.display.is_flex()
             && self.inset_definite_content_height(containing_block).is_some()
         {
@@ -5310,16 +5349,94 @@ impl LayoutBox {
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
+        } else if self.needs_percent_relayout_after_reanchor(containing_block) {
+            // The block path has the same hole for percentages: the children
+            // resolved `height: 100%` before this box had a height, so they
+            // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
+            // (a video player's backdrop) drew as a 32px strip in an 800px
+            // box where Chrome 148 fills the layer. The used height is known
+            // now and definite (CSS2 §10.6.4, or a percentage of the real
+            // containing block), so the children are laid out again against
+            // it. This box keeps the height it was given.
+            let height = self.dimensions.content.height;
+            // Only when the children were laid out against another base: a
+            // re-anchor that changes nothing (a parent re-anchoring its
+            // children again, or a layer its parent already sized through
+            // `abspos_cb_hint`) costs nothing (#1043 R1 nit 1).
+            if self
+                .children_percent_base
+                .is_none_or(|base| (base - height).abs() > 0.01)
+            {
+                self.mark_percent_height_bases(Some(height), containing_block);
+                self.layout_block_children(Some(height));
+                self.dimensions.content.height = height;
+                self.children_percent_base = Some(height);
+                relaid = true;
+            }
         }
 
         // An `inset`-stretched box changes SIZE here, after its own children
         // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
         // an `inset: 0` slider sat 22px above the slider (settings' toggles,
         // n46). Its abspos children are re-anchored to the new padding box.
-        if self.dimensions.content.width != origin_w || self.dimensions.content.height != origin_h
+        // The relayout above put its abspos children back on the stand-in.
+        if relaid
+            || self.dimensions.content.width != origin_w
+            || self.dimensions.content.height != origin_h
         {
             self.reanchor_absolute_children();
         }
+    }
+
+    /// The content height an absolutely positioned box will be given against
+    /// `containing_block` (a padding box): a percentage or `calc()` height of
+    /// it, or opposite insets with `height: auto`. `None` otherwise (also for
+    /// an `aspect-ratio` height, whose width is stretched only at the
+    /// re-anchor).
+    fn abspos_used_content_height(&self, containing_block: &Dimensions) -> Option<f32> {
+        if self.position != Position::Absolute {
+            return None;
+        }
+        match &self.style.height {
+            Length::Percent(_) => {
+                self.definite_content_height_for_children(containing_block.content.height, true)
+            }
+            Length::Calc(sum) if sum.percent != 0.0 => {
+                self.definite_content_height_for_children(containing_block.content.height, true)
+            }
+            Length::Auto => self.inset_definite_content_height(containing_block),
+            _ => None,
+        }
+    }
+
+    /// Whether `reanchor_absolute` must lay this block's children out again:
+    /// a plain block (not flex, grid, table or replaced) whose used height
+    /// only became definite against its real containing block (opposite
+    /// insets with `height: auto`, or a percentage / `calc()` height), with
+    /// an in-flow child whose height, `min-height` or `max-height` carries a
+    /// percentage. Anything else resolved nothing against the stand-in.
+    fn needs_percent_relayout_after_reanchor(&self, containing_block: &Dimensions) -> bool {
+        let has_percent = |l: &Length| match l {
+            Length::Percent(_) => true,
+            Length::Calc(sum) => sum.percent != 0.0,
+            _ => false,
+        };
+        matches!(self.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !(self.style.display.is_flex()
+                || self.style.display.is_grid()
+                || self.style.display.is_table())
+            && (has_percent(&self.style.height)
+                || self.inset_definite_content_height(containing_block).is_some()
+                // `aspect-ratio` with an auto height: the ratio of the
+                // (stretched or specified) width (#1043 R1 nit 2).
+                || (matches!(self.style.height, Length::Auto)
+                    && self.style.aspect_ratio.is_some_and(|r| r > 0.0 && r.is_finite())))
+            && self.children.iter().any(|c| {
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && (has_percent(&c.style.height)
+                        || has_percent(&c.style.min_height)
+                        || has_percent(&c.style.max_height))
+            })
     }
 
     /// CSS 2.1 §10.1: the containing block of an absolutely positioned
@@ -5956,6 +6073,20 @@ impl LayoutBox {
                 } else {
                     cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
                 };
+                // This box is the child's containing block and knows its own
+                // height: hand the child its real padding box, so it lays its
+                // children out once, at the height its re-anchor will keep.
+                if child.position == Position::Absolute && self.position != Position::Static {
+                    if let Some(h) = definite_height {
+                        let pb = self.dimensions.padding_box();
+                        child.abspos_cb_hint = Some(Rect::new(
+                            pb.x,
+                            pb.y,
+                            pb.width,
+                            h + self.dimensions.padding.top + self.dimensions.padding.bottom,
+                        ));
+                    }
+                }
                 child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
@@ -7025,6 +7156,20 @@ impl LayoutBox {
                 } else {
                     cb.content.height +=
                         open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
+                }
+                // This box is the child's containing block and knows its own
+                // height: hand the child its real padding box (see
+                // `layout_block_children`).
+                if child.position == Position::Absolute && self.position != Position::Static {
+                    if let Some(h) = definite_height {
+                        let pb = self.dimensions.padding_box();
+                        child.abspos_cb_hint = Some(Rect::new(
+                            pb.x,
+                            pb.y,
+                            pb.width,
+                            h + self.dimensions.padding.top + self.dimensions.padding.bottom,
+                        ));
+                    }
                 }
                 let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);

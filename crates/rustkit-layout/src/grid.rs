@@ -2117,6 +2117,10 @@ pub fn layout_grid_container(
                 // sibling was 38px in a 100px row.
                 let area_height = child.dimensions.content.height;
                 let child_containing = child.dimensions.clone();
+                // A grid item's percentage height resolves against its grid
+                // area, which is definite (css-grid §11.6): the block
+                // pre-pass's `auto` mark for it does not hold here (LAY1).
+                child.percent_height_is_auto = false;
                 crate::flex::layout_flex_container(child, &child_containing);
                 let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
@@ -2523,6 +2527,14 @@ pub fn layout_grid_container(
                     if !grandchild.children.is_empty() {
                         let grandchild_containing = grandchild.dimensions.clone();
                         if grandchild.style.display.is_flex() {
+                            // Its percentage height was just resolved against
+                            // the grid item's height, a stretched item's
+                            // definite cross size (css-sizing-3 §5.1): the
+                            // pre-pass's `auto` mark is stale. With it the flex
+                            // pass sized the image-gallery's `height: 100%;
+                            // min-height: 200px` tiles by their content, 23px
+                            // (batch 56, LAY1).
+                            grandchild.percent_height_is_auto = false;
                             crate::flex::layout_flex_container(grandchild, &grandchild_containing);
                         } else if grandchild.style.display.is_grid() {
                             layout_grid_container(grandchild, grandchild.dimensions.content.width, grandchild.dimensions.content.height);
