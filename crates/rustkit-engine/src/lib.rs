@@ -40,8 +40,22 @@ use rustkit_compositor::Compositor;
 /// the rest of the test, not just the call: see [`test_gpu::hold_for_this_test`].
 #[cfg(test)]
 pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
+    use std::sync::OnceLock;
+    // One wgpu instance, adapter and device for the whole test process; each test's compositor shares them
+    // and keeps its own surfaces and textures (T41b). Building a device was ~0.15 s of every engine a test
+    // creates (and its teardown is what the guard below is mostly for); the guard still serialises whole
+    // tests, so what changes is only that no test builds or drops a device of its own.
+    // Known limit (R1 nit 3, a follow-up): a device lost partway through a test run stays in this
+    // `OnceLock` (it cannot be reset), so later GPU tests in the same process fail with it instead of
+    // building a fresh one; before this change each test built its own.
+    static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
-    Compositor::new()
+    if let Some(shared) = SHARED_COMPOSITOR.get() {
+        return Ok(shared.share_device());
+    }
+    let compositor = Compositor::new()?;
+    let shared = SHARED_COMPOSITOR.get_or_init(|| compositor.share_device());
+    Ok(shared.share_device())
 }
 
 /// Test-only GPU guard: at most one unit test at a time owns GPU devices.
@@ -40712,7 +40726,9 @@ mod page_script_tests {
     use std::net::TcpListener;
 
     /// Serve `routes` (path -> body) on 127.0.0.1 until the test exits;
-    /// anything else is a 404. Paths starting `/slow` answer after 3s.
+    /// anything else is a 404. Paths starting `/slow` answer after 3s, and
+    /// paths starting `/stall` after 20s (a stall long enough that a bound
+    /// well clear of the load's own cost still tells it from a dropped one).
     /// Each connection gets its own thread, so concurrent fetches overlap.
     fn serve(routes: Vec<(&'static str, &'static str, String)>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -40735,6 +40751,8 @@ mod page_script_tests {
                     let path = request.split_whitespace().nth(1).unwrap_or("/");
                     if path.starts_with("/slow") {
                         std::thread::sleep(std::time::Duration::from_secs(3));
+                    } else if path.starts_with("/stall") {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
                     }
                     let (status, content_type, body) = routes
                         .iter()
@@ -41005,12 +41023,12 @@ document.currentScript.remove();
         // apple.com on the real-site board: one stylesheet never answered,
         // and the network client's 30s timeout ate the whole capture.
         let page = r#"<html><head>
-<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/stall.css">
 <link rel="stylesheet" href="/fast.css">
-</head><body><img src="/slow.png"><img src="/slow.svg">hi</body></html>"#;
+</head><body><img src="/stall.png"><img src="/stall.svg">hi</body></html>"#;
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
-            ("/slow.css", "text/css", "body { color: red }".into()),
+            ("/stall.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
         let config = EngineConfig {
@@ -41018,8 +41036,14 @@ document.currentScript.remove();
             ..EngineConfig::default()
         };
         let (engine, view, took) = load_timed(config, port);
+        // The stalled responses come after 20s, so an engine that waited for
+        // them takes 20s or more; one that drops them at the 500 ms budget
+        // takes what the load itself costs (about 2.4s in an unoptimised
+        // build on a quiet 12-core box, which the old 2.5s bound sat 0.1s
+        // above: a slower or busier runner failed it without having waited).
+        // 8s is a bound that machine speed does not reach and a wait does.
         assert!(
-            took < std::time::Duration::from_millis(2_500),
+            took < std::time::Duration::from_secs(8),
             "waited for the stalled subresources: {took:?}"
         );
         // The sheet that did arrive still applies — and it must be the fast
