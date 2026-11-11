@@ -437,3 +437,18 @@ an async function), `watchdog_turns::try_catch_around_the_spin_cannot_swallow_th
 (now: the `finally` runs once, the `catch` never), and in `rustkit-engine`
 `live_timer_slice_tests` (a MessageChannel scheduler that re-arms in
 `finally` runs its next task after a stop; a spinning `finally` is stopped).
+
+## Patch, continued: sort with a comparator that is not a total order (JS2)
+
+**Why.** `SortIndexedProperties` passed the page's comparator to `Vec::sort_by`,
+which since Rust 1.81 panics ("user-provided comparison function does not
+correctly implement a total order") once it notices an inconsistent answer. A
+page's comparator can be anything (`Math.random() - 0.5`, a boolean `a > b`);
+ECMA-262 makes the result implementation-defined, not fatal. walmart.com
+panicked the page thread on 17 of 17 loads.
+
+**What.** `src/builtins/array/mod.rs`: `sort_indexed_properties` calls
+`merge_sort_fallible`, a stable merge sort that never panics for any comparator
+and stops at the first abrupt completion (marked `HIWAVE PATCH (sort)`). It
+serves `Array.prototype.sort`/`toSorted` and the typed-array `sort`/`toSorted`.
+Pinned in `crates/rustkit-engine/src/sort_comparator_tests.rs`.

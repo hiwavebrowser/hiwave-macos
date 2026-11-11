@@ -19,10 +19,12 @@ pub mod forms;
 pub mod selection;
 pub mod fragment;
 pub mod grid;
+pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
 pub mod multicol;
+pub mod path_data;
 pub mod scroll;
 pub mod table;
 pub mod text;
@@ -52,6 +54,9 @@ mod flex_item_min_height_tests;
 
 #[cfg(test)]
 mod fit_content_width_tests;
+
+#[cfg(test)]
+mod zero_width_column_stretch_tests;
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
@@ -101,6 +106,7 @@ pub use images::{
     calculate_intrinsic_size, calculate_placeholder_size, render_background_image,
     render_broken_image, render_image, ImageLayoutInfo,
 };
+pub use incremental::layout_visits;
 pub use intrinsic_cache::IntrinsicSizingMode;
 pub use margin_collapse::{
     collapse_margins, establishes_bfc, is_margin_collapsible_through,
@@ -262,9 +268,47 @@ pub(crate) fn aspect_ratio_content_height(
     })
 }
 
-/// Compose a button's BORDER-box width from an advance measured out of its
-/// label: the author's horizontal padding+border when there is any, else the
-/// UA well (24px) the bare-control calibration uses.
+/// What a `<button>` has on each side (top, right, bottom, left) when the author declared none:
+/// 1 px of padding above and below and 6 px left and right, and a 2 px (outset) border. Chrome for
+/// Testing 148.0.7778.216 on Linux and macOS (CB3b, CB3c): a bare 16 px Arial button is 24 x 24
+/// for the label `x` (8 + 6 + 6 + 2 + 2 wide, 18 + 1 + 1 + 2 + 2 tall).
+pub const UA_BUTTON_PADDING: [f32; 4] = [1.0, 6.0, 1.0, 6.0];
+pub const UA_BUTTON_BORDER: f32 = 2.0;
+/// The same, summed over both sides of an axis.
+pub const UA_BUTTON_PADDING_V: f32 = 2.0;
+pub const UA_BUTTON_BORDER_V: f32 = 4.0;
+pub const UA_BUTTON_PADDING_H: f32 = 12.0;
+pub const UA_BUTTON_BORDER_H: f32 = 4.0;
+
+/// A button's padding and border per side (top, right, bottom, left): the author's on a side the
+/// cascade flagged ([`ComputedStyle::padding_declared`], [`ComputedStyle::border_declared`], zero
+/// and `none` included) and the UA's on a side nobody declared, so `padding-left: 0` alone leaves
+/// the right at 6 px (CB3c).
+pub(crate) fn button_box_sides(style: &ComputedStyle, font_size: f32) -> ([f32; 4], [f32; 4]) {
+    let px = |l: &Length| match l {
+        Length::Percent(_) | Length::Auto => 0.0,
+        other => other.to_px(font_size, 16.0, 0.0),
+    };
+    let author_pad = [&style.padding_top, &style.padding_right, &style.padding_bottom, &style.padding_left];
+    let author_border =
+        [&style.border_top_width, &style.border_right_width, &style.border_bottom_width, &style.border_left_width];
+    let mut pad = UA_BUTTON_PADDING;
+    let mut border = [UA_BUTTON_BORDER; 4];
+    for i in 0..4 {
+        if style.padding_declared[i] {
+            pad[i] = px(author_pad[i]);
+        }
+        if style.border_declared[i] {
+            border[i] = px(author_border[i]);
+        }
+    }
+    (pad, border)
+}
+
+/// Compose a button's BORDER-box width from an advance measured out of its label: the label plus
+/// the horizontal padding plus the horizontal border, each side the author's when declared and the
+/// UA's otherwise ([`button_box_sides`]; CB3c, measured on Chrome for Testing 148: `x` is 24 bare,
+/// 12 with `padding: 0`, 20 with `border: none`, 8 with both, 44 with `padding: 8px 16px`).
 ///
 /// This exists as one function because a button has TWO intrinsic widths and
 /// they differ only in which advance goes in — the whole label for
@@ -278,19 +322,8 @@ pub(crate) fn button_border_box_width(
     font_size: f32,
     label_advance: f32,
 ) -> f32 {
-    let px = |l: &Length| match l {
-        Length::Percent(_) | Length::Auto => 0.0,
-        other => other.to_px(font_size, 16.0, 0.0),
-    };
-    let author_pb_h = px(&style.padding_left)
-        + px(&style.padding_right)
-        + px(&style.border_left_width)
-        + px(&style.border_right_width);
-    if author_pb_h > 0.0 {
-        label_advance + author_pb_h
-    } else {
-        label_advance + 24.0
-    }
+    let (pad, border) = button_box_sides(style, font_size);
+    label_advance + pad[1] + pad[3] + border[1] + border[3]
 }
 
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
@@ -300,6 +333,14 @@ pub(crate) fn button_border_box_width(
 /// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
 /// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
 /// Chrome's 63.9x34 and everything below it sat a pixel high.
+///
+/// A `<button>`'s height is three independent parts (CB3b): the line (`line-height` when the
+/// button itself declared one, else `normal`), the vertical padding and the vertical border, each
+/// side the author's when declared and the UA's ([`UA_BUTTON_PADDING`], [`UA_BUTTON_BORDER`])
+/// otherwise; its width is the label plus the horizontal parts ([`button_border_box_width`]).
+/// Chrome for Testing 148.0.7778.216 at 16px Arial (Linux, macOS and Windows agree): bare 24 tall,
+/// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
+/// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -324,21 +365,56 @@ pub(crate) fn form_control_intrinsic_size(
     // padding and the control fell to the bare 19px blob (new_tab's
     // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
     // high). Resolve every absolute unit the way the rest of layout does.
-    let author_pb_v = {
+    let (author_pad_v, author_border_v) = {
         let px = |l: &Length| match l {
             Length::Percent(_) | Length::Auto => 0.0,
             other => other.to_px(font_size, 16.0, 0.0),
         };
-        px(&style.padding_top)
-            + px(&style.padding_bottom)
-            + px(&style.border_top_width)
-            + px(&style.border_bottom_width)
+        (
+            px(&style.padding_top) + px(&style.padding_bottom),
+            px(&style.border_top_width) + px(&style.border_bottom_width),
+        )
     };
+    let author_pb_v = author_pad_v + author_border_v;
     // The content line is the control font's `normal` line (n58): Arial is
     // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
     // read 14.33 / 15, so every styled control was 0.7–1px short.
-    let single_line_box = |blob: f32| {
-        if author_pb_v > 0.0 {
+    // CB3: an author who declared BOTH a vertical padding and a vertical border (zero and `none`
+    // included) fully specified the box, so the CSS box model applies as written: the content
+    // line (`line-height` when the author set one, else `normal`) plus the author's padding and
+    // border. `button{font-size:16px;line-height:1;padding:0 4px;border:none}` is 16 px tall in
+    // Chrome; with no author size to compose, the calibrated UA blob (22.8 at 16px) was used.
+    let fully_declared = style.padding_v_declared && style.border_v_declared;
+    let content_line = |font_size: f32| match style.line_height {
+        rustkit_css::LineHeight::Number(n) => n * font_size,
+        rustkit_css::LineHeight::Px(px) => px,
+        rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
+    };
+    // CB3b: a BUTTON's height is three independent parts (Chrome for Testing 148: line-height:1 only
+    // 22, padding:0 only 22, border:none only 20, all three declared 16 at 16px Arial): the line
+    // (`line-height` when the author set one, else `normal`), the vertical padding and the vertical
+    // border, each the author's when declared (zero and `none` included) and the UA's
+    // (`UA_BUTTON_PADDING_V`, `UA_BUTTON_BORDER_V`) when not, so a bare button is the model too (the
+    // old 19 px blob was RustKit's own number). Inputs and selects keep their own rule: they ignore `line-height`
+    // here, and compose only a declared box.
+    let single_line_box = |blob: f32, is_button: bool, button_line: Option<f32>| {
+        if is_button {
+            let (pad_sides, border_sides) = button_box_sides(style, font_size);
+            let pad = pad_sides[0] + pad_sides[2];
+            let border = border_sides[0] + border_sides[2];
+            // A button's line-height is `normal` unless declared on the button itself (see
+            // `ComputedStyle::line_height_declared`): the inherited one is reset by the UA font.
+            let line = button_line.unwrap_or_else(|| {
+                if style.line_height_declared {
+                    content_line(font_size)
+                } else {
+                    normal_line_height(style, font_size)
+                }
+            });
+            line + pad + border
+        } else if fully_declared {
+            normal_line_height(style, font_size) + author_pb_v
+        } else if author_pb_v > 0.0 {
             normal_line_height(style, font_size) + author_pb_v
         } else {
             blob
@@ -365,7 +441,7 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -396,12 +472,13 @@ pub(crate) fn form_control_intrinsic_size(
             // its text used (an emoji lifts Arial 14px from 16 to 23 in
             // Chrome 148: report's "📱 Share to Social" is 39 tall where
             // "Export as JSON" is 32). ASCII never reaches a fallback face.
-            let height = if author_pb_v > 0.0 && !label.is_ascii() && label_metrics.ascent > 0.0 {
-                normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
-                    + author_pb_v
-            } else {
-                single_line_box(19.0 * ua_scale)
-            };
+            // CB3b (Prometheus nit 1): the same three-part sum as an ASCII label; only the LINE
+            // differs. A declared `line-height` wins over the fallback face, as for any line.
+            let fallback_line = (!label.is_ascii()
+                && label_metrics.ascent > 0.0
+                && matches!(style.line_height, rustkit_css::LineHeight::Normal))
+            .then(|| normal_line_height(style, font_size).max(used_font_line_height(&label_metrics)));
+            let height = single_line_box(19.0 * ua_scale, true, fallback_line);
             (button_border_box_width(style, font_size, label_metrics.width), height)
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
@@ -465,7 +542,7 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale))
+                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
             }
         }
     }
@@ -478,6 +555,13 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
         other => other.to_px(font_size),
     }
+}
+
+/// An absolutely positioned box that was inline-level before it was
+/// blockified: its static position is on the line, so the line's alignment
+/// and float shifts move it (CH2.B25b).
+fn is_inline_level_oof(b: &LayoutBox) -> bool {
+    b.style.abspos_was_inline_level && matches!(b.position, Position::Absolute | Position::Fixed)
 }
 
 /// What closing the open line would advance the cursor by: the line box's
@@ -2524,6 +2608,7 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: Option<f32>,
     ) {
+        incremental::count_visit();
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -2677,6 +2762,13 @@ impl LayoutBox {
 
             child.layout_with_definite_height(&cb, cb.content.height);
 
+            // An out-of-flow child takes no room on the line: the inline
+            // stays as wide as its in-flow content and what follows starts
+            // where it would have (Chromium 148: `<a><ib 40px><abspos>`
+            // gives the link width 40; CH2.B25b).
+            if matches!(child.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
         }
@@ -3053,6 +3145,7 @@ impl LayoutBox {
         floats: &FloatContext,
         first_band: (f32, f32),
     ) -> (usize, f32) {
+        incremental::count_visit();
         let BoxType::Text(ref text) = self.box_type else {
             return (0, 0.0);
         };
@@ -3626,6 +3719,14 @@ impl LayoutBox {
         if self.style.box_sizing == BoxSizing::BorderBox {
             return (0.0, 0.0);
         }
+        self.control_edge_extent(control, cb_width)
+    }
+
+    /// The horizontal and vertical extent of a text control's padding and
+    /// border (the author's where set, Chrome's UA values where not),
+    /// whatever its `box-sizing`: the least its border box can be.
+    /// `(0, 0)` for every other control.
+    pub(crate) fn control_edge_extent(&self, control: &FormControlType, cb_width: f32) -> (f32, f32) {
         let (ua_pad_v, ua_pad_h, ua_border) = match control {
             FormControlType::TextInput { input_type, .. } => {
                 let t = input_type.to_ascii_lowercase();
@@ -3763,6 +3864,35 @@ impl LayoutBox {
                 }
             }
         };
+
+        // CSS 2.1 §10.4 / §10.7: min/max sizes clamp a control as any box,
+        // max first, then min (min wins). They name the same box `width`
+        // and `height` do, so a content-box text control adds its padding
+        // and border (CH2.B17b: `min-width: 60px` was ignored, 28 wide where
+        // Chromium builds 68; `max-width: 40px` left a 100px input 108).
+        // A percentage height against an indefinite base does not apply.
+        let clamp = |size: f32, min: &Length, max: &Length, base: Option<f32>, extra: f32| {
+            let mut size = size;
+            if let Some(mx) = self.replaced_length(max, base) {
+                size = size.min(mx + extra);
+            }
+            if let Some(mn) = self.replaced_length(min, base) {
+                size = size.max(mn + extra);
+            }
+            size
+        };
+        let width = clamp(width, &self.style.min_width, &self.style.max_width, Some(width_base), extra_w);
+        let height = clamp(height, &self.style.min_height, &self.style.max_height, percent_height_base, extra_h);
+
+        // CSS Sizing 3 §3: the content box is floored at zero, so the
+        // border box is never smaller than the control's padding plus
+        // border, whichever box the author's lengths name. A content-box
+        // control gets that from `extra` above; a `box-sizing: border-box`
+        // one has `extra` 0, and `max-width: 10px` on 20px padding and 3px
+        // borders made a 10px box where Chromium builds 46 (#985 R1 HOLD).
+        let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
+        let width = width.max(edges_w);
+        let height = height.max(edges_h);
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
@@ -4034,6 +4164,13 @@ impl LayoutBox {
     fn shift_inline_content_area(&mut self, half_leading: f32) {
         self.dimensions.content.y += half_leading;
         for sub in &mut self.children {
+            // An abspos box that was inline-level is placed at the top of
+            // the line slot, not of the content area (Chromium 148: inside
+            // an `<a>` whose rect starts 6px down, it stays at the line's
+            // top; CH2.B25b).
+            if is_inline_level_oof(sub) {
+                continue;
+            }
             match sub.box_type {
                 BoxType::Text(_) => {}
                 BoxType::Inline => sub.shift_inline_content_area(half_leading),
@@ -4278,6 +4415,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
+        incremental::count_visit();
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -5347,7 +5485,13 @@ impl LayoutBox {
             Length::Auto => {
                 let available =
                     (containing_block.content.width - total_margin_border_padding).max(0.0);
-                if style.display.is_atomic_inline() {
+                if style.width_max_content {
+                    // css-sizing-3 §3.1: `width: max-content` is the box's own max-content size, not
+                    // the container's and not clamped to it (CB3c). The estimator returns a
+                    // border-box width, so strip this box's padding and border.
+                    let pb = border_left + border_right + padding_left + padding_right;
+                    (crate::grid::estimate_max_content_width(self) - pb).max(0.0)
+                } else if style.display.is_atomic_inline() {
                     // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
                     // -grid) with width:auto shrinks to fit —
                     // min(max(preferred_min, available), preferred) — it
@@ -5642,13 +5786,39 @@ impl LayoutBox {
         band
     }
 
+    /// See `is_inline_level_oof`: the boxes of `inline_oof` that no recorded
+    /// line holds are aligned as an empty line of the band they were placed
+    /// in.
+    fn align_lone_inline_oof(
+        children: &mut [LayoutBox],
+        inline_oof: &[(usize, f32)],
+        line_ranges: &[(usize, usize)],
+        text_align: TextAlign,
+    ) {
+        for &(i, band_width) in inline_oof {
+            if line_ranges.iter().any(|&(start, end)| start <= i && i < end) {
+                continue;
+            }
+            let dx = match text_align {
+                TextAlign::Right => band_width.max(0.0),
+                TextAlign::Center => (band_width / 2.0).max(0.0),
+                TextAlign::Left | TextAlign::Justify => 0.0,
+            };
+            if dx > 0.0 {
+                crate::flex::translate_subtree(&mut children[i], dx, 0.0);
+            }
+        }
+    }
+
     /// Move the content already on a line right by `dx` (a left float was
     /// placed on it). A run split over several lines moves only its last
-    /// line, the one on this line box; floats and positioned boxes stay.
+    /// line, the one on this line box; floats and positioned boxes stay,
+    /// except an abspos box that was inline-level (`is_inline_level_oof`).
     fn shift_line_content(children: &mut [LayoutBox], dx: f32) {
         for sib in children {
             if sib.float != Float::None
-                || matches!(sib.position, Position::Absolute | Position::Fixed)
+                || (matches!(sib.position, Position::Absolute | Position::Fixed)
+                    && !is_inline_level_oof(sib))
             {
                 continue;
             }
@@ -5752,6 +5922,13 @@ impl LayoutBox {
             && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
+        // Abspos boxes that were inline-level, placed on a line: (index, the
+        // width of that line's band beside the floats). `text-align` moves
+        // them with their line (CH2.B25b).
+        let mut inline_oof: Vec<(usize, f32)> = Vec::new();
+        // The first of them placed while no line was open: the next line
+        // that opens starts at it, so it is aligned with that line.
+        let mut pending_oof: Option<usize> = None;
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout.
@@ -5764,7 +5941,13 @@ impl LayoutBox {
                 // position is below that line box (CH2.B25). One that was
                 // inline-level stays on the line, where it would have gone.
                 cb.content.height = if child.style.abspos_was_inline_level {
-                    cb.content.x += cursor_x;
+                    let (line_left, band_width) =
+                        floats.line_band(cursor_y, empty_line_height, container_width);
+                    cb.content.x += line_left + cursor_x;
+                    inline_oof.push((i, band_width));
+                    if line_start_index.is_none() && pending_oof.is_none() {
+                        pending_oof = Some(i);
+                    }
                     cursor_y
                 } else {
                     cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
@@ -5850,6 +6033,7 @@ impl LayoutBox {
                 line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
+                pending_oof = None;
                 continue;
             }
 
@@ -5984,7 +6168,7 @@ impl LayoutBox {
 
                 // Track line start
                 if line_start_index.is_none() {
-                    line_start_index = Some(i);
+                    line_start_index = Some(pending_oof.take().unwrap_or(i));
                 }
 
                 // Position the child. The cursor addresses the MARGIN box;
@@ -6142,6 +6326,7 @@ impl LayoutBox {
             } else {
                 seam = None;
                 // Regular block layout
+                pending_oof = None;
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
@@ -6268,6 +6453,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
         for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
@@ -6279,6 +6465,10 @@ impl LayoutBox {
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
+        // An inline-level abspos box on no recorded line (alone, or before a
+        // block or a break) sits on an empty line and is aligned as one
+        // (Chromium 148: alone in a 400px `text-align:center` block, x 200).
+        Self::align_lone_inline_oof(&mut self.children, &inline_oof, &line_ranges, text_align);
 
         // CSS 2.1 §10.6.7: a box that establishes a formatting context
         // grows to contain its floats (the auto height of a floated card
@@ -6466,9 +6656,27 @@ impl LayoutBox {
             // line leaves the run where it is. Ledgered, not chased.
             if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
+                if matches!(c.box_type, BoxType::Inline) {
+                    Self::keep_inline_oof_at_line_top(c, dy);
+                }
             }
             if seats_as_text(c) {
                 c.seat_atomics_in_inline(baseline_y, line_top);
+            }
+        }
+    }
+
+    /// Undo a baseline shift of `dy` for the inline-level abspos boxes inside
+    /// the non-atomic inline `b` (through nested inlines): their static
+    /// position is the line's top, which the baseline does not move
+    /// (Chromium 148: `<a><ib 40px><abspos>` keeps the abspos at y 0 while
+    /// the link's rect is 6px down; CH2.B25b).
+    fn keep_inline_oof_at_line_top(b: &mut LayoutBox, dy: f32) {
+        for sub in &mut b.children {
+            if is_inline_level_oof(sub) {
+                crate::flex::translate_subtree(sub, 0.0, -dy);
+            } else if matches!(sub.box_type, BoxType::Inline) {
+                Self::keep_inline_oof_at_line_top(sub, dy);
             }
         }
     }
@@ -6575,6 +6783,7 @@ impl LayoutBox {
             if offset > 0.0
                 && child.float == Float::None
                 && (child.style.display.is_atomic_inline()
+                    || is_inline_level_oof(child)
                     || matches!(
                         child.box_type,
                         BoxType::Inline
@@ -6755,6 +6964,13 @@ impl LayoutBox {
             && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
+        // Abspos boxes that were inline-level, placed on a line: (index, the
+        // width of that line's band beside the floats). `text-align` moves
+        // them with their line (CH2.B25b).
+        let mut inline_oof: Vec<(usize, f32)> = Vec::new();
+        // The first of them placed while no line was open: the next line
+        // that opens starts at it, so it is aligned with that line.
+        let mut pending_oof: Option<usize> = None;
 
         // `cb.content.height = cursor_y` below is the STATIC POSITION trick
         // (calculate_block_position stacks a box at cb.y + cb.height), not
@@ -6790,12 +7006,18 @@ impl LayoutBox {
                 // blockified keeps the place it would have had on the line:
                 // the line's top, after what the line holds so far (Chromium
                 // 148: `ab<span style=position:absolute>` at x 19, y 0, not
-                // below the line). The inline start ignores `text-align`
-                // and floats.
+                // below the line), past the floats that narrow the line. The
+                // line's `text-align` moves it with the line (CH2.B25b).
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y + margin_context.resolve();
                 if child.style.abspos_was_inline_level {
-                    cb.content.x += cursor_x;
+                    let (line_left, band_width) =
+                        floats.line_band(cursor_y, empty_line_height, container_width);
+                    cb.content.x += line_left + cursor_x;
+                    inline_oof.push((i, band_width));
+                    if line_start_index.is_none() && pending_oof.is_none() {
+                        pending_oof = Some(i);
+                    }
                 } else {
                     cb.content.height +=
                         open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
@@ -6907,6 +7129,7 @@ impl LayoutBox {
                 line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
+                pending_oof = None;
                 continue;
             }
 
@@ -7041,7 +7264,7 @@ impl LayoutBox {
 
                 // Track line start
                 if line_start_index.is_none() {
-                    line_start_index = Some(i);
+                    line_start_index = Some(pending_oof.take().unwrap_or(i));
                 }
 
                 // Position the child. The cursor addresses the MARGIN box;
@@ -7191,6 +7414,7 @@ impl LayoutBox {
             } else {
                 seam = None;
                 // Regular block layout with margin collapse
+                pending_oof = None;
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
@@ -7336,6 +7560,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
         for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
@@ -7347,6 +7572,10 @@ impl LayoutBox {
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
+        // An inline-level abspos box on no recorded line (alone, or before a
+        // block or a break) sits on an empty line and is aligned as one
+        // (Chromium 148: alone in a 400px `text-align:center` block, x 200).
+        Self::align_lone_inline_oof(&mut self.children, &inline_oof, &line_ranges, text_align);
 
         // CSS 2.1 §8.3.1: the last in-flow block child's bottom margin is
         // still pending in the context. When this box's own padding-bottom /
@@ -8238,6 +8467,17 @@ impl LayoutBox {
         let shift = self.sticky_shift.get();
         let (x, y) = (x - shift.0, y - shift.1);
 
+        // A `clip-path` clips hit testing as it clips painting (CSS Masking
+        // 1 §5): outside the shape neither the box nor what it holds is hit,
+        // whatever its bounding box. Rem lengths in it read a 16px root here.
+        if !self.style.clip_path.is_empty() {
+            if let Some(shape) = DisplayList::new().clip_path_clip(self) {
+                if !shape.contains(x, y) {
+                    return None;
+                }
+            }
+        }
+
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -8753,6 +8993,13 @@ pub enum DisplayCommand {
         /// on the legacy callers (paint then decides with the same function
         /// on its own font) and wherever `advances` is `None`.
         faces: Option<Vec<rustkit_text::GlyphFace>>,
+        /// The glyphs are drawn from the undilated outline (Skia's path for
+        /// unhinted text on macOS: `-webkit-font-smoothing: antialiased`,
+        /// `text-rendering: geometricPrecision`). `false`, the default, is
+        /// Chrome's normal macOS text: CoreGraphics-smoothed (dilated)
+        /// masks with Skia's mask pre-blend for the text colour
+        /// (`ComputedStyle::text_dilated`).
+        undilated: bool,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -8976,6 +9223,17 @@ pub enum DisplayCommand {
     /// `PushClip` here instead loses the corner notches: a child painting its
     /// own background fills the square corner the parent's radius cut away.
     PushClipRounded { rect: Rect, radius: BorderRadius },
+    /// Push a clip to an outline (`clip-path: polygon()`, `path()`,
+    /// `shape()`; C8b), closed by `PopClip` like every clip. `contours` are
+    /// closed polygons in document space, flattened; a point is inside by
+    /// the nonzero rule, or the even-odd rule when `even_odd`. `rect` is
+    /// their bounding box: a painter that cannot clip to an outline clips
+    /// to it, which never shows more than the outline's own box.
+    PushClipPath {
+        rect: Rect,
+        contours: Vec<Vec<(f32, f32)>>,
+        even_odd: bool,
+    },
     /// Solid borders around a border box with rounded corners. `rect` is
     /// the border box, `widths`/`colors` are `[top, right, bottom, left]`,
     /// and `radius` is the outer (border-edge) radius. The inner (padding)
@@ -9779,6 +10037,280 @@ fn parse_length(value: &str) -> Option<f32> {
     }
 }
 
+/// How far a `clip-path: path()` / `shape()` curve may stray from the true
+/// one when flattened, in CSS px (as `rustkit-svg` flattens `<path>`).
+const CLIP_FLATTEN_TOLERANCE_PX: f32 = 0.1;
+
+/// What a `clip-path` clips a box to, in document space.
+#[derive(Debug, Clone)]
+pub(crate) enum ShapeClip {
+    /// A rectangle, its corners rounded when the radius is not zero.
+    Rounded(Rect, BorderRadius),
+    /// Closed polygons (`polygon()`, flattened `path()` / `shape()`) and
+    /// their fill rule; `bounds` is their bounding box.
+    Path {
+        bounds: Rect,
+        contours: Vec<Vec<(f32, f32)>>,
+        even_odd: bool,
+    },
+}
+
+impl ShapeClip {
+    /// An outline clip; contours with no area (a valid `path('M 0 0 L 100
+    /// 100')` or `path('M 10 10')`) clip everything, as in Chrome 148. An
+    /// unparsable path never gets here: it is no clip (`path_data::is_valid`).
+    fn outline(contours: Vec<Vec<(f32, f32)>>, even_odd: bool) -> ShapeClip {
+        let contours: Vec<Vec<(f32, f32)>> = contours.into_iter().filter(|c| c.len() >= 3).collect();
+        let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+        let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for &(x, y) in contours.iter().flatten() {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        if !(x0 < x1 && y0 < y1) {
+            return ShapeClip::Rounded(Rect::new(0.0, 0.0, 0.0, 0.0), BorderRadius::default());
+        }
+        let bounds = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        // A single axis-aligned rectangle is a plain rect clip.
+        if let [only] = contours.as_slice() {
+            let mut ring: Vec<(f32, f32)> = only.clone();
+            if ring.len() == 5 && ring[0] == ring[4] {
+                ring.pop();
+            }
+            let axis_aligned = ring.len() == 4
+                && (0..4).all(|i| {
+                    let (a, b) = (ring[i], ring[(i + 1) % 4]);
+                    a.0 == b.0 || a.1 == b.1
+                })
+                && ring.iter().all(|&(x, y)| (x == x0 || x == x1) && (y == y0 || y == y1));
+            if axis_aligned {
+                return ShapeClip::Rounded(bounds, BorderRadius::default());
+            }
+        }
+        ShapeClip::Path { bounds, contours, even_odd }
+    }
+
+    /// Whether the clip keeps the point (a hit test inside it).
+    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
+        match self {
+            ShapeClip::Rounded(rect, radius) => rounded_rect_contains(*rect, radius, x, y),
+            ShapeClip::Path { bounds, contours, even_odd } => {
+                bounds.contains(x, y) && path_contains(contours, *even_odd, x, y)
+            }
+        }
+    }
+}
+
+/// Whether `(x, y)` is inside `rect` with its corners rounded by `radius`.
+fn rounded_rect_contains(rect: Rect, radius: &BorderRadius, x: f32, y: f32) -> bool {
+    if !(x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height) {
+        return false;
+    }
+    let (r, b) = (rect.x + rect.width, rect.y + rect.height);
+    let corners = [
+        (radius.top_left, rect.x + radius.top_left.h, rect.y + radius.top_left.v),
+        (radius.top_right, r - radius.top_right.h, rect.y + radius.top_right.v),
+        (radius.bottom_right, r - radius.bottom_right.h, b - radius.bottom_right.v),
+        (radius.bottom_left, rect.x + radius.bottom_left.h, b - radius.bottom_left.v),
+    ];
+    for (i, (c, cx, cy)) in corners.into_iter().enumerate() {
+        if c.h <= 0.0 || c.v <= 0.0 {
+            continue;
+        }
+        let in_corner = match i {
+            0 => x < cx && y < cy,
+            1 => x > cx && y < cy,
+            2 => x > cx && y > cy,
+            _ => x < cx && y > cy,
+        };
+        if in_corner {
+            let (dx, dy) = ((x - cx) / c.h, (y - cy) / c.v);
+            return dx * dx + dy * dy <= 1.0;
+        }
+    }
+    true
+}
+
+/// Whether `(x, y)` is inside the closed `contours` by the nonzero rule, or
+/// the even-odd rule when `even_odd`.
+pub fn path_contains(contours: &[Vec<(f32, f32)>], even_odd: bool, x: f32, y: f32) -> bool {
+    let mut winding = 0i32;
+    let mut crossings = 0u32;
+    for contour in contours {
+        let n = contour.len();
+        for i in 0..n {
+            let (a, b) = (contour[i], contour[(i + 1) % n]);
+            if (a.1 <= y) != (b.1 <= y) {
+                let t = (y - a.1) / (b.1 - a.1);
+                if a.0 + t * (b.0 - a.0) > x {
+                    crossings += 1;
+                    winding += if b.1 > a.1 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    if even_odd {
+        crossings % 2 == 1
+    } else {
+        winding != 0
+    }
+}
+
+/// A basic shape's optional leading `<fill-rule>,`: whether it is
+/// `evenodd`, and the rest.
+fn fill_rule_prefix(args: &str) -> (bool, &str) {
+    for (keyword, even_odd) in [("nonzero", false), ("evenodd", true)] {
+        if args.get(..7).is_some_and(|head| head.eq_ignore_ascii_case(keyword)) {
+            let rest = args[7..].trim_start();
+            return (even_odd, rest.strip_prefix(',').unwrap_or(rest).trim());
+        }
+    }
+    (false, args)
+}
+
+/// `shape()` (css-shapes-1 §3.1.3) commands after the optional fill rule,
+/// lowercased, as SVG path commands in px from the reference box's corner.
+/// `px` resolves a length or percentage against a basis; `w`/`h` are the
+/// reference box's size. `None` when any command does not read.
+fn shape_commands(
+    list: &str,
+    px: &dyn Fn(&str, f32) -> Option<f32>,
+    w: f32,
+    h: f32,
+) -> Option<Vec<path_data::PathCommand>> {
+    use path_data::PathCommand as P;
+    let x_of = |t: &str| match t {
+        "left" => Some(0.0),
+        "center" => Some(w / 2.0),
+        "right" => Some(w),
+        t => px(t, w),
+    };
+    let y_of = |t: &str| match t {
+        "top" => Some(0.0),
+        "center" => Some(h / 2.0),
+        "bottom" => Some(h),
+        t => px(t, h),
+    };
+    let pair = |t: &[&str]| -> Option<(f32, f32)> {
+        match t {
+            [x, y] => Some((x_of(x)?, y_of(y)?)),
+            _ => None,
+        }
+    };
+    let mut items = list.split(',').map(str::trim);
+    let from: Vec<&str> = items.next()?.split_whitespace().collect();
+    let (x, y) = match from.as_slice() {
+        ["from", rest @ ..] => pair(rest)?,
+        _ => return None,
+    };
+    let mut out = vec![P::MoveTo(x, y)];
+    for item in items {
+        let t: Vec<&str> = item.split_whitespace().collect();
+        let by = t.get(1) == Some(&"by");
+        if t.len() > 1 && !by && t[1] != "to" {
+            return None;
+        }
+        let cmd = match t.as_slice() {
+            ["close"] => P::Close,
+            ["move", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::MoveToRel(x, y) } else { P::MoveTo(x, y) }
+            }
+            ["line", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::LineToRel(x, y) } else { P::LineTo(x, y) }
+            }
+            ["hline", _, x] => {
+                let x = x_of(x)?;
+                if by { P::HorizontalToRel(x) } else { P::HorizontalTo(x) }
+            }
+            ["vline", _, y] => {
+                let y = y_of(y)?;
+                if by { P::VerticalToRel(y) } else { P::VerticalTo(y) }
+            }
+            ["curve", _, x, y, "with", c @ ..] => {
+                let (x, y) = pair(&[x, y])?;
+                match c {
+                    [c1x, c1y] => {
+                        let (a, b) = pair(&[c1x, c1y])?;
+                        if by { P::QuadToRel(a, b, x, y) } else { P::QuadTo(a, b, x, y) }
+                    }
+                    [c1x, c1y, "/", c2x, c2y] => {
+                        let (a, b) = pair(&[c1x, c1y])?;
+                        let (c, d) = pair(&[c2x, c2y])?;
+                        if by { P::CubicToRel(a, b, c, d, x, y) } else { P::CubicTo(a, b, c, d, x, y) }
+                    }
+                    _ => return None,
+                }
+            }
+            ["smooth", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::SmoothQuadToRel(x, y) } else { P::SmoothQuadTo(x, y) }
+            }
+            ["smooth", _, x, y, "with", c2x, c2y] => {
+                let (x, y) = pair(&[x, y])?;
+                let (c, d) = pair(&[c2x, c2y])?;
+                if by { P::SmoothCubicToRel(c, d, x, y) } else { P::SmoothCubicTo(c, d, x, y) }
+            }
+            ["arc", _, x, y, "of", rest @ ..] => {
+                let (x, y) = pair(&[x, y])?;
+                let mut radii = Vec::new();
+                let mut i = 0;
+                while i < rest.len() && radii.len() < 2 {
+                    if matches!(rest[i], "cw" | "ccw" | "large" | "small" | "rotate") {
+                        break;
+                    }
+                    radii.push(rest[i]);
+                    i += 1;
+                }
+                let (rx, ry) = match radii.as_slice() {
+                    [r] => (px(r, w)?, px(r, h)?),
+                    [a, b] => (px(a, w)?, px(b, h)?),
+                    _ => return None,
+                };
+                let (mut sweep, mut large, mut angle) = (false, false, 0.0);
+                while i < rest.len() {
+                    match rest[i] {
+                        "cw" => sweep = true,
+                        "ccw" => sweep = false,
+                        "large" => large = true,
+                        "small" => large = false,
+                        "rotate" => {
+                            i += 1;
+                            let a = rest.get(i)?;
+                            angle = if let Some(v) = a.strip_suffix("deg") {
+                                v.parse().ok()?
+                            } else if let Some(v) = a.strip_suffix("grad") {
+                                v.parse::<f32>().ok()? * 0.9
+                            } else if let Some(v) = a.strip_suffix("rad") {
+                                v.parse::<f32>().ok()?.to_degrees()
+                            } else if let Some(v) = a.strip_suffix("turn") {
+                                v.parse::<f32>().ok()? * 360.0
+                            } else if *a == "0" {
+                                0.0
+                            } else {
+                                return None;
+                            };
+                        }
+                        _ => return None,
+                    }
+                    i += 1;
+                }
+                if by {
+                    P::ArcToRel(rx, ry, angle, large, sweep, x, y)
+                } else {
+                    P::ArcTo(rx, ry, angle, large, sweep, x, y)
+                }
+            }
+            _ => return None,
+        };
+        out.push(cmd);
+    }
+    Some(out)
+}
+
 /// One box's outline, built and waiting to be painted.
 ///
 /// Chromium paints the outlines of the normal-flow boxes of a paint layer
@@ -10213,13 +10745,21 @@ impl DisplayList {
         if let Some(rect) = rect_clip {
             self.commands.push(DisplayCommand::PushClip(rect));
         }
-        if let Some((rect, radius)) = shape_clip {
-            if radius.is_zero() {
-                self.commands.push(DisplayCommand::PushClip(rect));
-            } else {
-                self.commands
-                    .push(DisplayCommand::PushClipRounded { rect, radius });
+        match &shape_clip {
+            Some(ShapeClip::Rounded(rect, radius)) if radius.is_zero() => {
+                self.commands.push(DisplayCommand::PushClip(*rect));
             }
+            Some(ShapeClip::Rounded(rect, radius)) => {
+                self.commands.push(DisplayCommand::PushClipRounded { rect: *rect, radius: *radius });
+            }
+            Some(ShapeClip::Path { bounds, contours, even_odd }) => {
+                self.commands.push(DisplayCommand::PushClipPath {
+                    rect: *bounds,
+                    contours: contours.clone(),
+                    even_odd: *even_odd,
+                });
+            }
+            None => {}
         }
 
         // Outlines (see `PendingOutline`). Taken here: the clips this box
@@ -10942,7 +11482,7 @@ impl DisplayList {
         ))
     }
 
-    fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+    pub(crate) fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<ShapeClip> {
         // A non-replaced inline is one box at its first line fragment here,
         // and Chrome clips a wrapped inline to that first fragment too (WPT
         // clip-path-reference-box-004), so its own boxes are the reference.
@@ -10952,7 +11492,10 @@ impl DisplayList {
         ) {
             return None;
         }
-        let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();
+        // Path data is case-sensitive (`M` and `m` differ); everything else
+        // is read lowercased. Lowercasing ASCII keeps the byte offsets.
+        let original = layout_box.style.clip_path.trim();
+        let raw = original.to_ascii_lowercase();
         if raw.is_empty() || raw == "none" {
             return None;
         }
@@ -10995,10 +11538,10 @@ impl DisplayList {
             let rect = reference_box(&raw)?;
             let radii = self.border_radius_px(layout_box);
             if radii.is_zero() {
-                return Some((rect, BorderRadius::default()));
+                return Some(ShapeClip::Rounded(rect, BorderRadius::default()));
             }
             if matches!(raw.as_str(), "border-box" | "stroke-box" | "view-box") {
-                return Some((rect, radii.fitted(rect.width, rect.height)));
+                return Some(ShapeClip::Rounded(rect, radii.fitted(rect.width, rect.height)));
             }
             return None;
         }
@@ -11216,43 +11759,58 @@ impl DisplayList {
                 // (one point, `0 0,0 0`, or collinear points) clips everything:
                 // eBay hides its header "Expand Cart" buttons and "Skip to
                 // main content" link with `polygon(0 0,0 0)` until `:focus`.
-                // Any other polygon clips to its bounding box: exact for an
-                // axis-aligned rectangle, and never more than Chromium paints
-                // for any other shape (the renderer clips to rects).
-                let list = shape
-                    .strip_prefix("nonzero")
-                    .or_else(|| shape.strip_prefix("evenodd"))
-                    .map_or(shape, |rest| rest.trim_start().trim_start_matches(',').trim());
+                // An axis-aligned rectangle is a plain rect clip; any other
+                // polygon clips to its outline.
+                let (even_odd, list) = fill_rule_prefix(shape);
                 let points = list
                     .split(',')
                     .map(|pair| match pair.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        [x, y] => Some((px(x, w)?, px(y, h)?)),
+                        [x, y] => Some((reference.x + px(x, w)?, reference.y + px(y, h)?)),
                         _ => None,
                     })
                     .collect::<Option<Vec<(f32, f32)>>>()?;
                 let twice_area: f32 = points
                     .iter()
                     .zip(points.iter().cycle().skip(1))
-                    .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
+                    .map(|(a, b)| (a.0 - reference.x) * (b.1 - reference.y) - (b.0 - reference.x) * (a.1 - reference.y))
                     .sum();
-                let rect = if twice_area.abs() < 1e-3 {
-                    Rect::new(reference.x, reference.y, 0.0, 0.0)
-                } else {
-                    let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
-                    let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-                    for &(x, y) in &points {
-                        x0 = x0.min(x);
-                        y0 = y0.min(y);
-                        x1 = x1.max(x);
-                        y1 = y1.max(y);
-                    }
-                    Rect::new(reference.x + x0, reference.y + y0, x1 - x0, y1 - y0)
-                };
-                (rect, BorderRadius::default())
+                if twice_area.abs() < 1e-3 {
+                    return Some(ShapeClip::Rounded(Rect::new(reference.x, reference.y, 0.0, 0.0), BorderRadius::default()));
+                }
+                return Some(ShapeClip::outline(vec![points], even_odd));
+            }
+            "path" => {
+                // `path([<fill-rule>,]? <string>)`: SVG path data in px from
+                // the reference box's top-left corner (css-shapes-1 §3.1).
+                let (even_odd, data) = fill_rule_prefix(original[open + 1..close].trim());
+                let data = data
+                    .strip_prefix('"')
+                    .and_then(|d| d.strip_suffix('"'))
+                    .or_else(|| data.strip_prefix('\'').and_then(|d| d.strip_suffix('\'')))?;
+                // An unparsable string invalidates the declaration: no
+                // clip at all, as Chrome 148 (`path('')` included).
+                if !path_data::is_valid(data) {
+                    return None;
+                }
+                let commands = path_data::parse(data);
+                let contours: Vec<Vec<(f32, f32)>> = path_data::flatten(&commands, CLIP_FLATTEN_TOLERANCE_PX)
+                    .into_iter()
+                    .map(|c| c.into_iter().map(|(x, y)| (reference.x + x, reference.y + y)).collect())
+                    .collect();
+                return Some(ShapeClip::outline(contours, even_odd));
+            }
+            "shape" => {
+                let (even_odd, list) = fill_rule_prefix(original[open + 1..close].trim());
+                let commands = shape_commands(&list.to_ascii_lowercase(), &|token, basis| px(token, basis), w, h)?;
+                let contours: Vec<Vec<(f32, f32)>> = path_data::flatten(&commands, CLIP_FLATTEN_TOLERANCE_PX)
+                    .into_iter()
+                    .map(|c| c.into_iter().map(|(x, y)| (reference.x + x, reference.y + y)).collect())
+                    .collect();
+                return Some(ShapeClip::outline(contours, even_odd));
             }
             _ => return None,
         };
-        Some((rect, radii))
+        Some(ShapeClip::Rounded(rect, radii))
     }
 
     /// The rounded clip a box imposes on its descendants, if any.
@@ -12261,6 +12819,7 @@ impl DisplayList {
                     ascent: Some(seat_ascent),
                     run: line_run.map(std::sync::Arc::new),
                     faces,
+                    undilated: !style.text_dilated(),
                 });
 
                 // Draw text decorations
@@ -13337,6 +13896,11 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The page declares `border: none` too (the cascade flags both axes, CB3b).
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
         let plain = FormControlType::Button {
             label: "Export as JSON".to_string(),
             button_type: "button".to_string(),
@@ -13347,6 +13911,86 @@ mod tests {
         };
         assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
         assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
+    }
+
+    #[test]
+    fn test_a_non_ascii_button_label_goes_through_the_same_three_part_sum() {
+        // Prometheus nit 1 on #1037: the non-ASCII branch kept the old rule (no UA border when
+        // padding was declared, `line-height` ignored). The label only changes the LINE (the
+        // fallback face united with `normal`); padding and border are the same sum. Deterministic
+        // on any machine: a declared line-height wins over the fallback face, so the emoji label
+        // is exactly the ASCII label's height; and a bare emoji button is never shorter than a
+        // bare ASCII one (its line is `normal` united with the fallback).
+        let button = |label: &str| FormControlType::Button {
+            label: label.to_string(),
+            button_type: "button".to_string(),
+        };
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        style.line_height_declared = true; // the cascade flags a line-height on the button itself
+        let ascii = form_control_intrinsic_size(&style, &button("Share")).1;
+        let emoji = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(ascii, 20.0 + UA_BUTTON_PADDING_V + UA_BUTTON_BORDER_V, "ascii: line + UA padding + UA border");
+        assert_eq!(emoji, ascii, "a declared line-height wins over the fallback face");
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_v_declared = true;
+        style.padding_declared = [true, false, true, false];
+        let emoji_padded = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
+        assert_eq!(emoji_padded, 20.0 + 16.0 + UA_BUTTON_BORDER_V, "declared padding keeps the UA border");
+        let bare = ComputedStyle::new();
+        let bare_ascii = form_control_intrinsic_size(&bare, &button("Share")).1;
+        let bare_emoji = form_control_intrinsic_size(&bare, &button("\u{1F4F1} Share")).1;
+        assert!(bare_emoji >= bare_ascii, "an emoji label is never shorter: {bare_emoji} vs {bare_ascii}");
+    }
+
+    #[test]
+    #[ignore = "BACKLOG (Prometheus #1037 nit 3): not measured on Chrome CfT 148 yet"]
+    fn backlog_a_fully_declared_input_and_select_box_is_line_plus_author_padding_and_border() {
+        // `fully_declared` (padding AND border declared, zero and `none` included) now also reaches
+        // `<input>` and `<select>`, which used to keep the 19 px blob when the declared values were
+        // all zero. The new rule is the CSS box model (normal line + 0 + 0 = 15 at the UA font).
+        // Unpinned until Chrome CfT 148 gives the number for `input{padding:0;border:none}` and
+        // the select equivalent; then replace the 15.0 below with it and drop `ignore`.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(40.0 / 3.0);
+        style.font_family = "Arial".to_string();
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
+        let input = FormControlType::TextInput {
+            value: String::new(),
+            placeholder: String::new(),
+            input_type: "text".to_string(),
+        };
+        assert_eq!(form_control_intrinsic_size(&style, &input).1, 15.0);
+    }
+
+    #[test]
+    fn one_declared_side_does_not_drop_the_ua_part_of_the_other_sides() {
+        // `padding-top: 0` alone keeps the UA bottom padding in Chrome (1 px), and `padding-left: 0`
+        // alone keeps the right at 6 (CB3c, Chrome for Testing 148: `x` is 18 wide, 24 tall). The
+        // cascade flags per side, so only the declared side is the author's.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(0.0);
+        style.padding_declared = [true, false, false, false];
+        style.padding_v_declared = true;
+        let button = FormControlType::Button { label: "Go".to_string(), button_type: "button".to_string() };
+        let h = form_control_intrinsic_size(&style, &button).1;
+        assert_eq!(h, 18.0 + 1.0 + UA_BUTTON_BORDER_V, "line 18 + the UA 1px bottom padding + the UA border");
+        let mut left = ComputedStyle::new();
+        left.font_size = Length::Px(16.0);
+        left.font_family = "Arial".to_string();
+        left.padding_left = Length::Px(0.0);
+        left.padding_declared = [false, false, false, true];
+        let x = FormControlType::Button { label: "x".to_string(), button_type: "button".to_string() };
+        let w = form_control_intrinsic_size(&left, &x).0;
+        assert_eq!(w, 8.0 + 6.0 + 0.0 + UA_BUTTON_BORDER_H, "x (8) + the UA right 6 + no left + the UA 2 + 2 border");
     }
 
     #[test]
@@ -13361,6 +14005,12 @@ mod tests {
         style.padding_bottom = Length::Px(8.0);
         style.padding_left = Length::Px(16.0);
         style.padding_right = Length::Px(16.0);
+        // The cascade flags a declared side (CB3b): `padding` and `border: none` are both the
+        // author's here, so no UA padding or border is added to the 14px line + 16.
+        style.padding_v_declared = true;
+        style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
         let control = FormControlType::Button {
             label: "Save".to_string(),
             button_type: "button".to_string(),
@@ -17752,6 +18402,10 @@ mod tests {
         s.padding_right = Length::Px(16.0);
         s.border_left_width = Length::Px(1.0);
         s.border_right_width = Length::Px(1.0);
+        // What the cascade flags for an author padding and border (CB3c): without it the button
+        // takes the UA's per-side values instead.
+        s.padding_declared = [true; 4];
+        s.border_declared = [true; 4];
         LayoutBox::new(
             BoxType::FormControl(FormControlType::Button {
                 label: label.to_string(),
@@ -17849,21 +18503,19 @@ mod tests {
 
     #[test]
     fn a_bare_buttons_min_content_keeps_the_ua_well() {
-        // With no author padding the composition falls back to the 24px UA
-        // well, and it must still be there under min-content — otherwise a
-        // bare button floors at its bare text and paints over its own border.
+        // With no author padding or border the composition falls back to the UA's (6 px padding
+        // and 2 px border a side, 16 in all: CB3c, Chrome for Testing 148), and it must still be
+        // there under min-content: otherwise a bare button floors at its bare text and paints
+        // over its own border.
         let mut b = n68_button("Save Changes");
-        b.style.padding_left = Length::Px(0.0);
-        b.style.padding_right = Length::Px(0.0);
-        b.style.border_left_width = Length::Px(0.0);
-        b.style.border_right_width = Length::Px(0.0);
+        b.style.padding_declared = [false; 4];
+        b.style.border_declared = [false; 4];
         let widest_word = n68_advance(&b, "Changes");
         let got = crate::grid::own_min_content_width(&b);
+        let ua = UA_BUTTON_PADDING_H + UA_BUTTON_BORDER_H;
         assert!(
-            (got - (widest_word + 24.0)).abs() < 0.01,
-            "a bare button's min-content is its widest word plus the 24px UA \
-             well ({}), got {got}",
-            widest_word + 24.0
+            (got - (widest_word + ua)).abs() < 0.01,
+            "a bare button's min-content is its widest word plus the UA's {ua} px, got {got}"
         );
     }
 

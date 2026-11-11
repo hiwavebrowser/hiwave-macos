@@ -475,6 +475,9 @@ pub struct JsRuntime {
     #[cfg(feature = "boa")]
     executor: std::rc::Rc<executor::HostJobExecutor>,
     config: JsRuntimeConfig,
+    /// The microtask job cap while a watchdog turn is open (H19c): a drain that the budget
+    /// interrupt bounds may run this many jobs. 0 = no raise: the config's cap holds always.
+    armed_job_cap: u64,
     console_handler: Option<Arc<ConsoleHandler>>,
     console_shape_handler: Option<Arc<ConsoleHandler>>,
     /// [`set_console_live`](Self::set_console_live)'s predicate, kept so the
@@ -560,6 +563,7 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             executor,
             config,
+            armed_job_cap: 0,
             console_handler: None,
             console_shape_handler: None,
             console_live: None,
@@ -1046,9 +1050,34 @@ impl JsRuntime {
         self.arm(turn != 0);
     }
 
+    /// The job cap a microtask drain may run to while a watchdog turn is open (H19c): the
+    /// interrupt, which Boa reads at every call, bounds the time, so the cap can be higher than
+    /// the config's. Outside an open turn (no watchdog, e.g. a chrome IPC evaluation) the
+    /// config's cap holds. 0 turns the raise off.
+    pub fn set_armed_max_job_iterations(&mut self, limit: u64) {
+        self.armed_job_cap = limit;
+        let armed = self.deadline.armed.get();
+        self.apply_job_cap(armed);
+    }
+
+    fn apply_job_cap(&mut self, armed: bool) {
+        #[cfg(feature = "boa")]
+        {
+            let cap = if armed {
+                self.config.max_job_iterations.max(self.armed_job_cap)
+            } else {
+                self.config.max_job_iterations
+            };
+            self.executor.set_max_job_iterations(cap);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = armed;
+    }
+
     /// Whether Boa stops the running turn by the word (`ALL` it always does).
     fn arm(&mut self, armed: bool) {
         self.deadline.armed.set(armed);
+        self.apply_job_cap(armed);
         #[cfg(feature = "boa")]
         self.context
             .set_interrupt_turn(if armed { self.deadline.turn.get() } else { 0 });
