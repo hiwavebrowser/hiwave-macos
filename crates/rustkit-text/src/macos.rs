@@ -1013,6 +1013,9 @@ pub struct GlyphRasterizer {
     /// (`-webkit-font-smoothing: antialiased`, `text-rendering:
     /// geometricPrecision`). See [`GlyphRasterizer::with_dilation`].
     dilate: bool,
+    /// The horizontal subpixel phase (0, 0.25, 0.5 or 0.75) glyphs are drawn
+    /// at by `rasterize_with_face` (TX3; see [`GlyphRasterizer::with_subpixel`]).
+    subpixel_x: f32,
 }
 
 /// What CoreGraphics font smoothing does on this machine, probed once as
@@ -1230,6 +1233,14 @@ impl GlyphRasterizer {
         self
     }
 
+    /// The same rasterizer drawing at horizontal subpixel phase `x`
+    /// (`rasterize_with_face`, and the fallback face it may take): the
+    /// quarter-pixel phase Skia rounds a glyph origin to (TX3).
+    pub fn with_subpixel(mut self, x: f32) -> Self {
+        self.subpixel_x = x;
+        self
+    }
+
     /// Create a new glyph rasterizer for a font
     pub fn new(family: &str, size: f64) -> Result<Self, TextError> {
         let font = create_font(family, size)?;
@@ -1239,6 +1250,7 @@ impl GlyphRasterizer {
             font_weight: 400,
             font_italic: false,
             dilate: false,
+            subpixel_x: 0.0,
         })
     }
     
@@ -1253,6 +1265,7 @@ impl GlyphRasterizer {
             font_weight: 400,
             font_italic: false,
             dilate: false,
+            subpixel_x: 0.0,
         }
     }
     
@@ -1267,6 +1280,7 @@ impl GlyphRasterizer {
             font_weight: weight,
             font_italic: italic,
             dilate: false,
+            subpixel_x: 0.0,
         }
     }
     
@@ -1285,6 +1299,7 @@ impl GlyphRasterizer {
             font_weight: 400,
             font_italic: false,
             dilate: false,
+            subpixel_x: 0.0,
         }
     }
 
@@ -1429,14 +1444,21 @@ impl GlyphRasterizer {
             let padding = 2.0;
             // One extra column ONLY when the ink is shifted, so a phase-0
             // rasterization stays byte-identical to the pre-subpixel result.
-            let shift_pad = if subpixel_x > 0.0 { 1 } else { 0 };
-            let width =
-                (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32 + shift_pad;
+            // TX3: the pen sits on a whole column of the bitmap and the
+            // outline at its own fractional offset plus the phase, as Skia
+            // draws it; the bearing is then a whole pixel, so the bitmap is
+            // placed on the device grid and sampled texel for pixel. (The
+            // outline used to start on a whole column, with the fraction in
+            // the bearing: the quad was sampled between texels.)
+            let left = bounds.origin.x.floor();
+            let width = ((bounds.origin.x + bounds.size.width + subpixel_x as f64).ceil() - left
+                + padding * 2.0)
+                .max(4.0) as u32;
             let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
             // Calculate position to draw glyph
             // Origin is at bottom-left, glyph origin needs adjustment
-            let x = padding - bounds.origin.x + subpixel_x as f64;
+            let x = padding - left + subpixel_x as f64;
             // INTEGER-BASELINE CONTRACT: `draw_y` is a whole CG row (see
             // baseline_seat) so the outline is rasterized at vertical phase 0.
             let y = draw_y;
@@ -1452,7 +1474,7 @@ impl GlyphRasterizer {
             // `bearing_y` comes from baseline_seat: the exact integer row
             // count from the bitmap top to the baseline row it was drawn on
             // (INTEGER-BASELINE CONTRACT).
-            let bearing_x = (bounds.origin.x - padding) as f32;
+            let bearing_x = (left - padding) as f32;
 
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
@@ -1525,19 +1547,24 @@ impl GlyphRasterizer {
             );
             
             let padding = 2.0;
-            let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
+            // TX3, as rasterize_glyph_id: whole-pixel bearing, outline at its
+            // own fraction plus the rasterizer's phase.
+            let left = bounds.origin.x.floor();
+            let sx = self.subpixel_x as f64;
+            let width = ((bounds.origin.x + bounds.size.width + sx).ceil() - left + padding * 2.0)
+                .max(4.0) as u32;
             let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
-            let draw_x = padding - bounds.origin.x;
+            let draw_x = padding - left + sx;
             // The fallback face is drawn as the primary one is (the same
             // dilation), so it does not paint lighter or heavier.
-            let bitmap = draw_coverage_mask(font_ref, glyph, CGPoint::new(draw_x, draw_y), width, height, self.dilate, false);
+            let bitmap = draw_coverage_mask(font_ref, glyph, CGPoint::new(draw_x, draw_y), width, height, self.dilate, sx > 0.0);
 
             let advance = advance_size.width as f32;
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
             // padded bitmap, not the outline. bearing_y is baseline_seat's
             // integer row count (INTEGER-BASELINE CONTRACT).
-            let bearing_x = (bounds.origin.x - padding) as f32;
+            let bearing_x = (left - padding) as f32;
 
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
@@ -1586,7 +1613,7 @@ impl GlyphRasterizer {
                     // The common path, as it always was (rasterize_char
                     // falls back by itself should this font lack the
                     // glyph: a face the record was not made for).
-                    self.rasterize_char(ch, 0.0).map(GlyphRaster::Mask)
+                    self.rasterize_char(ch, self.subpixel_x).map(GlyphRaster::Mask)
                 }
             }
             GlyphFace::Fallback { emoji } => {

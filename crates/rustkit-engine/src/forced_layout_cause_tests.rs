@@ -237,8 +237,9 @@ fn a_read_in_an_animation_frame_during_a_css_animation_forces_no_layout() {
 
 /// LAT7c: a page whose element `#s` runs a Web Animation of `keyframes`
 /// while a frame callback evaluates `expr` for 10 frames.
-/// Returns (reads that ran, forced layouts).
-fn waapi_frames(keyframes: &str, expr: &str) -> (u32, u64) {
+/// Returns (reads that ran, forced layouts, reads answered from an
+/// animation frame over the published boxes: LAT19).
+fn waapi_frames(keyframes: &str, expr: &str) -> (u32, u64, u64) {
     let page = "<html><head><style>body{margin:0} #s{width:20px;height:20px;background:red}</style></head><body>\
         <div id=s></div><div id=a style='width:100px;height:20px'></div>\
         <script>var a = document.getElementById('a'), s = document.getElementById('s');</script></body></html>";
@@ -266,11 +267,14 @@ fn waapi_frames(keyframes: &str, expr: &str) -> (u32, u64) {
         )
         .unwrap();
     let before = forced(&engine, view);
+    let framed = || engine.relayout_stats(view).unwrap().forced_frames;
+    let framed_before = framed();
     for _ in 0..12 {
         rt.block_on(engine.pump_live(view, 16));
     }
+    let framed = engine.relayout_stats(view).unwrap().forced_frames - framed_before;
     let reads: u32 = read(&mut engine, view, "window.__reads").parse().unwrap();
-    (reads, forced(&engine, view) - before)
+    (reads, forced(&engine, view) - before, framed)
 }
 
 /// LAT7c: a Web Animations frame of a paint property (opacity, colour,
@@ -286,7 +290,8 @@ fn a_read_in_an_animation_frame_during_a_web_animation_of_a_paint_property_force
         "[{backgroundColor: 'red'}, {backgroundColor: 'blue'}]",
         "[{transform: 'translateX(0px)'}, {transform: 'translateX(50px)'}]",
     ] {
-        let (reads, forced) = waapi_frames(keyframes, "a.offsetWidth + a.clientHeight");
+        let (reads, forced, framed) = waapi_frames(keyframes, "a.offsetWidth + a.clientHeight");
+        assert_eq!(framed, 0, "{keyframes}: nor is a frame placed for them");
         assert!(reads >= 5, "{keyframes}: the frame callback ran: {reads}");
         assert_eq!(forced, 0, "{keyframes}: a paint-property animation frame leaves offset/client reads clean");
     }
@@ -295,20 +300,28 @@ fn a_read_in_an_animation_frame_during_a_web_animation_of_a_paint_property_force
 /// LAT7c's other side: what the animated value does reach still lays out.
 /// A width animation moves boxes; the computed opacity and a transformed
 /// rect read the animated value (Chromium answers both at the current time).
+/// LAT19: a paint value is placed by an animation frame over the published
+/// boxes (`forced_frames`), not a build; a layout value is a forced layout.
 #[test]
 fn reads_that_see_a_web_animation_value_still_force_a_layout() {
-    let (reads, forced) = waapi_frames("[{width: '20px'}, {width: '60px'}]", "a.offsetWidth");
+    let (reads, forced, _) = waapi_frames("[{width: '20px'}, {width: '60px'}]", "a.offsetWidth");
     assert!(reads >= 5, "{reads}");
     assert!(forced >= 3, "a width animation moves boxes: {forced}");
-    let (_, forced) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "getComputedStyle(s).opacity");
-    assert!(forced >= 3, "the computed opacity reads the animated value: {forced}");
-    let (_, forced) = waapi_frames(
+    let (_, forced, framed) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "getComputedStyle(s).opacity");
+    assert!(framed >= 3, "the computed opacity reads the animated value: {framed}");
+    assert_eq!(forced, 0, "from a frame, not a build");
+    // The count before LAT19 (a forced layout per read) moved, it did not
+    // vanish: neither path absorbs the other.
+    assert!(forced + framed >= 3, "{forced} + {framed}");
+    let (_, forced, framed) = waapi_frames(
         "[{transform: 'translateX(0px)'}, {transform: 'translateX(50px)'}]",
         "s.getBoundingClientRect().left",
     );
-    assert!(forced >= 3, "a transformed rect reads the animated value: {forced}");
-    let (_, forced) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "s.getBoundingClientRect().left");
-    assert_eq!(forced, 0, "opacity moves no rect");
+    assert!(framed >= 3, "a transformed rect reads the animated value: {framed}");
+    assert_eq!(forced, 0, "from a frame, not a build");
+    assert!(forced + framed >= 3, "every such read is brought up to date one way or the other");
+    let (_, forced, framed) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "s.getBoundingClientRect().left");
+    assert_eq!((forced, framed), (0, 0), "opacity moves no rect");
 }
 
 #[test]

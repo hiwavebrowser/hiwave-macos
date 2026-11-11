@@ -64,6 +64,8 @@ cocoa = "0.25"
 objc = "0.2"
 
 [dev-dependencies]
+# The engine's tests share one wgpu device (`Compositor::share_device`, T41b).
+rustkit-compositor = { path = "../rustkit-compositor", features = ["test-support"] }
 # Only to force a collection in navigation_release_tests (M2).
 boa_gc = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -29,12 +29,10 @@ pub struct GlyphKey {
     /// .960/.200/.441/.880 -- arbitrary phases on every line -- which is the
     /// mechanism behind the bimodal text diff tail.
     ///
-    /// PRODUCTION IS FROZEN AT PHASE 0 IN THIS COMMIT, DELIBERATELY. The
-    /// rasterizer still draws a phase-0 bitmap for every phase, so emitting
-    /// multi-phase keys now would mint up to SUBPIXEL_QUANTIZE BYTE-IDENTICAL
-    /// atlas entries per glyph: more memory, more eviction pressure, and not
-    /// one pixel different. The call-site flip belongs in the same commit as
-    /// the rasterizer that can honor it.
+    /// TX3: on macOS the call sites key glyphs by the quarter phase Skia
+    /// rounds each glyph origin to (`skia_glyph_origin`), and the rasterizer
+    /// draws at it (`GlyphRasterizer::with_subpixel`); the bitmap is placed
+    /// on a whole pixel. Elsewhere it is 0.
     pub subpixel_phase: u8,
     /// Which document-registered (`@font-face`) file `font_family` resolves
     /// to, from [`GlyphKey::web_face_for`]; 0 when it is a platform font.
@@ -97,7 +95,7 @@ pub struct RunGlyphKey {
     pub face: u64,
     pub glyph_id: u16,
     pub font_size: u32, // Fixed-point (size * 10), as `GlyphKey`
-    /// As `GlyphKey::subpixel_phase`, and frozen at 0 for the same reason.
+    /// As `GlyphKey::subpixel_phase`.
     pub subpixel_phase: u8,
     /// As [`GlyphKey::coverage`].
     pub coverage: u8,
@@ -242,7 +240,10 @@ pub fn rasterize_run_glyph(
         let font = rustkit_text::macos::face_font(key.face, shaped_size)?;
         let mut raster = rustkit_text::macos::GlyphRasterizer::for_face(font, key.raster_size())
             .with_dilation(key.coverage != 0)
-            .rasterize_glyph_id(key.glyph_id, 0.0)?;
+            .rasterize_glyph_id(
+                key.glyph_id,
+                key.subpixel_phase as f32 / SUBPIXEL_QUANTIZE as f32,
+            )?;
         apply_mask_preblend(&mut raster.0, key.coverage);
         Some(raster)
     }
@@ -274,6 +275,26 @@ pub fn rasterize_run_glyph(
 /// cost still grows linearly. 3 is the LCD-subpixel-triad choice and belongs
 /// to a different rendering mode, not to this key.
 pub const SUBPIXEL_QUANTIZE: u8 = 4;
+
+/// Where Chrome draws a glyph whose pen is at device x `x` (TX3): the whole
+/// pixel its bitmap is placed from, and the quarter-pixel phase it is
+/// rasterized at. Skia (Chromium 148) rounds a horizontal run's glyph origin
+/// to the nearest quarter pixel: x + `kSubpixelRound` (1/8) floored to
+/// quarters (`SkGlyphPositionRoundingSpec::HalfAxisSampleFreq`, `kX` axis;
+/// `SkPackedGlyphID::kSubPixelPosLen` = 2, so 4 phases). CfT 148: a line at
+/// x + 0.125 draws as at x + 0.25, at x + 0.875 as at x + 1.
+///
+/// macOS only, where the rasterizer draws at the phase; elsewhere the pen
+/// stays where it was and the phase is 0.
+pub fn skia_glyph_origin(x: f32) -> (f32, u8) {
+    if !cfg!(target_os = "macos") {
+        return (x, 0);
+    }
+    let quarters = ((x + 0.125) * SUBPIXEL_QUANTIZE as f32).floor() as i64;
+    let whole = quarters.div_euclid(SUBPIXEL_QUANTIZE as i64);
+    let phase = quarters.rem_euclid(SUBPIXEL_QUANTIZE as i64) as u8;
+    (whole as f32, phase)
+}
 
 /// Quantize a fractional device X into a phase bucket.
 ///
@@ -671,6 +692,7 @@ impl GlyphCache {
             key.font_style == 1,
         )
         .with_dilation(key.coverage != 0)
+        .with_subpixel(key.subpixel_phase as f32 / SUBPIXEL_QUANTIZE as f32)
     }
 
     /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
