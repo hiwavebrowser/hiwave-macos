@@ -3291,6 +3291,27 @@ mod tests {
         assert_eq!(eval_string(&bindings, "String(navigator.userAgent)"), "RustKit/1.0");
     }
 
+    /// `navigator.platform` names the OS the engine runs on, as Chromium's
+    /// does (Chrome for Testing 148 on macOS arm64: "MacIntel"). It said
+    /// "Win32" everywhere, so HiWave's own chrome page on macOS showed the
+    /// focus-mode hint as "Ctrl+Shift+F" where the page writes "⌘⇧F" for a
+    /// Mac (CB6b: `#focusHintKey` 77.7 wide for Chrome's 41.4).
+    #[test]
+    fn navigator_platform_names_the_host_os() {
+        let want = if cfg!(target_os = "macos") {
+            "MacIntel"
+        } else if cfg!(windows) {
+            "Win32"
+        } else if cfg!(target_arch = "aarch64") {
+            "Linux aarch64"
+        } else {
+            "Linux x86_64"
+        };
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(eval_string(&bindings, "String(navigator.platform)"), want);
+        assert_eq!(JsNavigator::default().platform, want);
+    }
+
     /// `URL` / `URLSearchParams` (lyft, weather and others died on
     /// `ReferenceError: URL is not defined`). Parsing and setters are the
     /// `url` crate's; these pin the object layer and the cases pages hit.
