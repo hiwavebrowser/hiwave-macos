@@ -469,6 +469,17 @@ fn layout_flex_container_at(
         Axis::Vertical
     };
     let cross_axis = main_axis.cross();
+    // Pete's option 2 (CH2.B19): an out-of-flow container whose main size
+    // is `auto` and comes out 0 does not justify an overflowing line
+    // unsafely (see `distribute_main_axis`).
+    let zero_main_from_containing_block = matches!(container.position, crate::Position::Fixed | crate::Position::Absolute)
+        && matches!(
+            match main_axis {
+                Axis::Horizontal => &style.width,
+                Axis::Vertical => &style.height,
+            },
+            rustkit_css::Length::Auto
+        );
 
     // CSS2 §10.6.4, resolved before anything reads a main size: an
     // out-of-flow box with both insets set is definite, and only the
@@ -797,6 +808,7 @@ fn layout_flex_container_at(
             main_gap,
             style.justify_content,
             direction.is_reverse(),
+            zero_main_from_containing_block,
         );
     }
 
@@ -1409,6 +1421,7 @@ fn layout_flex_container_at(
                     main_gap,
                     style.justify_content,
                     direction.is_reverse(),
+                    zero_main_from_containing_block,
                 );
                 for item in &mut line.items {
                     if item.main_margin_auto != (false, false) {
@@ -2876,6 +2889,7 @@ fn distribute_main_axis(
     main_gap: f32,
     justify_content: JustifyContent,
     reverse: bool,
+    zero_main_from_containing_block: bool,
 ) {
     if line.items.is_empty() {
         return;
@@ -2894,7 +2908,11 @@ fn distribute_main_axis(
 
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+    // Signed: an overflowing line has negative free space, which
+    // `center` / `flex-end` place unsafely (CH2.B19, Box Align §4.4 and
+    // Chromium 143: a 300px item centred in 100px starts at -100).
+    let signed_free_space = container_main - total_item_size - total_gaps;
+    let free_space = signed_free_space.max(0.0);
 
     // §8.1/§9.5.12: positive free space goes to the auto margins in equal
     // shares, before `justify-content`, which then has nothing to place.
@@ -2918,10 +2936,27 @@ fn distribute_main_axis(
         free_space
     };
 
+    // Pete's option 2 (11-06), only for the case it covers: an out-of-flow
+    // (fixed or absolute) container with an `auto` main size that came out
+    // 0. A `position: fixed; inset: 0` overlay inside a zero-size fixed
+    // wrapper is still sized against the wrapper here, not the viewport
+    // (CH2.B15), and unsafe centring there pushed a consent dialog off the
+    // left edge where nothing can click it. In-flow and explicitly sized
+    // zero-size containers are unsafe as in Chrome. Remove with B15 (the
+    // gap page in flex_justify_overflow_tests says when).
+    let b15_zero_size = zero_main_from_containing_block && container_main <= 0.0;
+    let unsafe_space = if signed_free_space < 0.0 && !b15_zero_size {
+        signed_free_space
+    } else {
+        free_space
+    };
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
-        JustifyContent::FlexEnd => (free_space, main_gap),
-        JustifyContent::Center => (free_space / 2.0, main_gap),
+        // `center` / `flex-end` place the signed space (auto margins take
+        // none of a negative one, §9.5.12); the space-* values read the
+        // clamped one, so they fall back to the start, as in Chromium.
+        JustifyContent::FlexEnd => (unsafe_space, main_gap),
+        JustifyContent::Center => (unsafe_space / 2.0, main_gap),
         JustifyContent::SpaceBetween => {
             if line.items.len() > 1 {
                 (0.0, free_space / (line.items.len() - 1) as f32 + main_gap)
@@ -2939,8 +2974,22 @@ fn distribute_main_axis(
         }
     };
 
-    // Position items
-    let mut main_pos = initial_offset;
+    // Position items. `initial_offset` is measured from the main-start
+    // edge. A reverse line's main start is the far physical edge (right in
+    // row-reverse, bottom in column-reverse), and `main_position` is a
+    // physical offset, so the line is mirrored: its physical start sits at
+    // `container_main - initial_offset - extent`. Without it a reverse line
+    // was justified from the near edge: `row-reverse` flex-start packed
+    // left and flex-end right, the opposite of Chrome 148, fitting or not
+    // (from #1051's review, nit 2).
+    let main_pos_from_start = if reverse {
+        let extent: f32 = line.items.iter().map(|i| i.outer_main_size()).sum::<f32>()
+            + spacing * (line.items.len().saturating_sub(1)) as f32;
+        container_main - initial_offset - extent
+    } else {
+        initial_offset
+    };
+    let mut main_pos = main_pos_from_start;
     let items_to_position: Vec<_> = if reverse {
         (0..line.items.len()).rev().collect()
     } else {
