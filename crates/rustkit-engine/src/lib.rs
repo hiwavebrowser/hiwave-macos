@@ -23795,6 +23795,7 @@ impl Engine {
                         lay: Some(lay.clone()),
                         url: building.url.clone(),
                         viewport: building.viewport,
+                        dpr: building.dpr,
                         focus: lay.focused_node.get(),
                         external_sheets: sheets.clone(),
                     };
