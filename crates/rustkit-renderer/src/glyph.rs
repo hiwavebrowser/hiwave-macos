@@ -57,6 +57,11 @@ pub struct GlyphKey {
     /// in different buckets are different bitmaps, as in Skia's strike
     /// cache (the luminance colour is part of its descriptor).
     pub coverage: u8,
+    /// An emoji SEQUENCE drawn as one glyph (EM1): the head character and
+    /// the ones layout folded into it (recorded `Ignorable` after it), else
+    /// `None`. A family and its first member are different bitmaps under
+    /// the same `codepoint`, so the cluster is in the key.
+    pub cluster: Option<std::sync::Arc<str>>,
 }
 
 /// How a [`GlyphKey`] names its face (see [`GlyphKey::face`]).
@@ -584,7 +589,7 @@ impl GlyphCache {
             return entry.clone().map(|entry| (entry, true));
         }
 
-        match Self::rasterizer_for(&key).rasterize_with_face(key.codepoint, face) {
+        match Self::raster_for(&key, face) {
             Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => self
                 .insert_mask(queue, &key, raster)
                 .map(|entry| (entry, false)),
@@ -621,7 +626,7 @@ impl GlyphCache {
             return entry.clone();
         }
 
-        match Self::rasterizer_for(&key).rasterize_with_face(key.codepoint, face) {
+        match Self::raster_for(&key, face) {
             Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => {
                 self.insert_mask(queue, &key, raster)
             }
@@ -675,6 +680,20 @@ impl GlyphCache {
             },
             face,
         )
+    }
+
+    /// The glyph `key` names from `face`: an emoji sequence's one glyph when
+    /// the key carries a cluster (EM1) and its face forms it, else the
+    /// character's own glyph, as layout measured it.
+    #[cfg(target_os = "macos")]
+    fn raster_for(key: &GlyphKey, face: rustkit_text::GlyphFace) -> Option<rustkit_text::macos::GlyphRaster> {
+        let rasterizer = Self::rasterizer_for(key);
+        if let Some(cluster) = key.cluster.as_deref() {
+            if let Some(raster) = rasterizer.rasterize_emoji_cluster(cluster) {
+                return Some(raster);
+            }
+        }
+        rasterizer.rasterize_with_face(key.codepoint, face)
     }
 
     /// The rasterizer for the key's own font (the primary face).
@@ -1281,6 +1300,7 @@ pub(crate) fn rasterize_char_for_test(
     weight: u16,
 ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
     let key = GlyphKey {
+        cluster: None,
         codepoint: c,
         font_family: family.to_string(),
         font_size: (size * 10.0) as u32,
@@ -1583,6 +1603,7 @@ mod tests {
 
     fn key_at(phase: u8) -> GlyphKey {
         GlyphKey {
+            cluster: None,
             codepoint: 'a',
             font_family: "Helvetica".to_string(),
             font_size: 160,
@@ -1607,6 +1628,7 @@ mod tests {
             data: Arc::new(bytes.to_vec()),
         };
         let key = || GlyphKey {
+            cluster: None,
             web_face: GlyphKey::web_face_for("GlyphKeyLateFont, sans-serif", 400, 0),
             font_family: "GlyphKeyLateFont, sans-serif".to_string(),
             ..key_at(0)
@@ -1732,6 +1754,7 @@ mod tests {
     #[test]
     fn test_glyph_key_hash() {
         let key1 = GlyphKey {
+            cluster: None,
             subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
@@ -1744,6 +1767,7 @@ mod tests {
         };
 
         let key2 = GlyphKey {
+            cluster: None,
             subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
@@ -1761,6 +1785,7 @@ mod tests {
     #[test]
     fn test_glyph_key_different() {
         let key1 = GlyphKey {
+            cluster: None,
             subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
@@ -1773,6 +1798,7 @@ mod tests {
         };
 
         let key2 = GlyphKey {
+            cluster: None,
             subpixel_phase: 0,
             codepoint: 'B',
             font_family: "Arial".to_string(),

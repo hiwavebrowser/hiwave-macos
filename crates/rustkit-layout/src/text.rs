@@ -1643,8 +1643,30 @@ impl TextShaper {
             // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
+            // EM1: characters still to fold into the emoji sequence glyph
+            // the previous head started (Chrome shapes a ZWJ family, a
+            // skin-toned emoji, a flag, a keycap as ONE cluster with one
+            // advance). They are recorded `Ignorable`: no advance, nothing
+            // drawn of their own; paint draws the sequence at the head.
+            let mut fold_left = 0usize;
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
+                if fold_left > 0 {
+                    fold_left -= 1;
+                    glyphs.push(PositionedGlyph {
+                        glyph_id: glyph_ids[utf16_idx],
+                        x: x_offset,
+                        y: 0.0,
+                        advance: 0.0,
+                        character: c,
+                        cluster: char_idx as u32,
+                        face: GlyphFace::Ignorable,
+                    });
+                    utf16_idx += c.len_utf16();
+                    char_idx += 1;
+                    continue;
+                }
                 let advance = glyph_advances[utf16_idx].width as f32;
 
                 // A character the chosen face has no glyph for is shaped by
@@ -1677,6 +1699,19 @@ impl TextShaper {
                         primary_has_glyph,
                     )
                 };
+                // The head of an emoji sequence its emoji face forms as one
+                // glyph takes the rest of its grapheme cluster with it.
+                if face == (GlyphFace::Fallback { emoji: true }) {
+                    let n = rustkit_text::macos::emoji_cluster_len(&text_chars[char_idx..]);
+                    if n > 1 {
+                        let cluster: String = text_chars[char_idx..char_idx + n].iter().collect();
+                        let formed = rustkit_text::macos::fallback_face_for_presentation(&ct_font, c, true)
+                            .and_then(|(face, _)| rustkit_text::macos::emoji_cluster_glyph(&face, &cluster));
+                        if let Some((_, covered)) = formed {
+                            fold_left = covered - 1;
+                        }
+                    }
+                }
                 let final_advance = match face {
                     GlyphFace::Primary if primary_has_glyph => primary_advance,
                     GlyphFace::Primary => notdef_advance,

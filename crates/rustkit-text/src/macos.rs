@@ -641,7 +641,36 @@ pub fn is_color_face(font: &CTFont) -> bool {
 /// font scaled up. Every glyph of the face takes the same advance, as in
 /// Chrome (a flag, whose own image is narrower, is 18 at 14px too).
 pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
-    if !is_color_face(font) || !font.family_name().contains("Apple Color Emoji") {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    // The symbolic-traits read is the only cost every other face pays.
+    if !is_color_face(font) {
+        return None;
+    }
+    // One Core Text query per (face, size): it is on the shaping hot path,
+    // once per emoji per `shape` (Prometheus R1 on #1072).
+    type Key = (String, u32);
+    thread_local! {
+        static ADVANCE: RefCell<HashMap<Key, Option<f32>>> = RefCell::new(HashMap::new());
+    }
+    const MAX_ENTRIES: usize = 1024;
+    let key = (postscript_name_or_empty(font), (font.pt_size() as f32).to_bits());
+    if let Some(hit) = ADVANCE.with(|m| m.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let advance = apple_emoji_advance_uncached(font);
+    ADVANCE.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_ENTRIES {
+            m.clear();
+        }
+        m.insert(key, advance);
+    });
+    advance
+}
+
+fn apple_emoji_advance_uncached(font: &CTFont) -> Option<f32> {
+    if !font.family_name().contains("Apple Color Emoji") {
         return None;
     }
     let reference = color_glyph_id(font, '\u{1F600}')?;
@@ -664,6 +693,77 @@ pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
     // f64::round rounds a half away from zero, as Chrome does here
     // (17.5 at 14px is 18, 22.5 at 21px is 23).
     (width > 0.0).then(|| width.round() as f32)
+}
+
+/// The characters of the emoji sequence that starts `chars` (one extended
+/// grapheme cluster: a ZWJ sequence, a base with a skin-tone modifier, a
+/// regional-indicator pair, a keycap, a tag sequence, selectors). 1 for a
+/// lone character.
+pub fn emoji_cluster_len(chars: &[char]) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    // A cluster is short; the longest RGI sequences are ten code points.
+    let head: String = chars.iter().take(16).collect();
+    head.graphemes(true).next().map_or(1, |g| g.chars().count().max(1))
+}
+
+/// The first glyph `face` shapes the emoji sequence `cluster` into, and how
+/// many characters of `cluster` it covers; `None` when that glyph covers
+/// only the first character (nothing to fold).
+///
+/// Chrome shapes an emoji sequence as clusters, one advance per glyph the
+/// emoji face forms: a ZWJ family, a skin-toned thumbs-up, a flag and a
+/// keycap are each ONE glyph, 18 wide at 14px in Chrome for Testing 148
+/// (EM1); `👨‍🦲‍🙈`, which the face forms as `👨‍🦲` and `🙈`, is two (36).
+/// Layout folds the covered characters into the head's advance, and paint
+/// draws this glyph for them.
+pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
+    use core_foundation::attributed_string::CFMutableAttributedString;
+    use core_foundation::base::CFRange;
+    use core_foundation::string::CFString;
+    use core_text::line::CTLine;
+    use core_text::string_attributes::kCTFontAttributeName;
+
+    if cluster.chars().count() < 2 {
+        return None;
+    }
+    let mut astr = CFMutableAttributedString::new();
+    astr.replace_str(&CFString::new(cluster), CFRange::init(0, 0));
+    let range = CFRange::init(0, astr.char_len());
+    // SAFETY: `face` is a live CTFont; the attribute is set over the
+    // string's own range.
+    unsafe {
+        astr.set_attribute(range, kCTFontAttributeName, face);
+    }
+    let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef());
+    // (glyph, UTF-16 index of its first character), inked glyphs only:
+    // selectors and joiners shape to none or to deleted (0xFFFF) ones.
+    let mut inked: Vec<(u16, isize)> = Vec::new();
+    for run in line.glyph_runs().iter() {
+        // A run in another face: the emoji face does not draw this.
+        let glyphs = run.glyphs();
+        let indices = run.string_indices();
+        for (g, i) in glyphs.iter().zip(indices.iter()) {
+            if *g != 0 && *g != 0xFFFF {
+                inked.push((*g, *i));
+            }
+        }
+    }
+    let (glyph, start) = *inked.first()?;
+    if start != 0 {
+        return None;
+    }
+    let end_utf16 = inked.get(1).map_or(astr.char_len(), |(_, i)| *i) as usize;
+    // UTF-16 offset to a character count.
+    let mut units = 0usize;
+    let mut covered = 0usize;
+    for ch in cluster.chars() {
+        if units >= end_utf16 {
+            break;
+        }
+        units += ch.len_utf16();
+        covered += 1;
+    }
+    (covered > 1).then_some((glyph, covered))
 }
 
 /// The horizontal advance of `glyph` in `font`, in CSS px at the font's
@@ -1698,6 +1798,25 @@ impl GlyphRasterizer {
         // surrogate pair — `ch as u16` truncates them, which is why emoji glyph
         // lookup silently failed. color_glyph_id encodes UTF-16 correctly.
         let glyph = color_glyph_id(font, ch)?;
+        self.rasterize_glyph_color_with_font(font, glyph)
+    }
+
+    /// The emoji sequence `cluster` (EM1) as the ONE glyph its emoji face
+    /// forms it with ([`emoji_cluster_glyph`]), from the face layout measured
+    /// its head character in. `None` when the face does not form it; the
+    /// caller then draws the head alone, as layout measured it.
+    pub fn rasterize_emoji_cluster(&self, cluster: &str) -> Option<GlyphRaster> {
+        let head = cluster.chars().next()?;
+        let (font, _) = fallback_face_for_presentation(&self.font, head, true)?;
+        let (glyph, _) = emoji_cluster_glyph(&font, cluster)?;
+        self.rasterize_glyph_color_with_font(&font, glyph).map(GlyphRaster::Color)
+    }
+
+    fn rasterize_glyph_color_with_font(
+        &self,
+        font: &CTFont,
+        glyph: u16,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
         let glyphs: [u16; 1] = [glyph];
 
         unsafe {
