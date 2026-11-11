@@ -521,3 +521,51 @@ fn a_containers_automatic_minimum_is_contained() {
     let heights = offset_heights(AUTO_MINIMUM_PAGE, 1280, 800, 4);
     assert_eq!(heights, ["0", "0", "0", "0"]);
 }
+
+const CONTAINED_INTRINSIC_PAGE: &str = include_str!(
+    "../../../docs/diagnostics/2026-11-11/css_container_query_contained_intrinsic.html"
+);
+
+/// CQ2: inline-size containment in intrinsic sizing. A `container-type:
+/// inline-size; padding: 0 5px` container around a 300px child contributes
+/// only its padding and border to its min- and max-content width, so the
+/// four content-sized shapes (a `flex: 0 0 auto` item, an `inline-block`,
+/// `width: fit-content`, a block in a float) are 10 wide (Chrome for Testing
+/// 148.0.7778.216), not 310. Their content box is 0, so `(max-width: 1px)`
+/// holds: Chrome gives z1..z4 7. The float's container (z4) stays on the
+/// fail-safe: the walk does not trust a box under a float (`layout_trusted`).
+#[test]
+fn a_size_containers_intrinsic_width_ignores_its_contents() {
+    let server = serve_routes(vec![(
+        "/",
+        "text/html",
+        CONTAINED_INTRINSIC_PAGE.to_string(),
+    )]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let got = engine
+        .execute_script(
+            view,
+            "[1,2,3,4].map(function (i) { return document.getElementById('c' + i).offsetWidth + '/' \
+             + document.getElementById('k' + i).offsetHeight + '/' \
+             + document.getElementById('z' + i).offsetHeight; }).join(' ')",
+        )
+        .unwrap();
+    assert!(
+        got.contains("10/0/7 10/0/7 10/0/7 10/0/0"),
+        "width/k/z per container, Chrome 10/0/7 each (z4 fail-safe 0): {got}"
+    );
+}
