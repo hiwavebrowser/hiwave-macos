@@ -79,6 +79,7 @@ impl Default for LayoutCtx {
 
 /// What a build reads of the view it is for, taken by the engine when the
 /// build starts.
+#[derive(Clone)]
 pub(crate) struct BuildView {
     pub(crate) id: EngineViewId,
     /// `None` when the view is not (or no longer) in the engine.
@@ -572,6 +573,14 @@ pub(crate) struct ViewLayout {
     /// Chrome. Cleared with the document.
     pub(crate) scrollbar_marks: RefCell<HashMap<usize, (bool, bool)>>,
     pub(crate) root_scrollbar: Cell<bool>,
+    /// CQ1: the content-box size of every size container in this view's
+    /// last layout (raw NodeId → inline, block). The next build answers
+    /// `@container` queries with them (`container_query`), and
+    /// `lay_out_document` lays out again while they move. Cleared with the
+    /// document.
+    pub(crate) container_sizes: RefCell<crate::container_query::MeasuredContainers>,
+    /// Whether the last build's sheets had any `@container` rule.
+    pub(crate) container_rules: Cell<bool>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
     /// ran them. Read by tests to pin that a relayout takes one pass.

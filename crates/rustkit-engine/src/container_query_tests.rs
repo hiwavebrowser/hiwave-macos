@@ -100,9 +100,9 @@ fn container_query_answers_with_the_laid_out_width_not_the_style_width() {
     // k1: flex shrinks 500 -> 300. k2: 100% of 600 shrinks to 400 beside a
     // 200px sidebar. k3: 100% of the positioned 200px box, not of the 600px
     // parent. k4: 100% of the 200px grid column. k5: flex-shrink:0 keeps
-    // 300, so Chromium gives 15, but since HOLD 3 the walk knows widths of
-    // plain blocks only and a flex item is unknown: the query is false.
-    assert_eq!(heights, ["0", "0", "0", "0", "0"]);
+    // 300, so Chromium gives 15. Since CQ1 a flex item answers with its
+    // laid-out width (it was a fail-safe false after HOLD 3).
+    assert_eq!(heights, ["0", "0", "0", "0", "15"]);
 }
 
 /// #782 HOLD 2 (Atlas #843) and HOLD 3 (Atlas #847, review 5634168311):

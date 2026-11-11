@@ -36,10 +36,18 @@
 //! fixed width); they stay false rather than risk a guess wider than the
 //! laid-out box.
 //!
-//! Not covered: container-relative units (`cq*`), style queries, and sizes
-//! that only layout knows (a block's auto height).
+//! CQ1: a view's layout measures every size container's content box, and
+//! the next build answers with that (`MeasuredContainers`); the engine lays
+//! out again while those sizes move (`LayoutCtx::lay_out_document`), so a
+//! flex or grid item, which the estimate cannot see, is answered with its
+//! laid-out size, and a resize is answered again. A measurement is used
+//! only where the engine's layout is known to agree with Chrome's
+//! (`layout_trusted`); elsewhere the fail-safe above still holds.
+//!
+//! Not covered: container-relative units (`cq*`) and style queries.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use rustkit_css::{
     BoxSizing, ComputedStyle, ContainerType, Display, Float, Length, Overflow, Position,
@@ -76,11 +84,23 @@ struct Frame {
     /// A float has been entered in this box's formatting context, here or
     /// in an earlier descendant that does not start its own.
     floats: bool,
+    /// CQ1: the engine's laid-out width of this box can stand in for
+    /// Chrome's (`layout_trusted`), so a measured container here answers
+    /// with it.
+    trusted: bool,
 }
+
+/// The content-box size of each size container in a view's last layout,
+/// keyed by raw DOM node id: (inline size, block size). CQ1: the build
+/// answers a query on one of these with its laid-out size, which is what
+/// Chrome answers with, instead of the style-time estimate.
+pub(crate) type MeasuredContainers = HashMap<usize, (f32, f32)>;
 
 #[derive(Debug, Default)]
 struct State {
     viewport: (f32, f32),
+    /// Laid-out container sizes from the view's previous layout.
+    measured: MeasuredContainers,
     /// The root element's font size, CSS px (`rem`); set by the first
     /// element entered.
     root_em: Option<f32>,
@@ -106,9 +126,11 @@ impl DocumentScope {
         viewport: Option<(f32, f32)>,
         any_container_rule: bool,
         first_letter_floats: bool,
+        measured: MeasuredContainers,
     ) -> Self {
         let state = viewport.filter(|_| any_container_rule).map(|(w, h)| State {
             viewport: (w, h),
+            measured,
             root_em: None,
             first_letter_floats,
             frames: vec![Frame {
@@ -117,6 +139,7 @@ impl DocumentScope {
                 unknown_names: Vec::new(),
                 new_context: true,
                 floats: false,
+                trusted: true,
             }],
         });
         Self {
@@ -143,6 +166,7 @@ impl ElementScope {
         style: &ComputedStyle,
         parent: Option<&ComputedStyle>,
         tag: Option<&str>,
+        node: Option<usize>,
     ) -> Self {
         let pushed = STATE.with(|s| {
             let mut s = s.borrow_mut();
@@ -161,7 +185,27 @@ impl ElementScope {
                     break;
                 }
             }
-            let frame = frame_for(style, parent, tag, parent_width, state.viewport, float_seen);
+            let mut frame = frame_for(style, parent, tag, parent_width, state.viewport, float_seen);
+            frame.trusted = state.frames.last().is_some_and(|f| f.trusted)
+                && layout_trusted(style, parent, tag, float_seen);
+            // CQ1: a container the last layout measured is answered with its
+            // laid-out content box, as Chrome answers (css-contain-3 §6.1),
+            // wherever it sits: a flex or grid item, a float, a box after a
+            // float. Its descendants' estimates start from it too.
+            if let Some(&(inline, block)) = node.and_then(|n| state.measured.get(&n)) {
+                if frame.trusted
+                    && style.container_type != ContainerType::Normal
+                    && style.display != Display::None
+                {
+                    frame.width = Some(inline);
+                    frame.container = Some(Some(Container {
+                        names: style.container_name.clone(),
+                        inline,
+                        block: (style.container_type == ContainerType::Size).then_some(block),
+                        em: font_px(style),
+                    }));
+                }
+            }
             // A float overhangs a wrapper (block or inline) that does not
             // start a formatting context, so it still narrows a later box
             // there: record it up to the context's root. Whether it ends
@@ -361,6 +405,7 @@ fn frame_for(
         unknown_names: style.container_name.clone(),
         new_context: starts_context(style),
         floats: false,
+        trusted: false,
     }
 }
 
@@ -454,6 +499,32 @@ fn absolute_length(len: &Length) -> bool {
 
 /// A box whose width follows from its parent's by the block rules alone,
 /// or (out of flow) from its own length `width`.
+/// CQ1: whether the engine's laid-out width of this box (given trusted
+/// ancestors) is Chrome's, so that a measured container answers with it.
+/// Flex items, grid items and `inline-block`s are; what #782's fail-safe
+/// list knows the engine still lays out differently is not, with
+/// everything under it: a box beside an earlier float (a context it starts
+/// is not narrowed by the float here), a float, an absolute or fixed box
+/// (percentages and padding against the containing block), a vertical
+/// writing mode (the inline size is the height), a form control, replaced
+/// element or `dialog` (Chrome shrinks a `display: block` button), a
+/// `-webkit-box`, and a child of a multi-column box.
+fn layout_trusted(
+    style: &ComputedStyle,
+    parent: Option<&ComputedStyle>,
+    tag: Option<&str>,
+    float_seen: bool,
+) -> bool {
+    !float_seen
+        && style.float == Float::None
+        && !out_of_flow(style)
+        && style.writing_mode == WritingMode::HorizontalTb
+        && !style.writing_mode_declared
+        && style.webkit_box.is_none()
+        && !tag.is_some_and(|t| NOT_PLAIN_TAGS.iter().any(|n| t.eq_ignore_ascii_case(n)))
+        && !parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared)
+}
+
 fn plain_block(style: &ComputedStyle, tag: Option<&str>) -> bool {
     style.display == Display::Block
         && style.webkit_box.is_none()
