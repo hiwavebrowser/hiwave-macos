@@ -57,6 +57,10 @@ mod fit_content_width_tests;
 
 #[cfg(test)]
 mod emoji_cluster_tests;
+
+#[cfg(test)]
+mod primary_emoji_font_tests;
+
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]

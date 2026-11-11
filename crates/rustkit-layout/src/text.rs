@@ -1649,6 +1649,7 @@ impl TextShaper {
             // advance). They are recorded `Ignorable`: no advance, nothing
             // drawn of their own; paint draws the sequence at the head.
             let mut fold_left = 0usize;
+            let primary_emoji_advance = rustkit_text::macos::apple_emoji_advance(&ct_font);
 
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
@@ -1713,7 +1714,11 @@ impl TextShaper {
                     }
                 }
                 let final_advance = match face {
-                    GlyphFace::Primary if primary_has_glyph => primary_advance,
+                    // A primary Apple emoji face advances as it does when
+                    // reached by fallback (#1072 R1 nit 4).
+                    GlyphFace::Primary if primary_has_glyph => {
+                        primary_emoji_advance.unwrap_or(primary_advance)
+                    }
                     GlyphFace::Primary => notdef_advance,
                     // Variation selectors / joiners are zero-width
                     // wherever they land (they modify a neighbour).
