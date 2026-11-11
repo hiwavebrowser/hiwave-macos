@@ -1139,6 +1139,31 @@ fn layout_flex_container_at(
                     }
                 };
 
+                // An unstretched item in a row is as tall as step 11 laid it
+                // out, also when that is LESS than the hypothetical cross
+                // size: that number is a one-line guess from the item's own
+                // font (`get_content_cross_height`), and a 16px-font item
+                // holding a 12px line or a 5px block kept the 18px guess as
+                // the line's height (Chrome for Testing 148: the line is the
+                // laid-out 14 / 5; CB6b, HiWave's `.shelf-item-header`).
+                // A stretched item keeps its size: it is the line's.
+                let laid_out = children_height + item.cross_pb();
+                if cross_axis == Axis::Vertical
+                    && children_height > 0.0
+                    && laid_out < item.cross_size
+                    && !item.stretches(style.align_items)
+                {
+                    // Only an AUTHORED minimum floors it: without one,
+                    // `min_cross_size` is that same one-line content floor.
+                    let authored_min = resolve_length(
+                        item.layout_box,
+                        &item.layout_box.style.min_height,
+                        definite_inner_cross.unwrap_or(0.0),
+                    ) > 0.0;
+                    let floor = if authored_min { item.min_cross_size } else { 0.0 };
+                    item.cross_size = laid_out.max(floor).min(item.max_cross_size);
+                }
+
                 // children_height is a content measure; item.cross_size is
                 // border-box, so compare and store with padding+border added.
                 if children_height > 0.0 && children_height + item.cross_pb() > item.cross_size {

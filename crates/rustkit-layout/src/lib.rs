@@ -60,6 +60,8 @@ mod zero_width_column_stretch_tests;
 #[cfg(test)]
 mod flex_item_specified_width_min_tests;
 #[cfg(test)]
+mod flex_item_cross_guess_tests;
+#[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
 mod element_scroll_helper_tests;
