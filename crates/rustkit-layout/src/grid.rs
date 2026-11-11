@@ -3578,6 +3578,26 @@ pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
 /// out-of-flow box from its own content. The contribution rule still applies
 /// to every CHILD walked below, exactly as before.
 pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
+    min_content_width_impl(layout_box, true)
+}
+
+/// The min-content size of the box's CONTENT (border box), with its own
+/// pixel `width` not read back as the answer: css-flexbox-1 §4.5's content
+/// size suggestion. A flex item's automatic minimum is the smaller of this
+/// and its specified width; reading `width: 24px` back here made that
+/// minimum the width itself, so the item never shrank (CB6b).
+pub(crate) fn content_min_content_width(layout_box: &LayoutBox) -> f32 {
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) && !matches!(layout_box.box_type, BoxType::Text(_))
+    {
+        return 0.0;
+    }
+    min_content_width_impl(layout_box, false)
+}
+
+fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
@@ -3614,7 +3634,8 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     }
 
     // An explicit pixel width fixes the contribution regardless of content.
-    if let Length::Px(w) = style.width {
+    if let (true, Length::Px(w)) = (use_own_width, &style.width) {
+        let w = *w;
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,

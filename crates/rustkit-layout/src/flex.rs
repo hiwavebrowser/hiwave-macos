@@ -561,8 +561,16 @@ fn layout_flex_container_at(
         // The height case is deliberately NOT symmetric: an auto-height row
         // container really is indefinite (it is sized BY its content), and
         // test_auto_height_stretch depends on that staying true.
+        //
+        // A used width of 0 on the container's OWN box is as definite as any
+        // other: a column stretched into a `width: 0` parent (HiWave's
+        // collapsed right sidebar) stretches its own items to 0, and their
+        // content overflows (Chrome for Testing 148). Reading the 0 as
+        // indefinite stretched them to the widest item's content instead (CB6).
         Axis::Horizontal => {
-            !matches!(container.style.width, Length::Auto) || container_cross_size > 0.0
+            !matches!(container.style.width, Length::Auto)
+                || container_cross_size > 0.0
+                || is_own_box(container_box, container)
         }
     };
 
@@ -610,7 +618,7 @@ fn layout_flex_container_at(
             // `padding: 16px` column card 656 wide resolved `width: 100%` to
             // 624 and stretched its rows to 624 (Chromium 143: 656 and 656).
             None if cross_axis == Axis::Horizontal
-                && container_cross_size > 0.0
+                && container_cross_size >= 0.0
                 && is_own_box(container_box, container) =>
             {
                 Some(container_cross_size)
@@ -2004,7 +2012,7 @@ fn create_flex_item<'a>(
         let content_min = match main_axis {
             Axis::Horizontal => {
                 crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
-                    .unwrap_or_else(|| crate::grid::estimate_min_content_width(layout_box))
+                    .unwrap_or_else(|| crate::grid::content_min_content_width(layout_box))
             }
             // No min-content HEIGHT estimator exists yet. Returning 0.0 keeps
             // the previous behaviour on the vertical main axis rather than
