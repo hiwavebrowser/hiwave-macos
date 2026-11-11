@@ -59,3 +59,37 @@ fn every_button_in_the_matrix_is_the_size_chrome_148_measured() {
     }
     assert!(wrong.is_empty(), "{} of {} cells differ from Chrome 148:\n{}", wrong.len(), want.len(), wrong.join("\n"));
 }
+
+/// Reduce's reduced settings page (the blocklist remove button), on Chrome for Testing 148: every
+/// element's border box, including `#item`, a `width: max-content` flex row holding a label and
+/// the remove button (113.47 x 24, where the engine gave the whole 784 px container).
+#[test]
+fn the_settings_remove_button_page_is_the_size_chrome_148_measured() {
+    const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-11/cb3c_settings_remove_button.html");
+    const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-11/cb3c_settings_remove_button_cft148.json");
+    let want: serde_json::Value = serde_json::from_str(CHROME).expect("json");
+    let want = want.as_object().expect("object");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, PAGE).expect("load_html");
+    let ids: Vec<&String> = want.keys().collect();
+    let expr = ids
+        .iter()
+        .map(|id| format!("(function(r){{return r.width+'x'+r.height;}})(document.getElementById('{id}').getBoundingClientRect())"))
+        .collect::<Vec<_>>()
+        .join(" + ';;' + ");
+    let out = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out).to_string();
+    let mut wrong = Vec::new();
+    for (id, part) in ids.iter().zip(text.split(";;")) {
+        let (w, h) = part.split_once('x').expect("wxh");
+        let (w, h): (f64, f64) = (w.parse().unwrap_or(f64::NAN), h.parse().unwrap_or(f64::NAN));
+        let (cw, ch) = (want[*id][0].as_f64().unwrap(), want[*id][1].as_f64().unwrap());
+        if (w - cw).abs() > 0.75 || (h - ch).abs() > 0.75 {
+            wrong.push(format!("#{id}: got {w:.2}x{h:.2}, Chrome 148 {cw:.2}x{ch:.2}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} elements differ from Chrome 148:\n{}", wrong.len(), ids.len(), wrong.join("\n"));
+}

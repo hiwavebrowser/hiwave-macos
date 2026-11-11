@@ -3164,6 +3164,16 @@ pub struct ComputedStyle {
     /// -webkit-small-control` on form controls resets it, so `html { line-height: 1.5 }` does not
     /// make a bare button 5 px taller (CB3b).
     pub line_height_declared: bool,
+    /// Per side (top, right, bottom, left): an author rule set that side's padding, zero included
+    /// (`padding`, `padding-<side>`, the logical forms). A `<button>` keeps the UA's padding (1 px
+    /// top and bottom, 6 px left and right) on a side nobody declared: `padding-left: 0` alone
+    /// leaves the right at 6 (CB3c).
+    pub padding_declared: [bool; 4],
+    /// Per side (top, right, bottom, left): an author rule set that side's border WIDTH
+    /// (`border`, `border-<side>`, `border-width`, `border-<side>-width`) or its style to
+    /// `none`/`hidden` (which makes the width 0). A style that is not `none` alone keeps the UA's
+    /// 2 px width (`border-style: solid` alone on a button is still 2 px a side).
+    pub border_declared: [bool; 4],
 
     // Transforms
     pub transform: TransformList,
@@ -3245,6 +3255,12 @@ pub struct ComputedStyle {
     /// `MAX-CONTENT`, ...); layout keeps the previous value. `@container`
     /// treats the box's width as unknown. Not inherited.
     pub width_keywords: u8,
+    /// The winning `width` is `max-content` (also `-webkit-` / `-moz-` prefixed, any case): the
+    /// box is as wide as its own max-content width, not the container (CB3c: Reduce's
+    /// `width: max-content` flex row is 113.47 px in Chrome for Testing 148, 784 in the engine).
+    /// `Length` cannot carry the keyword, so this says which one `width_keywords` bit 1 stands for.
+    /// Not inherited.
+    pub width_max_content: bool,
     /// A `writing-mode` other than `horizontal-tb` was declared. Layout
     /// does not honour it yet, but `@container` treats the box's width as
     /// unknown (its inline size is the physical height). Not inherited.
