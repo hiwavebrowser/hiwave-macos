@@ -81,6 +81,18 @@ fn a_throwing_comparator_stops_the_sort_rethrows_and_leaves_the_array_unchanged(
     assert_eq!(out, "String(\"boom:5:true\")");
 }
 
+#[test]
+fn a_throw_in_the_middle_of_the_merge_leaves_the_array_unchanged() {
+    // The pre-pass stops at the first out-of-order pair, so this unsorted array reaches the merge;
+    // the throw is at call 400, well past the pre-pass and inside it (R1 on #1060).
+    let out = run(&format!(
+        "{ARRAY} var before = a.join(); var calls = 0; var msg = ''; \
+         try {{ a.sort(function (x, y) {{ calls++; if (calls === 400) throw new Error('mid'); return x - y; }}); }} catch (e) {{ msg = e.message; }} \
+         String(msg + ':' + calls + ':' + (a.join() === before))"
+    ));
+    assert_eq!(out, "String(\"mid:400:true\")");
+}
+
 /// Comparator calls, not wall clock: a flaky bound on a loaded machine proves nothing.
 fn calls_for(setup: &str) -> u64 {
     let out = run(&format!(

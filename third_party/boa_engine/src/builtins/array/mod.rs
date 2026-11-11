@@ -3697,6 +3697,8 @@ fn array_set_length(
 /// HIWAVE PATCH (sort): a stable merge sort whose comparator may be inconsistent (not a total
 /// order) and may fail. Never panics; on `Err` it stops calling the comparator and returns it.
 /// For an inconsistent comparator the order is unspecified, as ECMA-262 allows.
+/// On `Err`, `items` is unspecified (it has been taken or partly merged); the caller returns the
+/// error without using it, so nothing is written back to the array.
 fn merge_sort_fallible<T: Clone>(
     items: &mut Vec<T>,
     compare: &mut dyn FnMut(&T, &T) -> JsResult<Ordering>,
