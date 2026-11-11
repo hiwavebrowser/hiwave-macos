@@ -645,6 +645,8 @@ mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod button_line_height_tests;
 #[cfg(all(test, feature = "headless"))]
+mod button_width_tests;
+#[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
 mod record_elapsed_tests;
@@ -15956,6 +15958,34 @@ impl layout_ctx::LayoutCtx {
         }
         if matches!(property, "line-height" | "font") {
             style.line_height_declared = true;
+        }
+        // The same, side by side (CB3c): top, right, bottom, left.
+        {
+            let sides = |name: &str| -> &'static [usize] {
+                match name {
+                    "padding" | "border" | "border-width" | "border-style" => &[0, 1, 2, 3],
+                    "padding-top" | "border-top" | "border-top-width" | "border-top-style" => &[0],
+                    "padding-right" | "border-right" | "border-right-width" | "border-right-style" => &[1],
+                    "padding-bottom" | "border-bottom" | "border-bottom-width" | "border-bottom-style" => &[2],
+                    "padding-left" | "border-left" | "border-left-width" | "border-left-style" => &[3],
+                    _ => &[],
+                }
+            };
+            if property.starts_with("padding") {
+                for &i in sides(property) {
+                    style.padding_declared[i] = true;
+                }
+            } else if property.starts_with("border") {
+                // A STYLE sets the width only when it is `none`/`hidden` (width 0); any other
+                // style alone leaves the UA's width.
+                let style_only = property.ends_with("-style");
+                let zeroing = value.split_whitespace().any(|t| matches!(t, "none" | "hidden"));
+                if !style_only || zeroing {
+                    for &i in sides(property) {
+                        style.border_declared[i] = true;
+                    }
+                }
+            }
         }
         if matches!(
             property,
