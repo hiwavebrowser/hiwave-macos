@@ -1592,6 +1592,7 @@ impl ViewState {
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
         self.lay.container_sizes.borrow_mut().clear();
+        self.lay.container_trusted.borrow_mut().clear();
         self.lay.container_rules.set(false);
         self.lay.incremental_layout.borrow_mut().take();
         self.lay.focused_node.set(None);
@@ -11473,13 +11474,23 @@ impl layout_ctx::LayoutCtx {
         // settles the same way. Two more passes at most: a container whose
         // size follows the rules it switches would otherwise never settle,
         // and it keeps the last answer, as a later relayout would.
+        //
+        // A chain of more than two nested containers, each sized by the
+        // answer of the one outside it, can need more passes than that: the
+        // layout returns after the cap and the next relayout goes on from
+        // the sizes it stored. Such a layout is counted
+        // (`ViewLayout::container_unsettled`) and logged, so an oscillation
+        // shows instead of quietly tripling every relayout.
         if let Some(lay) = lay.as_ref() {
-            for _ in 0..2 {
+            if let Some(trusted) = container_query::take_trusted_containers() {
+                *lay.container_trusted.borrow_mut() = trusted;
+            }
+            for pass in 0..=2 {
                 if !lay.container_rules.get() {
                     break;
                 }
                 let mut sizes = container_query::MeasuredContainers::new();
-                collect_container_sizes(&root_box, &mut sizes);
+                collect_container_sizes(&root_box, &lay.container_trusted.borrow(), &mut sizes);
                 let moved = {
                     let used = lay.container_sizes.borrow();
                     used.len() != sizes.len()
@@ -11492,6 +11503,12 @@ impl layout_ctx::LayoutCtx {
                 if !moved {
                     break;
                 }
+                if pass == 2 {
+                    lay.container_unsettled.set(lay.container_unsettled.get() + 1);
+                    debug!("container query sizes still moving after the pass cap");
+                    break;
+                }
+                lay.container_passes.set(lay.container_passes.get() + 1);
                 root_box = self.lay_out_document_pass(
                     building.clone(),
                     document,
@@ -11499,6 +11516,9 @@ impl layout_ctx::LayoutCtx {
                     javascript_enabled,
                     bounds,
                 );
+                if let Some(trusted) = container_query::take_trusted_containers() {
+                    *lay.container_trusted.borrow_mut() = trusted;
+                }
             }
         }
         root_box
@@ -45898,22 +45918,35 @@ fn spot_on_bar(bar: rustkit_layout::scroll::BarGeometry, x: f32, y: f32) -> Opti
     Some(ScrollbarSpot::Track(bar, if before { -1.0 } else { 1.0 }))
 }
 
-/// CH2.E7: the width of the root's (the viewport's) styled scrollbar when
-/// it shows, 0 when the root has none (the platform's overlay bar).
-/// CQ1: the content-box size of every size container in a laid-out tree,
-/// keyed by raw DOM node id. An element's first box is its principal box.
-fn collect_container_sizes(b: &LayoutBox, sizes: &mut container_query::MeasuredContainers) {
+/// CQ1: the content-box size of every size container in a laid-out tree
+/// that the build met in a trusted frame (`trusted`), keyed by raw DOM node
+/// id. An element's first box is its principal box. The block size is
+/// kept only for `container-type: size`: an `inline-size` container's
+/// height answers no query, so a change of it alone must not cost another
+/// pass or a memo miss (#1070 R1 MED 1).
+fn collect_container_sizes(
+    b: &LayoutBox,
+    trusted: &std::collections::HashSet<usize>,
+    sizes: &mut container_query::MeasuredContainers,
+) {
     if let Some(node) = b.node_id {
-        if b.style.container_type != rustkit_css::ContainerType::Normal {
+        if b.style.container_type != rustkit_css::ContainerType::Normal && trusted.contains(&node) {
             let c = b.dimensions.content;
-            sizes.entry(node).or_insert((c.width, c.height));
+            let block = if b.style.container_type == rustkit_css::ContainerType::Size {
+                c.height
+            } else {
+                0.0
+            };
+            sizes.entry(node).or_insert((c.width, block));
         }
     }
     for child in &b.children {
-        collect_container_sizes(child, sizes);
+        collect_container_sizes(child, trusted, sizes);
     }
 }
 
+/// CH2.E7: the width of the root's (the viewport's) styled scrollbar when
+/// it shows, 0 when the root has none (the platform's overlay bar).
 fn root_scrollbar_width(root: &LayoutBox) -> f32 {
     if matches!(root.style.overflow_y, rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip) {
         return 0.0;
@@ -47327,7 +47360,7 @@ mod incremental_restyle_tests {
             hover: None,
             active: None,
             fonts: 0,
-                containers: 0,
+            containers: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
         let fresh_node = rustkit_dom::NodeId::new(8);

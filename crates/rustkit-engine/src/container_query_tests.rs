@@ -303,7 +303,8 @@ fn container_query_sees_floats_in_inline_boxes_and_pseudos_and_abs_percent_paddi
 ///   (200 -> 30) and min-height (10 -> 30; 200 -> 40, min wins).
 /// - k19-k21 (fix 4): `max-width: none` / `max-height: none` after a
 ///   500px / 30px limit removes it (800px wide, 200px tall).
-const R2_PAGE: &str = include_str!("../../../docs/diagnostics/2026-10-26/css_container_query_r2.html");
+const R2_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-10-26/css_container_query_r2.html");
 
 #[test]
 fn container_query_r2_unknown_parts_min_max_height_and_none_limits() {
@@ -413,7 +414,15 @@ fn container_query_is_answered_again_when_the_container_resizes() {
     };
     assert_eq!(read(&mut engine), ["11", "0", "13", "14", "0", "16", "17"]);
     engine
-        .resize_view(view, Bounds { x: 0, y: 0, width: 900, height: 800 })
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 900,
+                height: 800,
+            },
+        )
         .expect("resize");
     assert_eq!(read(&mut engine), ["0", "0", "0", "0", "0", "0", "17"]);
 }
@@ -436,44 +445,64 @@ fn container_query_on_a_content_sized_container_is_false() {
 }
 
 /// #1070 R1 MED 1: an `inline-size` container's height answers no query,
-/// so a write that only grows it is laid out in one build, as on a page
-/// without container queries; it was two (the height counted as a moved
-/// size and the measured pass ran again).
+/// so a write that only grows it costs the builds the same write costs on
+/// the page without its `@container` rule, and no measured pass. It cost
+/// one more each time (the height counted as a moved size, and the
+/// measured pass ran again).
 #[test]
-fn a_height_change_inside_an_inline_size_container_takes_one_build() {
-    let page = r#"<!DOCTYPE html><html><head><style>
-body { margin: 0 } .c { container-type: inline-size; width: 400px }
-@container (min-width: 300px) { #k { height: 11px } }
-</style></head><body><div class="c"><div id="k"></div><div id="grow" style="height: 10px"></div></div></body></html>"#;
-    let server = serve_routes(vec![("/", "text/html", page.to_string())]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-    let view = engine
-        .create_headless_view(Bounds {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 600,
-        })
-        .expect("view");
-    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(engine.load_url(view, url)).expect("load_url");
-    let builds = |engine: &Engine| engine.views[&view].lay.layout_builds.get();
-    for h in [20, 30, 40] {
-        let before = builds(&engine);
-        let got = engine
-            .execute_script(
-                view,
-                &format!(
-                    "document.getElementById('grow').style.height = '{h}px'; \
-                     String(document.getElementById('k').offsetHeight)"
-                ),
-            )
+fn a_height_change_inside_an_inline_size_container_takes_no_extra_pass() {
+    let page = |rule: &str| {
+        format!(
+            r#"<!DOCTYPE html><html><head><style>
+body {{ margin: 0 }} .c {{ container-type: inline-size; width: 400px }}
+{rule}
+</style></head><body><div class="c"><div id="k"></div><div id="grow" style="height: 10px"></div></div></body></html>"#
+        )
+    };
+    // The builds three height writes cost, and the measured passes.
+    let cost = |html: String| -> (u32, u32) {
+        let server = serve_routes(vec![("/", "text/html", html)]);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        assert!(got.contains("11"), "the query still holds: {got}");
-        assert_eq!(builds(&engine) - before, 1, "one build for a {h}px height");
-    }
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        let counts = |engine: &Engine| {
+            let lay = &engine.views[&view].lay;
+            (lay.layout_builds.get(), lay.container_passes.get())
+        };
+        let before = counts(&engine);
+        for h in [20, 30, 40] {
+            engine
+                .execute_script(
+                    view,
+                    &format!(
+                        "document.getElementById('grow').style.height = '{h}px'; \
+                         String(document.getElementById('k').offsetHeight)"
+                    ),
+                )
+                .unwrap();
+        }
+        let after = counts(&engine);
+        (after.0 - before.0, after.1 - before.1)
+    };
+    let with_rule = cost(page(
+        "@container (min-width: 300px) { #k { height: 11px } }",
+    ));
+    let without = cost(page(""));
+    assert_eq!(
+        with_rule,
+        (without.0, 0),
+        "builds and measured passes, against {without:?}"
+    );
 }

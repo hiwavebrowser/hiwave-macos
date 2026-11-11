@@ -581,6 +581,13 @@ pub(crate) struct ViewLayout {
     pub(crate) container_sizes: RefCell<crate::container_query::MeasuredContainers>,
     /// Whether the last build's sheets had any `@container` rule.
     pub(crate) container_rules: Cell<bool>,
+    /// The extra build-and-layout passes container sizes have cost this
+    /// view, and the layouts that hit the pass cap still moving (#1070 R1).
+    /// The size containers the last walk met in a trusted frame: the ones
+    /// `container_sizes` measures (`container_query::take_trusted_containers`).
+    pub(crate) container_trusted: RefCell<std::collections::HashSet<usize>>,
+    pub(crate) container_passes: Cell<u32>,
+    pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
     /// ran them. Read by tests to pin that a relayout takes one pass.
