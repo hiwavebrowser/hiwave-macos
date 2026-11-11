@@ -289,7 +289,7 @@ use rustkit_css::background::{
     parse_background_repeat, parse_background_size, split_top_level_whitespace,
 };
 use rustkit_css::{css_ident, ComputedStyle, CustomProperties, Rule, Stylesheet};
-use rustkit_dom::{Document, Node, NodeType};
+use rustkit_dom::{Document, Node, NodeId, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
 use rustkit_layout::{
@@ -766,6 +766,12 @@ mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inserted_link_tests;
+#[cfg(all(test, feature = "headless"))]
+mod link_sheet_order_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_paint_sheet_order_tests;
+#[cfg(all(test, feature = "headless"))]
 mod sticky_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sticky_flex_grid_tests;
@@ -1129,12 +1135,23 @@ impl ImagePlan {
     }
 }
 
-/// External stylesheets that arrived within the load's budget, each with its
-/// document-order index, and the fetches still out at the budget.
+/// What a load found: its stylesheet links in document order, the sheets
+/// that arrived within the budget by URL (`None`: fetched, not a sheet), and
+/// the fetches still out at the budget.
 type LoadedSheets = (
-    Vec<(usize, Stylesheet)>,
-    Vec<script_net::LiveFuture<(usize, Option<Stylesheet>)>>,
+    Vec<SheetLink>,
+    std::collections::HashMap<Url, Option<Stylesheet>>,
+    Vec<script_net::LiveFuture<(Url, Option<Stylesheet>)>>,
 );
+
+/// One `<link rel=stylesheet href>` of the document (CH2.E20): the element
+/// and its resolved URL. Its `media` attribute is read when the cascade
+/// places the sheet (`sheet_document_order`), so a change applies at once.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SheetLink {
+    pub(crate) owner: NodeId,
+    pub(crate) url: Url,
+}
 
 /// What an image pass fetched ([`Engine::fetch_planned_images`]). Raster
 /// images are already in the image manager's cache; the SVG documents wait
@@ -1441,13 +1458,35 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
-    /// External stylesheets still loading when the load's subresource
-    /// budget ran out (Z row S6). Each keeps loading and lands at its
-    /// document-order slot (the `usize`) on a live turn.
-    live_sheets: Vec<script_net::LiveFuture<(usize, Option<Stylesheet>)>>,
-    /// The document-order index of each entry of `external_stylesheets`,
-    /// so a late sheet is inserted where the cascade expects it.
-    external_sheet_slots: Vec<usize>,
+    /// Stylesheet fetches still out: the load's past its subresource
+    /// budget (Z row S6) and those for links scripts inserted (CH2.E20).
+    /// Each lands in `fetched_sheets` under its URL on a live turn.
+    live_sheets: Vec<script_net::LiveFuture<(Url, Option<Stylesheet>)>>,
+    /// The document's `<link rel=stylesheet>` elements in document order,
+    /// each with its resolved URL: the load's, then as the live loop
+    /// finds them. `external_stylesheets` is the sheet of each link whose
+    /// fetch has landed, in this order ([`sheets_in_link_order`]), so a
+    /// link cascades where it stands, the same URL in two links is two
+    /// sheets, and a removed link takes its sheet with it (#984 R1 HOLD:
+    /// an inserted link used to take a slot after every load sheet).
+    sheet_links: Vec<SheetLink>,
+    /// The `<link>` that owns each entry of `external_stylesheets`, so the
+    /// cascade can place it among the `<style>` sheets in document order
+    /// (`sheet_document_order`; #984 second HOLD: every external sheet
+    /// used to come after every `<style>` sheet).
+    external_sheet_owners: Rc<Vec<NodeId>>,
+    /// Every sheet this document has fetched, by URL; `None` when the
+    /// fetch failed or the body was not a sheet. A URL is fetched once per
+    /// document (`sheet_urls_seen`) however many links name it.
+    fetched_sheets: std::collections::HashMap<Url, Option<Stylesheet>>,
+    /// Every stylesheet link URL this document has requested, the load's
+    /// and those its scripts inserted since (CH2.E20), so a link is
+    /// fetched once.
+    sheet_urls_seen: std::collections::HashSet<Url>,
+    /// The frame generation at which the live loop last looked for
+    /// stylesheet links the page's scripts inserted; `None` until the
+    /// first live turn of this document.
+    sheets_checked_for: Option<u64>,
     /// External classic scripts the page inserted whose fetches are still
     /// out, or finished and not yet run. The fetch is not tied to a turn
     /// deadline. A live turn runs one whose fetch has finished (an
@@ -1473,6 +1512,16 @@ struct ViewState {
 }
 
 impl ViewState {
+    /// `external_stylesheets` and `external_sheet_owners` from the links
+    /// and the fetched sheets, in document order, each sheet under its
+    /// link's media (CH2.E20). A new `Rc` each time: the build's sheet
+    /// fingerprint tells the lists apart by identity.
+    fn rebuild_link_sheets(&mut self) {
+        let (owners, sheets) = link_sheets(&self.sheet_links, &self.fetched_sheets);
+        self.external_sheet_owners = Rc::new(owners);
+        self.external_stylesheets = Rc::new(sheets);
+    }
+
     /// What `log`'s writes could restyle, against the rule index this view
     /// was last built with (see `restyle_invalidation`).
     fn dirty_set(&self, log: &rustkit_bindings::MutationLog) -> restyle_invalidation::DirtySet {
@@ -1586,7 +1635,11 @@ impl ViewState {
         self.live_modules_started = 0;
         self.live_images.clear();
         self.live_sheets.clear();
-        self.external_sheet_slots.clear();
+        self.sheet_links.clear();
+        self.external_sheet_owners = Rc::default();
+        self.fetched_sheets.clear();
+        self.sheet_urls_seen.clear();
+        self.sheets_checked_for = None;
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
         // parked on that document must not fire `load` on this one.
@@ -3378,7 +3431,11 @@ impl Engine {
             live_modules_started: 0,
             live_images: Vec::new(),
             live_sheets: Vec::new(),
-            external_sheet_slots: Vec::new(),
+            sheet_links: Vec::new(),
+            external_sheet_owners: Rc::default(),
+            fetched_sheets: std::collections::HashMap::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -3495,7 +3552,11 @@ impl Engine {
             live_modules_started: 0,
             live_images: Vec::new(),
             live_sheets: Vec::new(),
-            external_sheet_slots: Vec::new(),
+            sheet_links: Vec::new(),
+            external_sheet_owners: Rc::default(),
+            fetched_sheets: std::collections::HashMap::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -3629,7 +3690,11 @@ impl Engine {
             live_modules_started: 0,
             live_images: Vec::new(),
             live_sheets: Vec::new(),
-            external_sheet_slots: Vec::new(),
+            sheet_links: Vec::new(),
+            external_sheet_owners: Rc::default(),
+            fetched_sheets: std::collections::HashMap::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -6334,23 +6399,38 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
             }
         }
-        // External stylesheets that missed the load's budget (Z row S6):
-        // each goes in at its document-order place, then the page restyles.
+        // Stylesheet links the page's scripts inserted, moved, changed or
+        // removed (CH2.E20): looked for on the first turn of the document
+        // and after every layout, as images are. A new URL is fetched like
+        // a late load sheet below; a changed link list restyles now.
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|v| v.sheets_checked_for != Some(v.frame_generation))
+            && self.sync_stylesheet_links(id)
+        {
+            match self.relayout_for(id, RelayoutCause::Other("stylesheet links changed")) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after a stylesheet link change failed"),
+            }
+        }
+        // Stylesheets that missed the load's budget (Z row S6) or that a
+        // script's link asked for: each lands under its URL and the sheets
+        // are rebuilt in link order, then the page restyles.
         let late_sheets = match self.views.get_mut(&id) {
             Some(view) => script_net::settle_live(&mut view.live_sheets, LIVE_NETWORK_SLICE).await,
             None => Vec::new(),
         };
         let mut sheets_arrived = 0;
         if let Some(view) = self.views.get_mut(&id) {
-            for (index, sheet) in late_sheets {
-                let Some(sheet) = sheet else { continue };
-                insert_sheet_at_document_order(
-                    &mut view.external_sheet_slots,
-                    Rc::make_mut(&mut view.external_stylesheets),
-                    index,
-                    sheet,
-                );
-                sheets_arrived += 1;
+            for (url, sheet) in late_sheets {
+                if sheet.is_some() && view.sheet_links.iter().any(|link| link.url == url) {
+                    sheets_arrived += 1;
+                }
+                view.fetched_sheets.insert(url, sheet);
+            }
+            if sheets_arrived > 0 {
+                view.rebuild_link_sheets();
             }
         }
         if sheets_arrived > 0 {
@@ -11314,6 +11394,7 @@ impl Engine {
             dpr: self.config.device_pixel_ratio,
             focus: view.and_then(|v| v.lay.focused_node.get()),
             external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
+            external_sheet_owners: view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default(),
         }
     }
 
@@ -11639,7 +11720,16 @@ impl layout_ctx::LayoutCtx {
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
         let extract_started = std::time::Instant::now();
-        let inline_sheets = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
+        let inline_owned = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
+        let inline_sheets: Vec<Rc<Stylesheet>> = inline_owned.iter().map(|(_, sheet)| sheet.clone()).collect();
+        // Where each `<style>` and `<link>` sheet goes: document order
+        // across both kinds (#984 second HOLD).
+        let order = sheet_document_order(
+            document,
+            &inline_owned,
+            external_stylesheets.len(),
+            &self.building_external_sheet_owners(),
+        );
         let mut parsed = match sheet_cache_enabled() {
             true => self.take_sheets_parsed(),
             false => inline_sheets.len(),
@@ -11650,7 +11740,7 @@ impl layout_ctx::LayoutCtx {
             document.root().adopted_styles().into_iter().filter(|text| !text.is_empty()).collect();
         // What the prepared sheets are made of, by identity (see
         // `SheetsFingerprint`); `None` when the build cannot vouch for it.
-        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport);
+        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport, &order);
 
         // Everything from here to the finished box tree is what Chrome's
         // `UpdateLayoutTree` covers; stylesheet parsing above is its `parse`.
@@ -11680,10 +11770,14 @@ impl layout_ctx::LayoutCtx {
             None => {
                 // Copies: the steps below filter and rank the rules in
                 // place, and must not reach the cached sheets.
-                let mut stylesheets: Vec<Stylesheet> =
-                    inline_sheets.iter().map(|sheet| Stylesheet::clone(sheet)).collect();
-                // Add external stylesheets (loaded from <link> elements)
-                stylesheets.extend(external_stylesheets.iter().cloned());
+                // `<style>` and `<link>` sheets at their document positions.
+                let mut stylesheets: Vec<Stylesheet> = order
+                    .iter()
+                    .map(|(slot, media)| match slot {
+                        SheetRef::Inline(i) => Stylesheet::clone(&inline_sheets[*i]),
+                        SheetRef::External(i) => sheet_under_media(&external_stylesheets[*i], media),
+                    })
+                    .collect();
                 for text in &adopted {
                     parsed += 1;
                     match Stylesheet::parse(text) {
@@ -17810,12 +17904,23 @@ impl Engine {
     fn load_cancelled(&mut self, id: EngineViewId, nav_id: u64) {
         let _turn = rustkit_js::DiagTurn::enter("navigation-teardown");
         rustkit_js::set_diag_nav(nav_id);
+        // The stylesheet links the stopped load held, so the live loop does
+        // not request them as links a script inserted (CH2.E20): a cancel
+        // drops the load's fetches, and a sheet that lands after Stop must
+        // not restyle the page or start its images.
+        let held_links = self
+            .views
+            .get(&id)
+            .and_then(|v| v.document.as_ref().map(|d| (v, d)))
+            .map(|(v, d)| self.discover_external_stylesheets(d.as_ref(), v.url.as_ref()))
+            .unwrap_or_default();
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
         if view.nav_id != nav_id || !view.control.nav_cancelled(nav_id) {
             return;
         }
+        view.sheet_urls_seen.extend(held_links);
         // Before the commit the word is the shown page's, whose script
         // keeps running: the cancel is of the load, not of that page.
         let committed = view.control.nav_committed(nav_id);
@@ -17964,7 +18069,11 @@ impl Engine {
     /// The document's `<style>` sheets for `view` (see the ctx's).
     fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
         let lay = view.and_then(|id| self.views.get(&id)).map(|v| &*v.lay);
-        self.lctx.inline_sheets(document, lay, self.config.javascript_enabled)
+        self.lctx
+            .inline_sheets(document, lay, self.config.javascript_enabled)
+            .into_iter()
+            .map(|(_, sheet)| sheet)
+            .collect()
     }
 
     /// The document's `<style>` sheets, as copies a test may change. The
@@ -17980,10 +18089,10 @@ impl Engine {
 }
 
 impl layout_ctx::LayoutCtx {
-    /// The parsed sheet of each `<style>` element the document has, in
-    /// tree order, less those script disabled. Parsing is a function of the
-    /// text alone (no base URL; a `media` attribute is folded into the text
-    /// by `style_sheet_text`), so a sheet whose
+    /// The parsed sheet of each `<style>` element the document has, with
+    /// the element, in tree order, less those script disabled. Parsing is a
+    /// function of the text alone (no base URL; a `media` attribute is
+    /// folded into the text by `style_sheet_text`), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
@@ -17992,7 +18101,7 @@ impl layout_ctx::LayoutCtx {
         document: &Document,
         lay: Option<&layout_ctx::ViewLayout>,
         javascript_enabled: bool,
-    ) -> Vec<Rc<Stylesheet>> {
+    ) -> Vec<(NodeId, Rc<Stylesheet>)> {
         let mut texts = Vec::new();
         for style_el in document.get_elements_by_tag_name("style") {
             if !sheet_element_counts(javascript_enabled, &style_el) {
@@ -18004,15 +18113,21 @@ impl layout_ctx::LayoutCtx {
             }
             let css_text = rustkit_dom::style_element_text(&style_el);
             if !css_text.is_empty() {
-                texts.push(style_sheet_text(&style_el, css_text));
+                texts.push((style_el.id, style_sheet_text(&style_el, css_text)));
             }
         }
 
         if !sheet_cache_enabled() {
-            return texts.iter().filter_map(|text| parse_style_sheet(text)).map(Rc::new).collect();
+            return texts
+                .iter()
+                .filter_map(|(owner, text)| parse_style_sheet(text).map(|sheet| (*owner, Rc::new(sheet))))
+                .collect();
         }
         let lookup = |cache: &mut SheetCache| {
-            let sheets = texts.into_iter().filter_map(|text| cache.get_or_parse(text)).collect();
+            let sheets = texts
+                .into_iter()
+                .filter_map(|(owner, text)| cache.get_or_parse(text).map(|sheet| (owner, sheet)))
+                .collect();
             cache.end_lookup();
             sheets
         };
@@ -18158,13 +18273,24 @@ fn sheet_element_counts(javascript_enabled: bool, element: &Rc<Node>) -> bool {
 
 impl Engine {
 
-    /// Discover external stylesheets from <link> elements.
+    /// The URLs of the document's stylesheet links, in document order.
     fn discover_external_stylesheets(
         &self,
         document: &Document,
         base_url: Option<&Url>,
     ) -> Vec<Url> {
-        let mut urls = Vec::new();
+        self.discover_stylesheet_links(document, base_url)
+            .into_iter()
+            .map(|link| link.url)
+            .collect()
+    }
+
+    /// The document's `<link rel=stylesheet href>` elements in document
+    /// order, each with its resolved URL and serialized `media` list. A
+    /// link with a `disabled` attribute is left out: HTML does not obtain
+    /// its resource, and Chromium neither fetches nor applies it.
+    fn discover_stylesheet_links(&self, document: &Document, base_url: Option<&Url>) -> Vec<SheetLink> {
+        let mut links = Vec::new();
 
         // Find all <link rel="stylesheet"> elements
         let link_elements = document.get_elements_by_tag_name("link");
@@ -18176,7 +18302,7 @@ impl Engine {
             if let NodeType::Element { attributes, .. } = &link_el.node_type {
                 // Check if this is a stylesheet link
                 let rel = attributes.get("rel").map(|s| s.to_lowercase());
-                if rel.as_deref() != Some("stylesheet") {
+                if rel.as_deref() != Some("stylesheet") || attributes.contains_key("disabled") {
                     continue;
                 }
 
@@ -18190,14 +18316,14 @@ impl Engine {
                     };
 
                     if let Some(url) = resolved {
-                        debug!(%url, "Discovered external stylesheet");
-                        urls.push(url);
+                        debug!(url = %url_for_log(&url), "Discovered external stylesheet");
+                        links.push(SheetLink { owner: link_el.id, url });
                     }
                 }
             }
         }
 
-        urls
+        links
     }
 
     /// Discover images from <img> elements.
@@ -18339,8 +18465,9 @@ impl Engine {
         let view = self.views.get(&view);
         let lay = view.map(|v| &*v.lay);
         let external: Rc<Vec<Stylesheet>> = view.map(|v| v.external_stylesheets.clone()).unwrap_or_default();
+        let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
-            .cache_svg_paint_styles(document, lay, &external, self.config.javascript_enabled, viewport);
+            .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
     }
 }
 
@@ -18402,6 +18529,7 @@ impl layout_ctx::LayoutCtx {
         document: &Document,
         lay: Option<&layout_ctx::ViewLayout>,
         external: &Rc<Vec<Stylesheet>>,
+        owners: &[NodeId],
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
     ) {
@@ -18431,7 +18559,7 @@ impl layout_ctx::LayoutCtx {
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
-        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport, &state);
+        let map = self.svg_paint_styles_of(document, lay, external, owners, javascript_enabled, viewport, &state);
         // The rules read now decide whether the state is in the key.
         let key = svg_prepass::PaintKey {
             state: self
@@ -18478,12 +18606,17 @@ impl layout_ctx::LayoutCtx {
         document: &Document,
         lay: Option<&layout_ctx::ViewLayout>,
         external: &Rc<Vec<Stylesheet>>,
+        owners: &[NodeId],
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
         state: &SvgElementState,
     ) -> HashMap<usize, SvgPaintStyle> {
-        let inline = self.inline_sheets(document, lay, javascript_enabled);
-        let rules = self.svg_paint_rules(inline, external, viewport);
+        // The same sheet list the cascade builds (#984 third HOLD): `<style>`
+        // and `<link>` sheets in document order, each link under its media.
+        let inline_owned = self.inline_sheets(document, lay, javascript_enabled);
+        let order = sheet_document_order(document, &inline_owned, external.len(), owners);
+        let inline: Vec<Rc<Stylesheet>> = inline_owned.into_iter().map(|(_, sheet)| sheet).collect();
+        let rules = self.svg_paint_rules(inline, external, &order, viewport);
         let sheet_rule = |source: SheetRef, rule: usize| -> &rustkit_css::Rule {
             match source {
                 SheetRef::Inline(i) => &rules.inline[i].rules[rule],
@@ -18596,13 +18729,17 @@ impl layout_ctx::LayoutCtx {
 
 impl layout_ctx::LayoutCtx {
     /// The author rules that set an svg paint property, of `inline` and
-    /// `external` at `viewport`, with the root's custom properties: kept
-    /// while the sheets are the same ones (LAT4b), since reading them
-    /// means visiting every rule of every sheet.
+    /// `external` in the cascade's `order` (`sheet_document_order`: document
+    /// position across both kinds, each `<link>` sheet with its media list,
+    /// which must match `viewport` for the sheet to count) at `viewport`,
+    /// with the root's custom properties: kept while the sheets, their
+    /// order and media are the same (LAT4b), since reading them means
+    /// visiting every rule of every sheet.
     fn svg_paint_rules(
         &self,
         inline: Vec<Rc<Stylesheet>>,
         external: &Rc<Vec<Stylesheet>>,
+        sheet_order: &[(SheetRef, String)],
         viewport: Option<(f32, f32)>,
     ) -> Rc<SvgPaintRules> {
         let viewport_bits = viewport.map(|(w, h)| (w.to_bits(), h.to_bits()));
@@ -18610,18 +18747,26 @@ impl layout_ctx::LayoutCtx {
             let same = kept.inline.len() == inline.len()
                 && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
                 && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
-                && kept.viewport == viewport_bits;
+                && kept.viewport == viewport_bits
+                && kept.order == sheet_order;
             if same {
                 return kept;
             }
         }
         let mut root_vars: HashMap<String, String> = HashMap::new();
         let mut paint = Vec::new();
-        let sources = inline
-            .iter()
-            .enumerate()
-            .map(|(i, sheet)| (SheetRef::Inline(i), &**sheet))
-            .chain(external.iter().enumerate().map(|(i, sheet)| (SheetRef::External(i), sheet)));
+        // A `<link>` sheet whose media does not match this viewport (or
+        // any, without one: conditional rules stay out, as in the cascade)
+        // contributes nothing.
+        let sources = sheet_order.iter().filter_map(|(slot, media)| {
+            if !media.is_empty() && !viewport.is_some_and(|(w, h)| rustkit_css::media_query_list_matches(media, w, h)) {
+                return None;
+            }
+            Some(match *slot {
+                SheetRef::Inline(i) => (SheetRef::Inline(i), &*inline[i]),
+                SheetRef::External(i) => (SheetRef::External(i), &external[i]),
+            })
+        });
         let mut order = 0;
         for (source, sheet) in sources {
             for (index, rule) in sheet.rules.iter().enumerate() {
@@ -18671,6 +18816,7 @@ impl layout_ctx::LayoutCtx {
             inline,
             external: Rc::downgrade(external),
             viewport: viewport_bits,
+            order: sheet_order.to_vec(),
             paint,
             root_vars,
             local,
@@ -18683,7 +18829,7 @@ impl layout_ctx::LayoutCtx {
 
 /// Where a rule of `SvgPaintRules` is: the n-th `<style>` sheet or the
 /// n-th `<link>` sheet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SheetRef {
     Inline(usize),
     External(usize),
@@ -18694,6 +18840,8 @@ pub(crate) struct SvgPaintRules {
     inline: Vec<Rc<Stylesheet>>,
     external: std::rc::Weak<Vec<Stylesheet>>,
     viewport: Option<(u32, u32)>,
+    /// The sheets' cascade order and link media (`sheet_document_order`).
+    order: Vec<(SheetRef, String)>,
     /// (cascade order, sheet, rule index, subject keys)
     paint: Vec<(usize, SheetRef, usize, Rc<Vec<SubjectKey>>)>,
     root_vars: HashMap<String, String>,
@@ -18964,14 +19112,15 @@ impl Engine {
         &mut self,
         id: EngineViewId,
     ) -> Result<Vec<Stylesheet>, EngineError> {
-        let (sheets, _late) = self.load_external_stylesheets_slotted(id).await?;
-        Ok(sheets.into_iter().map(|(_, sheet)| sheet).collect())
+        let (links, fetched, _late) = self.load_external_stylesheets_slotted(id).await?;
+        Ok(link_sheets(&links, &fetched).1)
     }
 
-    /// The external stylesheets that arrived within the subresource budget,
-    /// each with its document-order index, and the fetches still out at the
-    /// budget, which keep going (Z row S6: they used to be dropped, and a
-    /// page whose sheets came late stayed unstyled).
+    /// The document's stylesheet links, the sheets that arrived within the
+    /// subresource budget (by URL: a URL two links name is fetched once),
+    /// and the fetches still out at the budget, which keep going (Z row S6:
+    /// they used to be dropped, and a page whose sheets came late stayed
+    /// unstyled).
     async fn load_external_stylesheets_slotted(
         &mut self,
         id: EngineViewId,
@@ -18979,11 +19128,17 @@ impl Engine {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), std::collections::HashMap::new(), Vec::new()));
         };
 
         let base_url = view.url.as_ref();
-        let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
+        let links = self.discover_stylesheet_links(document.as_ref(), base_url);
+        let mut seen: std::collections::HashSet<Url> = std::collections::HashSet::new();
+        let urls: Vec<Url> = links
+            .iter()
+            .filter(|link| seen.insert(link.url.clone()))
+            .map(|link| link.url.clone())
+            .collect();
 
         // Fetch concurrently, but keep DOCUMENT ORDER in the result: the
         // cascade depends on stylesheet order, so `buffered` (ordered) is
@@ -18995,8 +19150,7 @@ impl Engine {
         let referrer = self.subresource_referrer(id);
         let fetches: Vec<_> = urls
             .into_iter()
-            .enumerate()
-            .map(|(index, url)| {
+            .map(|url| {
                 let mut fetch: script_net::LiveFuture<Option<Stylesheet>> = Box::pin(Self::fetch_stylesheet(
                     self.loader.clone(),
                     view.inspector.clone(),
@@ -19006,10 +19160,10 @@ impl Engine {
                 ));
                 async move {
                     match tokio::time::timeout_at(deadline, &mut fetch).await {
-                        Ok(sheet) => (index, Ok(sheet)),
+                        Ok(sheet) => (url, Ok(sheet)),
                         Err(_) => {
                             warn!(url = %url_for_log(&url), "Stylesheet over the subresource budget; it is applied when it arrives");
-                            (index, Err(fetch))
+                            (url, Err(fetch))
                         }
                     }
                 }
@@ -19020,17 +19174,88 @@ impl Engine {
             .collect()
             .await;
 
-        let mut sheets = Vec::new();
+        let mut sheets = std::collections::HashMap::new();
         let mut late = Vec::new();
-        for (index, outcome) in fetched {
+        for (url, outcome) in fetched {
             match outcome {
-                Ok(Some(sheet)) => sheets.push((index, sheet)),
-                Ok(None) => {}
-                Err(fetch) => late.push(Box::pin(async move { (index, fetch.await) })
-                    as script_net::LiveFuture<(usize, Option<Stylesheet>)>),
+                Ok(sheet) => {
+                    sheets.insert(url, sheet);
+                }
+                Err(fetch) => late.push(Box::pin(async move { (url, fetch.await) })
+                    as script_net::LiveFuture<(Url, Option<Stylesheet>)>),
             }
         }
-        Ok((sheets, late))
+        // What the live loop must not request again (CH2.E20).
+        if let Some(view) = self.views.get_mut(&id) {
+            view.sheet_urls_seen = seen;
+        }
+        Ok((links, sheets, late))
+    }
+
+    /// Bring `sheet_links` up to date with the document's stylesheet links
+    /// (CH2.E20): the links its scripts inserted, moved, re-pointed or
+    /// removed since the load looked (until this row a lazily added `<link
+    /// rel=stylesheet>` was never requested and its rules never applied).
+    /// A URL this document has not requested is fetched and lands through
+    /// `live_sheets`, like a late load sheet (S6); a URL it has is reused,
+    /// so a second link to a sheet costs no fetch. Returns whether the
+    /// sheets the cascade sees changed (a link with a fetched sheet moved,
+    /// went, or came back), in which case `external_stylesheets` is rebuilt
+    /// in document order and the caller restyles.
+    fn sync_stylesheet_links(&mut self, id: EngineViewId) -> bool {
+        let deadline = self.subresource_deadline();
+        let referrer = self.subresource_referrer(id);
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let generation = view.frame_generation;
+        let links = match &view.document {
+            Some(document) => self.discover_stylesheet_links(document.as_ref(), view.url.as_ref()),
+            None => Vec::new(),
+        };
+        let inspector = view.inspector.clone();
+        let Some(view) = self.views.get_mut(&id) else {
+            return false;
+        };
+        view.sheets_checked_for = Some(generation);
+        for link in &links {
+            let url = &link.url;
+            if !view.sheet_urls_seen.insert(url.clone()) {
+                continue;
+            }
+            info!(url = %url_for_log(url), "Fetching a stylesheet a script inserted");
+            let fetch = Self::fetch_stylesheet(
+                loader.clone(),
+                inspector.clone(),
+                referrer.get_for(url.clone(), RequestDestination::Style),
+                url.clone(),
+                deadline,
+            );
+            let url = url.clone();
+            view.live_sheets.push(Box::pin(async move { (url, fetch.await) }));
+        }
+        if links == view.sheet_links {
+            return false;
+        }
+        // The links whose sheets the cascade sees, in order: only their
+        // change is a restyle (a new link's sheet restyles when it lands; a
+        // move against a `<style>` or a `media` change is placed by the
+        // build the DOM change itself causes).
+        let effective = |links: &[SheetLink], fetched: &std::collections::HashMap<Url, Option<Stylesheet>>| {
+            links
+                .iter()
+                .filter(|link| fetched.get(&link.url).is_some_and(Option::is_some))
+                .cloned()
+                .collect::<Vec<SheetLink>>()
+        };
+        let before = effective(&view.sheet_links, &view.fetched_sheets);
+        view.sheet_links = links;
+        if effective(&view.sheet_links, &view.fetched_sheets) == before {
+            return false;
+        }
+        view.rebuild_link_sheets();
+        true
     }
 
     /// Fetch and parse one external stylesheet. Owns what it uses, so a
@@ -19064,7 +19289,7 @@ impl Engine {
                             Stylesheet::parse(&absolutize_css_urls(&css_text, &url))
                         } {
                             Ok(stylesheet) => {
-                                debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                debug!(rules = stylesheet.rules.len(), url = %url_for_log(&url), "Parsed external stylesheet");
                                 Some(stylesheet)
                             }
                             Err(e) => {
@@ -20016,8 +20241,8 @@ impl Engine {
             return Ok(());
         };
         drop(sheets);
-        let (external_stylesheets, late_sheets) = external_stylesheets?;
-        let (slots, external_stylesheets): (Vec<usize>, Vec<Stylesheet>) = external_stylesheets.into_iter().unzip();
+        let (sheet_links, fetched_sheets, late_sheets) = external_stylesheets?;
+        let (external_sheet_owners, external_stylesheets) = link_sheets(&sheet_links, &fetched_sheets);
         let count = external_stylesheets.len();
 
         // Relayout is needed when we HAVE new sheets, and equally when we
@@ -20032,7 +20257,9 @@ impl Engine {
         let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.external_stylesheets = Rc::new(external_stylesheets);
-            view.external_sheet_slots = slots;
+            view.external_sheet_owners = Rc::new(external_sheet_owners);
+            view.sheet_links = sheet_links;
+            view.fetched_sheets = fetched_sheets;
             view.live_sheets = late_sheets;
             // Read, not taken: a cancel before the relayout below (which
             // may drop this future at any await) finds it still set and
@@ -20667,6 +20894,7 @@ impl layout_ctx::LayoutCtx {
         external: &[Stylesheet],
         adopted: &[String],
         viewport: Option<(f32, f32)>,
+        order: &[(SheetRef, String)],
     ) -> Option<SheetsFingerprint> {
         if !sheet_cache_enabled() {
             return None;
@@ -20687,6 +20915,7 @@ impl layout_ctx::LayoutCtx {
             inline: inline.to_vec(),
             external,
             adopted: adopted.to_vec(),
+            order: order.to_vec(),
         })
     }
 }
@@ -23922,6 +24151,7 @@ impl Engine {
         let lctx = self.lctx.clone();
         let lay = view.lay.clone();
         let sheets = view.external_stylesheets.clone();
+        let owners = view.external_sheet_owners.clone();
         let javascript_enabled = self.config.javascript_enabled;
         // LAT19: the boxes the view last painted, for a read after a
         // paint-only layer write. Weak: a paint-only frame patches them in
@@ -23963,6 +24193,7 @@ impl Engine {
                         dpr: building.dpr,
                         focus: lay.focused_node.get(),
                         external_sheets: sheets.clone(),
+                        external_sheet_owners: owners.clone(),
                     };
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
@@ -23986,7 +24217,7 @@ impl Engine {
                 writes,
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
-            lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, javascript_enabled, building.viewport);
+            lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
@@ -24001,6 +24232,7 @@ impl Engine {
                     dpr: building.dpr,
                     focus: lay.focused_node.get(),
                     external_sheets: sheets.clone(),
+                    external_sheet_owners: owners.clone(),
                 },
                 &document,
                 &sheets,
@@ -27889,17 +28121,97 @@ pub(crate) fn url_after_redirects(requested: &Url, response_url: &Url, had_redir
     }
 }
 
-/// Insert a late external stylesheet at its document-order slot (Z row S6).
-/// `slots` and `sheets` stay the same length and the same order.
-pub(crate) fn insert_sheet_at_document_order<T>(
-    slots: &mut Vec<usize>,
-    sheets: &mut Vec<T>,
-    index: usize,
-    sheet: T,
-) {
-    let at = slots.partition_point(|&slot| slot < index);
-    slots.insert(at, index);
-    sheets.insert(at, sheet);
+/// The stylesheets the cascade sees, in the document order of the links
+/// that name them (Z row S6, CH2.E20): the fetched sheet of each link in
+/// `links`, with the link that owns it, skipping links whose sheet has not
+/// landed or was not a sheet. A URL two links name is one fetch and two
+/// sheets, as in Chromium.
+pub(crate) fn sheets_in_link_order<T: Clone>(
+    links: &[SheetLink],
+    fetched: &std::collections::HashMap<Url, Option<T>>,
+) -> Vec<(NodeId, T)> {
+    links
+        .iter()
+        .filter_map(|link| fetched.get(&link.url).and_then(Option::clone).map(|sheet| (link.owner, sheet)))
+        .collect()
+}
+
+/// `sheet` as a `<link media=...>` contributes it: every rule (and layer
+/// statement) under the link's serialized media list as its outermost
+/// condition (`""` for none or `all`; a list Chrome rejects serializes to
+/// `not all`), so `media=print` applies nowhere on screen and `(min-width:
+/// 900px)` follows the viewport (`Rule::applies_at`). An empty list is the
+/// sheet itself.
+pub(crate) fn sheet_under_media(sheet: &Stylesheet, media: &str) -> Stylesheet {
+    let mut sheet = sheet.clone();
+    if media.is_empty() {
+        return sheet;
+    }
+    for rule in &mut sheet.rules {
+        rule.media.insert(0, media.to_string());
+    }
+    for statement in &mut sheet.layer_statements {
+        statement.media.insert(0, media.to_string());
+    }
+    sheet
+}
+
+/// The view's external sheets from its links and fetched sheets: each
+/// link's owner and its sheet, in document order.
+fn link_sheets(
+    links: &[SheetLink],
+    fetched: &std::collections::HashMap<Url, Option<Stylesheet>>,
+) -> (Vec<NodeId>, Vec<Stylesheet>) {
+    sheets_in_link_order(links, fetched).into_iter().unzip()
+}
+
+/// The cascade order of a document's `<style>` and `<link>` sheets: one
+/// tree walk, each sheet at its owner's position (CSSOM §6.1: the document
+/// style sheets in tree order; #984 second HOLD), and for each `<link>`
+/// sheet the serialized `media` list its element carries now (`""` for a
+/// `<style>` sheet or no list). `inline` is the parsed `<style>` sheets
+/// with their elements, in tree order; `owners` the link that owns each
+/// external sheet. A sheet whose owner the walk does not meet (an ad-hoc
+/// build hands sheets with no owners) follows the rest in its own list's
+/// order, which is the order builds used before.
+pub(crate) fn sheet_document_order(
+    document: &Document,
+    inline: &[(NodeId, Rc<Stylesheet>)],
+    external_count: usize,
+    owners: &[NodeId],
+) -> Vec<(SheetRef, String)> {
+    let mut order = Vec::with_capacity(inline.len() + external_count);
+    let mut next_inline = 0;
+    let mut external_used = vec![false; external_count];
+    document.traverse(|node| {
+        let Some(tag) = node.tag_name() else { return };
+        if tag.eq_ignore_ascii_case("style") {
+            if inline.get(next_inline).is_some_and(|(owner, _)| *owner == node.id) {
+                order.push((SheetRef::Inline(next_inline), String::new()));
+                next_inline += 1;
+            }
+        } else if tag.eq_ignore_ascii_case("link") {
+            if let Some(i) = owners.iter().position(|owner| *owner == node.id) {
+                if i < external_count && !external_used[i] {
+                    external_used[i] = true;
+                    let media = node
+                        .get_attribute("media")
+                        .map(rustkit_css::media_query_list_serialize)
+                        .unwrap_or_default();
+                    order.push((SheetRef::External(i), media));
+                }
+            }
+        }
+    });
+    order.extend((next_inline..inline.len()).map(|i| (SheetRef::Inline(i), String::new())));
+    order.extend(
+        external_used
+            .iter()
+            .enumerate()
+            .filter(|(_, used)| !**used)
+            .map(|(i, _)| (SheetRef::External(i), String::new())),
+    );
+    order
 }
 
 /// The list the window drew for a page scrolled by `scroll_offset`, until
@@ -43506,6 +43818,10 @@ struct SheetsFingerprint {
     /// The text of each adopted sheet (`document.adoptedStyleSheets`),
     /// which the build parses after the others.
     adopted: Vec<String>,
+    /// Where each `<style>` and `<link>` sheet went and under which `media`
+    /// list (`sheet_document_order`): a link moved past a `<style>`, or
+    /// its `media` changed, changes the cascade with the same sheets.
+    order: Vec<(SheetRef, String)>,
 }
 
 /// A build's sheets as the cascade reads them, kept on the view
@@ -43537,6 +43853,7 @@ impl SheetsFingerprint {
                 _ => false,
             }
             && self.adopted == other.adopted
+            && self.order == other.order
     }
 }
 
