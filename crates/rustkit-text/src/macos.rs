@@ -917,6 +917,14 @@ fn create_font_with_traits(
         }
     }
 
+    // Nothing in the list exists here: Chrome's default (standard) font in
+    // the requested weight and style, as layout's chain measures it (Times
+    // Bold for `font: bold 14px -apple-system`; Chrome for Testing 148:
+    // Times-Bold, Times-Italic, Times-BoldItalic). `create_font` alone would
+    // paint Times-Roman for all three (Prometheus R1 on #1074).
+    if let Some(f) = family_face(map_generic("serif", "serif"), size, weight, italic) {
+        return Ok(f);
+    }
     // Fall back to base font resolution over the same list
     create_font(family, size)
 }
