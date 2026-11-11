@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::incremental_layout::{set_count_only_for_test, set_mode_for_test, Mode};
-use crate::script_net_tests::serve_routes;
+use crate::script_net_tests::{serve_byte_routes, serve_routes};
 
 /// Resets the thread's flag overrides when a test ends, also on a panic.
 struct ModeGuard;
@@ -447,4 +447,73 @@ fn verify_mode_shows_no_mismatch_on_the_layout_corpus() {
         relaid > 20,
         "the corpus exercised the incremental path: relaid {relaid}"
     );
+}
+
+/// Prometheus's #1063 review (MED 1): an ancestor with `aspect-ratio` and
+/// an auto height takes its height from its width and grows with its
+/// content only past the ratio height. A paragraph growing inside it must
+/// not grow it by the delta: the box is laid out whole (hoisted to).
+#[test]
+fn a_change_inside_an_aspect_ratio_box_relays_out_the_box() {
+    let html = "<div><div style='aspect-ratio:2/1'><p id=t>x</p></div><p>after</p></div>";
+    let stats = verified(html, GROW);
+    assert!(stats.hoists >= 1, "hoisted to the aspect-ratio box: {stats:?}");
+}
+
+const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+/// A web font declared in the page, fetched after the first layout (every
+/// glyph of Ahem is a 20px square here, so its lines measure unlike the
+/// fallback's), and a paragraph to rewrite once it has landed.
+const FONT_PAGE: &str = "<!doctype html><html><head><style>\
+    @font-face { font-family: IncFace; src: url(/Ahem.ttf) format('truetype'); } \
+    body { margin: 8px; font: 20px/20px IncFace, Helvetica; } p { margin: 0 0 10px; padding: 1px 0 }\
+    </style></head><body><div><p>XXXXX xx XXXX</p><p id=t>xx XXX</p><p>after</p></div></body></html>";
+
+/// Prometheus's #1063 review (MED 2), batch 59's cnn finding: a web font
+/// finishing its load changes text metrics without changing the box tree.
+/// The retained layout must not stand: the relayout the load asks for
+/// measures text afresh (verify: 0 mismatches, panics otherwise), and a
+/// change after the face landed is laid out incrementally in it.
+#[test]
+fn a_web_font_landing_after_layout_measures_text_afresh() {
+    let _mode = ModeGuard::set(Mode::Verify);
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", FONT_PAGE.as_bytes().to_vec()),
+        ("/Ahem.ttf", "font/ttf", AHEM.to_vec()),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+        })
+        .expect("view");
+    let rt = runtime();
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let loaded = stats(&engine, view);
+    assert_eq!(loaded.mismatches, 0, "{loaded:?}");
+    // The first line is in Ahem: 13 characters of 20px.
+    let tree = laid(&engine, view);
+    let mut widths = Vec::new();
+    fn first_lines(b: &LayoutBox, out: &mut Vec<f32>) {
+        if let Some(lines) = &b.text_lines {
+            out.extend(lines.iter().map(|l| l.width));
+        }
+        b.children.iter().for_each(|c| first_lines(c, out));
+    }
+    first_lines(&tree, &mut widths);
+    assert!(
+        widths.first().is_some_and(|w| (w - 260.0).abs() < 0.5),
+        "the page is measured in the web font: {widths:?} ({loaded:?})"
+    );
+    engine
+        .execute_script(view, "document.getElementById('t').firstChild.data = 'XX xxx XXX '.repeat(6);")
+        .expect("script");
+    let after = stats(&engine, view);
+    assert_eq!(after.mismatches, 0, "{after:?}");
+    assert!(after.last.starts_with("relaid"), "{after:?}");
 }
