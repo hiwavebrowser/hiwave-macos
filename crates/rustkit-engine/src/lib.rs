@@ -457,6 +457,8 @@ mod ua_control_margin_tests;
 mod emoji_presentation_fallback_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod inline_content_area_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod float_in_items_tests;
 #[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
