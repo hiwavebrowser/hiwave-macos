@@ -3912,6 +3912,8 @@ mod unreadable_color_tests;
 #[cfg(test)]
 mod opacity_parse_tests;
 #[cfg(test)]
+mod monospace_size_unit_tests;
+#[cfg(test)]
 mod clip_parse_tests;
 #[cfg(test)]
 mod outline_parse_tests;

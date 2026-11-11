@@ -542,6 +542,8 @@ mod appearance_apply_tests;
 #[cfg(test)]
 mod pointer_reads_has_tests;
 #[cfg(test)]
+mod pointer_reads_lat20_tests;
+#[cfg(test)]
 mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
