@@ -3113,6 +3113,15 @@ pub struct ComputedStyle {
 
     // Typography - Basic
     pub font_size: Length,
+    /// The size keyword the font-size came from, 1 (`xx-small`) to 8
+    /// (`xxx-large`); 0 when it came from a length or a percentage. The
+    /// initial `medium` is 4. Inherited with the size, as Blink's
+    /// `FontDescription::KeywordSize`; see [`ComputedStyle::apply_fixed_font_default`].
+    pub font_size_keyword: u8,
+    /// The font-size is absolute: an author length (px, rem, vw, calc), or
+    /// em/% of one. A keyword, the initial size and em/% of those are not.
+    /// Inherited with the size (Blink's `FontDescription::IsAbsoluteSize`).
+    pub font_size_absolute: bool,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
     pub font_family: String,
@@ -3442,10 +3451,86 @@ impl ComputedStyle {
             || self.text_rendering_geometric_precision)
     }
 
+    /// The family list is the generic `monospace` alone (Blink's
+    /// `FontDescription::IsMonospace`): `monospace, monospace` or
+    /// `Menlo, monospace` is not.
+    pub fn is_generic_monospace(&self) -> bool {
+        self.font_family.trim().eq_ignore_ascii_case("monospace")
+    }
+
+    /// The px size of size keyword `keyword` (1..=8) for a default font of
+    /// 16px, or of 13px for the bare generic `monospace` (the fixed-font
+    /// default): Blink's `kStrictFontSizeTable` rows "proportional font
+    /// default (16)" and "fixed font default (13)", Chromium 148.
+    pub fn font_size_for_keyword(keyword: u8, monospace: bool) -> f32 {
+        const PROPORTIONAL: [f32; 8] = [9.0, 10.0, 13.0, 16.0, 18.0, 24.0, 32.0, 48.0];
+        const FIXED: [f32; 8] = [9.0, 10.0, 12.0, 13.0, 16.0, 20.0, 26.0, 39.0];
+        let i = keyword.clamp(1, 8) as usize - 1;
+        if monospace { FIXED[i] } else { PROPORTIONAL[i] }
+    }
+
+    /// Blink's `FontBuilder::CheckForGenericFamilyChange` (Chromium 148): when
+    /// this element's family is the bare generic `monospace` and its
+    /// parent's is not (or the other way round), a font-size that is not
+    /// absolute is recomputed: a keyword size from the fixed-font (13px) or
+    /// proportional (16px) table, anything else (em/% of a keyword) scaled
+    /// by 13/16 or 16/13. `font_size` must already be resolved to px.
+    pub fn apply_fixed_font_default(&mut self, parent: Option<&ComputedStyle>) {
+        if self.font_size_absolute {
+            return;
+        }
+        let mono = self.is_generic_monospace();
+        // A keyword is always read from the element's own row
+        // (`FontBuilder::UpdateSpecifiedSize`): `<pre><span
+        // style="font-size:small">` is 12px, family change or not.
+        if self.font_size_keyword > 0 {
+            self.font_size = Length::Px(Self::font_size_for_keyword(self.font_size_keyword, mono));
+            return;
+        }
+        let parent_mono = parent.is_some_and(|p| p.is_generic_monospace());
+        if mono == parent_mono {
+            return;
+        }
+        let Length::Px(px) = self.font_size else {
+            return;
+        };
+        self.font_size = Length::Px(if parent_mono { px * 16.0 / 13.0 } else { px * 13.0 / 16.0 });
+    }
+
+    /// Set the font-size to a length, as every font-size write but a
+    /// keyword must (#1053 R1): the keyword is cleared; em and % keep the
+    /// inherited absoluteness, any other length is absolute (Blink's
+    /// `FontDescription::Size`). A UA size (h1's `2em`, the control font)
+    /// is not a keyword either.
+    pub fn set_font_size_length(&mut self, size: Length) {
+        if !matches!(size, Length::Em(_) | Length::Percent(_)) {
+            self.font_size_absolute = true;
+        }
+        self.font_size_keyword = 0;
+        self.font_size = size;
+    }
+
+    /// Set the font-size to size keyword `keyword` (1..=8): the size from
+    /// the proportional row (`apply_fixed_font_default` reads the fixed row
+    /// for the bare generic `monospace`), the keyword kept, not absolute.
+    pub fn set_font_size_keyword(&mut self, keyword: u8) {
+        self.font_size = Length::Px(Self::font_size_for_keyword(keyword, false));
+        self.font_size_keyword = keyword;
+        self.font_size_absolute = false;
+    }
+
+    /// Take `other`'s font-size with its keyword and absoluteness.
+    pub fn copy_font_size_from(&mut self, other: &ComputedStyle) {
+        self.font_size = other.font_size.clone();
+        self.font_size_keyword = other.font_size_keyword;
+        self.font_size_absolute = other.font_size_absolute;
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
             font_size: Length::Px(16.0),
+            font_size_keyword: 4,
             line_height: LineHeight::Normal,
             opacity: 1.0,
             color: Color::BLACK,
@@ -3494,6 +3579,8 @@ impl ComputedStyle {
             text_rendering_geometric_precision: parent.text_rendering_geometric_precision,
             color: parent.color,
             font_size: parent.font_size.clone(),
+            font_size_keyword: parent.font_size_keyword,
+            font_size_absolute: parent.font_size_absolute,
             font_weight: parent.font_weight,
             font_style: parent.font_style,
             font_stretch: parent.font_stretch,

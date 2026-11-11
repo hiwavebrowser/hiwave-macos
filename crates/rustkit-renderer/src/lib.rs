@@ -5937,11 +5937,11 @@ impl Renderer {
                 Some(faces) => FaceKey::Recorded(faces[char_idx]),
                 None => FaceKey::Auto(rustkit_text::Variation::after(next)),
             };
+            // TX3: whole-pixel origin and quarter phase (`glyph::skia_glyph_origin`).
+            let (origin_x, phase) = crate::glyph::skia_glyph_origin(cursor_x);
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                // The quarter phase Skia rounds this glyph to (TX3).
+                subpixel_phase: phase,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -5973,7 +5973,7 @@ impl Renderer {
                 continue;
             };
             {
-                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_x = origin_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
@@ -6109,24 +6109,31 @@ impl Renderer {
         layout_ascent: Option<f32>,
         undilated: bool,
     ) -> bool {
-        // FROZEN AT 0, as on the character path (GlyphKey::subpixel_phase).
         // The glyph-mask law for the run's colour (`glyph::coverage_for`).
         let coverage = crate::glyph::coverage_for([color.r, color.g, color.b], undilated);
-        let key_for = |glyph_id: u16| RunGlyphKey {
+        let key_for = |glyph_id: u16, phase: u8| RunGlyphKey {
             face: run.face.id,
             glyph_id,
             font_size: (run.font_size * 10.0) as u32,
-            subpixel_phase: 0,
+            subpixel_phase: phase,
             coverage,
         };
+        // TX3: each glyph's whole-pixel origin and quarter phase, as Skia
+        // rounds them (`glyph::skia_glyph_origin`).
+        let origins: Vec<(f32, u8)> = run
+            .glyphs
+            .iter()
+            .zip(run.pen_positions(x))
+            .map(|(glyph, pen_x)| crate::glyph::skia_glyph_origin(pen_x + glyph.x_offset))
+            .collect();
 
         // Every glyph's bitmap first, so a missing face is known before a
         // single quad is emitted.
         let mut entries = Vec::with_capacity(run.glyphs.len());
-        for glyph in &run.glyphs {
+        for (glyph, (_, phase)) in run.glyphs.iter().zip(&origins) {
             match self.glyph_cache.get_or_rasterize_run_glyph(
                 &self.queue,
-                &key_for(glyph.glyph_id),
+                &key_for(glyph.glyph_id, *phase),
                 run.font_size,
             ) {
                 Some(entry) => entries.push(entry),
@@ -6143,13 +6150,13 @@ impl Renderer {
         let baseline = (y + layout_ascent.unwrap_or(run.ascent)).round();
         let atlas_size = self.glyph_cache.atlas_size() as f32;
 
-        for ((glyph, pen_x), entry) in run
+        for ((glyph, (origin_x, _)), entry) in run
             .glyphs
             .iter()
-            .zip(run.pen_positions(x))
+            .zip(origins)
             .zip(entries)
         {
-            let glyph_x = pen_x + glyph.x_offset + entry.offset[0];
+            let glyph_x = origin_x + entry.offset[0];
             let glyph_y = baseline + glyph.y_offset + entry.offset[1];
             let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
             let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
@@ -6273,11 +6280,11 @@ impl Renderer {
                 Some(faces) => FaceKey::Recorded(faces[char_idx]),
                 None => FaceKey::Auto(rustkit_text::Variation::after(next)),
             };
+            // TX3: whole-pixel origin and quarter phase (`glyph::skia_glyph_origin`).
+            let (origin_x, phase) = crate::glyph::skia_glyph_origin(cursor_x);
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                // The quarter phase Skia rounds this glyph to (TX3).
+                subpixel_phase: phase,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -6335,7 +6342,7 @@ impl Renderer {
                 continue;
             };
 
-            let glyph_x = cursor_x + entry.offset[0];
+            let glyph_x = origin_x + entry.offset[0];
             let glyph_y = baseline + entry.offset[1];
             let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
             let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;

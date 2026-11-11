@@ -91,6 +91,11 @@ pub struct FrameCommit {
     /// press outside it closes it and goes nowhere else, so a view with a
     /// region (the RustKit chrome over the page) is hit everywhere.
     pub modal_popup: bool,
+    /// The `@font-face` set `list` was built with (E56). The window draws
+    /// a content thread's frame on its own thread, whose slot holds other
+    /// faces or none; it installs these before drawing, because a line
+    /// drawn per character resolves its family by name when drawn.
+    pub web_fonts: rustkit_layout::webfonts::FaceSet,
 }
 
 impl FrameCommit {
@@ -524,7 +529,11 @@ impl Presenter {
             visit: VisitTag::none(),
             canvas: self.background_color,
             modal_popup: false,
+            web_fonts: Default::default(),
         });
+        // The faces the frame was built with, on the thread that draws it
+        // (E56): this thread's slot may hold another document's, or none.
+        rustkit_layout::webfonts::install_set(&commit.web_fonts);
         // A transparent view clears to nothing: what its document does not
         // paint shows the views below (CH3.A3c).
         let transparent = self.transparent.contains(&viewhost_id);
@@ -1078,6 +1087,7 @@ mod present_choice_tests {
             visit: VisitTag::none(),
             canvas: [1.0, 1.0, 1.0, 1.0],
             modal_popup: false,
+            web_fonts: Default::default(),
         }
     }
 

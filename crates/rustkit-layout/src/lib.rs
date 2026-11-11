@@ -3695,6 +3695,14 @@ impl LayoutBox {
         if self.style.box_sizing == BoxSizing::BorderBox {
             return (0.0, 0.0);
         }
+        self.control_edge_extent(control, cb_width)
+    }
+
+    /// The horizontal and vertical extent of a text control's padding and
+    /// border (the author's where set, Chrome's UA values where not),
+    /// whatever its `box-sizing`: the least its border box can be.
+    /// `(0, 0)` for every other control.
+    pub(crate) fn control_edge_extent(&self, control: &FormControlType, cb_width: f32) -> (f32, f32) {
         let (ua_pad_v, ua_pad_h, ua_border) = match control {
             FormControlType::TextInput { input_type, .. } => {
                 let t = input_type.to_ascii_lowercase();
@@ -3843,6 +3851,35 @@ impl LayoutBox {
                 }
             }
         };
+
+        // CSS 2.1 §10.4 / §10.7: min/max sizes clamp a control as any box,
+        // max first, then min (min wins). They name the same box `width`
+        // and `height` do, so a content-box text control adds its padding
+        // and border (CH2.B17b: `min-width: 60px` was ignored, 28 wide where
+        // Chromium builds 68; `max-width: 40px` left a 100px input 108).
+        // A percentage height against an indefinite base does not apply.
+        let clamp = |size: f32, min: &Length, max: &Length, base: Option<f32>, extra: f32| {
+            let mut size = size;
+            if let Some(mx) = self.replaced_length(max, base) {
+                size = size.min(mx + extra);
+            }
+            if let Some(mn) = self.replaced_length(min, base) {
+                size = size.max(mn + extra);
+            }
+            size
+        };
+        let width = clamp(width, &self.style.min_width, &self.style.max_width, Some(width_base), extra_w);
+        let height = clamp(height, &self.style.min_height, &self.style.max_height, percent_height_base, extra_h);
+
+        // CSS Sizing 3 §3: the content box is floored at zero, so the
+        // border box is never smaller than the control's padding plus
+        // border, whichever box the author's lengths name. A content-box
+        // control gets that from `extra` above; a `box-sizing: border-box`
+        // one has `extra` 0, and `max-width: 10px` on 20px padding and 3px
+        // borders made a 10px box where Chromium builds 46 (#985 R1 HOLD).
+        let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
+        let width = width.max(edges_w);
+        let height = height.max(edges_h);
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:

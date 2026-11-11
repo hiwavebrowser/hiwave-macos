@@ -40,8 +40,22 @@ use rustkit_compositor::Compositor;
 /// the rest of the test, not just the call: see [`test_gpu::hold_for_this_test`].
 #[cfg(test)]
 pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
+    use std::sync::OnceLock;
+    // One wgpu instance, adapter and device for the whole test process; each test's compositor shares them
+    // and keeps its own surfaces and textures (T41b). Building a device was ~0.15 s of every engine a test
+    // creates (and its teardown is what the guard below is mostly for); the guard still serialises whole
+    // tests, so what changes is only that no test builds or drops a device of its own.
+    // Known limit (R1 nit 3, a follow-up): a device lost partway through a test run stays in this
+    // `OnceLock` (it cannot be reset), so later GPU tests in the same process fail with it instead of
+    // building a fresh one; before this change each test built its own.
+    static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
-    Compositor::new()
+    if let Some(shared) = SHARED_COMPOSITOR.get() {
+        return Ok(shared.share_device());
+    }
+    let compositor = Compositor::new()?;
+    let shared = SHARED_COMPOSITOR.get_or_init(|| compositor.share_device());
+    Ok(shared.share_device())
 }
 
 /// Test-only GPU guard: at most one unit test at a time owns GPU devices.
@@ -485,6 +499,9 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 mod computed_read;
+pub(crate) mod image_source;
+#[cfg(all(test, feature = "headless"))]
+mod image_source_engine_tests;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
@@ -572,6 +589,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lat19_animation_rect_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
@@ -612,6 +631,8 @@ mod live_timer_slice_tests;
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
+#[cfg(test)]
+mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -636,6 +657,10 @@ mod form_empty_submit_tests;
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
+#[cfg(all(test, feature = "headless"))]
+mod monospace_size_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod glyph_phase_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod text_coverage_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -683,6 +708,8 @@ mod grid_item_abspos_tests;
 mod positioned_form_control_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_control_author_size_tests;
+#[cfg(all(test, feature = "headless"))]
+mod form_control_min_max_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1607,9 +1634,14 @@ pub struct EngineConfig {
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
     /// Iterations any single loop in a page script may run before Boa
-    /// throws an error the script cannot catch. Boa has no wall-clock
-    /// interrupt; this is what stops `while (true) {}` from hanging a load.
+    /// throws an error the script cannot catch. It is the guard for a config
+    /// without `interrupt_scripts_at_budget`; with the watchdog on, the time
+    /// budget stops a runaway and this is only a backstop. 10M ended a
+    /// legitimate heavy loop in 50 to 70 ms in an optimized build (JS1).
     pub script_loop_iteration_limit: u64,
+    /// Device pixel ratio an image's `srcset` is selected for (E54b): 1.0 for the headless and
+    /// parity captures, the display's scale in the app. Not a layout scale: boxes stay in CSS px.
+    pub device_pixel_ratio: f32,
     /// Wall-clock budget for each subresource phase of a load (stylesheets,
     /// then web fonts, then images). A fetch not finished when its phase's
     /// budget runs out is dropped, and the page renders without it. The
@@ -1683,7 +1715,8 @@ impl Default for EngineConfig {
             disable_animations: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
-            script_loop_iteration_limit: 10_000_000,
+            script_loop_iteration_limit: 1_000_000_000,
+            device_pixel_ratio: 1.0,
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
@@ -2164,6 +2197,13 @@ thread_local! {
     static SCRIPT_STAMP: Arc<rustkit_js::ThreadStamp> = rustkit_js::Watchdog::shared().thread_stamp();
 }
 
+/// The viewport and DPR an image source is selected for (E54b); a free function so a caller
+/// holding a view borrow can use it.
+fn image_env_of(config: &EngineConfig, viewport: Option<(f32, f32)>) -> image_source::Env {
+    let (w, h) = viewport.unwrap_or((800.0, 600.0));
+    image_source::Env { viewport_w: w, viewport_h: h, dpr: config.device_pixel_ratio.max(0.1) }
+}
+
 /// Opens a turn of script on `bindings` for the watchdog, which stops it
 /// past `budget` wherever it is, host call or not (threads plan M1).
 fn begin_script_turn(bindings: &DomBindings, budget: std::time::Duration) {
@@ -2181,8 +2221,11 @@ fn end_script_turn(bindings: &DomBindings) {
 /// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
 /// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
 /// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
-/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
-/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+/// An evaluation outside one has no deadline, so it keeps the 100 000 cap (Prometheus R1 on
+/// #1031). `Engine::execute_script` is no longer such an evaluation: it arms a live turn (JS1), so
+/// a promise chain there is bounded by the live-turn time budget, and with the 1G default loop
+/// limit by nothing else. What still runs unarmed is what goes straight to the bindings
+/// (turn 0, bookkeeping).
 fn microtask_job_cap(config: &EngineConfig) -> u64 {
     config.script_loop_iteration_limit.min(100_000)
 }
@@ -10835,7 +10878,7 @@ impl Engine {
         let from = ComputedStyle::inherit_from(details);
         let mut style = ComputedStyle::new();
         style.color = from.color;
-        style.font_size = from.font_size;
+        style.copy_font_size_from(&from);
         style.font_weight = from.font_weight;
         style.font_style = from.font_style;
         style.font_stretch = from.font_stretch;
@@ -11175,50 +11218,19 @@ impl Engine {
             Ok(changes) => changes,
             Err(why) => return miss(&why),
         };
-        // The canvas takes the root's and body's background at build.
-        let root = document.document_element().map(|n| n.id.raw());
-        let body = document.body().map(|n| n.id.raw());
-        if changes.iter().any(|c| Some(c.node) == root || Some(c.node) == body) {
-            return miss("the root element or body animates");
-        }
         if !changes.is_empty() {
             let by_node: HashMap<usize, &layout_ctx::FrameChange> =
                 changes.iter().map(|c| (c.node, c)).collect();
             let layout = view.layout.as_ref().expect("checked above");
-            let mut found = std::collections::HashSet::new();
-            if let Err(why) = check_animation_frame(layout, &by_node, &mut found) {
+            if let Err(why) = check_frame_over(layout, &document, &changes, &by_node) {
                 return miss(&why);
-            }
-            // An element without a box (`display: contents`) passes its
-            // colour to boxes this frame does not know.
-            for change in &changes {
-                let colour = change.props.iter().any(|(i, _, _)| animations::prop_name(*i) == "color");
-                if colour && !found.contains(&change.node) {
-                    return miss("an element without a box changes colour");
-                }
             }
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             let Some(mut laid) = view.layout.take() else {
                 return Ok(false);
             };
             apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
-            // `getComputedStyle(el, '::before')` reads the frame (CH2.E16).
-            {
-                let mut pseudo_styles = view.lay.pseudo_styles.borrow_mut();
-                for change in &changes {
-                    let (node, Some(pseudo)) = animations::split_key(change.node) else {
-                        continue;
-                    };
-                    if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
-                        for (index, _, is) in &change.props {
-                            animations::set_prop_value(style, *index, is);
-                        }
-                        if let Some((_, settled)) = change.settled {
-                            style.animation_settled_opacity = settled;
-                        }
-                    }
-                }
-            }
+            apply_pseudo_frame(&view.lay, &changes);
             let display_list = self.display_list_for(id, &laid);
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.layout = Some(laid);
@@ -11286,6 +11298,7 @@ impl Engine {
             lay: view.map(|v| v.lay.clone()),
             url: view.and_then(|v| v.url.clone()),
             viewport: self.view_viewport(id),
+            dpr: self.config.device_pixel_ratio,
             focus: view.and_then(|v| v.lay.focused_node.get()),
             external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
         }
@@ -12019,18 +12032,27 @@ impl layout_ctx::LayoutCtx {
         ) = (&mut layout_box.box_type, hints)
         {
             // The box may paint an `<img>`'s previous image while its new
-            // `src` loads (LAT9): once the new one is in, it paints that.
+            // `src` loads (LAT9): once the new one is in, it paints that. The density is that of
+            // the image actually painted (E54b): the old image is not divided by the new pick's.
+            let mut density = 1.0_f32;
             if let Some(node) = layout_box.node_id {
                 let wanted = self
                     .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted.clone()))
                     .flatten();
                 if let Some(wanted) = wanted {
-                    if let Some(paint) = self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted)) {
+                    let wanted_density = self
+                        .with_building_lay(|lay| lay.shown_images.borrow().get(&node).map(|e| e.wanted_density))
+                        .flatten()
+                        .unwrap_or(1.0);
+                    if let Some((paint, painted_density)) =
+                        self.with_building_lay(|lay| self.img_src_to_paint(lay, node, &wanted, wanted_density))
+                    {
                         *url = paint;
+                        density = painted_density;
                     }
                 }
             }
-            (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h);
+            (*natural_width, *natural_height) = self.img_natural_size(url, *w, *h, density);
         }
         1 + layout_box
             .children
@@ -12048,7 +12070,13 @@ impl layout_ctx::LayoutCtx {
     /// Chrome). An empty `src` takes nothing over. Records `src` as the
     /// element's wanted URL, which a reused tree resolves again
     /// ([`Self::refresh_image_sizes`]).
-    fn img_src_to_paint(&self, lay: &layout_ctx::ViewLayout, node: usize, src: &str) -> String {
+    fn img_src_to_paint(
+        &self,
+        lay: &layout_ctx::ViewLayout,
+        node: usize,
+        src: &str,
+        density: f32,
+    ) -> (String, f32) {
         let ready = |url: &str| {
             Url::parse(url).is_ok_and(|u| {
                 u.scheme() == "data" || self.image_manager.is_cached(&u) || self.svg_cache.borrow().contains_key(u.as_str())
@@ -12059,19 +12087,21 @@ impl layout_ctx::LayoutCtx {
         if entry.wanted != src {
             entry.wanted = src.to_string();
         }
+        entry.wanted_density = density;
         if ready(src) {
             if entry.shown.as_deref() != Some(src) {
                 entry.shown = Some(src.to_string());
             }
-            return src.to_string();
+            entry.shown_density = density;
+            return (src.to_string(), density);
         }
         if lay.failed_images.borrow().urls.contains(src) {
             entry.shown = None;
-            return src.to_string();
+            return (src.to_string(), density);
         }
         match &entry.shown {
-            Some(shown) if !src.is_empty() && shown != src && ready(shown) => shown.clone(),
-            _ => src.to_string(),
+            Some(shown) if !src.is_empty() && shown != src && ready(shown) => (shown.clone(), entry.shown_density),
+            _ => (src.to_string(), density),
         }
     }
 
@@ -12082,6 +12112,7 @@ impl layout_ctx::LayoutCtx {
         src: &str,
         explicit_width: Option<f32>,
         explicit_height: Option<f32>,
+        density: f32,
     ) -> (f32, f32) {
         let loaded = Url::parse(src).ok().and_then(|parsed_url| {
             if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
@@ -12105,7 +12136,12 @@ impl layout_ctx::LayoutCtx {
         });
 
         match (&loaded, svg_size) {
-            (Some(image), _) => (image.natural_width as f32, image.natural_height as f32),
+            // A decoded raster is `density` image pixels per CSS pixel (a 2x pick of a 200 px image
+            // is 100 CSS px wide, as Chrome's naturalWidth says).
+            (Some(image), _) => {
+                let d = if density.is_finite() && density > 0.0 { density } else { 1.0 };
+                (image.natural_width as f32 / d, image.natural_height as f32 / d)
+            }
             (None, Some((w, h))) => (w, h),
             // Image unavailable at layout time: fall back to the
             // width=/height= attributes, then the placeholder size.
@@ -12472,6 +12508,9 @@ impl layout_ctx::LayoutCtx {
                     }
                     other => other,
                 };
+                // TX2: the bare generic `monospace` takes the 13px fixed-font
+                // default where a parent with another family had 16px.
+                style.apply_fixed_font_default(parent_style);
 
                 // `line-height` is an inherited property, but rustkit only inherited it into text
                 // nodes (see the NodeType::Text arm), never from one element to a descendant
@@ -12544,11 +12583,11 @@ impl layout_ctx::LayoutCtx {
                     // SAME selection rule as discover_images, or the loader
                     // caches under one key and layout looks up another — the
                     // exact cache-miss shape #113 fixed for relative URLs.
-                    let src = attributes
-                        .get("srcset")
-                        .and_then(|ss| Engine::pick_from_srcset(ss))
-                        .or_else(|| attributes.get("src").cloned())
-                        .unwrap_or_default();
+                    let (vw, vh) = self.building_viewport().unwrap_or((800.0, 600.0));
+                    let env = image_source::Env { viewport_w: vw, viewport_h: vh, dpr: self.building_dpr().max(0.1) };
+                    let pick = Engine::pick_image_source(node, attributes, &env);
+                    let density = pick.as_ref().map_or(1.0, |p| p.density);
+                    let src = pick.map(|p| p.url).unwrap_or_default();
 
                     // Parse explicit dimensions from attributes
                     let explicit_width: Option<f32> =
@@ -12582,12 +12621,11 @@ impl layout_ctx::LayoutCtx {
                         .resolve_resource_url(&src)
                         .map(|u| u.to_string())
                         .unwrap_or(src);
-                    let src = self
-                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src))
-                        .unwrap_or(src);
-
+                    let (src, density) = self
+                        .with_building_lay(|lay| self.img_src_to_paint(lay, node.id.raw(), &src, density))
+                        .unwrap_or((src, density));
                     let (natural_width, natural_height) =
-                        self.img_natural_size(&src, explicit_width, explicit_height);
+                        self.img_natural_size(&src, explicit_width, explicit_height, density);
 
                     let mut b = LayoutBox::new(
                         BoxType::Image {
@@ -13676,7 +13714,7 @@ impl layout_ctx::LayoutCtx {
                         let mut s = ComputedStyle::new();
                         // Inherit text-related properties
                         s.font_family = parent.font_family.clone();
-                        s.font_size = parent.font_size.clone();
+                        s.copy_font_size_from(parent);
                         s.font_weight = parent.font_weight;
                         s.font_style = parent.font_style;
                         s.color = parent.color;
@@ -13898,7 +13936,7 @@ impl layout_ctx::LayoutCtx {
                 return None;
             }
             let mut style = ComputedStyle::new();
-            style.font_size = element.font_size.clone();
+            style.copy_font_size_from(element);
             style.color = element.color;
             matched.sort_by_key(|(spec, rule)| (rule.layer_order, *spec));
             let mut important = matched.clone();
@@ -14110,7 +14148,7 @@ impl layout_ctx::LayoutCtx {
         // (a 22 px line became 40.8 px).
         pseudo_style.display = rustkit_css::Display::Inline;
         if let Some(parent) = parent {
-            pseudo_style.font_size = parent.font_size.clone();
+            pseudo_style.copy_font_size_from(parent);
             pseudo_style.font_family = parent.font_family.clone();
             pseudo_style.font_weight = parent.font_weight;
             pseudo_style.font_style = parent.font_style;
@@ -14247,6 +14285,8 @@ impl layout_ctx::LayoutCtx {
             rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
+        // TX2, as for an element.
+        pseudo_style.apply_fixed_font_default(parent);
 
         // As for an element: no style (or `none`) on a side, no width.
         zero_width_of_styleless_sides(&mut pseudo_style);
@@ -14370,7 +14410,7 @@ impl layout_ctx::LayoutCtx {
         // double-shift. Without this, about's hero (logo/tagline/version) and
         // any centered-container heading left-aligned.
         if let Some(parent) = parent_style {
-            style.font_size = parent.font_size.clone();
+            style.copy_font_size_from(parent);
             style.font_family = parent.font_family.clone();
             style.font_weight = parent.font_weight;
             style.font_style = parent.font_style;
@@ -14429,42 +14469,42 @@ impl layout_ctx::LayoutCtx {
             // in section/article/aside computes 2em, not 1.5em).
             "h1" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(2.0);
+                style.set_font_size_length(rustkit_css::Length::Em(2.0));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.67);
                 style.margin_bottom = rustkit_css::Length::Em(0.67);
             }
             "h2" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.5);
+                style.set_font_size_length(rustkit_css::Length::Em(1.5));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(0.83);
                 style.margin_bottom = rustkit_css::Length::Em(0.83);
             }
             "h3" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.17);
+                style.set_font_size_length(rustkit_css::Length::Em(1.17));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.0);
                 style.margin_bottom = rustkit_css::Length::Em(1.0);
             }
             "h4" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(1.0);
+                style.set_font_size_length(rustkit_css::Length::Em(1.0));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.33); // 1.33em
                 style.margin_bottom = rustkit_css::Length::Em(1.33);
             }
             "h5" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(0.83);
+                style.set_font_size_length(rustkit_css::Length::Em(0.83));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(1.67); // 1.67em
                 style.margin_bottom = rustkit_css::Length::Em(1.67);
             }
             "h6" => {
                 style.display = rustkit_css::Display::Block;
-                style.font_size = rustkit_css::Length::Em(0.67);
+                style.set_font_size_length(rustkit_css::Length::Em(0.67));
                 style.font_weight = rustkit_css::FontWeight::BOLD;
                 style.margin_top = rustkit_css::Length::Em(2.33); // 2.33em
                 style.margin_bottom = rustkit_css::Length::Em(2.33);
@@ -14536,7 +14576,7 @@ impl layout_ctx::LayoutCtx {
                 // three buttons vertically (h=124.6 vs Chrome 39) with the
                 // interstitial whitespace text runs each taking a line.
                 style.display = rustkit_css::Display::InlineBlock;
-                style.font_size = rustkit_css::Length::Px(13.333);
+                style.set_font_size_length(rustkit_css::Length::Px(13.333));
                 // The pinned oracle (Chrome CfT-148 on this seat) computes
                 // `font-family: Arial` for every unstyled control on every
                 // board case (n53 census over baselines/chrome-148); its
@@ -14591,20 +14631,24 @@ impl layout_ctx::LayoutCtx {
             }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
             }
             "big" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(19.0); // larger
+                // `font-size: larger` (Chrome UA): x 1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.2));
             }
             "sub" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
                                                                  // vertical-align: sub (not implemented)
             }
             "sup" => {
                 style.display = rustkit_css::Display::Inline;
-                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // `font-size: smaller` (Chrome UA): x 1/1.2 of the parent.
+                style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
                                                                  // vertical-align: super (not implemented)
             }
             // Code and preformatted
@@ -15575,14 +15619,16 @@ impl Engine {
             "color" => style.color = parent.color,
             "opacity" => style.opacity = parent.opacity,
             "font-family" => style.font_family = parent.font_family.clone(),
-            "font-size" => style.font_size = parent.font_size.clone(),
+            "font-size" => {
+                style.copy_font_size_from(parent);
+            }
             "font-weight" => style.font_weight = parent.font_weight,
             "font-style" => style.font_style = parent.font_style,
             "font-stretch" => style.font_stretch = parent.font_stretch,
             "line-height" => style.line_height = parent.line_height,
             "font" => {
                 style.font_family = parent.font_family.clone();
-                style.font_size = parent.font_size.clone();
+                style.copy_font_size_from(parent);
                 style.font_weight = parent.font_weight;
                 style.font_style = parent.font_style;
                 style.font_stretch = parent.font_stretch;
@@ -15989,8 +16035,29 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "font-size" => {
-                if let Some(length) = parse_length(value) {
-                    style.font_size = length;
+                // Size keywords (css-fonts-4 §2.5): the size from Blink's
+                // table, and the keyword kept so a bare `monospace` family
+                // takes it from the fixed-font row (apply_fixed_font_default).
+                let keyword = match value.trim().to_ascii_lowercase().as_str() {
+                    "xx-small" => 1,
+                    "x-small" => 2,
+                    "small" => 3,
+                    "medium" => 4,
+                    "large" => 5,
+                    "x-large" => 6,
+                    "xx-large" => 7,
+                    "xxx-large" => 8,
+                    _ => 0,
+                };
+                if keyword > 0 {
+                    style.set_font_size_keyword(keyword);
+                } else if value.trim().eq_ignore_ascii_case("smaller") {
+                    // Blink: x 1/1.2 and x 1.2 of the parent, keyword cleared.
+                    style.set_font_size_length(rustkit_css::Length::Em(1.0 / 1.2));
+                } else if value.trim().eq_ignore_ascii_case("larger") {
+                    style.set_font_size_length(rustkit_css::Length::Em(1.2));
+                } else if let Some(length) = parse_length(value) {
+                    style.set_font_size_length(length);
                 }
             }
             "font-weight" => {
@@ -16025,7 +16092,18 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "font-family" => {
-                style.font_family = value.trim_matches(|c| c == '"' || c == '\'').to_string();
+                // A quoted "monospace" is a family name, not the generic
+                // (#1053 R1; CfT 148 sizes it 16px): its quotes are kept so
+                // `is_generic_monospace` does not take it for the generic.
+                let v = value.trim();
+                let quoted_generic = v.len() >= 2
+                    && (v.starts_with('"') || v.starts_with('\''))
+                    && v[1..v.len() - 1].trim().eq_ignore_ascii_case("monospace");
+                style.font_family = if quoted_generic {
+                    v.to_string()
+                } else {
+                    value.trim_matches(|c| c == '"' || c == '\'').to_string()
+                };
             }
             "font-style" => {
                 if value == "italic" {
@@ -17411,7 +17489,7 @@ impl layout_ctx::LayoutCtx {
             "appearance" | "-webkit-appearance" => {
                 style.appearance = rustkit_css::Appearance::Auto
             }
-            "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
+            "font-size" => style.set_font_size_keyword(4),
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
@@ -18063,71 +18141,55 @@ impl Engine {
     }
 
     /// Discover images from <img> elements.
-    /// Choose one candidate from an `srcset` attribute.
-    ///
-    /// HTML §4.8.4.2. Deliberately a SUBSET: candidates are parsed and the
-    /// widest `w` (or highest `x`) wins, which is the right answer on a
-    /// retina display and a defensible one everywhere. Full selection needs
-    /// the `sizes` attribute and viewport/DPR math — that is a separate unit
-    /// and is NOT claimed here.
-    ///
-    /// Why it exists at all: `srcset` had ZERO support, so a page serving
-    /// images only via srcset (increasingly common; the `src` is often a
-    /// 1x1 placeholder or absent) rendered NO IMAGE AT ALL. A wrong-density
-    /// image is a rendering difference; no image is a hole.
-    fn pick_from_srcset(srcset: &str) -> Option<String> {
-        // `w` and `x` descriptors are NOT comparable — one is a pixel width,
-        // the other a device ratio. The first version scaled x by 1000 to
-        // rank them together; a test then showed 2x and 2000w colliding
-        // exactly, with the tie decided by document order. Inventing a
-        // common scale for incomparable units is the bug, not the tie.
-        //
-        // So: partition. If ANY width candidate exists, width decides
-        // (that is the descriptor authors reach for when the rendered size
-        // varies); otherwise density decides. Mixed srcsets are invalid per
-        // HTML §4.8.4.2 anyway.
-        let mut widest: Option<(f32, String)> = None;
-        let mut densest: Option<(f32, String)> = None;
-        let mut bare: Option<String> = None;
-
-        for cand in srcset.split(',') {
-            let mut parts = cand.split_whitespace();
-            let url = match parts.next() {
-                Some(u) if !u.is_empty() => u,
-                _ => continue,
-            };
-            match parts.next() {
-                // No descriptor means 1x (HTML §4.8.4.2).
-                None => {
-                    if bare.is_none() {
-                        bare = Some(url.to_string());
+    /// The image an `<img>` loads and its density (E54b): its `<picture>` sources, `srcset`,
+    /// `sizes`, then `src`, as `image_source::select_source` decides for this viewport and DPR.
+    fn pick_image_source(
+        node: &Node,
+        attributes: &HashMap<String, String>,
+        env: &image_source::Env,
+    ) -> Option<image_source::Pick> {
+        // The `<source>` elements before the `<img>` in its `<picture>`.
+        let mut owned: Vec<(Option<String>, Option<String>, Option<String>, Option<String>)> = Vec::new();
+        if let Some(parent) = node.parent() {
+            if parent.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("picture")) {
+                for child in parent.children() {
+                    if child.id.raw() == node.id.raw() {
+                        break;
                     }
-                    if densest.as_ref().map(|(d, _)| 1.0 > *d).unwrap_or(true) {
-                        densest = Some((1.0, url.to_string()));
+                    if child.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("source")) {
+                        owned.push((
+                            child.get_attribute("srcset").map(str::to_string),
+                            child.get_attribute("sizes").map(str::to_string),
+                            child.get_attribute("media").map(str::to_string),
+                            child.get_attribute("type").map(str::to_string),
+                        ));
                     }
                 }
-                Some(d) if d.ends_with('w') => {
-                    if let Ok(w) = d[..d.len() - 1].parse::<f32>() {
-                        if widest.as_ref().map(|(b, _)| w > *b).unwrap_or(true) {
-                            widest = Some((w, url.to_string()));
-                        }
-                    }
-                }
-                Some(d) if d.ends_with('x') => {
-                    if let Ok(x) = d[..d.len() - 1].parse::<f32>() {
-                        if densest.as_ref().map(|(b, _)| x > *b).unwrap_or(true) {
-                            densest = Some((x, url.to_string()));
-                        }
-                    }
-                }
-                Some(_) => {}
             }
         }
+        let sources: Vec<image_source::SourceAttrs<'_>> = owned
+            .iter()
+            .map(|(srcset, sizes, media, mime)| image_source::SourceAttrs {
+                srcset: srcset.as_deref(),
+                sizes: sizes.as_deref(),
+                media: media.as_deref(),
+                mime: mime.as_deref(),
+                src: None,
+            })
+            .collect();
+        let img = image_source::SourceAttrs {
+            srcset: attributes.get("srcset").map(String::as_str),
+            sizes: attributes.get("sizes").map(String::as_str),
+            media: None,
+            mime: None,
+            src: attributes.get("src").map(String::as_str),
+        };
+        image_source::select_source(&img, &sources, env)
+    }
 
-        widest
-            .map(|(_, u)| u)
-            .or_else(|| densest.map(|(_, u)| u))
-            .or(bare)
+    /// The viewport and DPR an image source is selected for in `view`.
+    fn image_env(&self, viewport: Option<(f32, f32)>) -> image_source::Env {
+        image_env_of(&self.config, viewport)
     }
 
     /// Serialize an inline `<svg>` element subtree back to markup for
@@ -18799,7 +18861,7 @@ impl Engine {
     }
 
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
-        Self::img_elements(document, base_url)
+        Self::img_elements(document, base_url, &self.image_env(None))
             .into_iter()
             .map(|(_, src, url)| (src, url))
             .collect()
@@ -18807,7 +18869,7 @@ impl Engine {
 
     /// Every `<img>` that names an image: its raw NodeId, the source as
     /// written, and that resolved.
-    fn img_elements(document: &Document, base_url: Option<&Url>) -> Vec<(usize, String, Url)> {
+    fn img_elements(document: &Document, base_url: Option<&Url>, env: &image_source::Env) -> Vec<(usize, String, Url)> {
         let mut images = Vec::new();
 
         // Find all <img> elements, shadow trees included
@@ -18817,10 +18879,7 @@ impl Engine {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
                 // srcset wins when present (that is the point of it); src is
                 // the fallback and is often a placeholder on srcset pages.
-                let chosen = attributes
-                    .get("srcset")
-                    .and_then(|ss| Self::pick_from_srcset(ss))
-                    .or_else(|| attributes.get("src").cloned());
+                let chosen = Self::pick_image_source(&img_el, attributes, env).map(|p| p.url);
 
                 if let Some(src) = chosen {
                     // Resolve relative URL
@@ -19074,11 +19133,12 @@ impl Engine {
         };
 
         let base_url = view.url.as_ref();
-        let mut elements = Self::img_elements(document.as_ref(), base_url);
+        let env = image_env_of(&self.config, self.view_viewport(id));
+        let mut elements = Self::img_elements(document.as_ref(), base_url, &env);
         // The URLs the document itself shows, when an `<img>` outside it
         // asks for one too (E54): what only such an element asks for is
         // fetched, and no layout follows its arrival.
-        let detached = Self::detached_img_elements(document.as_ref(), base_url, &view.lay.loaded_images.borrow().detached, &elements);
+        let detached = Self::detached_img_elements(document.as_ref(), base_url, &view.lay.loaded_images.borrow().detached, &elements, &env);
         let shown: std::collections::HashSet<Url> = match detached.is_empty() {
             true => Default::default(),
             false => elements.iter().map(|(_, _, url)| url.clone()).collect(),
@@ -19517,6 +19577,7 @@ impl Engine {
         base_url: Option<&Url>,
         detached: &[usize],
         listed: &[(usize, String, Url)],
+        env: &image_source::Env,
     ) -> Vec<(usize, String, Url)> {
         if detached.is_empty() {
             return Vec::new();
@@ -19530,10 +19591,8 @@ impl Engine {
                 let NodeType::Element { attributes, .. } = &node.node_type else {
                     return None;
                 };
-                let src = attributes
-                    .get("srcset")
-                    .and_then(|ss| Self::pick_from_srcset(ss))
-                    .or_else(|| attributes.get("src").cloned())?;
+                // The same selection rule as the document's own images (E54b).
+                let src = Self::pick_image_source(&node, attributes, env)?.url;
                 let url = match base_url {
                     Some(base) => base.join(&src).ok()?,
                     None => Url::parse(&src).ok()?,
@@ -19663,11 +19722,12 @@ impl Engine {
         let Some(document) = view.document.as_ref() else {
             return (relaid_out, Vec::new());
         };
+        let env = image_env_of(&self.config, self.view_viewport(id));
         let mut events = Vec::new();
         let mut failed = view.lay.failed_images.borrow_mut();
         let mut loaded = view.lay.loaded_images.borrow_mut();
-        let mut elements = Self::img_elements(document.as_ref(), view.url.as_ref());
-        let detached = Self::detached_img_elements(document.as_ref(), view.url.as_ref(), &loaded.detached, &elements);
+        let mut elements = Self::img_elements(document.as_ref(), view.url.as_ref(), &env);
+        let detached = Self::detached_img_elements(document.as_ref(), view.url.as_ref(), &loaded.detached, &elements, &env);
         elements.extend(detached);
         let mut still_failed = std::collections::HashSet::new();
         let mut still_loaded = std::collections::HashSet::new();
@@ -23419,6 +23479,8 @@ impl Engine {
                 },
                 canvas,
                 modal_popup: view.lay.select_popup.borrow().is_some(),
+                // Installed for this view just above.
+                web_fonts: rustkit_layout::webfonts::current(),
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };
@@ -23517,9 +23579,17 @@ impl Engine {
         // A script that threw may still have written to the DOM before it
         // did, so the flush runs either way.
         let turn = wgate::script_turn();
+        // This path starts no turn of its own, so without arming one the
+        // only bound on a `while (true) {}` typed into the devtools console
+        // (or sent by the chrome) is the loop-iteration cap (JS1).
+        let armed = arm_live_turn(&self.config, bindings);
         let result = bindings.evaluate(script);
+        let stopped = end_live_turn(&self.config, armed, bindings, "eval");
         drop(turn);
         self.flush_script_dom_writes(id, None)?;
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
         let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
@@ -23704,6 +23774,7 @@ impl Engine {
         let mut writes = rustkit_bindings::ControlWrites {
             values: bindings.take_value_writes(),
             checked: bindings.take_checked_writes(),
+            layer_only: false,
         };
         Self::apply_control_writes(edit_states, checked_states, &mut writes);
     }
@@ -23758,6 +23829,15 @@ impl Engine {
             stats.forced_layouts = stats.forced_layouts.saturating_add(report.count);
             stats.forced_ms += report.ms;
         }
+        if report.framed > 0 {
+            debug!(
+                ?id,
+                forced_frames = report.framed,
+                ms = %format!("{:.1}", report.framed_ms),
+                "Reads after an animation layer write answered from a frame over the published boxes"
+            );
+            stats.forced_frames = stats.forced_frames.saturating_add(report.framed);
+        }
     }
 
     /// How a script read of geometry after a DOM write in the same task
@@ -23783,6 +23863,23 @@ impl Engine {
         let lay = view.lay.clone();
         let sheets = view.external_stylesheets.clone();
         let javascript_enabled = self.config.javascript_enabled;
+        // LAT19: the boxes the view last painted, for a read after a
+        // paint-only layer write. Weak: a paint-only frame patches them in
+        // place (`Rc::make_mut`), and the closure set after it holds the
+        // new ones; a stale handle falls back to a build. Boxes laid out at
+        // another size (a resize not painted since) are not a base either:
+        // the read takes the full build.
+        let published = match (view.layout.as_ref(), view.laid_with.as_ref()) {
+            (Some(layout), Some(with)) if with.size == bounds => Some(Rc::downgrade(layout)),
+            _ => None,
+        };
+        // #1057 R1: a full forced build since that paint laid out writes the
+        // painted boxes do not show (`style.width` then a read), and cleared
+        // the bindings' `since_layout`; a later layer-only read must not be
+        // answered from the painted boxes, which would give the old width
+        // with the new transform. Until the next publish installs a new
+        // closure (and a fresh flag), every read takes the full build.
+        let built_since_publish = Rc::new(Cell::new(false));
         Some(Rc::new(move |writes: &mut rustkit_bindings::ControlWrites| {
             let restyling = RESTYLE_BUILD.with(|b| b.try_borrow().map_or(true, |b| b.is_some()));
             let memo_held = STYLE_MEMO.with(|m| m.try_borrow_mut().is_err());
@@ -23795,7 +23892,34 @@ impl Engine {
                 debug!(?id, busy, "Forced layout skipped: build state in use");
                 return None;
             }
+            if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
+                let layout = published.as_ref().and_then(|w| w.upgrade());
+                match layout.map(|layout| {
+                    let view = layout_ctx::BuildView {
+                        id,
+                        lay: Some(lay.clone()),
+                        url: building.url.clone(),
+                        viewport: building.viewport,
+                        dpr: building.dpr,
+                        focus: lay.focused_node.get(),
+                        external_sheets: sheets.clone(),
+                    };
+                    forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
+                }) {
+                    Some(Ok(geometry)) => return Some(geometry),
+                    Some(Err(why)) => debug!(?id, why, "Forced read after a layer write needs a build"),
+                    None => debug!(?id, "Forced read after a layer write needs a build: no published boxes"),
+                }
+            }
             let started = std::time::Instant::now();
+            // LAT19: nothing a forced layout builds is painted, so the
+            // animation baseline (what the view painted of each animated
+            // element, and the clock it was built at) stays as it was: the
+            // frame that follows when script settles compares against it.
+            // Re-captured here, the frame found nothing that moved and
+            // painted nothing (reddit: no frame for as long as the loop ran).
+            let baseline = AnimationBaseline::save(&lay);
+            built_since_publish.set(true);
             Engine::apply_control_writes(
                 &mut lay.edit_states.borrow_mut(),
                 &mut lay.checked_states.borrow_mut(),
@@ -23814,6 +23938,7 @@ impl Engine {
                     lay: Some(lay.clone()),
                     url: building.url.clone(),
                     viewport: building.viewport,
+                    dpr: building.dpr,
                     focus: lay.focused_node.get(),
                     external_sheets: sheets.clone(),
                 },
@@ -23823,6 +23948,7 @@ impl Engine {
                 bounds,
             );
             drop(memo_aside);
+            baseline.restore(&lay);
             stamp_element_scrolls(&built, &lay.element_scrolls);
             built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
             let root_element = document.document_element().map(|e| e.id.raw());
@@ -23847,6 +23973,7 @@ impl Engine {
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
                 computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
                 max_scroll,
+                framed: false,
             })
         }))
     }
@@ -24552,6 +24679,12 @@ impl EngineBuilder {
     /// (`EngineConfig::script_budget_ms`).
     pub fn script_budget_ms(mut self, ms: u64) -> Self {
         self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// Iterations one loop may run (`EngineConfig::script_loop_iteration_limit`).
+    pub fn script_loop_iteration_limit(mut self, limit: u64) -> Self {
+        self.config.script_loop_iteration_limit = limit;
         self
     }
 
@@ -38112,92 +38245,6 @@ mod relative_url_tests {
     }
 }
 
-#[cfg(test)]
-mod srcset_tests {
-    use super::*;
-
-    // ---- srcset had ZERO support (live finding, 2026-08-08) ----
-    //
-    // A page serving images only via srcset rendered NO IMAGE AT ALL — the
-    // src is often a placeholder or absent on such pages. A wrong-density
-    // pick is a rendering difference; no pick is a hole.
-
-    #[test]
-    fn widest_w_candidate_wins() {
-        let picked = Engine::pick_from_srcset(
-            "small.jpg 400w, medium.jpg 800w, large.jpg 1600w",
-        );
-        assert_eq!(picked.as_deref(), Some("large.jpg"));
-    }
-
-    #[test]
-    fn density_candidates_are_ranked_among_themselves() {
-        let picked = Engine::pick_from_srcset("a.png, b.png 2x, c.png 3x");
-        assert_eq!(picked.as_deref(), Some("c.png"));
-    }
-
-    #[test]
-    fn a_bare_candidate_is_one_x_not_zero() {
-        // A no-descriptor candidate means 1x. Treating it as weight 0 would
-        // make a single-candidate srcset resolve to nothing, which is the
-        // no-image hole this whole change exists to close.
-        assert_eq!(
-            Engine::pick_from_srcset("only.png").as_deref(),
-            Some("only.png")
-        );
-    }
-
-    #[test]
-    fn density_never_outranks_width_by_scale_accident() {
-        // 2x and 2000w are on different scales. Without normalisation a
-        // naive max() picks the 2x candidate over a far larger w one.
-        let picked = Engine::pick_from_srcset("dense.png 2x, wide.png 2000w");
-        assert_eq!(picked.as_deref(), Some("wide.png"));
-    }
-
-    #[test]
-    fn malformed_input_yields_none_rather_than_a_bogus_url() {
-        assert_eq!(Engine::pick_from_srcset(""), None);
-        assert_eq!(Engine::pick_from_srcset("   "), None);
-    }
-
-    #[test]
-    #[cfg(all(target_os = "macos", feature = "headless"))]
-    fn an_img_with_only_srcset_still_gets_a_layout_box_with_that_url() {
-        // The end-to-end property: BOTH the loader's discovery and the
-        // layout box must choose the SAME candidate, or the loader caches
-        // under one key while layout looks up another — the cache-miss
-        // shape #113 fixed for relative URLs, one attribute over.
-        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-        let id = engine
-            .create_headless_view(Bounds::new(0, 0, 800, 600))
-            .expect("view");
-        engine
-            .load_html(
-                id,
-                r#"<html><body><img srcset="a.png 400w, b.png 1200w"></body></html>"#,
-            )
-            .expect("load_html");
-        {
-            let view = engine.views.get_mut(&id).expect("view");
-            view.url = Some(Url::parse("https://example.com/page").unwrap());
-        }
-        engine.relayout(id).expect("relayout");
-
-        fn find_image_url(b: &LayoutBox) -> Option<String> {
-            if let BoxType::Image { url, .. } = &b.box_type {
-                return Some(url.clone());
-            }
-            b.children.iter().find_map(find_image_url)
-        }
-        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
-        let url = find_image_url(layout).expect("img must produce an Image box");
-        assert_eq!(
-            url, "https://example.com/b.png",
-            "layout must resolve the WIDEST srcset candidate, absolutely"
-        );
-    }
-}
 
 #[cfg(test)]
 mod visual_rect_tests {
@@ -40771,7 +40818,9 @@ mod page_script_tests {
     use std::net::TcpListener;
 
     /// Serve `routes` (path -> body) on 127.0.0.1 until the test exits;
-    /// anything else is a 404. Paths starting `/slow` answer after 3s.
+    /// anything else is a 404. Paths starting `/slow` answer after 3s, and
+    /// paths starting `/stall` after 20s (a stall long enough that a bound
+    /// well clear of the load's own cost still tells it from a dropped one).
     /// Each connection gets its own thread, so concurrent fetches overlap.
     fn serve(routes: Vec<(&'static str, &'static str, String)>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -40794,6 +40843,8 @@ mod page_script_tests {
                     let path = request.split_whitespace().nth(1).unwrap_or("/");
                     if path.starts_with("/slow") {
                         std::thread::sleep(std::time::Duration::from_secs(3));
+                    } else if path.starts_with("/stall") {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
                     }
                     let (status, content_type, body) = routes
                         .iter()
@@ -41064,12 +41115,12 @@ document.currentScript.remove();
         // apple.com on the real-site board: one stylesheet never answered,
         // and the network client's 30s timeout ate the whole capture.
         let page = r#"<html><head>
-<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/stall.css">
 <link rel="stylesheet" href="/fast.css">
-</head><body><img src="/slow.png"><img src="/slow.svg">hi</body></html>"#;
+</head><body><img src="/stall.png"><img src="/stall.svg">hi</body></html>"#;
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
-            ("/slow.css", "text/css", "body { color: red }".into()),
+            ("/stall.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
         let config = EngineConfig {
@@ -41077,8 +41128,14 @@ document.currentScript.remove();
             ..EngineConfig::default()
         };
         let (engine, view, took) = load_timed(config, port);
+        // The stalled responses come after 20s, so an engine that waited for
+        // them takes 20s or more; one that drops them at the 500 ms budget
+        // takes what the load itself costs (about 2.4s in an unoptimised
+        // build on a quiet 12-core box, which the old 2.5s bound sat 0.1s
+        // above: a slower or busier runner failed it without having waited).
+        // 8s is a bound that machine speed does not reach and a wait does.
         assert!(
-            took < std::time::Duration::from_millis(2_500),
+            took < std::time::Duration::from_secs(8),
             "waited for the stalled subresources: {took:?}"
         );
         // The sheet that did arrive still applies — and it must be the fast
@@ -44950,6 +45007,134 @@ fn for_inherited_runs(b: &mut LayoutBox, node: usize, f: &mut dyn FnMut(&mut Lay
 /// transform that becomes or stops being the identity holds no fixed or
 /// sticky box, and a colour change reaches no other element that took
 /// the old colour (it inherits it, and its own boxes are not patched).
+/// LAT2: whether an animation frame of `changes` can be placed on the
+/// laid-out boxes `layout` without a build (`Err` says why not).
+fn check_frame_over(
+    layout: &LayoutBox,
+    document: &Document,
+    changes: &[layout_ctx::FrameChange],
+    by_node: &HashMap<usize, &layout_ctx::FrameChange>,
+) -> Result<(), String> {
+    // The canvas takes the root's and body's background at build.
+    let root = document.document_element().map(|n| n.id.raw());
+    let body = document.body().map(|n| n.id.raw());
+    if changes.iter().any(|c| Some(c.node) == root || Some(c.node) == body) {
+        return Err("the root element or body animates".into());
+    }
+    let mut found = std::collections::HashSet::new();
+    check_animation_frame(layout, by_node, &mut found)?;
+    // An element without a box (`display: contents`) passes its colour to
+    // boxes this frame does not know.
+    for change in changes {
+        let colour = change.props.iter().any(|(i, _, _)| animations::prop_name(*i) == "color");
+        if colour && !found.contains(&change.node) {
+            return Err("an element without a box changes colour".into());
+        }
+    }
+    Ok(())
+}
+
+/// `getComputedStyle(el, '::before')` reads the frame (CH2.E16): the
+/// pseudo-elements' styles take its values.
+fn apply_pseudo_frame(lay: &layout_ctx::ViewLayout, changes: &[layout_ctx::FrameChange]) {
+    let mut pseudo_styles = lay.pseudo_styles.borrow_mut();
+    for change in changes {
+        let (node, Some(pseudo)) = animations::split_key(change.node) else {
+            continue;
+        };
+        if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
+            for (index, _, is) in &change.props {
+                animations::set_prop_value(style, *index, is);
+            }
+            if let Some((_, settled)) = change.settled {
+                style.animation_settled_opacity = settled;
+            }
+        }
+    }
+}
+
+/// LAT19: what the view painted of its animated elements
+/// (`Animations::captured`) and the clock it was built at. A forced
+/// layout, which paints nothing, puts them back as it found them.
+struct AnimationBaseline {
+    captured: HashMap<usize, animations::Captured>,
+    last_build_clock: Option<f64>,
+}
+
+impl AnimationBaseline {
+    fn save(lay: &layout_ctx::ViewLayout) -> Self {
+        let anims = lay.animations.borrow();
+        AnimationBaseline { captured: anims.captured.clone(), last_build_clock: anims.last_build_clock }
+    }
+
+    fn restore(self, lay: &layout_ctx::ViewLayout) {
+        let mut anims = lay.animations.borrow_mut();
+        anims.captured = self.captured;
+        anims.last_build_clock = self.last_build_clock;
+    }
+}
+
+/// LAT19: a geometry read after a paint-only Web Animations layer write
+/// (`ControlWrites::layer_only`): the frame at the animation clock placed
+/// on a copy of the boxes the view painted (`layout`), as the paint-only
+/// frame (`Engine::paint_animation_frame`) will place it when script
+/// settles; no build. The animation baseline is left as it was, so that
+/// frame still finds what moved and paints it. `Err` when the frame needs
+/// a build (a layout property moved, a box does not show the last frame,
+/// script's pause/play is pending, ...).
+fn forced_animation_frame(
+    lctx: &layout_ctx::LayoutCtx,
+    lay: &Rc<layout_ctx::ViewLayout>,
+    document: &Document,
+    layout: &Rc<LayoutBox>,
+    view: layout_ctx::BuildView,
+    bounds: (u32, u32),
+) -> Result<rustkit_bindings::ForcedGeometry, String> {
+    if !animation_repaint_enabled() {
+        return Err("paint-only frames are off".into());
+    }
+    if !lay.animated.borrow().controls.is_empty() {
+        return Err("an animation control is pending".into());
+    }
+    let started = std::time::Instant::now();
+    let baseline = AnimationBaseline::save(lay);
+    let changes = lctx.animation_frame(view);
+    baseline.restore(lay);
+    let changes = changes?;
+    let mut built = LayoutBox::clone(layout);
+    if !changes.is_empty() {
+        let by_node: HashMap<usize, &layout_ctx::FrameChange> = changes.iter().map(|c| (c.node, c)).collect();
+        check_frame_over(&built, document, &changes, &by_node)?;
+        apply_animation_frame(&mut built, &by_node);
+        // A read writes the frame's pseudo-element values into the view's
+        // shared `pseudo_styles` (as the paint-only frame does): the values
+        // of this clock, which the frame painted when script settles writes
+        // again; a full relayout instead rebuilds them all.
+        apply_pseudo_frame(lay, &changes);
+    }
+    stamp_element_scrolls(&built, &lay.element_scrolls);
+    built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
+    let root_element = document.document_element().map(|e| e.id.raw());
+    let content_height = scrollable_bottom(&built, lay.html_clips.get());
+    let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
+    let built = Rc::new(built);
+    debug!(elements = changes.len(), ms = started.elapsed().as_secs_f64() * 1000.0, "Forced read answered from an animation frame");
+    let snapshot_of = built.clone();
+    let styled = lay.clone();
+    let styles_of = built.clone();
+    Ok(rustkit_bindings::ForcedGeometry {
+        source: Box::new(move || {
+            let _snapshot_time = time_stage(Stage::Snapshot);
+            set_root_font_for(&snapshot_of, root_element, &styled);
+            geometry_only(&snapshot_of, root_element)
+        }),
+        hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
+        computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
+        max_scroll,
+        framed: true,
+    })
+}
+
 fn check_animation_frame(
     b: &LayoutBox,
     changes: &HashMap<usize, &layout_ctx::FrameChange>,
