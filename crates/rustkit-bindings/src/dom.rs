@@ -225,6 +225,11 @@ pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
 pub struct ControlWrites {
     pub values: Vec<(usize, String)>,
     pub checked: Vec<(usize, Option<bool>)>,
+    /// LAT19: the only write since the last published layout is Web
+    /// Animations' paint-only layer (`transform`, `opacity`, colours): no
+    /// box moved, so an animation frame over the published boxes answers
+    /// the read without a build when it can.
+    pub layer_only: bool,
 }
 
 /// A layout of the DOM as it is now: what a forced layout publishes.
@@ -239,6 +244,9 @@ pub struct ForcedGeometry {
     /// The furthest the view can scroll over this layout, as
     /// `DomBindings::set_scroll_state` takes it.
     pub max_scroll: (f32, f32),
+    /// LAT19: answered from an animation frame over the published boxes
+    /// (`ControlWrites::layer_only`), not a build: not a forced layout.
+    pub framed: bool,
 }
 
 /// Lays the page out again for a read of geometry or computed style that
@@ -526,6 +534,7 @@ impl DomHost {
             ControlWrites {
                 values: std::mem::take(&mut h.value_writes),
                 checked: std::mem::take(&mut h.checked_writes),
+                layer_only: !dirty.written_since_layout(),
             }
         };
         let laid = forced(&mut writes);
@@ -554,9 +563,15 @@ impl DomHost {
         s.x = s.x.min(s.max_x.max(0.0));
         s.y = s.y.min(s.max_y.max(0.0));
         h.scroll = (s.x, s.y);
-        h.forced_layouts += 1;
         h.forced_in_task += 1;
-        h.forced_report.note(cause, read, ms);
+        if laid.framed {
+            // LAT19: a frame over the published boxes, not a layout.
+            h.forced_report.framed += 1;
+            h.forced_report.framed_ms += ms;
+        } else {
+            h.forced_layouts += 1;
+            h.forced_report.note(cause, read, ms);
+        }
         dirty.laid_out();
     }
 

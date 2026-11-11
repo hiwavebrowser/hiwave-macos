@@ -589,6 +589,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lat19_animation_rect_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
@@ -11208,50 +11210,19 @@ impl Engine {
             Ok(changes) => changes,
             Err(why) => return miss(&why),
         };
-        // The canvas takes the root's and body's background at build.
-        let root = document.document_element().map(|n| n.id.raw());
-        let body = document.body().map(|n| n.id.raw());
-        if changes.iter().any(|c| Some(c.node) == root || Some(c.node) == body) {
-            return miss("the root element or body animates");
-        }
         if !changes.is_empty() {
             let by_node: HashMap<usize, &layout_ctx::FrameChange> =
                 changes.iter().map(|c| (c.node, c)).collect();
             let layout = view.layout.as_ref().expect("checked above");
-            let mut found = std::collections::HashSet::new();
-            if let Err(why) = check_animation_frame(layout, &by_node, &mut found) {
+            if let Err(why) = check_frame_over(layout, &document, &changes, &by_node) {
                 return miss(&why);
-            }
-            // An element without a box (`display: contents`) passes its
-            // colour to boxes this frame does not know.
-            for change in &changes {
-                let colour = change.props.iter().any(|(i, _, _)| animations::prop_name(*i) == "color");
-                if colour && !found.contains(&change.node) {
-                    return miss("an element without a box changes colour");
-                }
             }
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             let Some(mut laid) = view.layout.take() else {
                 return Ok(false);
             };
             apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
-            // `getComputedStyle(el, '::before')` reads the frame (CH2.E16).
-            {
-                let mut pseudo_styles = view.lay.pseudo_styles.borrow_mut();
-                for change in &changes {
-                    let (node, Some(pseudo)) = animations::split_key(change.node) else {
-                        continue;
-                    };
-                    if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
-                        for (index, _, is) in &change.props {
-                            animations::set_prop_value(style, *index, is);
-                        }
-                        if let Some((_, settled)) = change.settled {
-                            style.animation_settled_opacity = settled;
-                        }
-                    }
-                }
-            }
+            apply_pseudo_frame(&view.lay, &changes);
             let display_list = self.display_list_for(id, &laid);
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.layout = Some(laid);
@@ -23698,6 +23669,7 @@ impl Engine {
         let mut writes = rustkit_bindings::ControlWrites {
             values: bindings.take_value_writes(),
             checked: bindings.take_checked_writes(),
+            layer_only: false,
         };
         Self::apply_control_writes(edit_states, checked_states, &mut writes);
     }
@@ -23752,6 +23724,15 @@ impl Engine {
             stats.forced_layouts = stats.forced_layouts.saturating_add(report.count);
             stats.forced_ms += report.ms;
         }
+        if report.framed > 0 {
+            debug!(
+                ?id,
+                forced_frames = report.framed,
+                ms = %format!("{:.1}", report.framed_ms),
+                "Reads after an animation layer write answered from a frame over the published boxes"
+            );
+            stats.forced_frames = stats.forced_frames.saturating_add(report.framed);
+        }
     }
 
     /// How a script read of geometry after a DOM write in the same task
@@ -23777,6 +23758,23 @@ impl Engine {
         let lay = view.lay.clone();
         let sheets = view.external_stylesheets.clone();
         let javascript_enabled = self.config.javascript_enabled;
+        // LAT19: the boxes the view last painted, for a read after a
+        // paint-only layer write. Weak: a paint-only frame patches them in
+        // place (`Rc::make_mut`), and the closure set after it holds the
+        // new ones; a stale handle falls back to a build. Boxes laid out at
+        // another size (a resize not painted since) are not a base either:
+        // the read takes the full build.
+        let published = match (view.layout.as_ref(), view.laid_with.as_ref()) {
+            (Some(layout), Some(with)) if with.size == bounds => Some(Rc::downgrade(layout)),
+            _ => None,
+        };
+        // #1057 R1: a full forced build since that paint laid out writes the
+        // painted boxes do not show (`style.width` then a read), and cleared
+        // the bindings' `since_layout`; a later layer-only read must not be
+        // answered from the painted boxes, which would give the old width
+        // with the new transform. Until the next publish installs a new
+        // closure (and a fresh flag), every read takes the full build.
+        let built_since_publish = Rc::new(Cell::new(false));
         Some(Rc::new(move |writes: &mut rustkit_bindings::ControlWrites| {
             let restyling = RESTYLE_BUILD.with(|b| b.try_borrow().map_or(true, |b| b.is_some()));
             let memo_held = STYLE_MEMO.with(|m| m.try_borrow_mut().is_err());
@@ -23789,7 +23787,34 @@ impl Engine {
                 debug!(?id, busy, "Forced layout skipped: build state in use");
                 return None;
             }
+            if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
+                let layout = published.as_ref().and_then(|w| w.upgrade());
+                match layout.map(|layout| {
+                    let view = layout_ctx::BuildView {
+                        id,
+                        lay: Some(lay.clone()),
+                        url: building.url.clone(),
+                        viewport: building.viewport,
+                        dpr: building.dpr,
+                        focus: lay.focused_node.get(),
+                        external_sheets: sheets.clone(),
+                    };
+                    forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
+                }) {
+                    Some(Ok(geometry)) => return Some(geometry),
+                    Some(Err(why)) => debug!(?id, why, "Forced read after a layer write needs a build"),
+                    None => debug!(?id, "Forced read after a layer write needs a build: no published boxes"),
+                }
+            }
             let started = std::time::Instant::now();
+            // LAT19: nothing a forced layout builds is painted, so the
+            // animation baseline (what the view painted of each animated
+            // element, and the clock it was built at) stays as it was: the
+            // frame that follows when script settles compares against it.
+            // Re-captured here, the frame found nothing that moved and
+            // painted nothing (reddit: no frame for as long as the loop ran).
+            let baseline = AnimationBaseline::save(&lay);
+            built_since_publish.set(true);
             Engine::apply_control_writes(
                 &mut lay.edit_states.borrow_mut(),
                 &mut lay.checked_states.borrow_mut(),
@@ -23818,6 +23843,7 @@ impl Engine {
                 bounds,
             );
             drop(memo_aside);
+            baseline.restore(&lay);
             stamp_element_scrolls(&built, &lay.element_scrolls);
             built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
             let root_element = document.document_element().map(|e| e.id.raw());
@@ -23842,6 +23868,7 @@ impl Engine {
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
                 computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
                 max_scroll,
+                framed: false,
             })
         }))
     }
@@ -44874,6 +44901,134 @@ fn for_inherited_runs(b: &mut LayoutBox, node: usize, f: &mut dyn FnMut(&mut Lay
 /// transform that becomes or stops being the identity holds no fixed or
 /// sticky box, and a colour change reaches no other element that took
 /// the old colour (it inherits it, and its own boxes are not patched).
+/// LAT2: whether an animation frame of `changes` can be placed on the
+/// laid-out boxes `layout` without a build (`Err` says why not).
+fn check_frame_over(
+    layout: &LayoutBox,
+    document: &Document,
+    changes: &[layout_ctx::FrameChange],
+    by_node: &HashMap<usize, &layout_ctx::FrameChange>,
+) -> Result<(), String> {
+    // The canvas takes the root's and body's background at build.
+    let root = document.document_element().map(|n| n.id.raw());
+    let body = document.body().map(|n| n.id.raw());
+    if changes.iter().any(|c| Some(c.node) == root || Some(c.node) == body) {
+        return Err("the root element or body animates".into());
+    }
+    let mut found = std::collections::HashSet::new();
+    check_animation_frame(layout, by_node, &mut found)?;
+    // An element without a box (`display: contents`) passes its colour to
+    // boxes this frame does not know.
+    for change in changes {
+        let colour = change.props.iter().any(|(i, _, _)| animations::prop_name(*i) == "color");
+        if colour && !found.contains(&change.node) {
+            return Err("an element without a box changes colour".into());
+        }
+    }
+    Ok(())
+}
+
+/// `getComputedStyle(el, '::before')` reads the frame (CH2.E16): the
+/// pseudo-elements' styles take its values.
+fn apply_pseudo_frame(lay: &layout_ctx::ViewLayout, changes: &[layout_ctx::FrameChange]) {
+    let mut pseudo_styles = lay.pseudo_styles.borrow_mut();
+    for change in changes {
+        let (node, Some(pseudo)) = animations::split_key(change.node) else {
+            continue;
+        };
+        if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
+            for (index, _, is) in &change.props {
+                animations::set_prop_value(style, *index, is);
+            }
+            if let Some((_, settled)) = change.settled {
+                style.animation_settled_opacity = settled;
+            }
+        }
+    }
+}
+
+/// LAT19: what the view painted of its animated elements
+/// (`Animations::captured`) and the clock it was built at. A forced
+/// layout, which paints nothing, puts them back as it found them.
+struct AnimationBaseline {
+    captured: HashMap<usize, animations::Captured>,
+    last_build_clock: Option<f64>,
+}
+
+impl AnimationBaseline {
+    fn save(lay: &layout_ctx::ViewLayout) -> Self {
+        let anims = lay.animations.borrow();
+        AnimationBaseline { captured: anims.captured.clone(), last_build_clock: anims.last_build_clock }
+    }
+
+    fn restore(self, lay: &layout_ctx::ViewLayout) {
+        let mut anims = lay.animations.borrow_mut();
+        anims.captured = self.captured;
+        anims.last_build_clock = self.last_build_clock;
+    }
+}
+
+/// LAT19: a geometry read after a paint-only Web Animations layer write
+/// (`ControlWrites::layer_only`): the frame at the animation clock placed
+/// on a copy of the boxes the view painted (`layout`), as the paint-only
+/// frame (`Engine::paint_animation_frame`) will place it when script
+/// settles; no build. The animation baseline is left as it was, so that
+/// frame still finds what moved and paints it. `Err` when the frame needs
+/// a build (a layout property moved, a box does not show the last frame,
+/// script's pause/play is pending, ...).
+fn forced_animation_frame(
+    lctx: &layout_ctx::LayoutCtx,
+    lay: &Rc<layout_ctx::ViewLayout>,
+    document: &Document,
+    layout: &Rc<LayoutBox>,
+    view: layout_ctx::BuildView,
+    bounds: (u32, u32),
+) -> Result<rustkit_bindings::ForcedGeometry, String> {
+    if !animation_repaint_enabled() {
+        return Err("paint-only frames are off".into());
+    }
+    if !lay.animated.borrow().controls.is_empty() {
+        return Err("an animation control is pending".into());
+    }
+    let started = std::time::Instant::now();
+    let baseline = AnimationBaseline::save(lay);
+    let changes = lctx.animation_frame(view);
+    baseline.restore(lay);
+    let changes = changes?;
+    let mut built = LayoutBox::clone(layout);
+    if !changes.is_empty() {
+        let by_node: HashMap<usize, &layout_ctx::FrameChange> = changes.iter().map(|c| (c.node, c)).collect();
+        check_frame_over(&built, document, &changes, &by_node)?;
+        apply_animation_frame(&mut built, &by_node);
+        // A read writes the frame's pseudo-element values into the view's
+        // shared `pseudo_styles` (as the paint-only frame does): the values
+        // of this clock, which the frame painted when script settles writes
+        // again; a full relayout instead rebuilds them all.
+        apply_pseudo_frame(lay, &changes);
+    }
+    stamp_element_scrolls(&built, &lay.element_scrolls);
+    built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
+    let root_element = document.document_element().map(|e| e.id.raw());
+    let content_height = scrollable_bottom(&built, lay.html_clips.get());
+    let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
+    let built = Rc::new(built);
+    debug!(elements = changes.len(), ms = started.elapsed().as_secs_f64() * 1000.0, "Forced read answered from an animation frame");
+    let snapshot_of = built.clone();
+    let styled = lay.clone();
+    let styles_of = built.clone();
+    Ok(rustkit_bindings::ForcedGeometry {
+        source: Box::new(move || {
+            let _snapshot_time = time_stage(Stage::Snapshot);
+            set_root_font_for(&snapshot_of, root_element, &styled);
+            geometry_only(&snapshot_of, root_element)
+        }),
+        hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
+        computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
+        max_scroll,
+        framed: true,
+    })
+}
+
 fn check_animation_frame(
     b: &LayoutBox,
     changes: &HashMap<usize, &layout_ctx::FrameChange>,
