@@ -554,7 +554,35 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
+                // SET1, Chrome for Testing 148 over 69 selects
+                // (docs/diagnostics/2026-11-11/set1_select_heights*): the
+                // menulist's content line is round(ascent) + round(descent)
+                // of its font (the line gap left out) plus 2px it keeps
+                // inside, then the vertical padding (the UA's is 0) and
+                // border (the UA's 1px each side when the author sets
+                // none). `line-height` does not apply. 13.6px Arial with
+                // padding .5rem: 12 + 3 + 2 + 16 + 2 = 35 (settings'
+                // #theme). An `appearance: none` select is a plain box
+                // around the text line (chrome's #modeSelector, 31).
+                let height = if style.appearance == rustkit_css::Appearance::None {
+                    single_line_box(19.0 * ua_scale, false, None)
+                } else {
+                    let m = measure_text_advanced(
+                        "x",
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    );
+                    let content = m.ascent.round() + m.descent.round() + 2.0;
+                    let border_v = if style.border_v_declared || author_border_v > 0.0 {
+                        author_border_v
+                    } else {
+                        2.0
+                    };
+                    content + author_pad_v + border_v
+                };
+                (widest.ceil() + well + pb_h, height)
             }
         }
     }
