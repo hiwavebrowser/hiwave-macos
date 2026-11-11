@@ -506,3 +506,18 @@ body {{ margin: 0 }} .c {{ container-type: inline-size; width: 400px }}
         "builds and measured passes, against {without:?}"
     );
 }
+
+const AUTO_MINIMUM_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-11/css_container_query_auto_minimum.html");
+
+/// #1070 R1 MED (review 5861798552): inline-size containment contains a
+/// container's automatic minimum too. Two `flex: 1` containers in a 200px
+/// row, one holding a 300px box, and the same in a `1fr 1fr` grid: Chrome
+/// for Testing 148.0.7778.216 makes all four 100 wide, so `(min-width:
+/// 150px)` holds in none. Without containment the engine floors the item
+/// holding the 300px box at its content (300, and 0 for its sibling).
+#[test]
+fn a_containers_automatic_minimum_is_contained() {
+    let heights = offset_heights(AUTO_MINIMUM_PAGE, 1280, 800, 4);
+    assert_eq!(heights, ["0", "0", "0", "0"]);
+}
