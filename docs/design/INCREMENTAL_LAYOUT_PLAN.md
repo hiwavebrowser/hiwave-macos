@@ -179,7 +179,12 @@ until a stage names them.
      absolute box under the relayout root is laid out with it. Relative
      offsets under the root are applied again after its layout.
    - The skipped build and the published-tree reuse above.
-3. **Margin collapsing.** Save each block's incoming `MarginCollapseContext`
+3. **Margin collapsing.** Implemented in part (2026-11-11): a relayout
+   root whose margins collapse through an open edge is laid out alone when
+   the chain of first (last) in-flow children down that edge is the same
+   boxes as built last time and, laid out, the same margins with height
+   (`chain_stays` before, `edge_chain` after); otherwise the root moves up
+   as before. Below is the general case, still a plan. Save each block's incoming `MarginCollapseContext`
    and cursor on the laid-out box (output fields), so a parent's child loop
    can be resumed at B instead of B being laid out alone. That lifts the
    closed-edge and non-empty conditions: the parent re-runs from B to its end
@@ -218,6 +223,15 @@ while hoisting, when the root would have reached the body: `no_retained`,
 `ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
 `fixed_after`, `geometry_moved`.
 
+## Labels are not inputs (2026-11-11)
+
+The build numbers elements in document order (`element_id`, and the
+identity's `:nth-of-type` selector), so an element inserted anywhere
+renumbers every box after it, and the diff saw all of them as changed.
+Layout reads only the identity's tag. The diff compares the tag, and the
+incremental result takes the fresh build's labels (`refresh_labels`);
+verify compares labels too (`labels`).
+
 ## What the batch 59 A/B showed (2026-11-11)
 
 The 19-site A/B in verify mode, stage 1 on develop: no relayout on any real
@@ -231,6 +245,21 @@ inside the relayout root; stage 4 (out-of-flow re-anchoring) is the one
 that opens real sites, and `changed_percent_height` and
 `changed_not_block` (inline-level and table boxes changing) come after.
 Stage 2's own counts on these sites come from the next batch A/B.
+
+`no_retained` is each page's first layout (the deferred one that waits for
+sheets and fonts): there is no earlier tree of the document to keep, and a
+tree from the previous document would diff as all-changed. It is not a
+relayout, so it is left out of the incremental share.
+
+A proxy until then: `real_site_shapes_take_the_incremental_path` mutates ten
+page shapes like the A/B's fallbacks (absolute badges and overlays in a
+growing card, an inset layer, a dropdown, a tooltip, an image in a line,
+percentage heights, a growing list, a fixed header, a flex shell). Stage 2
+lays out absolute boxes in a growing box with it as one root, so
+`subtree_positioned`/`subtree_out_of_flow` no longer apply; it took 84% of
+those relayouts incrementally, and with the margin chains above 89%. What
+remains there is a fixed header in the body and margins collapsing all the
+way to the body.
 
 ## Tests
 

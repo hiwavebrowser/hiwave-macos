@@ -84,6 +84,7 @@ pub fn relayout(
     let mut out = Relaid::default();
     let changed = nest_free(changed_roots(old_unlaid, fresh, &mut out.compared)?);
     if changed.is_empty() {
+        refresh_labels(laid, fresh);
         return Ok(out);
     }
     let mut plans = Vec::new();
@@ -104,7 +105,23 @@ pub fn relayout(
         out.bounded += u32::from(plan.stop.is_some());
     }
     out.roots = plans.into_iter().map(|p| p.root).collect();
+    refresh_labels(laid, fresh);
     Ok(out)
+}
+
+/// The fresh build's element numbers and identities, onto the laid-out
+/// tree (same shape by now): the diff ignores them, the painted tree must
+/// carry the current ones.
+fn refresh_labels(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    if laid.element_id != fresh.element_id {
+        laid.element_id = fresh.element_id;
+    }
+    if laid.identity != fresh.identity {
+        laid.identity = fresh.identity.clone();
+    }
+    for (l, f) in laid.children.iter_mut().zip(&fresh.children) {
+        refresh_labels(l, f);
+    }
 }
 
 /// Lay the box at `plan.root` out alone, from `fresh`, where the full pass
@@ -168,8 +185,100 @@ fn lay_out_root(
     {
         return Err("geometry_moved");
     }
+    // Stage 3, the part that needs no resumed child loop: margins that
+    // collapse through an open edge with the first (last) child's, down the
+    // chain of open edges, sit outside the box. The full pass adjoined the
+    // top chain above the box and leaves the bottom chain pending after it;
+    // when both chains are the margins they were, the box's place and what
+    // follows it are as before but for the delta.
+    let same = |top: bool| {
+        matches!((edge_chain(old_b, top), edge_chain(&nb, top)), (Some(a), Some(b)) if a == b)
+    };
+    if !edge_closed_top(old_b) && !same(true) {
+        return Err("margin_collapse_top");
+    }
+    if !edge_closed_bottom(old_b) && !same(false) {
+        return Err("margin_collapse_bottom");
+    }
     let delta = nb.dimensions.border_box().bottom() - d.border_box().bottom();
     Ok((nb, delta))
+}
+
+fn edge_child(b: &LayoutBox, top: bool) -> Option<&LayoutBox> {
+    let mut in_flow = b.children.iter().filter(|c| {
+        !matches!(c.position, Position::Absolute | Position::Fixed) && c.float == Float::None
+    });
+    if top {
+        in_flow.next()
+    } else {
+        in_flow.last()
+    }
+}
+
+/// Before layout: down the chain of open edges of the laid-out box `l`,
+/// the first (`top`) or last in-flow child is the same box as built last
+/// time (`u`) and now (`n`), and had height. Same inputs give the same
+/// margins at the same width; `edge_chain` confirms after layout.
+fn chain_stays(l: &LayoutBox, n: &LayoutBox, u: &LayoutBox, top: bool) -> bool {
+    let (mut l, mut n, mut u) = (l, n, u);
+    loop {
+        let open = if top {
+            !edge_closed_top(l)
+        } else {
+            !edge_closed_bottom(l)
+        };
+        if !open {
+            return true;
+        }
+        match (edge_child(l, top), edge_child(n, top), edge_child(u, top)) {
+            (None, None, None) => return true,
+            (Some(lc), Some(nc), Some(uc)) => {
+                if is_inline_level(lc) && is_inline_level(nc) {
+                    return true;
+                }
+                if !own_inputs_equal(nc, uc) || lc.dimensions.border_box().height <= 0.0 {
+                    return false;
+                }
+                (l, n, u) = (lc, nc, uc);
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The margins of a laid-out box's chain of first (`top`) or last in-flow
+/// children while its edge is open, each with whether the child has height
+/// (an empty child collapses through and joins its sibling's margin:
+/// `None`, so the chains never compare equal). Rounded to 0.01 px.
+fn edge_chain(b: &LayoutBox, top: bool) -> Option<Vec<i64>> {
+    let mut out = Vec::new();
+    let mut cur = b;
+    loop {
+        let open = if top {
+            !edge_closed_top(cur)
+        } else {
+            !edge_closed_bottom(cur)
+        };
+        if !open {
+            return Some(out);
+        }
+        let Some(child) = edge_child(cur, top) else {
+            return Some(out);
+        };
+        if is_inline_level(child) {
+            return Some(out);
+        }
+        if child.dimensions.border_box().height <= 0.0 {
+            return None;
+        }
+        let m = if top {
+            child.dimensions.margin.top
+        } else {
+            child.dimensions.margin.bottom
+        };
+        out.push((m * 100.0).round() as i64);
+        cur = child;
+    }
 }
 
 /// Drop every path that has another (or an equal one) as a prefix, sorted.
@@ -382,7 +491,10 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         containing_block_index,
         viewport,
         sticky_state,
-        element_id,
+        // Labels the build numbers in document order (an element inserted
+        // before a box renumbers it): layout reads only the tag. The
+        // incremental result takes the fresh build's (`refresh_labels`).
+        element_id: _,
         identity,
         link_href,
         focused_caret,
@@ -412,8 +524,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         && *z_index == b.z_index
         && *containing_block_index == b.containing_block_index
         && *viewport == b.viewport
-        && *element_id == b.element_id
-        && *identity == b.identity
+        && identity.as_ref().map(|i| &i.tag) == b.identity.as_ref().map(|i| &i.tag)
         && *link_href == b.link_href
         && *focused_caret == b.focused_caret
         && *focused_selection == b.focused_selection
@@ -554,17 +665,16 @@ fn root_ok(l: &LayoutBox, n: &LayoutBox, u: &LayoutBox) -> Result<(), Fallback> 
     {
         return Err("changed_not_block");
     }
+    // Margins collapsing through an open edge must be what they were: the
+    // same boxes at the ends of the chain now (`chain_stays`), and the same
+    // margins once the box is laid out (`edge_chain`, in `lay_out_root`).
     let bfc = crate::margin_collapse::establishes_bfc(s, n.float);
     if !bfc {
-        let top = edge_closed_top(l);
-        let bottom = edge_closed_bottom(l);
-        for b in [n, u] {
-            if !top && !b.children.first().is_some_and(is_inline_level) {
-                return Err("margin_collapse_top");
-            }
-            if !bottom && !b.children.last().is_some_and(is_inline_level) {
-                return Err("margin_collapse_bottom");
-            }
+        if !chain_stays(l, n, u, true) {
+            return Err("margin_collapse_top");
+        }
+        if !chain_stays(l, n, u, false) {
+            return Err("margin_collapse_bottom");
         }
     }
     subtree_ok(n, bfc)?;
@@ -803,6 +913,9 @@ fn compare_into(
     }
     if !edges_close(&da.margin, &db.margin) {
         what.push("margin");
+    }
+    if a.element_id != b.element_id || a.identity != b.identity {
+        what.push("labels");
     }
     // A line's break points, width, offset and justification space fix
     // where each of its glyph runs is drawn.
