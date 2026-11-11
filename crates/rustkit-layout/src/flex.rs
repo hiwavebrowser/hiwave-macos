@@ -1979,7 +1979,7 @@ fn create_flex_item<'a>(
         let content_min = match main_axis {
             Axis::Horizontal => {
                 crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
-                    .unwrap_or_else(|| crate::grid::estimate_min_content_width(layout_box))
+                    .unwrap_or_else(|| crate::grid::content_min_content_width(layout_box))
             }
             // No min-content HEIGHT estimator exists yet. Returning 0.0 keeps
             // the previous behaviour on the vertical main axis rather than
