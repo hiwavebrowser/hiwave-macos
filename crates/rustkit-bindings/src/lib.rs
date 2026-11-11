@@ -396,13 +396,25 @@ pub struct JsNavigator {
     pub hardware_concurrency: usize,
 }
 
+/// `navigator.platform` for the OS the engine is built for, as Chromium
+/// reports it ("MacIntel" on every Mac, Apple silicon included).
+pub const NAVIGATOR_PLATFORM: &str = if cfg!(target_os = "macos") {
+    "MacIntel"
+} else if cfg!(windows) {
+    "Win32"
+} else if cfg!(target_arch = "aarch64") {
+    "Linux aarch64"
+} else {
+    "Linux x86_64"
+};
+
 impl Default for JsNavigator {
     fn default() -> Self {
         Self {
             app_name: "RustKit".to_string(),
             app_version: "1.0".to_string(),
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RustKit/1.0".to_string(),
-            platform: "Win32".to_string(),
+            platform: NAVIGATOR_PLATFORM.to_string(),
             language: "en-US".to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
             online: true,
@@ -1528,7 +1540,7 @@ impl DomBindings {
                     userAgent: 'RustKit/1.0',
                     language: 'en-US',
                     languages: ['en-US', 'en'],
-                    platform: 'Win32',
+                    platform: '__NAVIGATOR_PLATFORM__',
                     onLine: true
                 },
                 history: {
@@ -1573,7 +1585,7 @@ impl DomBindings {
             var self = window;
         "#;
 
-        runtime.evaluate_script(window_js)?;
+        runtime.evaluate_script(&window_js.replace("__NAVIGATOR_PLATFORM__", NAVIGATOR_PLATFORM))?;
 
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
@@ -3289,6 +3301,27 @@ mod tests {
         // Something defined first wins: the shim never overwrites.
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         assert_eq!(eval_string(&bindings, "String(navigator.userAgent)"), "RustKit/1.0");
+    }
+
+    /// `navigator.platform` names the OS the engine runs on, as Chromium's
+    /// does (Chrome for Testing 148 on macOS arm64: "MacIntel"). It said
+    /// "Win32" everywhere, so HiWave's own chrome page on macOS showed the
+    /// focus-mode hint as "Ctrl+Shift+F" where the page writes "⌘⇧F" for a
+    /// Mac (CB6b: `#focusHintKey` 77.7 wide for Chrome's 41.4).
+    #[test]
+    fn navigator_platform_names_the_host_os() {
+        let want = if cfg!(target_os = "macos") {
+            "MacIntel"
+        } else if cfg!(windows) {
+            "Win32"
+        } else if cfg!(target_arch = "aarch64") {
+            "Linux aarch64"
+        } else {
+            "Linux x86_64"
+        };
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(eval_string(&bindings, "String(navigator.platform)"), want);
+        assert_eq!(JsNavigator::default().platform, want);
     }
 
     /// `URL` / `URLSearchParams` (lyft, weather and others died on
