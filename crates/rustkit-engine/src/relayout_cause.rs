@@ -262,6 +262,9 @@ pub struct RelayoutStats {
     /// The most recent relayout's inline svg pre-pass, in milliseconds
     /// (`svg_ms` of the relayout log line).
     pub last_svg_ms: f64,
+    /// The most recent relayout's layout stage, in milliseconds (INC5's
+    /// timing; under `RUSTKIT_INCREMENTAL_LAYOUT=verify` both passes).
+    pub last_layout_ms: f64,
 }
 
 impl RelayoutStats {
