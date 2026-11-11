@@ -657,6 +657,12 @@ pub(crate) fn note_width_value(style: &mut ComputedStyle, bit: u8, parsed: bool,
     } else {
         style.width_keywords |= bit;
     }
+    if bit == 1 {
+        // `width` only: which keyword it was (CB3c). A later length or `auto` clears it.
+        let keyword = value.trim().to_ascii_lowercase();
+        style.width_max_content =
+            !parsed && matches!(keyword.as_str(), "max-content" | "-webkit-max-content" | "-moz-max-content");
+    }
 }
 
 fn content_width(

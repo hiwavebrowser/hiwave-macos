@@ -538,6 +538,12 @@ mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
 #[cfg(test)]
+mod appearance_apply_tests;
+#[cfg(test)]
+mod pointer_reads_has_tests;
+#[cfg(test)]
+mod pointer_reads_lat20_tests;
+#[cfg(test)]
 mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
@@ -571,6 +577,8 @@ mod script_scroll_tests;
 mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_percent_basis_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_aspect_ratio_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -644,6 +652,8 @@ mod navigation_release_tests;
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod button_line_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod button_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -737,6 +747,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_maximize_tracks_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
@@ -15878,6 +15890,16 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
+/// A size the child inherits: the parent's computed value. An `em` length
+/// computes to pixels in the parent's font (CSS Values 4 §6.1.1), so it is
+/// handed down as pixels; everything else is handed down as written.
+fn inherited_size(length: &rustkit_css::Length, parent: &ComputedStyle) -> rustkit_css::Length {
+    match (length, &parent.font_size) {
+        (rustkit_css::Length::Em(n), rustkit_css::Length::Px(font)) => rustkit_css::Length::Px(n * font),
+        _ => length.clone(),
+    }
+}
+
 impl Engine {
 
     /// Apply a single CSS property to a computed style.
@@ -15931,6 +15953,19 @@ impl Engine {
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
             "box-sizing" => style.box_sizing = parent.box_sizing,
+            // The box's sizes (LAY1): the parent's COMPUTED value, so a
+            // percentage stays a percentage and resolves against this box's
+            // own containing block, and an `em` length is the parent's
+            // (computed in the parent's font). A recorded search page's
+            // result cards are `a { width: inherit; height: inherit }` under
+            // a `width: 100%; height: 100%` box; the keyword used to leave the
+            // child at `auto`.
+            "width" => style.width = inherited_size(&parent.width, parent),
+            "height" => style.height = inherited_size(&parent.height, parent),
+            "min-width" => style.min_width = inherited_size(&parent.min_width, parent),
+            "min-height" => style.min_height = inherited_size(&parent.min_height, parent),
+            "max-width" => style.max_width = inherited_size(&parent.max_width, parent),
+            "max-height" => style.max_height = inherited_size(&parent.max_height, parent),
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
             "cursor" => style.cursor = parent.cursor,
@@ -16048,6 +16083,34 @@ impl layout_ctx::LayoutCtx {
         }
         if matches!(property, "line-height" | "font") {
             style.line_height_declared = true;
+        }
+        // The same, side by side (CB3c): top, right, bottom, left.
+        {
+            let sides = |name: &str| -> &'static [usize] {
+                match name {
+                    "padding" | "border" | "border-width" | "border-style" => &[0, 1, 2, 3],
+                    "padding-top" | "border-top" | "border-top-width" | "border-top-style" => &[0],
+                    "padding-right" | "border-right" | "border-right-width" | "border-right-style" => &[1],
+                    "padding-bottom" | "border-bottom" | "border-bottom-width" | "border-bottom-style" => &[2],
+                    "padding-left" | "border-left" | "border-left-width" | "border-left-style" => &[3],
+                    _ => &[],
+                }
+            };
+            if property.starts_with("padding") {
+                for &i in sides(property) {
+                    style.padding_declared[i] = true;
+                }
+            } else if property.starts_with("border") {
+                // A STYLE sets the width only when it is `none`/`hidden` (width 0); any other
+                // style alone leaves the UA's width.
+                let style_only = property.ends_with("-style");
+                let zeroing = value.split_whitespace().any(|t| matches!(t, "none" | "hidden"));
+                if !style_only || zeroing {
+                    for &i in sides(property) {
+                        style.border_declared[i] = true;
+                    }
+                }
+            }
         }
         if matches!(
             property,
@@ -24292,16 +24355,7 @@ impl Engine {
             if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
-                    let view = layout_ctx::BuildView {
-                        id,
-                        lay: Some(lay.clone()),
-                        url: building.url.clone(),
-                        viewport: building.viewport,
-                        dpr: building.dpr,
-                        focus: lay.focused_node.get(),
-                        external_sheets: sheets.clone(),
-                        external_sheet_owners: owners.clone(),
-                    };
+                    let view = building.for_build();
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
                     Some(Ok(geometry)) => return Some(geometry),
@@ -24331,16 +24385,7 @@ impl Engine {
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
-                layout_ctx::BuildView {
-                    id,
-                    lay: Some(lay.clone()),
-                    url: building.url.clone(),
-                    viewport: building.viewport,
-                    dpr: building.dpr,
-                    focus: lay.focused_node.get(),
-                    external_sheets: sheets.clone(),
-                    external_sheet_owners: owners.clone(),
-                },
+                building.for_build(),
                 &document,
                 &sheets,
                 javascript_enabled,
@@ -42355,7 +42400,7 @@ impl SubjectCompound {
 /// class on it as an ancestor or an earlier sibling (those are known by
 /// tag, classes and id). A page can spell it only by writing U+0001 into a
 /// class or an attribute name, and then styles that element as hovered.
-const HOVER_MARK: &str = "\u{1}hover";
+pub(crate) const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 /// The focused element (`:focus`) and it and its ancestors
 /// (`:focus-within`), marked like the two above: by the build
@@ -44564,21 +44609,21 @@ struct SelectorReads {
 /// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
 /// a rule's match from.
 #[derive(Default)]
-struct PointerReads {
+pub(crate) struct PointerReads {
     /// The compounds that carry it, without it, each with how far a rule
     /// reaches past a matching element's later siblings: an element none
     /// of them matches by tag, classes and id gains or loses the
     /// pseudo-class without any rule noticing.
-    compounds: Vec<PointerCompound>,
+    pub(crate) compounds: Vec<PointerCompound>,
     /// Index into `compounds` by tag, classes, id and attributes.
     seen: HashMap<PointerCompoundKey, usize>,
     /// Each `:has()` whose argument reads it (LAT3, a marketplace's
     /// `[data-x]:not(:has([data-x]:hover)):hover::after`).
-    has: Vec<HasPointer>,
+    pub(crate) has: Vec<HasPointer>,
     /// Some selector names it where neither `compounds` nor `has` shows it
     /// (a `:has()` argument that starts with `+` or `~`, a member the
     /// selector parser rejects): any element may count.
-    anywhere: bool,
+    pub(crate) anywhere: bool,
     /// LAT20: the shape of the first selector that set `anywhere`
     /// (`anywhere_shape`), for the relayout line's `restyle_miss`: never
     /// the selector's text.
@@ -44688,7 +44733,7 @@ struct PointerCompound {
 impl PointerReads {
     /// Record where `selector` reads `name` (`":hover"`), which the
     /// compound parser turns into the class `mark`.
-    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+    pub(crate) fn note(&mut self, selector: &str, name: &str, mark: &str) {
         if pseudo_named(selector, name) == 0 {
             return;
         }

@@ -329,6 +329,11 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         text_lines,
         text_flow_first_offset,
         percent_height_is_auto,
+        // LAY1: layout's own bookkeeping, reset or set by every layout of
+        // the box (`children_percent_base`) or by its parent just before it
+        // (`abspos_cb_hint`); never an input from the tree.
+        children_percent_base: _,
+        abspos_cb_hint: _,
         root_element_height,
         table_span,
         table_caption_shift,
