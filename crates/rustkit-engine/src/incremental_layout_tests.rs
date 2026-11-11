@@ -914,3 +914,46 @@ fn a_change_in_a_content_sized_column_flex_item_falls_back() {
     let verify = mutate(Mode::Verify, html, GROW);
     assert_eq!(verify.mismatches, 0, "{verify:?}");
 }
+
+/// A fixed-height `overflow: auto` box with a styled (space-taking)
+/// scrollbar: a boundary whose scroll extent and bar follow its content
+/// (Prometheus #1064 MED). `#t` is inside it, `#u` after it.
+const SCROLLER: &str = "<style>#s{height:80px;overflow:auto;padding:2px} #s::-webkit-scrollbar{width:8px}\
+    #s::-webkit-scrollbar-thumb{background:#888}</style>\
+    <div><div id=s><p id=t>short</p><p>two</p></div><p id=u>after</p></div>";
+
+/// Content growing inside a scroller that overflows already keeps its bar:
+/// the scroll extent follows the spliced content, the marks pass finds
+/// nothing new, and the relayout is incremental.
+#[test]
+fn a_scroller_that_keeps_its_bar_is_relaid() {
+    let grown = "document.getElementById('t').firstChild.data = 'overflowing words '.repeat(30);";
+    let more = "document.getElementById('t').firstChild.data = 'more overflowing words '.repeat(40);";
+    let _mode = ModeGuard::set(Mode::Verify);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+        })
+        .expect("view");
+    engine.load_html(view, SCROLLER).expect("load_html");
+    engine.execute_script(view, grown).expect("grow");
+    engine.execute_script(view, more).expect("grow more");
+    let s = stats(&engine, view);
+    assert_eq!(s.mismatches, 0, "{s:?}");
+    assert!(s.last.starts_with("relaid"), "{s:?}");
+}
+
+/// Content growing past the scroller's height gives it a bar, which
+/// narrows its content and re-wraps it: the full layout's second pass.
+#[test]
+fn a_scroller_that_gains_a_bar_falls_back() {
+    let grown = "document.getElementById('t').firstChild.data = 'overflowing words '.repeat(30);";
+    let on = mutate(Mode::On, SCROLLER, grown);
+    assert_eq!(last_fallback(&on), "scrollbar_changed", "{on:?}");
+    let verify = mutate(Mode::Verify, SCROLLER, grown);
+    assert_eq!(verify.mismatches, 0, "{verify:?}");
+}
