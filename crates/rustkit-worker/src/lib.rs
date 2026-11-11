@@ -860,6 +860,23 @@ mod tests {
         assert_eq!(scope.location, url);
     }
 
+    /// A worker's `navigator.platform` is the page's (CB6c): the OS the
+    /// engine runs on, as Chromium names it ("MacIntel" on every Mac). It
+    /// said "Win32" while the page said "MacIntel" after #1069.
+    #[test]
+    fn worker_navigator_platform_names_the_host_os() {
+        let want = if cfg!(target_os = "macos") {
+            "MacIntel"
+        } else if cfg!(windows) {
+            "Win32"
+        } else if cfg!(target_arch = "aarch64") {
+            "Linux aarch64"
+        } else {
+            "Linux x86_64"
+        };
+        assert_eq!(WorkerNavigator::new().platform, want);
+    }
+
     #[test]
     fn test_worker_navigator() {
         let nav = WorkerNavigator::new();
