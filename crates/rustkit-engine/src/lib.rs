@@ -619,6 +619,8 @@ mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod button_line_height_tests;
 #[cfg(all(test, feature = "headless"))]
+mod button_width_tests;
+#[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
 mod record_elapsed_tests;
