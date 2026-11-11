@@ -302,6 +302,23 @@ pub fn ct_weight_trait(css_weight: u16) -> f64 {
 /// text, enough to wrap a string Chrome fits.
 pub fn create_system_font_with_weight(size: f64, css_weight: u16) -> CTFont {
     let base = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+    system_font_weighted(base, size, css_weight)
+}
+
+/// The system font's italic at `css_weight`: the italic face first, then the
+/// weight on it, so the `wght` variation is not lost to the trait copy
+/// (Chrome for Testing 148: italic system-ui is .SFNS-RegularItalic, at 700
+/// .SFNS-BoldItalic).
+pub fn create_system_italic_with_weight(size: f64, css_weight: u16) -> CTFont {
+    use core_text::font_descriptor::kCTFontItalicTrait;
+    let upright = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+    let base = upright
+        .clone_with_symbolic_traits(kCTFontItalicTrait, kCTFontItalicTrait)
+        .unwrap_or(upright);
+    system_font_weighted(base, size, css_weight)
+}
+
+fn system_font_weighted(base: CTFont, size: f64, css_weight: u16) -> CTFont {
     if css_weight == 400 {
         return base;
     }
@@ -882,8 +899,15 @@ fn create_font_with_traits(
         // as Chrome/Skia do. "-Bold" name variants never exist for it, and the
         // UI-font API alone offers only Regular/Bold — so the previous
         // `weight >= 600` gate shaped 300 as Regular and 600 as Bold.
-        if is_system_family(&lower) && !italic {
-            return Ok(create_system_font_with_weight(size, weight));
+        if is_system_family(&lower) {
+            // An italic system family is the system font's italic (before,
+            // it fell through to the name guesses and on to the default
+            // serif: Times-Italic where layout measured SF).
+            return Ok(if italic {
+                create_system_italic_with_weight(size, weight)
+            } else {
+                create_system_font_with_weight(size, weight)
+            });
         }
 
         let mapped = map_generic(&lower, fam);
@@ -2353,7 +2377,22 @@ mod tests {
             assert!(regular.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} italic trait");
             let bold = create_font_with_traits(family, 14.0, 700, true).expect("a font");
             assert!(bold.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} 700 italic trait");
-            assert!(bold.symbolic_traits() & font_descriptor::kCTFontBoldTrait != 0, "{family} 700 bold trait");
+            // Bold by its width (a variable face need not set the bold
+            // trait): Chrome 72.73 for italic 400 and 78.48 for italic 700.
+            let width = |f: &CTFont| {
+                use core_foundation::attributed_string::CFMutableAttributedString;
+                use core_foundation::base::CFRange;
+                use core_foundation::string::CFString;
+                use core_text::line::CTLine;
+                use core_text::string_attributes::kCTFontAttributeName;
+                let mut astr = CFMutableAttributedString::new();
+                astr.replace_str(&CFString::new("Hello world"), CFRange::init(0, 0));
+                let range = CFRange::init(0, astr.char_len());
+                unsafe { astr.set_attribute(range, kCTFontAttributeName, f) };
+                CTLine::new_with_attributed_string(astr.as_concrete_TypeRef()).get_typographic_bounds().width
+            };
+            assert!((width(&regular) - 72.73).abs() < 0.3, "{family} italic 400 width {}", width(&regular));
+            assert!((width(&bold) - 78.48).abs() < 0.3, "{family} italic 700 width {}", width(&bold));
         }
     }
 
