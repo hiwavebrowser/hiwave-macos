@@ -66,7 +66,10 @@ pub(crate) fn set_mode_for_test(mode: Option<Mode>) {
 pub(crate) struct Key {
     pub(crate) bounds: (u32, u32),
     pub(crate) cb_width: f32,
-    pub(crate) fonts: usize,
+    /// The font-load generation (`rustkit_text::webfonts::generation()`)
+    /// of the face set text is measured with: a web font landing after a
+    /// layout changes text metrics, not the box tree.
+    pub(crate) fonts: u64,
 }
 
 /// The root post-passes' inputs (`finish_root`): the root's laid-out size

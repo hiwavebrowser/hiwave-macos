@@ -23,8 +23,11 @@ over all of it. The `DirtySet` from restyle PR 1 is computed and only logged.
 - `verify`: every layout runs the full pass as today and, when the incremental
   path is eligible, the incremental pass too. Every box rect of the two trees is
   compared (content, padding, border and margin edges, to 0.01 px, plus the tree
-  shape and each text box's line count and widths). The page is painted from the
-  full tree. Mismatches are counted on the view and logged as shapes only (the
+  shape and each text box's lines: count, break points, width, x offset and
+  justification space, which fix where every glyph run is drawn). The page is
+  painted from the full tree. Verify does not compare scrollable overflow,
+  `scrollbar_overflows` or stacking contexts, so "0 mismatches" is box and
+  line equivalence, not full equivalence. Mismatches are counted on the view and logged as shapes only (the
   box's child-index path, box kind and which edge moved), never text or URLs.
   Under `cfg(test)` a mismatch panics, so any engine test run with
   `RUSTKIT_INCREMENTAL_LAYOUT=verify` is an equivalence test.
@@ -52,8 +55,14 @@ with the view; restyle note §6):
   the tree as layout left it. A forced layout's tree is still held by its
   geometry closures and is copied;
 - the key it was laid out under: viewport bounds, initial containing block
-  width and web font count. A changed key drops the state and takes the full
-  path.
+  width and the font-load generation (`rustkit_text::webfonts::generation()`,
+  which moves whenever the face set text is measured with changes: a web
+  font finishing its load, or another set installed on the thread). A
+  changed key drops the state and takes the full path. Until batch 59 the
+  key held the partition's face count, read outside the build, where it was
+  always the opaque partition's (0): a font landing after the first layout
+  left the retained tree's stale text measurements standing (cnn, 2963
+  mismatches in one `font_loaded` relayout).
 
 The state is dropped with the document. Its cost is one extra box tree per
 view (the unlaid one, about 1.5 KB per element) and one copy of the fresh
@@ -149,7 +158,9 @@ until a stage names them.
      does not contain them, a fixed box under it) moves up to its parent,
      and so does one under an ancestor that does not just grow (flex, grid,
      table, columns, a float, an absolute box, a size container, a
-     percentage or keyword min/max height). A relayout root may be a flex or
+     percentage or keyword min/max height, an `aspect-ratio` with an auto
+     height, whose height comes from its width and grows with its content
+     only past the ratio height). A relayout root may be a flex or
      grid container: it is laid out whole, and only its own height delta
      moves what follows. A root that would be the body (or the root box)
      falls back: the full layout is as cheap.
@@ -203,8 +214,23 @@ while hoisting, when the root would have reached the body: `no_retained`,
 `margin_collapse_bottom`, `collapse_through`, `ancestor_not_block`,
 `ancestor_flex`, `ancestor_grid`, `ancestor_table`, `ancestor_columns`,
 `ancestor_container`, `ancestor_out_of_flow`, `ancestor_sized`,
+`ancestor_aspect_ratio`,
 `ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
 `fixed_after`, `geometry_moved`.
+
+## What the batch 59 A/B showed (2026-11-11)
+
+The 19-site A/B in verify mode, stage 1 on develop: no relayout on any real
+site took the incremental path. The fallbacks, by count: `unchanged` 45 (the
+retained tree stood; one of these was the font-key bug above),
+`no_retained` 19 (each page's first layout), `subtree_positioned` 13,
+`subtree_out_of_flow` 10, `changed_percent_height` 9, `changed_not_block` 8.
+Real pages put positioned and out-of-flow boxes inside the boxes that
+change, which stage 1 refuses and stage 2 handles only when they lay out
+inside the relayout root; stage 4 (out-of-flow re-anchoring) is the one
+that opens real sites, and `changed_percent_height` and
+`changed_not_block` (inline-level and table boxes changing) come after.
+Stage 2's own counts on these sites come from the next batch A/B.
 
 ## Tests
 

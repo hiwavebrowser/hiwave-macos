@@ -675,6 +675,11 @@ fn classify_ancestor(a: &LayoutBox, parent: Option<&LayoutBox>) -> Ancestor {
     if !auto_height {
         return Ancestor::Hoist("ancestor_sized");
     }
+    // An auto height with a ratio comes from the width, and the content
+    // raises it only past the ratio height: it does not just grow.
+    if s.aspect_ratio.is_some() {
+        return Ancestor::Hoist("ancestor_aspect_ratio");
+    }
     // A min- or max-height clamps the content height; `splice` checks the
     // old and new heights are both on the content side of it.
     let keyword = |l: &Length| {
@@ -799,18 +804,18 @@ fn compare_into(
     if !edges_close(&da.margin, &db.margin) {
         what.push("margin");
     }
-    let lines = |l: &Option<Vec<crate::TextLine>>| {
-        l.as_ref()
-            .map(|v| v.iter().map(|t| (t.width, t.x_offset)).collect::<Vec<_>>())
-    };
-    let (la, lb) = (lines(&a.text_lines), lines(&b.text_lines));
-    let lines_close = match (&la, &lb) {
+    // A line's break points, width, offset and justification space fix
+    // where each of its glyph runs is drawn.
+    let lines_close = match (&a.text_lines, &b.text_lines) {
         (None, None) => true,
         (Some(x), Some(y)) => {
             x.len() == y.len()
-                && x.iter()
-                    .zip(y)
-                    .all(|(p, q)| close(p.0, q.0) && close(p.1, q.1))
+                && x.iter().zip(y).all(|(p, q)| {
+                    p.text == q.text
+                        && close(p.width, q.width)
+                        && close(p.x_offset, q.x_offset)
+                        && close(p.justify_space, q.justify_space)
+                })
         }
         _ => false,
     };

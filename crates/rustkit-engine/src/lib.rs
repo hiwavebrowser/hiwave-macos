@@ -11528,7 +11528,7 @@ impl layout_ctx::LayoutCtx {
         // full anyway and compares.
         use incremental_layout::Mode as IncMode;
         let inc_mode = if lay.is_some() { incremental_layout::mode() } else { IncMode::Off };
-        let inc_key = incremental_layout::Key { bounds, cb_width, fonts: self.web_font_count() };
+        let inc_key = incremental_layout::Key { bounds, cb_width, fonts: rustkit_layout::webfonts::generation() };
         let scrollbar_pass = unlaid.is_some() || !remembered.is_empty() || root_bar_always;
         let mut incremental: Option<LayoutBox> = None;
         let mut unchanged = false;
@@ -11718,7 +11718,11 @@ impl layout_ctx::LayoutCtx {
         }
         let mut slot = lay.incremental_layout.borrow_mut();
         let retained = slot.as_mut()?;
-        let key = incremental_layout::Key { bounds, cb_width: bounds.0 as f32, fonts: self.web_font_count() };
+        let key = incremental_layout::Key {
+            bounds,
+            cb_width: bounds.0 as f32,
+            fonts: rustkit_layout::webfonts::generation(),
+        };
         if retained.key != key {
             return None;
         }

@@ -455,7 +455,9 @@ fn verify_mode_shows_no_mismatch_on_the_layout_corpus() {
 /// not grow it by the delta: the box is laid out whole (hoisted to).
 #[test]
 fn a_change_inside_an_aspect_ratio_box_relays_out_the_box() {
-    let html = "<div><div style='aspect-ratio:2/1'><p id=t>x</p></div><p>after</p></div>";
+    // Padded, so the box's own margins stay off its children's and it can
+    // be laid out alone.
+    let html = "<div><div style='aspect-ratio:2/1;padding:1px'><p id=t>x</p></div><p>after</p></div>";
     let stats = verified(html, GROW);
     assert!(stats.hoists >= 1, "hoisted to the aspect-ratio box: {stats:?}");
 }
@@ -496,16 +498,17 @@ fn a_web_font_landing_after_layout_measures_text_afresh() {
     rt.block_on(engine.load_url(view, url)).expect("load_url");
     let loaded = stats(&engine, view);
     assert_eq!(loaded.mismatches, 0, "{loaded:?}");
+    assert_eq!(loaded.last, "fallback(key_changed)", "the face landing moved the key: {loaded:?}");
     // The first line is in Ahem: 13 characters of 20px.
     let tree = laid(&engine, view);
     let mut widths = Vec::new();
-    fn first_lines(b: &LayoutBox, out: &mut Vec<f32>) {
-        if let Some(lines) = &b.text_lines {
-            out.extend(lines.iter().map(|l| l.width));
+    fn text_widths(b: &LayoutBox, out: &mut Vec<f32>) {
+        if matches!(b.box_type, BoxType::Text(_)) {
+            out.push(b.dimensions.content.width);
         }
-        b.children.iter().for_each(|c| first_lines(c, out));
+        b.children.iter().for_each(|c| text_widths(c, out));
     }
-    first_lines(&tree, &mut widths);
+    text_widths(&tree, &mut widths);
     assert!(
         widths.first().is_some_and(|w| (w - 260.0).abs() < 0.5),
         "the page is measured in the web font: {widths:?} ({loaded:?})"
