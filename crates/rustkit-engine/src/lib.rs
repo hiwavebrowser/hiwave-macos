@@ -629,6 +629,8 @@ mod live_timer_slice_tests;
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
+#[cfg(test)]
+mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1622,8 +1624,10 @@ pub struct EngineConfig {
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
     /// Iterations any single loop in a page script may run before Boa
-    /// throws an error the script cannot catch. Boa has no wall-clock
-    /// interrupt; this is what stops `while (true) {}` from hanging a load.
+    /// throws an error the script cannot catch. It is the guard for a config
+    /// without `interrupt_scripts_at_budget`; with the watchdog on, the time
+    /// budget stops a runaway and this is only a backstop. 10M ended a
+    /// legitimate heavy loop in 50 to 70 ms in an optimized build (JS1).
     pub script_loop_iteration_limit: u64,
     /// Device pixel ratio an image's `srcset` is selected for (E54b): 1.0 for the headless and
     /// parity captures, the display's scale in the app. Not a layout scale: boxes stay in CSS px.
@@ -1701,7 +1705,7 @@ impl Default for EngineConfig {
             disable_animations: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
-            script_loop_iteration_limit: 10_000_000,
+            script_loop_iteration_limit: 1_000_000_000,
             device_pixel_ratio: 1.0,
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
@@ -2207,8 +2211,11 @@ fn end_script_turn(bindings: &DomBindings) {
 /// the loop limit only WHILE A WATCHDOG TURN IS OPEN (`armed_microtask_job_cap`): the budget
 /// interrupt, which Boa reads at every call microtask jobs included, is what bounds the time of an
 /// endless chain (measured: ~8.6k jobs in a 400 ms budget), and it only runs inside an armed turn.
-/// An evaluation outside one (a chrome IPC `execute_script`, `history.back()`) has no deadline, so
-/// it keeps the 100 000 cap (Prometheus R1 on #1031).
+/// An evaluation outside one has no deadline, so it keeps the 100 000 cap (Prometheus R1 on
+/// #1031). `Engine::execute_script` is no longer such an evaluation: it arms a live turn (JS1), so
+/// a promise chain there is bounded by the live-turn time budget, and with the 1G default loop
+/// limit by nothing else. What still runs unarmed is what goes straight to the bindings
+/// (turn 0, bookkeeping).
 fn microtask_job_cap(config: &EngineConfig) -> u64 {
     config.script_loop_iteration_limit.min(100_000)
 }
@@ -23494,9 +23501,17 @@ impl Engine {
         // A script that threw may still have written to the DOM before it
         // did, so the flush runs either way.
         let turn = wgate::script_turn();
+        // This path starts no turn of its own, so without arming one the
+        // only bound on a `while (true) {}` typed into the devtools console
+        // (or sent by the chrome) is the loop-iteration cap (JS1).
+        let armed = arm_live_turn(&self.config, bindings);
         let result = bindings.evaluate(script);
+        let stopped = end_live_turn(&self.config, armed, bindings, "eval");
         drop(turn);
         self.flush_script_dom_writes(id, None)?;
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
         let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
@@ -24530,6 +24545,12 @@ impl EngineBuilder {
     /// (`EngineConfig::script_budget_ms`).
     pub fn script_budget_ms(mut self, ms: u64) -> Self {
         self.config.script_budget_ms = ms;
+        self
+    }
+
+    /// Iterations one loop may run (`EngineConfig::script_loop_iteration_limit`).
+    pub fn script_loop_iteration_limit(mut self, limit: u64) -> Self {
+        self.config.script_loop_iteration_limit = limit;
         self
     }
 
