@@ -2309,6 +2309,23 @@ mod tests {
         assert_eq!(ps("-apple-system, \"Segoe UI\", Helvetica"), "Helvetica");
     }
 
+    /// A bold or italic `-apple-system` (or any all-unknown list) paints in
+    /// the weighted default face, as layout measures it. Chrome for Testing
+    /// 148 (CSS.getPlatformFontsForNode, 14px): 700 is Times-Bold, italic
+    /// Times-Italic, both Times-BoldItalic (Prometheus R1 MED on #1074).
+    #[test]
+    fn an_all_unknown_list_paints_the_weighted_default_face() {
+        let ps = |weight: u16, italic: bool| {
+            create_font_with_traits("-apple-system", 14.0, weight, italic)
+                .expect("a font")
+                .postscript_name()
+        };
+        assert_eq!(ps(700, false), "Times-Bold");
+        assert_eq!(ps(400, true), "Times-Italic");
+        assert_eq!(ps(700, true), "Times-BoldItalic");
+        assert_eq!(ps(400, false), "Times-Roman");
+    }
+
     /// Paint draws the fallback glyph from that same face: the advance the
     /// rasteriser reports is Menlo's, not Apple Symbols'.
     #[test]
