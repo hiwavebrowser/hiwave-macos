@@ -4978,6 +4978,19 @@ impl LayoutBox {
         self.calculate_block_height(percent_height_base.or_else(|| {
             (containing_block.content.height > 0.0).then_some(containing_block.content.height)
         }));
+        // A floated grid container is still one: the pass above re-flowed
+        // its items as blocks, one under the other, at the float's width
+        // (GR1: `float: left; display: grid; grid-template-columns: 100px
+        // 300px` stacked both items at x 0, Chromium 148 puts them side by
+        // side). Lay its grid out again in the float's final box, as the
+        // in-flow path does.
+        if self.style.display.is_grid() {
+            grid::layout_grid_container(
+                self,
+                self.dimensions.content.width,
+                self.dimensions.content.height,
+            );
+        }
     }
 
     /// Offsets with percent values resolved against the containing block.

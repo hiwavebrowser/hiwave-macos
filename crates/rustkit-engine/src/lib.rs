@@ -745,6 +745,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_maximize_tracks_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
