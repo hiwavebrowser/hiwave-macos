@@ -634,6 +634,8 @@ mod vm_interrupt_tests;
 #[cfg(test)]
 mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sort_comparator_tests;
+#[cfg(all(test, feature = "headless"))]
 mod navigation_release_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
