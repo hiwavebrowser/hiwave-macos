@@ -569,3 +569,69 @@ fn a_size_containers_intrinsic_width_ignores_its_contents() {
         "width/k/z per container, Chrome 10/0/7 each (z4 fail-safe 0): {got}"
     );
 }
+
+/// Loads `html` at 1280 x 800; returns the boxes layout visited for the
+/// load, the measured re-passes it took, and `#k`'s height.
+fn load_cost(html: String) -> (u64, u32, String) {
+    let server = serve_routes(vec![("/", "text/html", html)]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let before = rustkit_layout::layout_visits();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let visits = rustkit_layout::layout_visits() - before;
+    let passes = engine.views[&view].lay.container_passes.get();
+    let k = engine
+        .execute_script(view, "String(document.getElementById('k').offsetHeight)")
+        .unwrap();
+    (visits, passes, k)
+}
+
+/// CQ3 (batch 62: first-layout time rose with #1070's re-passes): a
+/// measured size that changes no query's answer costs no second build and
+/// layout. The container is a `flex: 1` item (700 wide, which the
+/// style-time estimate cannot know, so the first build answers false).
+/// `(min-width: 2000px)` is false at 700 too: the load visits exactly the
+/// boxes the same page without the rule visits. `(min-width: 150px)` turns
+/// true at 700, so that page takes its one re-pass and `#k` gets its 10px.
+#[test]
+fn a_measured_size_that_changes_no_answer_costs_no_re_pass() {
+    let page = |rule: &str| {
+        format!(
+            r#"<!DOCTYPE html><html><head><style>
+body {{ margin: 0 }} .row {{ display: flex; width: 800px }} .pad {{ width: 100px; flex: none }}
+.c {{ flex: 1; container-type: inline-size }}
+{rule}
+</style></head><body><div class="row"><div class="pad"></div><div class="c"><div id="k"></div><p>text</p></div></div></body></html>"#
+        )
+    };
+    let (plain_visits, plain_passes, _) = load_cost(page(""));
+    let (same_visits, same_passes, same_k) = load_cost(page(
+        "@container (min-width: 2000px) { #k { height: 10px } }",
+    ));
+    let (_, flip_passes, flip_k) = load_cost(page(
+        "@container (min-width: 150px) { #k { height: 10px } }",
+    ));
+    assert_eq!(plain_passes, 0);
+    assert_eq!(
+        (same_passes, same_visits, same_k.contains("\"0\")")),
+        (0, plain_visits, true),
+        "an answer that stays false: no re-pass, the visits of the page without the rule"
+    );
+    assert_eq!(
+        (flip_passes, flip_k.contains("10")),
+        (1, true),
+        "an answer that flips: one re-pass"
+    );
+}
