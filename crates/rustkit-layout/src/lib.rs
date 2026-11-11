@@ -59,6 +59,12 @@ mod fit_content_width_tests;
 mod emoji_cluster_tests;
 
 #[cfg(test)]
+mod zero_width_column_stretch_tests;
+#[cfg(test)]
+mod flex_item_specified_width_min_tests;
+#[cfg(test)]
+mod flex_item_cross_guess_tests;
+#[cfg(test)]
 mod primary_emoji_font_tests;
 
 #[cfg(test)]
@@ -71,11 +77,15 @@ mod relative_offset_unit_tests;
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
+#[cfg(test)]
+mod abspos_percent_child_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
 #[cfg(test)]
 mod form_control_content_box_tests;
+#[cfg(test)]
+mod form_control_appearance_tests;
 
 #[cfg(test)]
 mod replaced_size_unit_tests;
@@ -270,9 +280,47 @@ pub(crate) fn aspect_ratio_content_height(
     })
 }
 
-/// Compose a button's BORDER-box width from an advance measured out of its
-/// label: the author's horizontal padding+border when there is any, else the
-/// UA well (24px) the bare-control calibration uses.
+/// What a `<button>` has on each side (top, right, bottom, left) when the author declared none:
+/// 1 px of padding above and below and 6 px left and right, and a 2 px (outset) border. Chrome for
+/// Testing 148.0.7778.216 on Linux and macOS (CB3b, CB3c): a bare 16 px Arial button is 24 x 24
+/// for the label `x` (8 + 6 + 6 + 2 + 2 wide, 18 + 1 + 1 + 2 + 2 tall).
+pub const UA_BUTTON_PADDING: [f32; 4] = [1.0, 6.0, 1.0, 6.0];
+pub const UA_BUTTON_BORDER: f32 = 2.0;
+/// The same, summed over both sides of an axis.
+pub const UA_BUTTON_PADDING_V: f32 = 2.0;
+pub const UA_BUTTON_BORDER_V: f32 = 4.0;
+pub const UA_BUTTON_PADDING_H: f32 = 12.0;
+pub const UA_BUTTON_BORDER_H: f32 = 4.0;
+
+/// A button's padding and border per side (top, right, bottom, left): the author's on a side the
+/// cascade flagged ([`ComputedStyle::padding_declared`], [`ComputedStyle::border_declared`], zero
+/// and `none` included) and the UA's on a side nobody declared, so `padding-left: 0` alone leaves
+/// the right at 6 px (CB3c).
+pub(crate) fn button_box_sides(style: &ComputedStyle, font_size: f32) -> ([f32; 4], [f32; 4]) {
+    let px = |l: &Length| match l {
+        Length::Percent(_) | Length::Auto => 0.0,
+        other => other.to_px(font_size, 16.0, 0.0),
+    };
+    let author_pad = [&style.padding_top, &style.padding_right, &style.padding_bottom, &style.padding_left];
+    let author_border =
+        [&style.border_top_width, &style.border_right_width, &style.border_bottom_width, &style.border_left_width];
+    let mut pad = UA_BUTTON_PADDING;
+    let mut border = [UA_BUTTON_BORDER; 4];
+    for i in 0..4 {
+        if style.padding_declared[i] {
+            pad[i] = px(author_pad[i]);
+        }
+        if style.border_declared[i] {
+            border[i] = px(author_border[i]);
+        }
+    }
+    (pad, border)
+}
+
+/// Compose a button's BORDER-box width from an advance measured out of its label: the label plus
+/// the horizontal padding plus the horizontal border, each side the author's when declared and the
+/// UA's otherwise ([`button_box_sides`]; CB3c, measured on Chrome for Testing 148: `x` is 24 bare,
+/// 12 with `padding: 0`, 20 with `border: none`, 8 with both, 44 with `padding: 8px 16px`).
 ///
 /// This exists as one function because a button has TWO intrinsic widths and
 /// they differ only in which advance goes in — the whole label for
@@ -286,19 +334,8 @@ pub(crate) fn button_border_box_width(
     font_size: f32,
     label_advance: f32,
 ) -> f32 {
-    let px = |l: &Length| match l {
-        Length::Percent(_) | Length::Auto => 0.0,
-        other => other.to_px(font_size, 16.0, 0.0),
-    };
-    let author_pb_h = px(&style.padding_left)
-        + px(&style.padding_right)
-        + px(&style.border_left_width)
-        + px(&style.border_right_width);
-    if author_pb_h > 0.0 {
-        label_advance + author_pb_h
-    } else {
-        label_advance + 24.0
-    }
+    let (pad, border) = button_box_sides(style, font_size);
+    label_advance + pad[1] + pad[3] + border[1] + border[3]
 }
 
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
@@ -308,21 +345,14 @@ pub(crate) fn button_border_box_width(
 /// label + 24 wide, 1.5em + 12 tall, author padding ignored), so
 /// flex-positioning's `.btn { padding: 8px 16px }` row built 55.9x33 for
 /// Chrome's 63.9x34 and everything below it sat a pixel high.
-/// What a `<button>` adds above and below its line when the author did not declare that side
-/// (CB3b): the UA padding (top + bottom) and the UA border (top + bottom). Height is the sum of
-/// three independent parts: the line (`line-height`, else `normal`), the vertical padding and the
-/// vertical border, each the author's when declared (zero and `none` included) and these otherwise.
-/// Measured on Chrome for Testing 148.0.7778.216 (the board's oracle), headless, 800x600, on BOTH
-/// Linux (Talos) and macOS (Atlas, 2026-11-10; computed font Arial on both): `<button
-/// style="font-size:16px">` is 24 px = an 18 px `normal` line + 1 px padding per side + 2 px
-/// outset border per side. These constants are the TOTALS over both sides (padding 2, border 4).
-/// The earlier 4 / 0 "Mac calibration" (bare 19, `padding: 8px 16px` = 31) was RustKit's own
-/// number, not Chrome's: Chrome has no Mac-specific button metrics. Also measured at 16px Arial:
+///
+/// A `<button>`'s height is three independent parts (CB3b): the line (`line-height` when the
+/// button itself declared one, else `normal`), the vertical padding and the vertical border, each
+/// side the author's when declared and the UA's ([`UA_BUTTON_PADDING`], [`UA_BUTTON_BORDER`])
+/// otherwise; its width is the label plus the horizontal parts ([`button_border_box_width`]).
+/// Chrome for Testing 148.0.7778.216 at 16px Arial (Linux, macOS and Windows agree): bare 24 tall,
 /// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
 /// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
-pub const UA_BUTTON_PADDING_V: f32 = 2.0;
-pub const UA_BUTTON_BORDER_V: f32 = 4.0;
-
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -381,8 +411,9 @@ pub(crate) fn form_control_intrinsic_size(
     // here, and compose only a declared box.
     let single_line_box = |blob: f32, is_button: bool, button_line: Option<f32>| {
         if is_button {
-            let pad = if style.padding_v_declared { author_pad_v } else { UA_BUTTON_PADDING_V };
-            let border = if style.border_v_declared { author_border_v } else { UA_BUTTON_BORDER_V };
+            let (pad_sides, border_sides) = button_box_sides(style, font_size);
+            let pad = pad_sides[0] + pad_sides[2];
+            let border = border_sides[0] + border_sides[2];
             // A button's line-height is `normal` unless declared on the button itself (see
             // `ComputedStyle::line_height_declared`): the inherited one is reset by the UA font.
             let line = button_line.unwrap_or_else(|| {
@@ -1885,6 +1916,16 @@ pub struct LayoutBox {
     /// an auto-height out-of-flow parent (and the auto-height in-flow chain
     /// under it) sets it today; see `mark_percent_height_bases`.
     pub(crate) percent_height_is_auto: bool,
+    /// LAY1: the percentage base this box's in-flow children were last
+    /// laid out against on the block path (`None`: none, or not known). A
+    /// re-anchor that finds the same used height leaves them as they are.
+    pub(crate) children_percent_base: Option<f32>,
+    /// LAY1: an absolutely positioned box whose parent is its containing
+    /// block and knows its own height: that padding box, set by the parent
+    /// before the flow pass lays the box out, so the box's children are
+    /// laid out against its used height at once instead of again at the
+    /// re-anchor (nested `inset: 0` layers would cost 2.5x per level).
+    pub(crate) abspos_cb_hint: Option<Rect>,
     /// Set on the engine's layout root, an anonymous stand-in for `<html>`
     /// whose own style is the default (html's computed style only feeds
     /// inheritance): html's specified `height`. The root's children resolve
@@ -1979,6 +2020,8 @@ impl LayoutBox {
             text_lines: None,
             text_flow_first_offset: None,
             percent_height_is_auto: false,
+            children_percent_base: None,
+            abspos_cb_hint: None,
             root_element_height: None,
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
@@ -2590,6 +2633,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        self.children_percent_base = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -4397,6 +4441,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        self.children_percent_base = None;
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -4482,13 +4527,24 @@ impl LayoutBox {
         // Layout children. Percentage-height children resolve against THIS
         // box's height when it is definite (CSS 2.1 §10.5); the containing
         // block they are handed carries the flow cursor instead.
-        let definite_for_children =
+        let mut definite_for_children =
             self.definite_content_height_for_children(
                 definite_height.unwrap_or(0.0),
                 definite_height.is_some(),
             );
+        // An abspos box whose parent handed it its real containing block:
+        // the height its re-anchor will give it is known now.
+        if let Some(cb) = self.abspos_cb_hint.take() {
+            if definite_for_children.is_none() {
+                definite_for_children = self.abspos_used_content_height(&Dimensions {
+                    content: cb,
+                    ..Default::default()
+                });
+            }
+        }
         self.mark_percent_height_bases(definite_for_children, containing_block);
         self.layout_block_children(definite_for_children);
+        self.children_percent_base = definite_for_children;
 
         // Height depends on children - use definite_height for percentage resolution
         self.calculate_block_height(definite_height);
@@ -4566,11 +4622,21 @@ impl LayoutBox {
         // Knowable now, before any child flows: this box's own height when it
         // does not depend on its children. Children resolve percentage heights
         // against it (CSS 2.1 §10.5); `None` leaves them on the old path.
-        let definite_for_children =
+        let mut definite_for_children =
             self.definite_content_height_for_children(
                 percent_height_base.unwrap_or(containing_block.content.height),
                 percent_height_base.is_some(),
             );
+        // As in `layout_block_with_definite_height`: an abspos box handed
+        // its real containing block knows its used height now.
+        if let Some(cb) = self.abspos_cb_hint.take() {
+            if definite_for_children.is_none() {
+                definite_for_children = self.abspos_used_content_height(&Dimensions {
+                    content: cb,
+                    ..Default::default()
+                });
+            }
+        }
         self.mark_percent_height_bases(definite_for_children, containing_block);
 
         let mut child_margin_context = MarginCollapseContext::new();
@@ -4637,6 +4703,7 @@ impl LayoutBox {
                 float_context,
                 definite_for_children,
             );
+            self.children_percent_base = definite_for_children;
         }
 
         // Height depends on children
@@ -4917,6 +4984,19 @@ impl LayoutBox {
         self.calculate_block_height(percent_height_base.or_else(|| {
             (containing_block.content.height > 0.0).then_some(containing_block.content.height)
         }));
+        // A floated grid container is still one: the pass above re-flowed
+        // its items as blocks, one under the other, at the float's width
+        // (GR1: `float: left; display: grid; grid-template-columns: 100px
+        // 300px` stacked both items at x 0, Chromium 148 puts them side by
+        // side). Lay its grid out again in the float's final box, as the
+        // in-flow path does.
+        if self.style.display.is_grid() {
+            grid::layout_grid_container(
+                self,
+                self.dimensions.content.width,
+                self.dimensions.content.height,
+            );
+        }
     }
 
     /// Offsets with percent values resolved against the containing block.
@@ -5279,6 +5359,7 @@ impl LayoutBox {
         // free space at all, and every item stays packed against the start
         // edge. Passing the containing block as well keeps step 11d's
         // re-derivation on the same number.
+        let mut relaid = false;
         if self.style.display.is_flex()
             && self.inset_definite_content_height(containing_block).is_some()
         {
@@ -5287,16 +5368,94 @@ impl LayoutBox {
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
+        } else if self.needs_percent_relayout_after_reanchor(containing_block) {
+            // The block path has the same hole for percentages: the children
+            // resolved `height: 100%` before this box had a height, so they
+            // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
+            // (a video player's backdrop) drew as a 32px strip in an 800px
+            // box where Chrome 148 fills the layer. The used height is known
+            // now and definite (CSS2 §10.6.4, or a percentage of the real
+            // containing block), so the children are laid out again against
+            // it. This box keeps the height it was given.
+            let height = self.dimensions.content.height;
+            // Only when the children were laid out against another base: a
+            // re-anchor that changes nothing (a parent re-anchoring its
+            // children again, or a layer its parent already sized through
+            // `abspos_cb_hint`) costs nothing (#1043 R1 nit 1).
+            if self
+                .children_percent_base
+                .is_none_or(|base| (base - height).abs() > 0.01)
+            {
+                self.mark_percent_height_bases(Some(height), containing_block);
+                self.layout_block_children(Some(height));
+                self.dimensions.content.height = height;
+                self.children_percent_base = Some(height);
+                relaid = true;
+            }
         }
 
         // An `inset`-stretched box changes SIZE here, after its own children
         // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
         // an `inset: 0` slider sat 22px above the slider (settings' toggles,
         // n46). Its abspos children are re-anchored to the new padding box.
-        if self.dimensions.content.width != origin_w || self.dimensions.content.height != origin_h
+        // The relayout above put its abspos children back on the stand-in.
+        if relaid
+            || self.dimensions.content.width != origin_w
+            || self.dimensions.content.height != origin_h
         {
             self.reanchor_absolute_children();
         }
+    }
+
+    /// The content height an absolutely positioned box will be given against
+    /// `containing_block` (a padding box): a percentage or `calc()` height of
+    /// it, or opposite insets with `height: auto`. `None` otherwise (also for
+    /// an `aspect-ratio` height, whose width is stretched only at the
+    /// re-anchor).
+    fn abspos_used_content_height(&self, containing_block: &Dimensions) -> Option<f32> {
+        if self.position != Position::Absolute {
+            return None;
+        }
+        match &self.style.height {
+            Length::Percent(_) => {
+                self.definite_content_height_for_children(containing_block.content.height, true)
+            }
+            Length::Calc(sum) if sum.percent != 0.0 => {
+                self.definite_content_height_for_children(containing_block.content.height, true)
+            }
+            Length::Auto => self.inset_definite_content_height(containing_block),
+            _ => None,
+        }
+    }
+
+    /// Whether `reanchor_absolute` must lay this block's children out again:
+    /// a plain block (not flex, grid, table or replaced) whose used height
+    /// only became definite against its real containing block (opposite
+    /// insets with `height: auto`, or a percentage / `calc()` height), with
+    /// an in-flow child whose height, `min-height` or `max-height` carries a
+    /// percentage. Anything else resolved nothing against the stand-in.
+    fn needs_percent_relayout_after_reanchor(&self, containing_block: &Dimensions) -> bool {
+        let has_percent = |l: &Length| match l {
+            Length::Percent(_) => true,
+            Length::Calc(sum) => sum.percent != 0.0,
+            _ => false,
+        };
+        matches!(self.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !(self.style.display.is_flex()
+                || self.style.display.is_grid()
+                || self.style.display.is_table())
+            && (has_percent(&self.style.height)
+                || self.inset_definite_content_height(containing_block).is_some()
+                // `aspect-ratio` with an auto height: the ratio of the
+                // (stretched or specified) width (#1043 R1 nit 2).
+                || (matches!(self.style.height, Length::Auto)
+                    && self.style.aspect_ratio.is_some_and(|r| r > 0.0 && r.is_finite())))
+            && self.children.iter().any(|c| {
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && (has_percent(&c.style.height)
+                        || has_percent(&c.style.min_height)
+                        || has_percent(&c.style.max_height))
+            })
     }
 
     /// CSS 2.1 §10.1: the containing block of an absolutely positioned
@@ -5466,7 +5625,13 @@ impl LayoutBox {
             Length::Auto => {
                 let available =
                     (containing_block.content.width - total_margin_border_padding).max(0.0);
-                if style.display.is_atomic_inline() {
+                if style.width_max_content {
+                    // css-sizing-3 §3.1: `width: max-content` is the box's own max-content size, not
+                    // the container's and not clamped to it (CB3c). The estimator returns a
+                    // border-box width, so strip this box's padding and border.
+                    let pb = border_left + border_right + padding_left + padding_right;
+                    (crate::grid::estimate_max_content_width(self) - pb).max(0.0)
+                } else if style.display.is_atomic_inline() {
                     // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
                     // -grid) with width:auto shrinks to fit —
                     // min(max(preferred_min, available), preferred) — it
@@ -5927,6 +6092,20 @@ impl LayoutBox {
                 } else {
                     cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
                 };
+                // This box is the child's containing block and knows its own
+                // height: hand the child its real padding box, so it lays its
+                // children out once, at the height its re-anchor will keep.
+                if child.position == Position::Absolute && self.position != Position::Static {
+                    if let Some(h) = definite_height {
+                        let pb = self.dimensions.padding_box();
+                        child.abspos_cb_hint = Some(Rect::new(
+                            pb.x,
+                            pb.y,
+                            pb.width,
+                            h + self.dimensions.padding.top + self.dimensions.padding.bottom,
+                        ));
+                    }
+                }
                 child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
@@ -6996,6 +7175,20 @@ impl LayoutBox {
                 } else {
                     cb.content.height +=
                         open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
+                }
+                // This box is the child's containing block and knows its own
+                // height: hand the child its real padding box (see
+                // `layout_block_children`).
+                if child.position == Position::Absolute && self.position != Position::Static {
+                    if let Some(h) = definite_height {
+                        let pb = self.dimensions.padding_box();
+                        child.abspos_cb_hint = Some(Rect::new(
+                            pb.x,
+                            pb.y,
+                            pb.width,
+                            h + self.dimensions.padding.top + self.dimensions.padding.bottom,
+                        ));
+                    }
                 }
                 let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
@@ -13874,6 +14067,8 @@ mod tests {
         // The page declares `border: none` too (the cascade flags both axes, CB3b).
         style.padding_v_declared = true;
         style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
         let plain = FormControlType::Button {
             label: "Export as JSON".to_string(),
             button_type: "button".to_string(),
@@ -13910,6 +14105,7 @@ mod tests {
         style.padding_top = Length::Px(8.0);
         style.padding_bottom = Length::Px(8.0);
         style.padding_v_declared = true;
+        style.padding_declared = [true, false, true, false];
         let emoji_padded = form_control_intrinsic_size(&style, &button("\u{1F4F1} Share")).1;
         assert_eq!(emoji_padded, 20.0 + 16.0 + UA_BUTTON_BORDER_V, "declared padding keeps the UA border");
         let bare = ComputedStyle::new();
@@ -13931,6 +14127,8 @@ mod tests {
         style.font_family = "Arial".to_string();
         style.padding_v_declared = true;
         style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
         let input = FormControlType::TextInput {
             value: String::new(),
             placeholder: String::new(),
@@ -13940,19 +14138,27 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BACKLOG (Prometheus #1037 nit 2): the flags are per axis, not per side"]
-    fn backlog_one_declared_side_does_not_drop_the_ua_part_of_the_other_side() {
-        // `padding-top: 0` alone keeps the UA bottom padding in Chrome (1px), and `border-style: solid`
-        // alone keeps the UA 2px width. RustKit flags the axis, so it drops both. Needs per-side flags
-        // in rustkit-css; until then this documents the expected value.
+    fn one_declared_side_does_not_drop_the_ua_part_of_the_other_sides() {
+        // `padding-top: 0` alone keeps the UA bottom padding in Chrome (1 px), and `padding-left: 0`
+        // alone keeps the right at 6 (CB3c, Chrome for Testing 148: `x` is 18 wide, 24 tall). The
+        // cascade flags per side, so only the declared side is the author's.
         let mut style = ComputedStyle::new();
         style.font_size = Length::Px(16.0);
         style.font_family = "Arial".to_string();
         style.padding_top = Length::Px(0.0);
+        style.padding_declared = [true, false, false, false];
         style.padding_v_declared = true;
         let button = FormControlType::Button { label: "Go".to_string(), button_type: "button".to_string() };
         let h = form_control_intrinsic_size(&style, &button).1;
         assert_eq!(h, 18.0 + 1.0 + UA_BUTTON_BORDER_V, "line 18 + the UA 1px bottom padding + the UA border");
+        let mut left = ComputedStyle::new();
+        left.font_size = Length::Px(16.0);
+        left.font_family = "Arial".to_string();
+        left.padding_left = Length::Px(0.0);
+        left.padding_declared = [false, false, false, true];
+        let x = FormControlType::Button { label: "x".to_string(), button_type: "button".to_string() };
+        let w = form_control_intrinsic_size(&left, &x).0;
+        assert_eq!(w, 8.0 + 6.0 + 0.0 + UA_BUTTON_BORDER_H, "x (8) + the UA right 6 + no left + the UA 2 + 2 border");
     }
 
     #[test]
@@ -13971,6 +14177,8 @@ mod tests {
         // author's here, so no UA padding or border is added to the 14px line + 16.
         style.padding_v_declared = true;
         style.border_v_declared = true;
+        style.padding_declared = [true; 4];
+        style.border_declared = [true; 4];
         let control = FormControlType::Button {
             label: "Save".to_string(),
             button_type: "button".to_string(),
@@ -18362,6 +18570,10 @@ mod tests {
         s.padding_right = Length::Px(16.0);
         s.border_left_width = Length::Px(1.0);
         s.border_right_width = Length::Px(1.0);
+        // What the cascade flags for an author padding and border (CB3c): without it the button
+        // takes the UA's per-side values instead.
+        s.padding_declared = [true; 4];
+        s.border_declared = [true; 4];
         LayoutBox::new(
             BoxType::FormControl(FormControlType::Button {
                 label: label.to_string(),
@@ -18459,21 +18671,19 @@ mod tests {
 
     #[test]
     fn a_bare_buttons_min_content_keeps_the_ua_well() {
-        // With no author padding the composition falls back to the 24px UA
-        // well, and it must still be there under min-content — otherwise a
-        // bare button floors at its bare text and paints over its own border.
+        // With no author padding or border the composition falls back to the UA's (6 px padding
+        // and 2 px border a side, 16 in all: CB3c, Chrome for Testing 148), and it must still be
+        // there under min-content: otherwise a bare button floors at its bare text and paints
+        // over its own border.
         let mut b = n68_button("Save Changes");
-        b.style.padding_left = Length::Px(0.0);
-        b.style.padding_right = Length::Px(0.0);
-        b.style.border_left_width = Length::Px(0.0);
-        b.style.border_right_width = Length::Px(0.0);
+        b.style.padding_declared = [false; 4];
+        b.style.border_declared = [false; 4];
         let widest_word = n68_advance(&b, "Changes");
         let got = crate::grid::own_min_content_width(&b);
+        let ua = UA_BUTTON_PADDING_H + UA_BUTTON_BORDER_H;
         assert!(
-            (got - (widest_word + 24.0)).abs() < 0.01,
-            "a bare button's min-content is its widest word plus the 24px UA \
-             well ({}), got {got}",
-            widest_word + 24.0
+            (got - (widest_word + ua)).abs() < 0.01,
+            "a bare button's min-content is its widest word plus the UA's {ua} px, got {got}"
         );
     }
 

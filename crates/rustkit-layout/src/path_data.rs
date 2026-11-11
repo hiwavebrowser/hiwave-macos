@@ -770,3 +770,57 @@ pub fn is_valid(d: &str) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod is_valid_tests {
+    use super::{is_valid, parse};
+
+    /// C8b / #1052 nit 5: CSS `path()` drops an unparsable string
+    /// (including empty). The headless frame pin is gated; these exercise
+    /// the pure validator Linux `--lib` always runs.
+    #[test]
+    fn invalid_and_empty_path_data_are_rejected() {
+        for d in [
+            "",
+            "   ",
+            "garbage",
+            "L 10 10",
+            "M 0 0 L 10",
+            "M 0 0 L 100 0 L 0 100 Z garbage",
+            "zz",
+            "M",
+            "M 0",
+        ] {
+            assert!(!is_valid(d), "{d:?} must be invalid for CSS path()");
+        }
+    }
+
+    #[test]
+    fn valid_path_data_is_accepted_even_when_empty_of_area() {
+        for d in [
+            "M 0 0 L 100 0 L 0 100 Z",
+            "M 0 0 L 100 100",
+            "M 10 10",
+            "m0,0c0,0,200,0,200,100q-100,150-200,0z",
+            "M 0 0 A 50 50 0 0 1 100 0",
+        ] {
+            assert!(is_valid(d), "{d:?} must be valid");
+            assert!(
+                !parse(d).is_empty(),
+                "{d:?}: valid data should parse at least one command"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_is_lenient_where_is_valid_is_strict() {
+        // SVG `d` keeps commands up to the first error; CSS path() rejects
+        // the whole string. Trailing garbage is the C8b distinction.
+        let d = "M 0 0 L 100 0 L 0 100 Z garbage";
+        assert!(!is_valid(d));
+        assert!(
+            !parse(d).is_empty(),
+            "lenient parse still yields the triangle before garbage"
+        );
+    }
+}
