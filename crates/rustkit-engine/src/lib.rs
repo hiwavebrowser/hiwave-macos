@@ -24234,16 +24234,7 @@ impl Engine {
             if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
-                    let view = layout_ctx::BuildView {
-                        id,
-                        lay: Some(lay.clone()),
-                        url: building.url.clone(),
-                        viewport: building.viewport,
-                        dpr: building.dpr,
-                        focus: lay.focused_node.get(),
-                        external_sheets: sheets.clone(),
-                        external_sheet_owners: owners.clone(),
-                    };
+                    let view = building.for_build();
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
                     Some(Ok(geometry)) => return Some(geometry),
@@ -24273,16 +24264,7 @@ impl Engine {
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
-                layout_ctx::BuildView {
-                    id,
-                    lay: Some(lay.clone()),
-                    url: building.url.clone(),
-                    viewport: building.viewport,
-                    dpr: building.dpr,
-                    focus: lay.focused_node.get(),
-                    external_sheets: sheets.clone(),
-                    external_sheet_owners: owners.clone(),
-                },
+                building.for_build(),
                 &document,
                 &sheets,
                 javascript_enabled,
