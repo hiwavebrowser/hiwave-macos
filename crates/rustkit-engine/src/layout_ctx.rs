@@ -96,6 +96,9 @@ pub(crate) struct BuildView {
     /// The view's `<link>` sheets: the rule-index fingerprint vouches for
     /// them only when the build was handed this very list.
     pub(crate) external_sheets: Rc<Vec<rustkit_css::Stylesheet>>,
+    /// The `<link>` that owns each of `external_sheets`, for its place
+    /// among the `<style>` sheets (`sheet_document_order`).
+    pub(crate) external_sheet_owners: Rc<Vec<rustkit_dom::NodeId>>,
 }
 
 impl LayoutCtx {
@@ -451,6 +454,12 @@ impl LayoutCtx {
         self.building.borrow().as_ref().and_then(|b| b.viewport)
     }
 
+    /// The owners of the building view's external sheets; empty outside
+    /// a view build.
+    pub(crate) fn building_external_sheet_owners(&self) -> Rc<Vec<rustkit_dom::NodeId>> {
+        self.building.borrow().as_ref().map(|b| b.external_sheet_owners.clone()).unwrap_or_default()
+    }
+
     pub(crate) fn building_url(&self) -> Option<Url> {
         self.building.borrow().as_ref().and_then(|b| b.url.clone())
     }
@@ -568,6 +577,10 @@ pub(crate) struct ViewLayout {
     /// ran them. Read by tests to pin that a relayout takes one pass.
     pub(crate) layout_passes: Cell<u32>,
     pub(crate) layout_builds: Cell<u32>,
+    /// INC5: this view's last layout, kept for the incremental path while
+    /// `RUSTKIT_INCREMENTAL_LAYOUT` is not `off`, and what that path did.
+    pub(crate) incremental_layout: RefCell<Option<crate::incremental_layout::Retained>>,
+    pub(crate) incremental_stats: RefCell<crate::incremental_layout::Stats>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
@@ -713,6 +726,7 @@ mod tests {
             viewport: None,
             focus: None,
             external_sheets: Rc::default(),
+            external_sheet_owners: Rc::default(),
         }
     }
 
