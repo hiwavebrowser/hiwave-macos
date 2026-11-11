@@ -356,3 +356,64 @@ fn container_query_nits_name_split_and_context_roots() {
     let heights = offset_heights(NITS_PAGE, 800, 600, 9);
     assert_eq!(heights, ["0", "12", "0", "14", "14", "14", "0", "14", "14"]);
 }
+
+const CQ1_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-11/css_container_query_cq1.html");
+
+/// CQ1, reduced from a real-site page whose card row is a named
+/// `@container gridrow (width >= 42rem)`: the container sits in a column
+/// flex item of a grid item of a flexed `<main>`, so the style-time
+/// estimate had no width and every query under it was false; the row
+/// stayed one column. Chromium answers with the laid-out content box
+/// (Chrome for Testing 148.0.7778.216 at 1280 x 800: `#c1` 692 wide, `#c2`
+/// a `flex: 1` item 700 wide):
+/// k1 named, 692 >= 672; k2 named, 692 < 896; k3 unnamed, the nearest
+/// container (`#c1`); k4 named, past a nearer container of another name;
+/// k5 that nearer 100px container; k6 past an element with the name but no
+/// `container-type`; k7 a named container that is itself a flex item.
+#[test]
+fn named_container_query_answers_with_the_laid_out_size_of_flex_and_grid_items() {
+    let heights = offset_heights(CQ1_PAGE, 1280, 800, 7);
+    assert_eq!(heights, ["11", "0", "13", "14", "0", "16", "17"]);
+}
+
+/// CQ1: a container query is answered again when its container resizes.
+/// The same page at 1280 x 800, then the view resized to 900: Chromium has
+/// `#c1` 312 wide, so only k7 (the 700px flex item) still holds.
+#[test]
+fn container_query_is_answered_again_when_the_container_resizes() {
+    let server = serve_routes(vec![("/", "text/html", CQ1_PAGE.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let read = |engine: &mut Engine| -> Vec<String> {
+        (1..=7)
+            .map(|k| {
+                let expr = format!("String(document.getElementById('k{k}').offsetHeight)");
+                let value = engine.execute_script(view, &expr).unwrap();
+                value
+                    .strip_prefix("String(\"")
+                    .and_then(|v| v.strip_suffix("\")"))
+                    .unwrap_or(&value)
+                    .to_string()
+            })
+            .collect()
+    };
+    assert_eq!(read(&mut engine), ["11", "0", "13", "14", "0", "16", "17"]);
+    engine
+        .resize_view(view, Bounds { x: 0, y: 0, width: 900, height: 800 })
+        .expect("resize");
+    assert_eq!(read(&mut engine), ["0", "0", "0", "0", "0", "0", "17"]);
+}
