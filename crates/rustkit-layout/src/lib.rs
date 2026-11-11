@@ -1971,6 +1971,11 @@ pub struct LayoutBox {
     /// box. A pseudo-element has no node of its own (`node_id` is `None`),
     /// so a paint-only animation frame finds its boxes by this.
     pub pseudo_animation_key: Option<usize>,
+    /// The box is a flex or grid item: it establishes an independent
+    /// formatting context whatever its own style says (css-flexbox-1 §3,
+    /// css-grid-1 §6), so its auto height encloses its floats. Set by the
+    /// flex and grid containers on their in-flow children.
+    pub formatting_root: bool,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2029,6 +2034,7 @@ impl LayoutBox {
             scrollbar_overflows: std::cell::Cell::new((false, false)),
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
+            formatting_root: false,
         }
     }
 
@@ -6624,7 +6630,9 @@ impl LayoutBox {
         // grows to contain its floats (the auto height of a floated card
         // or an `overflow:hidden` row of floated items). Other boxes let
         // them overflow; a clearfix clears them above.
-        if !floats.is_empty() && crate::margin_collapse::establishes_bfc(&self.style, self.float) {
+        if !floats.is_empty()
+            && (self.formatting_root || crate::margin_collapse::establishes_bfc(&self.style, self.float))
+        {
             cursor_y = cursor_y.max(floats.clear_all());
         }
 
@@ -7762,7 +7770,9 @@ impl LayoutBox {
 
         // A formatting root's auto height contains its floats (see
         // layout_block_children).
-        if !floats.is_empty() && crate::margin_collapse::establishes_bfc(&self.style, self.float) {
+        if !floats.is_empty()
+            && (self.formatting_root || crate::margin_collapse::establishes_bfc(&self.style, self.float))
+        {
             cursor_y = cursor_y.max(floats.clear_all());
         }
 

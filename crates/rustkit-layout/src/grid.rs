@@ -1514,6 +1514,12 @@ pub fn layout_grid_container(
     if !style.display.is_grid() {
         return;
     }
+    // A grid item is a formatting root (css-grid-1 §6): it encloses its
+    // floats. Marked before anything lays an item out.
+    for child in &mut container.children {
+        child.formatting_root = true;
+    }
+    let style = &container.style;
 
     debug!(
         "Grid layout: container {}x{}, {} children",
@@ -4101,7 +4107,12 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
         let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
-        if inline_level {
+        // A float sits on the line beside the inline content around it, so
+        // in max-content it adds to that line rather than breaking it
+        // (Chrome for Testing 148: a 10px float + "text" is 35.8 wide, the
+        // two side by side; the float was a block-level break here, which
+        // left the text no room beside the float).
+        if inline_level || child.float != crate::Float::None {
             inline_run += outer;
         } else {
             max_contribution = max_contribution.max(inline_run);

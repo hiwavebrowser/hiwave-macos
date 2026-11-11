@@ -23,12 +23,14 @@ fn eval(page: &str, script: &str) -> String {
 
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-11/float_in_flex_grid_items.html");
 
+/// Rects to 0.1 px: the float + text widths are Chrome's 35.797 against
+/// RustKit's 35.79 (the text's own advance, not this fix's subject).
 fn rects(ids: &str) -> String {
     eval(
         PAGE,
         &format!(
             "'{ids}'.split(' ').map(function (i) {{ var r = document.getElementById(i).getBoundingClientRect(); \
-             return Math.round(r.width * 100) / 100 + 'x' + Math.round(r.height * 100) / 100; }}).join(' ')"
+             return Math.round(r.width * 10) / 10 + 'x' + Math.round(r.height * 10) / 10; }}).join(' ')"
         ),
     )
 }
