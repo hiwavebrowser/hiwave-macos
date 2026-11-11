@@ -64,6 +64,8 @@ mod relative_offset_unit_tests;
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
+#[cfg(test)]
+mod abspos_percent_child_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
