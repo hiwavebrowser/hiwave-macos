@@ -667,7 +667,13 @@ pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
         static ADVANCE: RefCell<HashMap<Key, Option<f32>>> = RefCell::new(HashMap::new());
     }
     const MAX_ENTRIES: usize = 1024;
-    let key = (postscript_name_or_empty(font), (font.pt_size() as f32).to_bits());
+    let name = postscript_name_or_empty(font);
+    // A face without a PostScript name is not cached by it (see
+    // `shaped_cache_key`).
+    if name.is_empty() {
+        return apple_emoji_advance_uncached(font);
+    }
+    let key = (name, (font.pt_size() as f32).to_bits());
     if let Some(hit) = ADVANCE.with(|m| m.borrow().get(&key).copied()) {
         return hit;
     }
@@ -777,9 +783,11 @@ pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)>
     shaped
 }
 
-/// The shaped-sequence cache key for a face named `ps_name` at `size`.
+/// The shaped-sequence cache key for a face named `ps_name` at `size`, or
+/// `None` for a face without a PostScript name (a downloaded face can lack
+/// one): two such faces would share an entry, so they are shaped uncached.
 fn shaped_cache_key(ps_name: &str, size: f64, cluster: &str) -> Option<(String, u32, String)> {
-    Some((ps_name.to_string(), (size as f32).to_bits(), cluster.to_string()))
+    (!ps_name.is_empty()).then(|| (ps_name.to_string(), (size as f32).to_bits(), cluster.to_string()))
 }
 
 fn emoji_cluster_glyph_uncached(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
