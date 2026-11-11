@@ -52,6 +52,10 @@ pub struct GridTrack {
     pub is_max_content: bool,
     /// For fit-content(length), the maximum length constraint.
     pub fit_content_limit: Option<f32>,
+    /// A `fit-content()` column whose growth limit was set from its items'
+    /// max-content (`layout_grid_container`): it takes part in maximize
+    /// tracks before the `fr` tracks like any finite track.
+    pub fit_content_measured: bool,
     /// Whether this track is from auto-fit (should collapse if empty).
     pub is_auto_fit: bool,
     /// An empty auto-fit track, collapsed (css-grid-1 §7.2.3.2): 0 wide, and
@@ -168,6 +172,7 @@ impl GridTrack {
             is_min_content,
             is_max_content,
             fit_content_limit,
+            fit_content_measured: false,
             is_auto_fit: false,
             collapsed: false,
             flexible_with_fixed_min: flex_factor > 0.0
@@ -1847,6 +1852,25 @@ pub fn layout_grid_container(
         column_gap,
         max_col_span,
     );
+    // A `fit-content(L)` column grows to min(L, its items' max-content),
+    // never below its base size (css-grid-1 §7.2.4, §12.5). Its growth
+    // limit was L itself, so maximize tracks took it to L (300 around a
+    // 100px box beside a 100px track; Chromium 148 100), and it had to be
+    // kept out of the pass before the `fr` tracks, where it then stayed at
+    // its min-content (60 of a 240px max-content beside `1fr`; Chromium 240).
+    for (column, track) in grid.columns.iter_mut().enumerate() {
+        let Some(limit) = track.fit_content_limit else { continue };
+        let max_content = items
+            .iter()
+            .filter(|item| item.column_span.max(1) == 1 && (item.column_start - 1).max(0) as usize == column)
+            .map(|item| {
+                (estimate_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style))
+                    .max(item.get_width_contribution(container_width))
+            })
+            .fold(0.0f32, f32::max);
+        track.growth_limit = max_content.min(limit).max(track.base_size);
+        track.fit_content_measured = true;
+    }
     // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     // Apply content alignment (justify-content for columns)
@@ -4630,7 +4654,7 @@ fn maximize_tracks(tracks: &mut [GridTrack], available_space: f32, fit_content: 
             .enumerate()
             .filter(|(_, t)| {
                 !t.is_flexible
-                    && (fit_content || t.fit_content_limit.is_none())
+                    && (fit_content || t.fit_content_limit.is_none() || t.fit_content_measured)
                     && t.growth_limit > t.size
                     && t.growth_limit < f32::INFINITY
             })

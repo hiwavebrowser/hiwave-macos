@@ -23,7 +23,15 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // A floated grid's width: the intrinsic-width estimate leaves
+    // `fit-content()` tracks to the generic walk (`outside_the_estimate`,
+    // whose comment gives the page where the estimate was further from
+    // Chromium), and the walk sizes this one from its min-content: the
+    // float is 240, Chromium 340. Track sizing inside the float is not
+    // the cause.
+    "a-float-grid-with-a-fit-content-track",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
