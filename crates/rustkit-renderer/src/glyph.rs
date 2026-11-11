@@ -689,7 +689,7 @@ impl GlyphCache {
     fn raster_for(key: &GlyphKey, face: rustkit_text::GlyphFace) -> Option<rustkit_text::macos::GlyphRaster> {
         let rasterizer = Self::rasterizer_for(key);
         if let Some(cluster) = key.cluster.as_deref() {
-            if let Some(raster) = rasterizer.rasterize_emoji_cluster(cluster) {
+            if let Some(raster) = rasterizer.rasterize_emoji_cluster(cluster, face) {
                 return Some(raster);
             }
         }

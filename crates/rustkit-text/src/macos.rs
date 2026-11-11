@@ -1821,9 +1821,15 @@ impl GlyphRasterizer {
     /// forms it with ([`emoji_cluster_glyph`]), from the face layout measured
     /// its head character in. `None` when the face does not form it; the
     /// caller then draws the head alone, as layout measured it.
-    pub fn rasterize_emoji_cluster(&self, cluster: &str) -> Option<GlyphRaster> {
+    pub fn rasterize_emoji_cluster(&self, cluster: &str, face: GlyphFace) -> Option<GlyphRaster> {
         let head = cluster.chars().next()?;
-        let (font, _) = fallback_face_for_presentation(&self.font, head, true)?;
+        let font = match face {
+            GlyphFace::Fallback { emoji: true } => fallback_face_for_presentation(&self.font, head, true)?.0,
+            // The run's own face draws its sequences only when it is an
+            // Apple emoji face; any other primary draws the head alone.
+            GlyphFace::Primary if apple_emoji_advance(&self.font).is_some() => self.font.clone(),
+            _ => return None,
+        };
         let (glyph, _) = emoji_cluster_glyph(&font, cluster)?;
         self.rasterize_glyph_color_with_font(&font, glyph).map(GlyphRaster::Color)
     }

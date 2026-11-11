@@ -6387,7 +6387,13 @@ impl Renderer {
         #[cfg(target_os = "macos")]
         {
             let faces = faces?;
-            if faces.get(i) != Some(&rustkit_text::GlyphFace::Fallback { emoji: true }) {
+            // An emoji-fallback head, or a head in the run's own face (an
+            // Apple emoji primary; the glyph cache draws a cluster in the
+            // primary face only when that face is a colour face).
+            if !matches!(
+                faces.get(i),
+                Some(rustkit_text::GlyphFace::Fallback { emoji: true }) | Some(rustkit_text::GlyphFace::Primary)
+            ) {
                 return None;
             }
             // The head and the characters layout folded into it: the

@@ -1702,12 +1702,20 @@ impl TextShaper {
                 };
                 // The head of an emoji sequence its emoji face forms as one
                 // glyph takes the rest of its grapheme cluster with it.
-                if face == (GlyphFace::Fallback { emoji: true }) {
+                // So does the head of a run whose own face is an Apple
+                // emoji face (`font-family: "Apple Color Emoji"`).
+                let primary_emoji_head =
+                    face == GlyphFace::Primary && primary_has_glyph && primary_emoji_advance.is_some();
+                if face == (GlyphFace::Fallback { emoji: true }) || primary_emoji_head {
                     let n = rustkit_text::macos::emoji_cluster_len(&text_chars[char_idx..]);
                     if n > 1 {
                         let cluster: String = text_chars[char_idx..char_idx + n].iter().collect();
-                        let formed = rustkit_text::macos::fallback_face_for_presentation(&ct_font, c, true)
-                            .and_then(|(face, _)| rustkit_text::macos::emoji_cluster_glyph(&face, &cluster));
+                        let formed = if primary_emoji_head {
+                            rustkit_text::macos::emoji_cluster_glyph(&ct_font, &cluster)
+                        } else {
+                            rustkit_text::macos::fallback_face_for_presentation(&ct_font, c, true)
+                                .and_then(|(face, _)| rustkit_text::macos::emoji_cluster_glyph(&face, &cluster))
+                        };
                         if let Some((_, covered)) = formed {
                             fold_left = covered - 1;
                         }
