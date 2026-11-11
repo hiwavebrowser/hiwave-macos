@@ -2286,6 +2286,35 @@ mod tests {
         }
     }
 
+    /// An Apple emoji glyph advances as far as Chrome for Testing 148 places
+    /// the next character (span widths of one `🔍` at each size, Helvetica
+    /// primary, CB7a). Core Text's tracked advance is a pixel wider at most
+    /// sizes (19 for Chrome's 18 at 14px), which put every emoji icon on the
+    /// chrome board 1 to 2px wide.
+    #[test]
+    fn an_apple_emoji_advances_as_chrome_places_it() {
+        let chrome: &[(f64, f32)] = &[
+            (6.0, 8.0), (8.0, 10.0), (9.0, 11.0), (10.0, 13.0), (10.5, 13.0), (11.0, 14.0),
+            (12.0, 15.0), (13.0, 16.0), (13.5, 17.0), (14.0, 18.0), (14.5, 18.0), (15.0, 19.0),
+            (16.0, 20.0), (17.0, 21.0), (18.0, 21.0), (19.0, 22.0), (20.0, 22.0), (21.0, 23.0),
+            (22.0, 23.0), (23.0, 24.0), (24.0, 24.0), (26.0, 26.0), (30.0, 30.0), (40.0, 40.0),
+        ];
+        for &(size, want) in chrome {
+            let helvetica = font::new_from_name("Helvetica", size).expect("Helvetica");
+            for ch in ['\u{1F50D}', '\u{1F6E1}', '\u{1F4C8}'] {
+                let (face, glyph) = fallback_face_for_presentation(&helvetica, ch, true).expect("a face");
+                let got = glyph_advance(&face, glyph);
+                assert_eq!(got, want, "{ch:?} at {size}px in {}: Chrome advances {want}", face.postscript_name());
+            }
+        }
+        // The system font's emoji face (`.AppleColorEmojiUI`) too: Chrome 18 / 20.
+        for (size, want) in [(14.0, 18.0), (16.0, 20.0)] {
+            let face = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+            let (emoji, glyph) = fallback_face_for_presentation(&face, '\u{1F6E1}', true).expect("a face");
+            assert_eq!(glyph_advance(&emoji, glyph), want, "UI emoji at {size}px");
+        }
+    }
+
     /// Paint draws the fallback glyph from that same face: the advance the
     /// rasteriser reports is Menlo's, not Apple Symbols'.
     #[test]
