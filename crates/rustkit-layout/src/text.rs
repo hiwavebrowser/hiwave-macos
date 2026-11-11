@@ -1651,6 +1651,8 @@ impl TextShaper {
             // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
+            let primary_emoji_advance = rustkit_text::macos::apple_emoji_advance(&ct_font);
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
                 let advance = glyph_advances[utf16_idx].width as f32;
@@ -1686,7 +1688,11 @@ impl TextShaper {
                     )
                 };
                 let final_advance = match face {
-                    GlyphFace::Primary if primary_has_glyph => primary_advance,
+                    // A primary Apple emoji face advances as it does when
+                    // reached by fallback (#1072 R1 nit 4).
+                    GlyphFace::Primary if primary_has_glyph => {
+                        primary_emoji_advance.unwrap_or(primary_advance)
+                    }
                     GlyphFace::Primary => notdef_advance,
                     // Variation selectors / joiners are zero-width
                     // wherever they land (they modify a neighbour).

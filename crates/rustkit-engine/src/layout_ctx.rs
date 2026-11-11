@@ -79,6 +79,12 @@ impl Default for LayoutCtx {
 
 /// What a build reads of the view it is for, taken by the engine when the
 /// build starts.
+///
+/// `Engine::build_view` is the one place a `BuildView` is made from the
+/// engine's view; a build that starts later from one already taken (the
+/// forced read, #1057) goes through [`BuildView::for_build`], so a field
+/// added here is carried along without touching those call sites.
+#[derive(Clone)]
 pub(crate) struct BuildView {
     pub(crate) id: EngineViewId,
     /// `None` when the view is not (or no longer) in the engine.
@@ -99,6 +105,18 @@ pub(crate) struct BuildView {
     /// The `<link>` that owns each of `external_sheets`, for its place
     /// among the `<style>` sheets (`sheet_document_order`).
     pub(crate) external_sheet_owners: Rc<Vec<rustkit_dom::NodeId>>,
+}
+
+impl BuildView {
+    /// This view for a build that starts now: every per-build field copied,
+    /// with what can change between builds (the focused node) read afresh
+    /// from the view's layout state.
+    pub(crate) fn for_build(&self) -> BuildView {
+        BuildView {
+            focus: self.lay.as_ref().and_then(|lay| lay.focused_node.get()),
+            ..self.clone()
+        }
+    }
 }
 
 impl LayoutCtx {
@@ -572,6 +590,21 @@ pub(crate) struct ViewLayout {
     /// Chrome. Cleared with the document.
     pub(crate) scrollbar_marks: RefCell<HashMap<usize, (bool, bool)>>,
     pub(crate) root_scrollbar: Cell<bool>,
+    /// CQ1: the content-box size of every size container in this view's
+    /// last layout (raw NodeId → inline, block). The next build answers
+    /// `@container` queries with them (`container_query`), and
+    /// `lay_out_document` lays out again while they move. Cleared with the
+    /// document.
+    pub(crate) container_sizes: RefCell<crate::container_query::MeasuredContainers>,
+    /// Whether the last build's sheets had any `@container` rule.
+    pub(crate) container_rules: Cell<bool>,
+    /// The extra build-and-layout passes container sizes have cost this
+    /// view, and the layouts that hit the pass cap still moving (#1070 R1).
+    /// The size containers the last walk met in a trusted frame: the ones
+    /// `container_sizes` measures (`container_query::take_trusted_containers`).
+    pub(crate) container_trusted: RefCell<std::collections::HashSet<usize>>,
+    pub(crate) container_passes: Cell<u32>,
+    pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
     /// ran them. Read by tests to pin that a relayout takes one pass.
@@ -581,6 +614,10 @@ pub(crate) struct ViewLayout {
     /// `RUSTKIT_INCREMENTAL_LAYOUT` is not `off`, and what that path did.
     pub(crate) incremental_layout: RefCell<Option<crate::incremental_layout::Retained>>,
     pub(crate) incremental_stats: RefCell<crate::incremental_layout::Stats>,
+    /// INC5 stage 2: the coming relayout's dirty set changed no style and no
+    /// box, so its build may be skipped (`Engine::relayout` sets it, the
+    /// next build takes it).
+    pub(crate) incremental_skip_build: Cell<bool>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
@@ -728,6 +765,26 @@ mod tests {
             external_sheets: Rc::default(),
             external_sheet_owners: Rc::default(),
         }
+    }
+
+    #[test]
+    fn a_view_for_a_later_build_keeps_the_per_build_fields_and_rereads_focus() {
+        let lay = Rc::new(ViewLayout::default());
+        let mut taken = build_view(&lay);
+        taken.dpr = 2.0;
+        taken.viewport = Some((800.0, 600.0));
+        taken.url = Url::parse("https://example.com/a").ok();
+        let focused = rustkit_dom::NodeId::new(7);
+        lay.focused_node.set(Some(focused));
+        let later = taken.for_build();
+        assert_eq!(later.id, taken.id);
+        assert!(Rc::ptr_eq(later.lay.as_ref().unwrap(), &lay));
+        assert_eq!(later.url, taken.url);
+        assert_eq!(later.viewport, Some((800.0, 600.0)));
+        assert_eq!(later.dpr, 2.0);
+        assert_eq!(later.focus, Some(focused));
+        assert!(Rc::ptr_eq(&later.external_sheets, &taken.external_sheets));
+        assert!(Rc::ptr_eq(&later.external_sheet_owners, &taken.external_sheet_owners));
     }
 
     #[test]
