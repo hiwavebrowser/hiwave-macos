@@ -1,0 +1,29 @@
+<!doctype html><meta charset=utf-8><body style="margin:0">
+<div id=cases>
+<img id=c1 srcset="i100.png 1x, i200.png 2x">
+<img id=c2 srcset="i100.png 1x, i200.png 2x, i400.png 4x">
+<img id=c3 srcset="i200.png 2x">
+<img id=c4 src="i50.png" srcset="i100.png 1.5x, i300.png 3x">
+<img id=c5 srcset="i100.png 100w, i200.png 200w, i400.png 400w" sizes="100vw">
+<img id=c6 srcset="i100.png 100w, i200.png 200w, i400.png 400w" sizes="(min-width: 600px) 300px, 100px">
+<img id=c7 srcset="i100.png 100w, i200.png 200w, i400.png 400w">
+<img id=c8 srcset="i100.png 1x, i200.png 2x" width="60">
+<img id=c9 srcset="i100.png 100w, i200.png 200w, i400.png 400w" sizes="150px">
+<picture id=p1><source media="(min-width: 600px)" srcset="i400.png"><source srcset="i100.png"><img id=c10 src="i50.png"></picture>
+<picture id=p2><source type="image/foo" srcset="i400.png"><img id=c11 src="i50.png" srcset="i100.png 1x, i200.png 2x"></picture>
+<picture id=p3><source type="image/png" srcset="i200.png 1x, i400.png 2x"><img id=c12 src="i50.png"></picture>
+<picture id=p4><source srcset="i100.png 100w, i300.png 300w" sizes="200px"><img id=c13 src="i50.png"></picture>
+<img id=c14 src="i50.png" srcset="">
+<img id=c15 srcset="i100.png, i200.png 2x">
+<img id=c16 srcset="i100.png 1x, i150.png 1.5x, i200.png 2x" style="width:50px">
+</div>
+<script>
+setTimeout(function(){
+  var out = [];
+  document.querySelectorAll('img').forEach(function(i){
+    var cs = i.currentSrc.split('/').pop();
+    out.push([i.id, cs, i.naturalWidth, i.naturalHeight, i.width, i.height, i.complete].join('|'));
+  });
+  var pre = document.createElement('pre'); pre.id='out'; pre.textContent = out.join(';;'); document.body.appendChild(pre);
+}, 1500);
+</script>
