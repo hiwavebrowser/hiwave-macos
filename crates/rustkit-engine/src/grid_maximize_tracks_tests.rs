@@ -24,13 +24,7 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[
-    // `fit-content(300px)` around 540px of 60px boxes beside `1fr`: the
-    // track's growth limit is still its argument, not min(argument,
-    // max-content), so it waits until after the `fr` tracks and stays at
-    // its 60px min-content (Chromium 300). The fit-content row fixes it.
-    "a-fit-content-track-wider-than-its-argument-beside-an-fr-track",
-];
+const GAPS: &[&str] = &[];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
