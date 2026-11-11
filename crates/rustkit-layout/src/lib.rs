@@ -54,6 +54,9 @@ mod flex_item_min_height_tests;
 
 #[cfg(test)]
 mod fit_content_width_tests;
+
+#[cfg(test)]
+mod primary_emoji_font_tests;
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]

@@ -2360,6 +2360,22 @@ mod tests {
         }
     }
 
+    /// Every path that reports an Apple emoji glyph's advance reports
+    /// Chrome's (#1072 R1 nits 3 and 4): the legacy mask fallback a caller
+    /// without layout's record reaches, and the shaper's own advances when
+    /// the run's PRIMARY face is Apple Color Emoji. Chrome for Testing 148:
+    /// `🔍` in `font: 14px "Apple Color Emoji"` is 18; two at 16px are 40.
+    #[test]
+    fn every_path_reports_the_apple_emoji_advance() {
+        let helvetica = GlyphRasterizer::with_style("Helvetica", 14.0, 400, false);
+        let (_, _, _, legacy, ..) = helvetica.rasterize_char('\u{1F50D}', 0.0).expect("rasterizes");
+        assert_eq!(legacy, 18.0, "legacy fallback advance under Helvetica at 14px");
+        let shaper = TextShaper::new("Apple Color Emoji", 16.0).expect("the emoji face");
+        let shaped = shaper.shape("\u{1F50D}\u{1F50D}").expect("shapes");
+        let total: f32 = shaped.advances.iter().sum();
+        assert_eq!(total, 40.0, "two emoji in the emoji face at 16px");
+    }
+
     /// Paint draws the fallback glyph from that same face: the advance the
     /// rasteriser reports is Menlo's, not Apple Symbols'.
     #[test]
