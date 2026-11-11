@@ -254,7 +254,8 @@ while hoisting, when the root would have reached the body: `no_retained`,
 `ancestor_container`, `ancestor_out_of_flow`, `ancestor_sized`,
 `ancestor_aspect_ratio`,
 `ancestor_min_max`, `float_beside`, `abspos_on_path`, `relative_percent`,
-`fixed_after`, `geometry_moved`, `root_large` (the relayout roots hold
+`fixed_after`, `geometry_moved`, `flex_item_resized` (a stage 6a root came
+out a different size), `root_large` (the relayout roots hold
 more than half of a tree of 2000 boxes or more: laying them out alone
 costs more than the full pass).
 

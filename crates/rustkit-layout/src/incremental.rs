@@ -71,6 +71,9 @@ struct Plan {
     /// move the children after the path. `None`: every ancestor grows.
     stop: Option<usize>,
     hoists: u32,
+    /// The root is a flex item whose container's algorithm reads nothing
+    /// that changed (stage 6a): its border box must come out the same.
+    exact: bool,
 }
 
 /// Lay `fresh` out by updating `laid` (the layout of `old_unlaid`) in place.
@@ -112,6 +115,13 @@ pub fn relayout(
     // out, and each is laid out at its own old position.
     for plan in plans.iter().rev() {
         let (nb, delta) = lay_out_root(laid, fresh, plan, &mut out.visits)?;
+        if plan.exact {
+            let old = at(laid, &plan.root).ok_or("shape")?.dimensions.border_box();
+            let new = nb.dimensions.border_box();
+            if !close(old.width, new.width) || !close(old.height, new.height) || delta.abs() > 0.01 {
+                return Err("flex_item_resized");
+            }
+        }
         out.moved += splice(laid, &plan.root, 0, plan.stop, nb, delta)?;
         out.delta += delta;
         out.hoists += plan.hoists;
@@ -167,6 +177,10 @@ fn lay_out_root(
     cb.content.height = 0.0;
     let mut margins = MarginCollapseContext::new();
     margins.first_child_top_adjoined = true;
+    // A flex or grid item is a formatting root: its children's margins
+    // stay inside it, as the container's own layout of it has them.
+    margins.children_are_formatting_roots =
+        parent.style.display.is_flex() || parent.style.display.is_grid();
     let before = layout_visits();
     nb.layout_with_collapse_in(&cb, &mut margins, &mut FloatContext::new(), None);
     // The root pass's relative offsets, for what is under the box (its own
@@ -643,6 +657,9 @@ fn plan_for(
 ) -> Result<Plan, Fallback> {
     let mut root = path;
     let mut hoists = 0;
+    // Depth of a flex container whose item at depth + 1 is the root and
+    // holds its size (`column_item_holds`).
+    let mut flex_hold: Option<usize> = None;
     let mut why: Fallback = if root.len() == 1 {
         "body_box"
     } else {
@@ -651,6 +668,9 @@ fn plan_for(
     'hoist: loop {
         if root.len() <= 1 {
             return Err(if root.is_empty() { "root_box" } else { why });
+        }
+        if flex_hold.is_some_and(|d| root.len() != d + 1) {
+            flex_hold = None;
         }
         let (Some(l), Some(n), Some(u)) =
             (at(laid, &root), at(fresh, &root), at(old_unlaid, &root))
@@ -664,8 +684,14 @@ fn plan_for(
             continue;
         }
         let mut stop = None;
+        let mut exact = false;
         for depth in (0..root.len()).rev() {
             let a = at(laid, &root[..depth]).ok_or("shape")?;
+            if flex_hold == Some(depth) {
+                stop = Some(depth);
+                exact = true;
+                break;
+            }
             let parent = depth.checked_sub(1).and_then(|p| at(laid, &root[..p]));
             match classify_ancestor(a, parent) {
                 Ancestor::Grows => {}
@@ -674,6 +700,19 @@ fn plan_for(
                     break;
                 }
                 Ancestor::Hoist(w) => {
+                    // Stage 6a: the root moves up to the container's item
+                    // instead, when the container would size and place
+                    // every item as before.
+                    let item = &root[..depth + 1];
+                    if w == "ancestor_flex"
+                        && depth >= 1
+                        && at(fresh, item).is_some_and(|n| column_item_holds(a, n))
+                    {
+                        hoists += (root.len() - item.len()) as u32;
+                        root.truncate(depth + 1);
+                        flex_hold = Some(depth);
+                        continue 'hoist;
+                    }
                     why = w;
                     hoists += (root.len() - depth) as u32;
                     root.truncate(depth);
@@ -687,8 +726,97 @@ fn plan_for(
             hoists += 1;
             continue;
         }
-        return Ok(Plan { root, stop, hoists });
+        return Ok(Plan {
+            root,
+            stop,
+            hoists,
+            exact,
+        });
     }
+}
+
+/// Stage 6a: whether the column flex container `c` would give its item
+/// (`n`, as built now) the size and place it had, whatever
+/// changed inside the item. Its main size (`height`) is a length the
+/// algorithm takes as is: `flex-basis: auto`, min/max lengths or unset,
+/// and no item shrank last time (so a content-based minimum never came
+/// into play); its cross size is a `width` length or the container's
+/// (stretched); not baseline-aligned, no auto margins.
+fn column_item_holds(c: &LayoutBox, n: &LayoutBox) -> bool {
+    use rustkit_css::{AlignItems, AlignSelf, FlexBasis, FlexDirection, FlexWrap};
+    let cs = &c.style;
+    if cs.display != Display::Flex
+        || !matches!(cs.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse)
+        || cs.flex_wrap != FlexWrap::NoWrap
+        || c.float != Float::None
+        || matches!(c.position, Position::Absolute | Position::Fixed)
+    {
+        return false;
+    }
+    let s = &n.style;
+    let fixed = |l: &Length| {
+        matches!(
+            l,
+            Length::Px(_)
+                | Length::Em(_)
+                | Length::Rem(_)
+                | Length::Vw(_)
+                | Length::Vh(_)
+                | Length::Vmin(_)
+                | Length::Vmax(_)
+                | Length::Zero
+        )
+    };
+    let unset_or_fixed = |l: &Length| matches!(l, Length::Auto) || fixed(l);
+    if !fixed(&s.height)
+        || s.flex_basis != FlexBasis::Auto
+        || !unset_or_fixed(&s.min_height)
+        || !unset_or_fixed(&s.max_height)
+        || !unset_or_fixed(&s.min_width)
+        || !unset_or_fixed(&s.max_width)
+    {
+        return false;
+    }
+    let stretch = match s.align_self {
+        AlignSelf::Auto => match cs.align_items {
+            AlignItems::Stretch => Some(true),
+            AlignItems::Baseline => None,
+            _ => Some(false),
+        },
+        AlignSelf::Stretch => Some(true),
+        AlignSelf::Baseline => None,
+        _ => Some(false),
+    };
+    let Some(stretch) = stretch else {
+        return false;
+    };
+    if !(fixed(&s.width) || (matches!(s.width, Length::Auto) && stretch)) {
+        return false;
+    }
+    if [&s.margin_top, &s.margin_right, &s.margin_bottom, &s.margin_left]
+        .into_iter()
+        .any(|m| matches!(m, Length::Auto))
+    {
+        return false;
+    }
+    let items: Vec<&LayoutBox> = c
+        .children
+        .iter()
+        .filter(|x| {
+            !matches!(x.position, Position::Absolute | Position::Fixed)
+                && !matches!(
+                    x.style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                )
+        })
+        .collect();
+    let gap = c.length_to_px(&cs.row_gap, 0.0).max(0.0);
+    let sum: f32 = items
+        .iter()
+        .map(|x| x.dimensions.margin_box().height)
+        .sum::<f32>()
+        + gap * items.len().saturating_sub(1) as f32;
+    sum <= c.dimensions.content.height + 0.5
 }
 
 /// Whether the box at a root's path can be laid out alone: `l` laid out,
