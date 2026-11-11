@@ -2583,6 +2583,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -4390,6 +4391,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -22341,4 +22343,22 @@ mod overlay_hit_tests {
         // Elsewhere on the overlay: the overlay, not the page under it.
         assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
+}
+
+thread_local! {
+    /// Boxes laid out on this thread since the last [`take_layout_visits`]: one per call of
+    /// `layout_with_collapse_in` or `layout_with_percent_base`. A box laid out k times in one pass
+    /// counts k, so `visits / boxes` is the pass's re-layout multiplicity (LAT21: walmart ran
+    /// ~160 visits per box).
+    static LAYOUT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_layout_visit() {
+    LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of box layouts on this thread since the last call, and a fresh count.
+pub fn take_layout_visits() -> u64 {
+    LAYOUT_VISITS.with(|n| n.replace(0))
 }
