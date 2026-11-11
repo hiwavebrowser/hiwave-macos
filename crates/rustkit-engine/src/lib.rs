@@ -538,6 +538,10 @@ mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
 #[cfg(test)]
+mod appearance_apply_tests;
+#[cfg(test)]
+mod pointer_reads_has_tests;
+#[cfg(test)]
 mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
@@ -644,6 +648,8 @@ mod navigation_release_tests;
 mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod button_line_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod button_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod microtask_cap_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -15957,6 +15963,34 @@ impl layout_ctx::LayoutCtx {
         if matches!(property, "line-height" | "font") {
             style.line_height_declared = true;
         }
+        // The same, side by side (CB3c): top, right, bottom, left.
+        {
+            let sides = |name: &str| -> &'static [usize] {
+                match name {
+                    "padding" | "border" | "border-width" | "border-style" => &[0, 1, 2, 3],
+                    "padding-top" | "border-top" | "border-top-width" | "border-top-style" => &[0],
+                    "padding-right" | "border-right" | "border-right-width" | "border-right-style" => &[1],
+                    "padding-bottom" | "border-bottom" | "border-bottom-width" | "border-bottom-style" => &[2],
+                    "padding-left" | "border-left" | "border-left-width" | "border-left-style" => &[3],
+                    _ => &[],
+                }
+            };
+            if property.starts_with("padding") {
+                for &i in sides(property) {
+                    style.padding_declared[i] = true;
+                }
+            } else if property.starts_with("border") {
+                // A STYLE sets the width only when it is `none`/`hidden` (width 0); any other
+                // style alone leaves the UA's width.
+                let style_only = property.ends_with("-style");
+                let zeroing = value.split_whitespace().any(|t| matches!(t, "none" | "hidden"));
+                if !style_only || zeroing {
+                    for &i in sides(property) {
+                        style.border_declared[i] = true;
+                    }
+                }
+            }
+        }
         if matches!(
             property,
             "border"
@@ -24200,16 +24234,7 @@ impl Engine {
             if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
-                    let view = layout_ctx::BuildView {
-                        id,
-                        lay: Some(lay.clone()),
-                        url: building.url.clone(),
-                        viewport: building.viewport,
-                        dpr: building.dpr,
-                        focus: lay.focused_node.get(),
-                        external_sheets: sheets.clone(),
-                        external_sheet_owners: owners.clone(),
-                    };
+                    let view = building.for_build();
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
                     Some(Ok(geometry)) => return Some(geometry),
@@ -24239,16 +24264,7 @@ impl Engine {
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
-                layout_ctx::BuildView {
-                    id,
-                    lay: Some(lay.clone()),
-                    url: building.url.clone(),
-                    viewport: building.viewport,
-                    dpr: building.dpr,
-                    focus: lay.focused_node.get(),
-                    external_sheets: sheets.clone(),
-                    external_sheet_owners: owners.clone(),
-                },
+                building.for_build(),
                 &document,
                 &sheets,
                 javascript_enabled,
@@ -42263,7 +42279,7 @@ impl SubjectCompound {
 /// class on it as an ancestor or an earlier sibling (those are known by
 /// tag, classes and id). A page can spell it only by writing U+0001 into a
 /// class or an attribute name, and then styles that element as hovered.
-const HOVER_MARK: &str = "\u{1}hover";
+pub(crate) const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 /// The focused element (`:focus`) and it and its ancestors
 /// (`:focus-within`), marked like the two above: by the build
@@ -44472,21 +44488,21 @@ struct SelectorReads {
 /// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
 /// a rule's match from.
 #[derive(Default)]
-struct PointerReads {
+pub(crate) struct PointerReads {
     /// The compounds that carry it, without it, each with how far a rule
     /// reaches past a matching element's later siblings: an element none
     /// of them matches by tag, classes and id gains or loses the
     /// pseudo-class without any rule noticing.
-    compounds: Vec<PointerCompound>,
+    pub(crate) compounds: Vec<PointerCompound>,
     /// Index into `compounds` by tag, classes, id and attributes.
     seen: HashMap<PointerCompoundKey, usize>,
     /// Each `:has()` whose argument reads it (LAT3, a marketplace's
     /// `[data-x]:not(:has([data-x]:hover)):hover::after`).
-    has: Vec<HasPointer>,
+    pub(crate) has: Vec<HasPointer>,
     /// Some selector names it where neither `compounds` nor `has` shows it
     /// (a `:has()` argument that starts with `+` or `~`, a member the
     /// selector parser rejects): any element may count.
-    anywhere: bool,
+    pub(crate) anywhere: bool,
     /// LAT20: the shape of the first selector that set `anywhere`
     /// (`anywhere_shape`), for the relayout line's `restyle_miss`: never
     /// the selector's text.
@@ -44596,7 +44612,7 @@ struct PointerCompound {
 impl PointerReads {
     /// Record where `selector` reads `name` (`":hover"`), which the
     /// compound parser turns into the class `mark`.
-    fn note(&mut self, selector: &str, name: &str, mark: &str) {
+    pub(crate) fn note(&mut self, selector: &str, name: &str, mark: &str) {
         if pseudo_named(selector, name) == 0 {
             return;
         }
