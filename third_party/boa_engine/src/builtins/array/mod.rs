@@ -3705,8 +3705,21 @@ fn merge_sort_fallible<T: Clone>(
     if len < 2 {
         return Ok(());
     }
-    let mut from = items.clone();
-    let mut to = items.clone();
+    // Already in order (the common case for a re-sorted list): n - 1 comparator calls, as
+    // driftsort's run detection gave, instead of n log n. Stops at the first out-of-order pair, so
+    // unsorted input pays at most one extra call per element.
+    let mut sorted = true;
+    for i in 1..len {
+        if compare(&items[i - 1], &items[i])? == Ordering::Greater {
+            sorted = false;
+            break;
+        }
+    }
+    if sorted {
+        return Ok(());
+    }
+    let mut from = std::mem::take(items);
+    let mut to = from.clone();
     let mut width = 1;
     while width < len {
         let mut start = 0;

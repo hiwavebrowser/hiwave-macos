@@ -70,22 +70,41 @@ fn a_consistent_comparator_still_sorts_stably() {
 }
 
 #[test]
-fn a_throwing_comparator_stops_the_sort_and_rethrows() {
+fn a_throwing_comparator_stops_the_sort_rethrows_and_leaves_the_array_unchanged() {
     let out = run(&format!(
-        "{ARRAY} var calls = 0; var msg = ''; \
+        "{ARRAY} var before = a.join(); var calls = 0; var msg = ''; \
          try {{ a.sort(function () {{ calls++; if (calls === 5) throw new Error('boom'); return 0; }}); }} catch (e) {{ msg = e.message; }} \
-         String(msg + ':' + calls)"
+         String(msg + ':' + calls + ':' + (a.join() === before))"
     ));
-    // No further comparator calls after the abrupt completion (ECMA-262 SortIndexedProperties).
-    assert_eq!(out, "String(\"boom:5\")");
+    // No further comparator calls after the abrupt completion (ECMA-262 SortIndexedProperties),
+    // and nothing is written back.
+    assert_eq!(out, "String(\"boom:5:true\")");
+}
+
+/// Comparator calls, not wall clock: a flaky bound on a loaded machine proves nothing.
+fn calls_for(setup: &str) -> u64 {
+    let out = run(&format!(
+        "{setup} var calls = 0; a.sort(function (x, y) {{ calls++; return x - y; }}); String(calls)"
+    ));
+    out.trim_start_matches("String(\"").trim_end_matches("\")").parse().unwrap()
 }
 
 #[test]
-fn sorting_two_hundred_thousand_numbers_stays_fast() {
-    let started = std::time::Instant::now();
+fn sorted_input_costs_n_minus_one_comparator_calls() {
+    assert_eq!(calls_for("var a = []; for (var i = 0; i < 10000; i++) a.push(i);"), 9_999);
+    // Equal neighbours are still "in order" (stable, nothing to move).
+    assert_eq!(calls_for("var a = []; for (var i = 0; i < 1000; i++) a.push(i >> 2);"), 999);
+}
+
+#[test]
+fn unsorted_input_stays_within_n_log_n_comparator_calls() {
+    let n: u64 = 200_000;
+    let calls = calls_for("var a = []; for (var i = 0; i < 200000; i++) a.push((i * 7919) % 100003);");
+    // Merge sort: at most n * ceil(log2 n) - 2^ceil(log2 n) + 1 calls, plus the sorted pre-pass
+    // (stopped at the first out-of-order pair).
+    let bound = n * 18 + n;
+    assert!(calls <= bound, "{calls} calls for {n} numbers (bound {bound})");
     let out = run("var a = []; for (var i = 0; i < 200000; i++) a.push((i * 7919) % 100003); \
                    a.sort(function (x, y) { return x - y; }); String(a[0] + ',' + a[199999])");
     assert_eq!(out, "String(\"0,100002\")");
-    assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
-    eprintln!("SORT200K {:?}", started.elapsed());
 }
