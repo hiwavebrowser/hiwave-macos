@@ -1910,6 +1910,60 @@ mod tests {
         );
     }
 
+    /// The titles the page reported, in order.
+    fn titles(events: &[PageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PageEvent::Title { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tab's title follows the document's. The engine reported a title
+    /// once, at load: a page that set `document.title` later (an unread
+    /// count, a single-page app's route) kept its first title in the tab.
+    /// Every change is reported, once per script turn however many writes
+    /// the turn made, with the text `document.title` reads.
+    #[test]
+    fn a_title_script_changes_reaches_the_app_once_per_turn() {
+        let page = page();
+        let mut loaded = page.load_html("<title>  base \n title </title><p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
+        assert_eq!(titles(&events), ["base title"], "the title at load, as document.title reads it");
+
+        // Three writes in one turn: one report, of the last.
+        let mut done = page.eval("document.title = 'one'; document.title = 'two'; document.title = '  three \\n four '; 0");
+        assert!(wait_recv(&mut done, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(10), |events| titles(events).iter().any(|t| t == "three four"));
+        assert_eq!(titles(&events), ["three four"]);
+
+        // The element's text changed, not the property.
+        let mut done = page.eval("document.querySelector('title').textContent = 'by element'; 0");
+        assert!(wait_recv(&mut done, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
+        assert_eq!(titles(&events), ["by element"]);
+
+        // From a timer, with no script call from the app.
+        let mut done = page.eval("setTimeout(function () { document.title = 'later'; }, 30); 0");
+        assert!(wait_recv(&mut done, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
+        assert_eq!(titles(&events), ["later"]);
+
+        // A write that changes nothing reports nothing; removing the
+        // element reports the empty title.
+        let mut done = page.eval("document.title = 'later'; document.getElementById('t').textContent = 'y'; 0");
+        assert!(wait_recv(&mut done, Duration::from_secs(10)).unwrap().is_ok());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(titles(&page.poll()), Vec::<String>::new());
+        let mut done = page.eval("document.querySelector('title').remove(); 0");
+        assert!(wait_recv(&mut done, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
+        assert_eq!(titles(&events), [""]);
+    }
+
     #[test]
     fn the_first_commit_is_the_laid_out_frame() {
         let page = page();

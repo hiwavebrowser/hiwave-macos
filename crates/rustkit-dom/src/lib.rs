@@ -1142,6 +1142,24 @@ impl QuerySelector {
 mod tests {
     use super::*;
 
+    /// The document's title is what `document.title` reads (HTML §3.1.3):
+    /// the first HTML `<title>` in tree order, its own text, ASCII
+    /// whitespace stripped and collapsed.
+    #[test]
+    fn the_title_is_the_first_html_title_elements_collapsed_text() {
+        let title = |html: &str| Document::parse_html(html).unwrap().title();
+        assert_eq!(title("<title>  a \n\t b  </title>"), Some("a b".to_string()));
+        assert_eq!(title("<p>none</p>"), None);
+        assert_eq!(title("<title></title>"), Some(String::new()));
+        assert_eq!(title("<body><svg><title>drawing</title></svg><p>x</p>"), None, "an SVG title is not the document's");
+        assert_eq!(
+            title("<head></head><body><svg><title>drawing</title></svg><title>in body</title>"),
+            Some("in body".to_string()),
+            "a title outside the head counts"
+        );
+        assert_eq!(title("<title>\u{a0}kept\u{a0}</title>"), Some("\u{a0}kept\u{a0}".to_string()), "only ASCII whitespace is stripped");
+    }
+
     #[test]
     fn test_parse_simple_html() {
         let html = r#"<!DOCTYPE html>
