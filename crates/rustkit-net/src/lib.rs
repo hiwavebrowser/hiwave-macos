@@ -1485,13 +1485,13 @@ mod blocked_request_log_tests {
             let err = rt.block_on(loader.fetch(request)).err().expect("blocked");
             assert!(matches!(err, NetError::Blocked(_)));
         });
-        // The blocked-request line only: the loader's general debug line keeps the whole URL by the
-        // existing convention (CH3.A6), and is not what this row is about.
-        let blocked: Vec<&str> = text.lines().filter(|l| l.contains("blocked")).collect();
-        let text = blocked.join("
+        // Every captured line for this request, except the loader's general "Fetching resource" debug
+        // line, which keeps the whole URL by the existing convention (CH3.A6).
+        let text: String = text.lines().filter(|l| !l.contains("Fetching resource")).collect::<Vec<_>>().join("
 ");
         assert!(text.contains("Request blocked by interceptor"), "the block is still logged: {text}");
         assert!(text.contains("tracker.example"), "by its host: {text}");
+        assert!(text.contains("Handler intercepted"), "the handler line is in the capture: {text}");
         for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9"] {
             assert!(!text.contains(secret), "{secret} reached the blocked-request line: {text}");
         }
