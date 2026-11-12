@@ -216,10 +216,11 @@ fn text_and_base64_codecs_take_megabytes_without_a_per_byte_loop() {
     let out = rig
         .bindings
         .evaluate(
-            "var s = 'é€😀' + 'a'.repeat(2 * 1024 * 1024) + '\\ud800';\
+            "var big = function (n, c) { return new TextDecoder().decode(new Uint8Array(n).fill(c)); };\
+             var s = 'é€😀' + big(2 * 1024 * 1024, 97) + '\\ud800';\
              var bytes = new TextEncoder().encode(s);\
              var back = new TextDecoder().decode(bytes);\
-             var b64 = btoa('\\u00ff' + 'b'.repeat(1024 * 1024));\
+             var b64 = btoa('\\u00ff' + big(1024 * 1024, 98));\
              var bin = atob(b64);\
              [bytes.length, bytes[0], bytes[1], bytes[bytes.length - 1], back.length, back.charCodeAt(back.length - 1),\
               back.slice(0, 4) === 'é€😀', b64.length, b64.slice(0, 4), bin.length, bin.charCodeAt(0), bin[bin.length - 1]].join()",
