@@ -52,8 +52,13 @@ pub(crate) fn base64_decode(ascii: &[u8]) -> Option<Vec<u8>> {
 
 /// Run `f` over the bytes of `value`: an `ArrayBuffer`, or the part of one
 /// a typed array or `DataView` covers.
-fn with_bytes<T>(value: Option<&JsValue>, context: &mut Context, f: impl FnOnce(&[u8]) -> T) -> JsResult<T> {
-    let not_bytes = || JsNativeError::typ().with_message("expected an ArrayBuffer or a view on one");
+fn with_bytes<T>(
+    value: Option<&JsValue>,
+    context: &mut Context,
+    f: impl FnOnce(&[u8]) -> T,
+) -> JsResult<T> {
+    let not_bytes =
+        || JsNativeError::typ().with_message("expected an ArrayBuffer or a view on one");
     let object = value.and_then(JsValue::as_object).ok_or_else(not_bytes)?;
     let (buffer, start, length) = match JsArrayBuffer::from_object(object.clone()) {
         Ok(buffer) => {
@@ -65,7 +70,11 @@ fn with_bytes<T>(value: Option<&JsValue>, context: &mut Context, f: impl FnOnce(
             let buffer = view.buffer(context)?;
             let buffer = buffer.as_object().ok_or_else(not_bytes)?;
             let buffer = JsArrayBuffer::from_object(buffer.clone()).map_err(|_| not_bytes())?;
-            (buffer, view.byte_offset(context)?, view.byte_length(context)?)
+            (
+                buffer,
+                view.byte_offset(context)?,
+                view.byte_length(context)?,
+            )
         }
     };
     let data = buffer
@@ -127,7 +136,11 @@ pub(crate) fn utf8_decode(bytes: &[u8], flush: bool) -> (String, usize, bool) {
 pub(crate) fn utf8_encode(string: JsStr<'_>) -> Vec<u8> {
     match string.variant() {
         JsStrVariant::Latin1(units) if units.is_ascii() => units.to_vec(),
-        JsStrVariant::Latin1(units) => units.iter().map(|&u| u as char).collect::<String>().into_bytes(),
+        JsStrVariant::Latin1(units) => units
+            .iter()
+            .map(|&u| u as char)
+            .collect::<String>()
+            .into_bytes(),
         JsStrVariant::Utf16(units) => char::decode_utf16(units.iter().copied())
             .map(|c| c.unwrap_or('\u{FFFD}'))
             .collect::<String>()
@@ -136,9 +149,11 @@ pub(crate) fn utf8_encode(string: JsStr<'_>) -> Vec<u8> {
 }
 
 fn string_arg(args: &[JsValue]) -> JsResult<JsString> {
-    args.first()
-        .and_then(JsValue::as_string)
-        .ok_or_else(|| JsNativeError::typ().with_message("expected a string").into())
+    args.first().and_then(JsValue::as_string).ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("expected a string")
+            .into()
+    })
 }
 
 /// Add the byte natives to the host object under construction.
@@ -161,8 +176,13 @@ pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash) {
     };
     let decode = NativeFunction::from_fn_ptr(|_this, args, context| {
         let flush = args.get(1).is_some_and(JsValue::to_boolean);
-        let (text, used, bad) = with_bytes(args.first(), context, |bytes| utf8_decode(bytes, flush))?;
-        let parts = [JsValue::from(JsString::from(text.as_str())), JsValue::from(used as f64), JsValue::from(bad)];
+        let (text, used, bad) =
+            with_bytes(args.first(), context, |bytes| utf8_decode(bytes, flush))?;
+        let parts = [
+            JsValue::from(JsString::from(text.as_str())),
+            JsValue::from(used as f64),
+            JsValue::from(bad),
+        ];
         Ok(JsArray::from_iter(parts, context).into())
     });
     let encode = NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -170,7 +190,9 @@ pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash) {
         uint8_array(&bytes, context)
     });
     let binary_decode = NativeFunction::from_fn_ptr(|_this, args, context| {
-        let text = with_bytes(args.first(), context, |bytes| JsString::from(JsStr::latin1(bytes)))?;
+        let text = with_bytes(args.first(), context, |bytes| {
+            JsString::from(JsStr::latin1(bytes))
+        })?;
         Ok(text.into())
     });
     let binary_encode = NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -216,16 +238,34 @@ mod tests {
     fn malformed_utf8_is_one_replacement_per_maximal_subpart() {
         // F0 9F 98 is a truncated four-byte sequence, then 'a'; C0 can
         // start nothing; E2 82 at the end is incomplete.
-        assert_eq!(utf8_decode(b"\xF0\x9F\x98a", true), ("\u{FFFD}a".to_string(), 4, true));
-        assert_eq!(utf8_decode(b"\xC0\x80", true), ("\u{FFFD}\u{FFFD}".to_string(), 2, true));
-        assert_eq!(utf8_decode(b"ok\xE2\x82", true), ("ok\u{FFFD}".to_string(), 4, true));
-        assert_eq!(utf8_decode("é€😀".as_bytes(), true), ("é€😀".to_string(), 9, false));
+        assert_eq!(
+            utf8_decode(b"\xF0\x9F\x98a", true),
+            ("\u{FFFD}a".to_string(), 4, true)
+        );
+        assert_eq!(
+            utf8_decode(b"\xC0\x80", true),
+            ("\u{FFFD}\u{FFFD}".to_string(), 2, true)
+        );
+        assert_eq!(
+            utf8_decode(b"ok\xE2\x82", true),
+            ("ok\u{FFFD}".to_string(), 4, true)
+        );
+        assert_eq!(
+            utf8_decode("é€😀".as_bytes(), true),
+            ("é€😀".to_string(), 9, false)
+        );
     }
 
     #[test]
     fn an_incomplete_tail_waits_for_the_next_chunk_when_streaming() {
-        assert_eq!(utf8_decode(b"ok\xE2\x82", false), ("ok".to_string(), 2, false));
-        assert_eq!(utf8_decode(b"\xE2\x82\xAC", false), ("€".to_string(), 3, false));
+        assert_eq!(
+            utf8_decode(b"ok\xE2\x82", false),
+            ("ok".to_string(), 2, false)
+        );
+        assert_eq!(
+            utf8_decode(b"\xE2\x82\xAC", false),
+            ("€".to_string(), 3, false)
+        );
     }
 
     #[test]
