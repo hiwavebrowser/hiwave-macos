@@ -407,6 +407,8 @@ mod script_net_t7_tests;
 #[cfg(test)]
 mod script_net_body_size_tests;
 #[cfg(test)]
+mod frames_stage2_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -1820,6 +1822,11 @@ pub struct EngineConfig {
     /// start more requests; whatever is still pending after the last round
     /// completes with a network error.
     pub script_network_rounds: u32,
+    /// Same-origin `<iframe>` documents (nested browsing contexts, Stage 2
+    /// of docs/diagnostics/2026-11-11/nested-browsing-contexts-plan.md).
+    /// Off by default: an iframe stays an empty box with `contentWindow`
+    /// null, as before.
+    pub nested_contexts: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -1882,6 +1889,7 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
+            nested_contexts: false,
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -25602,6 +25610,12 @@ impl EngineBuilder {
 
     /// Requests made after the `load` event go to the live loop
     /// (`EngineConfig::post_load_requests_live`).
+    /// Load same-origin `<iframe>` documents (`EngineConfig::nested_contexts`).
+    pub fn nested_contexts(mut self, on: bool) -> Self {
+        self.config.nested_contexts = on;
+        self
+    }
+
     pub fn post_load_requests_live(mut self, live: bool) -> Self {
         self.config.post_load_requests_live = live;
         self
