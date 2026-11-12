@@ -5295,6 +5295,20 @@ fn apply_justify_self(
 /// narrow (bing's search icon: an svg in a label whose column is 1.6px
 /// wide; flowed, the icon shrank to a dot).
 fn item_children_flow_inline(item: &LayoutBox) -> bool {
+    // GR3: floats share lines with each other and with what follows, which
+    // the block arm's one-under-the-other re-stack cannot express: two
+    // 100px floats in a 200-wide item came out stacked (Chrome 148: side by
+    // side, the item 10 tall, not 20). Such an item is flowed whole, at its
+    // final width, by the same block-children pass the inline arm runs.
+    if item.children.iter().any(|c| {
+        c.float != crate::Float::None
+            && !matches!(
+                c.style.position,
+                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+            )
+    }) {
+        return true;
+    }
     let mut in_flow = item.children.iter().filter(|c| {
         !matches!(
             c.style.position,

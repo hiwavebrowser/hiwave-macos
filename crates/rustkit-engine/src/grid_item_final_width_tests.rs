@@ -16,6 +16,13 @@ use super::*;
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/grid_item_final_width.html");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/grid_item_final_width_cft148.txt");
 
+/// Boxes still off for a reason outside this row: two `auto` columns share
+/// the free space equally from the items' MIN-content (100 for two 100px
+/// floats), where Chrome first grows each to its max-content (200) and then
+/// stretches (296 / 104; here 246 / 154). Track sizing, its own row (GR4).
+/// They must still DIFFER; one that starts matching comes off the list.
+const KNOWN: &[&str] = &["t_auto_a", "t_auto_b"];
+
 #[test]
 fn grid_items_lay_out_children_at_their_final_width() {
     let expected: Vec<(&str, [f32; 4])> = CHROME
@@ -59,8 +66,14 @@ fn grid_items_lay_out_children_at_their_final_width() {
     let wrong: Vec<String> = expected
         .iter()
         .zip(&got)
-        .filter(|((_, e), g)| e.iter().zip(g.iter()).any(|(e, g)| (e - g).abs() > 0.5))
-        .map(|((id, e), g)| format!("{id}: {g:?} (Chromium {e:?})"))
+        .filter(|((id, e), g)| {
+            let off = e.iter().zip(g.iter()).any(|(e, g)| (e - g).abs() > 0.5);
+            off != KNOWN.contains(id)
+        })
+        .map(|((id, e), g)| {
+            let listed = if KNOWN.contains(id) { ", listed in KNOWN" } else { "" };
+            format!("{id}: {g:?} (Chromium {e:?}{listed})")
+        })
         .collect();
     assert!(wrong.is_empty(), "{} of {} boxes differ (x, width, y, height):\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
