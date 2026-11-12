@@ -218,6 +218,15 @@ pub type ComputedLines = Rc<dyn Fn(usize) -> Option<String>>;
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
 
+/// Where characters `[start, end)` of a text node (by NodeId, offsets in
+/// characters) are in the layout: `[x, y, width, height]` per line, in
+/// document coordinates (`Range.getClientRects`).
+///
+/// The second pair is the same span counted after white-space collapsing
+/// (each run of white space as one character): the numbering of a run whose
+/// white space collapses.
+pub type TextRects = Rc<dyn Fn(usize, (usize, usize), (usize, usize)) -> Vec<[f32; 4]>>;
+
 /// Control writes script made that the engine has not taken yet. A forced
 /// layout copies them into the engine's edit state before it builds, and
 /// drains what it applied (`ForcedLayout`).
@@ -264,6 +273,8 @@ pub struct ForcedGeometry {
     /// first read that needs them (as `DomBindings::set_geometry_source`).
     pub source: GeometrySource,
     pub hit_tester: Option<HitTester>,
+    /// The layout's text geometry, for `Range` rects.
+    pub text_rects: Option<TextRects>,
     /// Formats one element's computed style of this layout on its first
     /// read (LAT8); `None` keeps whatever `source` returns.
     pub computed_lines: Option<ComputedLines>,
@@ -346,6 +357,8 @@ pub(crate) struct DomHost {
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
+    /// The layout's text geometry (`TextRects`), installed with a layout.
+    text_rects: Option<TextRects>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -590,6 +603,7 @@ impl DomHost {
         h.computed_lines = laid.computed_lines;
         h.geometry_source = Some(laid.source);
         h.hit_tester = laid.hit_tester;
+        h.text_rects = laid.text_rects;
         // The document may have grown or shrunk: scrollTo clamps to the new
         // end, and an offset past it comes back to it.
         let scroll = h.scroll_state.clone();
@@ -652,6 +666,10 @@ impl DomHost {
 
     pub(crate) fn set_hit_tester(&mut self, tester: Option<HitTester>) {
         self.hit_tester = tester;
+    }
+
+    pub(crate) fn set_text_rects(&mut self, rects: Option<TextRects>) {
+        self.text_rects = rects;
     }
 
     /// Bind `document`, returning the new generation.
@@ -2297,6 +2315,36 @@ pub(crate) fn install(
         }),
     )?;
 
+    // textRects(node, start, end): where those characters of a text node
+    // are, as a flat [x, y, w, h, ...] JSON array in document coordinates;
+    // "[]" before a layout or for a node with no box.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_text_rects",
+        5,
+        Box::new(move |args| {
+            DomHost::ensure_fresh_geometry(&h, &d, "text_rects");
+            let host = h.borrow();
+            let (Some(node), Some(start), Some(end)) =
+                (number_arg(args, 0), number_arg(args, 1), number_arg(args, 2))
+            else {
+                return JsValue::String("[]".to_string());
+            };
+            let Some(rects) = host.text_rects.clone() else {
+                return JsValue::String("[]".to_string());
+            };
+            let at = |i: usize, fallback: f32| number_arg(args, i).unwrap_or(fallback).max(0.0) as usize;
+            let span = (start.max(0.0) as usize, end.max(0.0) as usize);
+            let collapsed = (at(3, start), at(4, end));
+            let flat: Vec<String> = rects(node as usize, span, collapsed)
+                .iter()
+                .flat_map(|r| r.iter().map(|v| if v.is_finite() { v.to_string() } else { "0".to_string() }))
+                .collect();
+            JsValue::String(format!("[{}]", flat.join(",")))
+        }),
+    )?;
+
     // hit(x, y): the node under a viewport point, or null before a layout
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
@@ -2575,7 +2623,7 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        hit: __rustkit_dom_hit, textRects: __rustkit_dom_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
@@ -4388,6 +4436,50 @@ const WRAPPERS_JS: &str = r#"
     }
     Object.defineProperty(Range.prototype, Symbol.toStringTag, { value: 'Range' });
     g.Range = Range;
+    // AbstractRange and StaticRange (DOM §5.3, §5.4): a StaticRange is four
+    // plain values, never updated and never validated beyond its containers'
+    // types. `InputEvent.getTargetRanges()` answers them.
+    function AbstractRange() { throw new TypeError('Illegal constructor'); }
+    Object.defineProperty(AbstractRange.prototype, Symbol.toStringTag, { value: 'AbstractRange', configurable: true });
+    Object.setPrototypeOf(Range.prototype, AbstractRange.prototype);
+    Object.setPrototypeOf(Range, AbstractRange);
+    g.AbstractRange = AbstractRange;
+    var STATIC = Symbol('rustkit.staticRange');
+    function StaticRange(init) {
+        if (!new.target) throw new TypeError("Failed to construct 'StaticRange': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        if (arguments.length < 1) throw new TypeError("Failed to construct 'StaticRange': 1 argument required, but only 0 present.");
+        if (init === null || typeof init !== 'object') throw new TypeError("Failed to construct 'StaticRange': The provided value is not of type 'StaticRangeInit'.");
+        ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+            if (init[k] === undefined) {
+                throw new TypeError("Failed to construct 'StaticRange': Failed to read the '" + k + "' property from 'StaticRangeInit': Required member is undefined.");
+            }
+        });
+        [init.startContainer, init.endContainer].forEach(function (n) {
+            if (!(n instanceof Node)) throw new TypeError("Failed to construct 'StaticRange': Failed to read a container from 'StaticRangeInit': it is not of type 'Node'.");
+            if (n.nodeType === 10 || n.nodeType === 2) {
+                throw new DOMException("Failed to construct 'StaticRange': Neither startContainer nor endContainer can be a DocumentType or Attribute node.", 'InvalidNodeTypeError');
+            }
+        });
+        Object.defineProperty(this, STATIC, { value: {
+            startContainer: init.startContainer, startOffset: init.startOffset >>> 0,
+            endContainer: init.endContainer, endOffset: init.endOffset >>> 0 } });
+    }
+    StaticRange.prototype = Object.create(AbstractRange.prototype, { constructor: { value: StaticRange, writable: true, configurable: true } });
+    Object.setPrototypeOf(StaticRange, AbstractRange);
+    Object.defineProperty(StaticRange.prototype, Symbol.toStringTag, { value: 'StaticRange', configurable: true });
+    ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+        getter(StaticRange.prototype, k, function () {
+            var s = this[STATIC];
+            if (!s) throw new TypeError('Illegal invocation');
+            return s[k];
+        });
+    });
+    getter(StaticRange.prototype, 'collapsed', function () {
+        var s = this[STATIC];
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.startContainer === s.endContainer && s.startOffset === s.endOffset;
+    });
+    g.StaticRange = StaticRange;
     function slots(range, method) {
         var r = range && range[RANGE];
         if (!r) {
@@ -4625,24 +4717,84 @@ const WRAPPERS_JS: &str = r#"
         return out;
     }
     Range.prototype.toString = function () { return rangeText(slots(this, 'toString')); };
-    // The rect of a range: the union of the boxes of the elements its ends
-    // sit in (no per-character geometry reaches script yet).
-    Range.prototype.getBoundingClientRect = function () {
-        var r = slots(this, 'getBoundingClientRect');
-        function box(node) {
-            var el = node.nodeType === 1 ? node : node.parentElement;
-            return el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    // The rects of a range (CSSOM View §10.1): the client rects of each
+    // element it selects whose parent it does not select, and of the part
+    // of each text node it selects or ends in, in tree order. The text
+    // rects are per line and per character (layout's `text_range_rects`).
+    var DOMRectList = g.DOMRectList;
+    if (typeof DOMRectList !== 'function') {
+        DOMRectList = function DOMRectList() { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(DOMRectList.prototype, Symbol.toStringTag, { value: 'DOMRectList' });
+        DOMRectList.prototype.item = function (i) { i = i >>> 0; return i < this.length ? this[i] : null; };
+        g.DOMRectList = DOMRectList;
+    }
+    function rectList(rects) {
+        var list = Object.create(DOMRectList.prototype);
+        rects.forEach(function (r, i) { Object.defineProperty(list, i, { value: r, enumerable: true }); });
+        Object.defineProperty(list, 'length', { value: rects.length });
+        return list;
+    }
+    // A UTF-16 offset in `data` as a count of characters.
+    function charCount(data, offset) {
+        var n = 0;
+        for (var i = 0; i < offset && i < data.length; i++) {
+            var c = data.charCodeAt(i);
+            if (c < 0xDC00 || c > 0xDFFF) n++;
         }
-        var a = box(r.start.node), b = r.end.node === r.start.node ? a : box(r.end.node);
-        if (!a) a = b;
-        if (!b) b = a;
-        if (!a) return g.DOMRect ? new g.DOMRect(0, 0, 0, 0) : { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
-        var left = Math.min(a.left, b.left), top = Math.min(a.top, b.top);
-        var right = Math.max(a.right, b.right), bottom = Math.max(a.bottom, b.bottom);
-        return g.DOMRect ? new g.DOMRect(left, top, right - left, bottom - top)
-            : { x: left, y: top, width: right - left, height: bottom - top, top: top, left: left, right: right, bottom: bottom };
+        return n;
+    }
+    function textRects(node, from, to) {
+        var s = node[SLOT];
+        if (!s || s.gen !== gen) return [];
+        // Both numberings: the node's characters, and those characters
+        // after white-space collapsing (layout knows which the run uses).
+        var data = node.data;
+        function collapsed(offset) { return charCount(data.slice(0, offset).replace(/[ \t\n\r\f]+/g, ' '), offset); }
+        var flat = JSON.parse(N.textRects(s.id, charCount(data, from), charCount(data, to), collapsed(from), collapsed(to)));
+        var out = [], sx = scrollOffset('x'), sy = scrollOffset('y');
+        for (var i = 0; i + 3 < flat.length; i += 4) out.push(rect(flat[i] - sx, flat[i + 1] - sy, flat[i + 2], flat[i + 3]));
+        return out;
+    }
+    function rangeRects(r) {
+        var out = [], start = r.start, end = r.end;
+        // The first node at or after the start, and the first one past the end.
+        var node = start.node.nodeType === 1 || start.node.nodeType === 9 || start.node.nodeType === 11
+            ? (start.node.childNodes[start.offset] || nextSkipping(start.node)) : start.node;
+        var stop = end.node.nodeType === 1 || end.node.nodeType === 9 || end.node.nodeType === 11
+            ? (end.node.childNodes[end.offset] || nextSkipping(end.node)) : nextSkipping(end.node);
+        function selected(n) {
+            var p = n.parentNode;
+            if (!p) return false;
+            var i = childIndex(p, n);
+            return !pointBefore({ node: p, offset: i }, start) && !pointBefore(end, { node: p, offset: i + 1 });
+        }
+        for (; node && node !== stop; node = nextInTree(node)) {
+            if (node.nodeType === 3) {
+                var from = node === start.node ? start.offset : 0;
+                var to = node === end.node ? end.offset : node.length;
+                Array.prototype.push.apply(out, textRects(node, from, to));
+            } else if (node.nodeType === 1 && selected(node) && !(node.parentNode && node.parentNode.nodeType === 1 && selected(node.parentNode))) {
+                var own = node.getClientRects();
+                for (var k = 0; k < own.length; k++) out.push(own[k]);
+            }
+        }
+        return out;
+    }
+    Range.prototype.getClientRects = function () {
+        return rectList(rangeRects(slots(this, 'getClientRects')));
     };
-    Range.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
+    // The smallest rect around those that are not empty in both
+    // directions; all zeros when there are none.
+    Range.prototype.getBoundingClientRect = function () {
+        var rects = rangeRects(slots(this, 'getBoundingClientRect')).filter(function (b) { return b.width !== 0 || b.height !== 0; });
+        if (!rects.length) return rect(0, 0, 0, 0);
+        var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+        rects.forEach(function (b) {
+            left = Math.min(left, b.left); top = Math.min(top, b.top);
+            right = Math.max(right, b.right); bottom = Math.max(bottom, b.bottom);
+        });
+        return rect(left, top, right - left, bottom - top);
+    };
     Range.prototype.cloneRange = function () {
         var r = slots(this, 'cloneRange');
         var made = makeRange(g.document);

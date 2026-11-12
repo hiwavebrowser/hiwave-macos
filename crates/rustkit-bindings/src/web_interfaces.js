@@ -146,6 +146,38 @@
             configurable: true, enumerable: false, writable: true
         });
     }
+    // InputEvent.getTargetRanges() (Input Events §4.1.1): the ranges the
+    // edit will affect, as StaticRanges. A new array of new ranges on every
+    // call, as in Chrome; empty unless the event was made with
+    // `targetRanges`.
+    if (g.InputEvent && g.InputEvent.prototype.getTargetRanges === undefined) {
+        var IE = g.InputEvent, TARGETS = typeof WeakMap === 'function' ? new WeakMap() : null;
+        var InputEventWithRanges = function InputEvent(type, init) {
+            var e = Reflect.construct(IE, arguments.length < 2 ? [type] : [type, init], new.target || InputEventWithRanges);
+            var ranges = init && init.targetRanges;
+            if (ranges != null && TARGETS) {
+                TARGETS.set(e, Array.from(ranges, function (r) {
+                    if (!(g.StaticRange && r instanceof g.StaticRange)) {
+                        throw new TypeError("Failed to construct 'InputEvent': Failed to read the 'targetRanges' property from 'InputEventInit': Failed to convert value to 'StaticRange'.");
+                    }
+                    return r;
+                }));
+            }
+            return e;
+        };
+        InputEventWithRanges.prototype = IE.prototype;
+        Object.defineProperty(IE.prototype, 'constructor', { value: InputEventWithRanges, writable: true, configurable: true });
+        Object.setPrototypeOf(InputEventWithRanges, Object.getPrototypeOf(IE));
+        IE.prototype.getTargetRanges = function getTargetRanges() {
+            if (!(this instanceof IE)) throw new TypeError('Illegal invocation');
+            var ranges = TARGETS && TARGETS.get(this);
+            return (ranges || []).map(function (r) {
+                return new g.StaticRange({ startContainer: r.startContainer, startOffset: r.startOffset,
+                                           endContainer: r.endContainer, endOffset: r.endOffset });
+            });
+        };
+        g.InputEvent = InputEventWithRanges;
+    }
     var KE = g.KeyboardEvent;
     if (KE) {
         ['DOM_KEY_LOCATION_STANDARD', 'DOM_KEY_LOCATION_LEFT', 'DOM_KEY_LOCATION_RIGHT', 'DOM_KEY_LOCATION_NUMPAD'].forEach(function (k, i) {
@@ -197,6 +229,8 @@
             DOMRectReadOnly.call(this, x, y, width, height);
         };
         DOMRect.prototype = Object.create(DOMRectReadOnly.prototype, { constructor: { value: DOMRect, writable: true, configurable: true } });
+        Object.defineProperty(DOMRectReadOnly.prototype, Symbol.toStringTag, { value: 'DOMRectReadOnly', configurable: true });
+        Object.defineProperty(DOMRect.prototype, Symbol.toStringTag, { value: 'DOMRect', configurable: true });
         DOMRect.fromRect = function (r) { r = r || {}; return new DOMRect(r.x, r.y, r.width, r.height); };
         def('DOMRect', DOMRect);
     }

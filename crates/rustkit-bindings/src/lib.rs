@@ -138,7 +138,7 @@ mod web_url;
 
 pub use dom::{
     AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, ForcedReadProbe, CssAnimationInfo, ElementScrolls,
-    ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, TextRects, SelectorMatchFn, SharedAnimatedStyles,
     SharedElementScrolls,
 };
 pub mod events;
@@ -1993,6 +1993,7 @@ impl DomBindings {
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
         host.set_hit_tester(None);
+        host.set_text_rects(None);
         host.geometry = geometry;
     }
 
@@ -2000,6 +2001,11 @@ impl DomBindings {
     /// the published boxes. A point answers null until a layout exists.
     pub fn set_hit_tester(&self, tester: Option<HitTester>) {
         self.dom_host.borrow_mut().set_hit_tester(tester);
+    }
+
+    /// The layout's text geometry, which `Range.getClientRects` reads.
+    pub fn set_text_rects(&self, rects: Option<TextRects>) {
+        self.dom_host.borrow_mut().set_text_rects(rects);
     }
 
     /// Publish a new layout without measuring it: `source` builds the maps

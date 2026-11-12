@@ -136,6 +136,110 @@ impl LayoutBox {
         run.position_of_run_char(line.start + index)
     }
 
+    /// Where the characters `[start, end)` of DOM text node `node` are:
+    /// one rect per line they are on, in document coordinates, in tree
+    /// order (`Range.getClientRects`). Offsets count the node's characters.
+    /// `start == end`, or a span that holds only collapsed white space, is
+    /// the caret there: one rect of no width. Nothing for a node with no
+    /// box.
+    ///
+    /// A rect is the run's content area on its line, as an inline box's is:
+    /// the face's rounded ascent and descent, with the line's leading
+    /// floored above it. Its left and right edges are on the 1/64 px grid
+    /// Chrome keeps lengths in.
+    ///
+    /// Positions are where layout put the runs: element scrolls, sticky
+    /// shifts and transforms are not followed.
+    ///
+    /// `collapsed` is the same span counted after white-space collapsing
+    /// (each run of white space as one character), which is how a run whose
+    /// white space collapses numbers its characters.
+    pub fn text_range_rects(&self, node: usize, span: (usize, usize), collapsed: (usize, usize)) -> Vec<Rect> {
+        let mut out = Vec::new();
+        self.visit_text_runs(&mut |run, raw| {
+            let mut pieces: Vec<&TextSource> = run.text_sources.iter().filter(|s| s.node == node).collect();
+            if pieces.is_empty() {
+                return;
+            }
+            pieces.sort_by_key(|s| s.skip);
+            let collapsible = pieces[0].collapsible;
+            let (start, end) = if collapsible { collapsed } else { span };
+            // A DOM offset as a character boundary of the run: inside a
+            // piece, or at the start of the next one when the characters
+            // there were collapsed away.
+            let boundary = |offset: usize| -> usize {
+                for piece in &pieces {
+                    if offset < piece.skip {
+                        return piece.at;
+                    }
+                    if offset <= piece.skip + piece.len {
+                        return piece.at + (offset - piece.skip);
+                    }
+                }
+                pieces.last().map_or(0, |p| p.at + p.len)
+            };
+            let (from, to) = (boundary(start), boundary(end.max(start)));
+            let style = &run.style;
+            let font_size = match style.font_size {
+                Length::Px(px) => px,
+                _ => 16.0,
+            };
+            let metrics = measure_text_advanced("x", &style.font_family, font_size, style.font_weight, style.font_style);
+            let (ascent, descent) = if metrics.ascent > 0.0 {
+                (metrics.ascent.round(), metrics.descent.round())
+            } else {
+                ((font_size * 0.8).round(), (font_size * 0.2).round())
+            };
+            // Chrome keeps lengths on a 1/64 px grid: a line's origin is
+            // rounded to it, and inside the line a left edge goes down to
+            // it and a right edge up (a value on the grid stays).
+            let grid = |v: f32| (v * 64.0 + 0.5).floor() / 64.0;
+            let grid_down = |v: f32| (v * 64.0 + 0.001).floor() / 64.0;
+            let grid_up = |v: f32| (v * 64.0 - 0.001).ceil() / 64.0;
+            let lines = run_lines(run, raw);
+            let mut caret: Option<Rect> = None;
+            for (number, line) in lines.iter().enumerate() {
+                // White space that collapses where the run wraps takes no
+                // room there: such a line ends at its last other character.
+                // The run's last line keeps a space it ends with (what
+                // follows it on the line is another box).
+                let wraps = number + 1 < lines.len();
+                let count = if collapsible && wraps { line.text.trim_end().chars().count() } else { line.text.chars().count() };
+                let (line_from, line_to) = (line.start, line.start + count);
+                let (a, b) = (from.max(line_from), to.min(line_to));
+                let is_caret = from == to && from >= line_from && from <= line_to;
+                if a >= b && !is_caret {
+                    continue;
+                }
+                let advances = shape_line_advances(&line.text, style, font_size).unwrap_or_else(|| {
+                    line.text
+                        .chars()
+                        .map(|c| {
+                            measure_text_advanced(&c.to_string(), &style.font_family, font_size, style.font_weight, style.font_style)
+                                .width
+                        })
+                        .collect()
+                });
+                let origin = grid(line.rect.x);
+                let within = |index: usize| -> f32 { advances.iter().take(index - line_from).sum::<f32>() };
+                let top = line.rect.y + ((line.rect.height - (ascent + descent)) / 2.0).floor();
+                if is_caret {
+                    // At a line break the caret is at the start of the
+                    // later line: the last line that holds it wins.
+                    let x = origin + grid_down(within(from));
+                    caret = Some(Rect::new(x, top, 0.0, ascent + descent));
+                    continue;
+                }
+                let (left, right) = (origin + grid_down(within(a)), origin + grid_up(within(b)));
+                out.push(Rect::new(left, top, right - left, ascent + descent));
+            }
+            if let Some(caret) = caret {
+                out.push(caret);
+            }
+        });
+        out
+    }
+
     /// Every text run with a DOM source, in tree order.
     fn visit_text_runs<'a>(&'a self, f: &mut dyn FnMut(&'a LayoutBox, &'a str)) {
         if let BoxType::Text(ref raw) = self.box_type {

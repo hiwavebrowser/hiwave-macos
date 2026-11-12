@@ -24752,6 +24752,10 @@ impl Engine {
                     set_root_font_for(&snapshot_of, root_element, &styled);
                     geometry_only(&snapshot_of, root_element)
                 }),
+                text_rects: Some(layout_text_rects({
+                    let built = built.clone();
+                    move || Some(built.clone())
+                })),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
                 computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
                 max_scroll,
@@ -28936,6 +28940,8 @@ fn publish_geometry(
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
+    let text_layout = layout.clone();
+    bindings.set_text_rects(Some(layout_text_rects(move || text_layout.upgrade())));
     let styles_layout = layout.clone();
     let styles = computed_lines_source(move || styles_layout.upgrade(), root_element, lay.clone());
     bindings.set_geometry_source(Box::new(move || {
@@ -29038,6 +29044,19 @@ fn stamp_element_scrolls(root: &LayoutBox, scrolls: &rustkit_bindings::SharedEle
     if !scrolls.offsets.is_empty() {
         walk(root, &mut scrolls.offsets);
     }
+}
+
+/// `Range.getClientRects` over the tree `layout` gives: where the
+/// characters of a text node are (`LayoutBox::text_range_rects`).
+fn layout_text_rects(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> rustkit_bindings::TextRects {
+    std::rc::Rc::new(move |node, span, collapsed| match layout() {
+        Some(layout) => layout
+            .text_range_rects(node, span, collapsed)
+            .into_iter()
+            .map(|r| [r.x, r.y, r.width, r.height])
+            .collect(),
+        None => Vec::new(),
+    })
 }
 
 /// `elementFromPoint` over the tree `layout` gives, with the offsets script
@@ -46099,6 +46118,10 @@ fn forced_animation_frame(
             set_root_font_for(&snapshot_of, root_element, &styled);
             geometry_only(&snapshot_of, root_element)
         }),
+        text_rects: Some(layout_text_rects({
+            let built = built.clone();
+            move || Some(built.clone())
+        })),
         hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
         computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
         max_scroll,

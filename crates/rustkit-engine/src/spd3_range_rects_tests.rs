@@ -20,10 +20,22 @@ use super::*;
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/spd3_range_rects.html");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/spd3_range_rects_cft148.txt");
 
-/// Lines still off, each for a reason outside this row; filled in from the
-/// first run with the fix. They must still DIFFER: one that matches comes
-/// off the list.
-const KNOWN: &[&str] = &[];
+/// Lines still off, for a reason outside this row: the image in `#mixed`
+/// is `vertical-align: top` and sits 5px low here (y 115 for Chrome's
+/// 110), which is the element's own rect, not the range's. They must
+/// still DIFFER: one that matches comes off the list.
+///
+/// `tall across sizes` is off by 1/64 px in its last two rects: Chrome
+/// lays inline boxes out on its 1/64 px grid, so the box after the 24px
+/// span starts at the sum of two rounded lengths (111.53), where the
+/// layout here keeps the unrounded sum (111.51).
+const KNOWN: &[&str] = &[
+    "mixed all rects: ",
+    "mixed image bounding: ",
+    "mixed image rects: ",
+    "tall across sizes bounding: ",
+    "tall across sizes rects: ",
+];
 
 #[test]
 fn a_range_reports_the_rects_of_its_characters() {
