@@ -4083,6 +4083,43 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        // The page hears the wheel when it has a listener for one
+        // (`DomBindings::wants_wheel`); a page with none runs no script
+        // here. A listener that is not passive hears it first and may
+        // cancel it, and then nothing scrolls. Passive ones hear it after
+        // the scroll, at whatever is then under the pointer (WHL1; Chrome
+        // for Testing 148). An open `<select>` drop-down keeps the wheel.
+        let listening = !self.select_popup_open(id)
+            && self
+                .views
+                .get(&id)
+                .and_then(|v| v.bindings.as_ref())
+                .is_some_and(|bindings| bindings.wants_wheel());
+        if !listening {
+            return self.scroll_by_wheel(id, x, y, delta_x, delta_y);
+        }
+        let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
+            self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+        });
+        if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
+            return Ok(false);
+        }
+        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y)?;
+        if !cancelable {
+            self.fire_wheel(id, x, y, delta_x, delta_y, false);
+        }
+        Ok(changed)
+    }
+
+    /// `scroll_at` without the page's `wheel` event.
+    fn scroll_by_wheel(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Result<bool, EngineError> {
         // An open `<select>` drop-down takes the wheel.
         if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
             return Ok(moved);
@@ -4102,6 +4139,48 @@ impl Engine {
             view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
         }
         Ok(changed)
+    }
+
+    /// The element under a viewport point (raw NodeId), for a `wheel`.
+    fn wheel_target(&self, id: EngineViewId, x: f32, y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let raw = Self::hit_at(view, x, y)?.node_id?;
+        let doc = view.document.as_ref()?;
+        let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// Dispatch `wheel` at the element under a viewport point, with the
+    /// engine's scroll deltas as DOM ones (down and right are positive).
+    /// Returns false when a listener cancelled it.
+    fn fire_wheel(&mut self, id: EngineViewId, x: f32, y: f32, delta_x: f32, delta_y: f32, cancelable: bool) -> bool {
+        let Some(target) = self.wheel_target(id, x, y) else {
+            return true;
+        };
+        let (offset_x, offset_y) = self
+            .views
+            .get(&id)
+            .and_then(|view| Self::hit_at(view, x, y))
+            .map_or((0.0, 0.0), |hit| (hit.local_x as f64, hit.local_y as f64));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: x as f64,
+            client_y: y as f64,
+            screen_x: x as f64,
+            screen_y: y as f64,
+            offset_x,
+            offset_y,
+            ..Default::default()
+        };
+        let not_cancelled = self.run_listeners(id, target, "wheel", true, |bindings| {
+            bindings.fire_wheel_event(target, &data, delta_x as f64, -(delta_y as f64), cancelable)
+        });
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after wheel event failed");
+        }
+        not_cancelled
     }
 
     /// What a new wheel over a point moves: the innermost scroller under the

@@ -76,6 +76,19 @@ fn the_users_wheel_reaches_script_before_it_scrolls() {
     assert!(wrong.is_empty(), "{} of {} report lines differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
 
+/// The wheel dispatch is the engine's: nothing of it is a property a page
+/// can read, call or replace.
+#[test]
+fn the_wheel_dispatch_is_not_the_pages_to_call() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    engine.load_html(view, "<!doctype html><body><p>x</p>").expect("load");
+    let seen = engine
+        .execute_script(view, "[typeof document.__rkFireWheel, typeof document.__rkWheelBlocks, typeof window.__rustkit_dom_note_wheel].join(' ')")
+        .expect("script");
+    assert_eq!(seen, "String(\"undefined undefined undefined\")");
+}
+
 /// The cost of a wheel, for the row's rule that only a page with a wheel
 /// listener pays anything. A timing, run by hand:
 ///
