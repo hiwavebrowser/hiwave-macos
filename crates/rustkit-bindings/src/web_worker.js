@@ -35,6 +35,16 @@
             fire(w, new g.Event('error'));
         }, 0);
     }
+    // The text of a data: URL, or null when it is malformed.
+    function dataText(href) {
+        var comma = href.indexOf(',');
+        if (comma < 0) return null;
+        var meta = href.slice(5, comma), body = href.slice(comma + 1);
+        try {
+            if (/;base64$/i.test(meta)) return new g.TextDecoder().decode(fromBase64(g.decodeURIComponent(body)));
+            return g.decodeURIComponent(body);
+        } catch (_) { return null; }
+    }
     function encode(message) {
         if (typeof message === 'function' || typeof message === 'symbol') {
             throw dom("Failed to execute 'postMessage' on 'Worker': " + String(message) + ' could not be cloned.', 'DataCloneError');
@@ -130,15 +140,10 @@
             var st = { w: this, href: u.href, id: 0, dead: false, queue: [], net: 0, on: {}, reg: {} };
             states.set(this, st);
             var name = options && options.name !== undefined ? String(options.name) : '';
-            var net = g.__rustkit_net;
-            if (!net) { failLoad(this, st); return; }
             var self = this;
-            st.net = net.request({ url: u.href, destination: 'worker', mode: 'cors', credentials: 'same-origin' }, function (r) {
-                st.net = 0;
+            // The source is in hand (blob:, data:) or comes over the bridge.
+            function begin(source) {
                 if (st.dead) return;
-                if (!r.ok || r.status < 200 || r.status >= 300) { failLoad(self, st); return; }
-                var source;
-                try { source = new g.TextDecoder().decode(fromBase64(r.body_b64)); } catch (_) { failLoad(self, st); return; }
                 var loc = {
                     href: u.href, origin: u.origin, protocol: u.protocol, host: u.host, hostname: u.hostname,
                     port: u.port, pathname: u.pathname, search: u.search, hash: u.hash,
@@ -150,6 +155,32 @@
                 live[id] = st;
                 for (var i = 0; i < st.queue.length; i++) post(id, st.queue[i]);
                 st.queue = [];
+            }
+            if (u.protocol === 'blob:') {
+                // Resolved now, as Chrome does: revoking right after `new Worker` does not matter.
+                // The bytes are the host's blob store's (createObjectURL put them there).
+                var found = __rk.blobGet(u.href.split('#')[0]);
+                if (!found) { failLoad(this, st); return; }
+                var blobText;
+                try { blobText = new g.TextDecoder().decode(new Uint8Array(found[0])); } catch (_) { failLoad(this, st); return; }
+                g.queueMicrotask(function () { begin(blobText); });
+                return;
+            }
+            if (u.protocol === 'data:') {
+                var text = dataText(u.href);
+                if (text === null) { failLoad(this, st); return; }
+                g.queueMicrotask(function () { begin(text); });
+                return;
+            }
+            var net = g.__rustkit_net;
+            if (!net) { failLoad(this, st); return; }
+            st.net = net.request({ url: u.href, destination: 'worker', mode: 'cors', credentials: 'same-origin' }, function (r) {
+                st.net = 0;
+                if (st.dead) return;
+                if (!r.ok || r.status < 200 || r.status >= 300) { failLoad(self, st); return; }
+                var source;
+                try { source = new g.TextDecoder().decode(fromBase64(r.body_b64)); } catch (_) { failLoad(self, st); return; }
+                begin(source);
             });
             if (!st.net) failLoad(this, st);
         }
