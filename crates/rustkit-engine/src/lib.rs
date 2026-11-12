@@ -472,6 +472,8 @@ mod lay2_fixed_containing_block_tests;
 #[cfg(all(test, feature = "headless"))]
 mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod spd3_range_rects_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod stretched_row_height_tests;
