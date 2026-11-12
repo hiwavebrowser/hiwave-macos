@@ -302,3 +302,31 @@ window.loaded = false; document.getElementById('f').addEventListener('load', fun
         r#"String("classic,dep,dep-value,main|upgraded")"#
     );
 }
+
+/// `querySelector` inside a shadow tree of a frame's document (Speedometer
+/// 3.1 TodoMVC-WebComponents and Lit: the runner walks `todo-app` ->
+/// shadow root -> `todo-topbar`, and got null inside the frame while the
+/// same page top-level answered). The frame's bindings had no selector
+/// matcher from the engine. Chrome 148: the elements are found.
+#[test]
+fn a_frames_script_finds_elements_inside_a_shadow_tree() {
+    let page = "<!doctype html><body><iframe id=f src=/shadow.html></iframe><script>
+window.loaded = false; document.getElementById('f').addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let child = "<!doctype html><body><div id=h></div><script>
+var r = document.getElementById('h').attachShadow({ mode: 'open' });
+r.innerHTML = '<section class=app><x-top></x-top><span class=s>in</span></section>';
+window.inside = [String(r.querySelector('x-top')), String(r.querySelector('.s')), r.querySelectorAll('*').length].join();
+</script></body>";
+    let server = serve_routes(vec![("/", "text/html", page.to_string()), ("/shadow.html", "text/html", child.to_string())]);
+    let mut engine = Engine::new(config(true)).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).unwrap();
+    let mut page = Page { engine, view, rt, server };
+    page.turns_until("window.loaded", Duration::from_secs(8));
+    assert_eq!(
+        page.js("var d = document.getElementById('f').contentDocument; document.getElementById('f').contentWindow.inside + '|' + String(d.getElementById('h').shadowRoot.querySelector('x-top'))"),
+        r#"String("[object HTMLElement],[object HTMLSpanElement],3|[object HTMLElement]")"#
+    );
+}
