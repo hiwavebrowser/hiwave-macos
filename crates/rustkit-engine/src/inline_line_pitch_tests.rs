@@ -57,3 +57,73 @@ fn a_wrapped_inline_steps_by_the_strut_union() {
         .collect();
     assert!(wrong.is_empty(), "{} of {} blocks differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
+
+/// The heights of the fixture's blocks, in document order.
+fn block_heights(engine: &mut Engine, view: EngineViewId) -> Vec<f32> {
+    let got = engine
+        .execute_script(
+            view,
+            "Array.prototype.map.call(document.querySelectorAll('body > div'), function (d) { return d.getBoundingClientRect().height; }).join(' ')",
+        )
+        .expect("script");
+    got.trim_start_matches("String(\"")
+        .trim_end_matches("\")")
+        .split(' ')
+        .map(|v| v.parse().unwrap())
+        .collect()
+}
+
+/// R1 on #1090 (MED): the pitch is written into the run's height, so a
+/// second visit to a run that was not laid out again must not add it a
+/// second time. Each block is laid out again around its untouched span (a
+/// text node appended and removed), three times over, in a full layout and
+/// through the incremental path: the heights stay what the first layout
+/// gave.
+#[test]
+fn a_wrapped_run_keeps_its_height_when_its_block_is_laid_out_again() {
+    use crate::incremental_layout::{set_mode_for_test, Mode};
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            set_mode_for_test(None);
+        }
+    }
+    for mode in [Mode::Off, Mode::On, Mode::Verify] {
+        set_mode_for_test(Some(mode));
+        let _reset = Reset;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("view");
+        engine.load_html(view, PAGE).expect("load");
+        let first = block_heights(&mut engine, view);
+        assert_eq!(first.len(), 60, "the fixture has 60 blocks");
+        for pass in 0..3 {
+            // A new last line in every block: the block is laid out again
+            // and its wrapped span is the same box as before.
+            engine
+                .execute_script(
+                    view,
+                    "Array.prototype.forEach.call(document.querySelectorAll('body > div'), function (d) { var b = document.createElement('div'); b.className = 'again'; b.style.cssText = 'height:3px;margin:0;width:auto'; d.appendChild(b); }); 0",
+                )
+                .expect("append");
+            let grown = block_heights(&mut engine, view);
+            engine
+                .execute_script(
+                    view,
+                    "Array.prototype.forEach.call(document.querySelectorAll('.again'), function (b) { b.remove(); }); 0",
+                )
+                .expect("remove");
+            let again = block_heights(&mut engine, view);
+            let moved: Vec<String> = first
+                .iter()
+                .zip(&grown)
+                .zip(&again)
+                .enumerate()
+                .filter(|(_, ((first, grown), again))| ((*grown - *first) - 3.0).abs() > 0.01 || (*again - *first).abs() > 0.01)
+                .map(|(i, ((first, grown), again))| format!("d{i}: {first} first, {grown} with a 3px child, {again} after"))
+                .collect();
+            assert!(moved.is_empty(), "{mode:?}, pass {pass}: {} of 60 blocks changed height:\n{}", moved.len(), moved.join("\n"));
+        }
+    }
+}
