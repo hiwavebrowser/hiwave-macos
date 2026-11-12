@@ -542,6 +542,8 @@ mod appearance_apply_tests;
 #[cfg(test)]
 mod pointer_reads_has_tests;
 #[cfg(test)]
+mod pointer_reads_lat20_tests;
+#[cfg(test)]
 mod border_shorthand_no_style_apply_tests;
 #[cfg(test)]
 mod transform_parse_pure_tests;
@@ -575,6 +577,8 @@ mod script_scroll_tests;
 mod resize_coalesce_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_percent_basis_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_aspect_ratio_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -745,6 +749,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_maximize_tracks_tests;
 #[cfg(test)]
 mod nested_layout_matrix_tests;
 #[cfg(test)]
@@ -1599,6 +1605,9 @@ impl ViewState {
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
+        self.lay.container_sizes.borrow_mut().clear();
+        self.lay.container_trusted.borrow_mut().clear();
+        self.lay.container_rules.set(false);
         self.lay.incremental_layout.borrow_mut().take();
         self.lay.focused_node.set(None);
         // Likewise the old page's transitions and their per-node values.
@@ -10105,7 +10114,28 @@ impl Engine {
         // The builds' sheet and custom-property extraction (LAT1): outside
         // `build_ms`, so the line names it.
         let extract_before = SheetExtract::totals().extract_us;
-        let layout_skipped = self.relayout_uncounted(id)?;
+        // INC5 stage 2: script writes whose dirty set restyles nothing and
+        // changes no box (`data-*`/`aria-*` no selector reads) leave the box
+        // tree as it was: the build may be skipped. Only for relayouts that
+        // script writes alone asked for.
+        if incremental_layout::mode() != incremental_layout::Mode::Off {
+            let only_script = !causes.counts.is_empty()
+                && causes
+                    .counts
+                    .iter()
+                    .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "scroll" | "observer_callback"));
+            let nothing_dirty = dirty.as_ref().is_some_and(|d| d.full.is_none() && d.nodes.is_empty());
+            if let Some(view) = self.views.get(&id) {
+                view.lay
+                    .incremental_skip_build
+                    .set(only_script && nothing_dirty && pointer_restyle.is_none());
+            }
+        }
+        let layout_skipped = self.relayout_uncounted(id);
+        if let Some(view) = self.views.get(&id) {
+            view.lay.incremental_skip_build.set(false);
+        }
+        let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
         self.close_stale_select_popup(id);
@@ -10174,6 +10204,7 @@ impl Engine {
             view.relayout_stats.record(&causes, tree_reused, took_ms);
             view.relayout_stats.last_build_ms = stages.build;
             view.relayout_stats.last_svg_ms = stages.svg;
+            view.relayout_stats.last_layout_ms = stages.layout;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -10247,6 +10278,14 @@ impl Engine {
         }
 
         let javascript_enabled = self.config.javascript_enabled;
+        // INC5 stage 2: the incremental path takes the published tree back
+        // without a copy when nothing else holds it; the view's own handle
+        // goes first (the bindings hold theirs weakly).
+        if incremental_layout::mode() != incremental_layout::Mode::Off {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.layout = None;
+            }
+        }
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -10317,6 +10356,9 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(Rc::new(root_box));
+        if let Some(layout) = view.layout.as_ref() {
+            incremental_layout::adopt(&view.lay, layout);
+        }
         view.laid_with = Some(LaidWith {
             hover: view.lay.hover_chain.borrow().clone(),
             active: view.lay.active_chain.borrow().clone(),
@@ -11464,6 +11506,92 @@ impl layout_ctx::LayoutCtx {
         bounds: (u32, u32),
     ) -> LayoutBox {
         let lay = building.lay.clone();
+        // INC5 stage 2: a script-mutation relayout whose dirty set changed no
+        // style and no box (`relayout`) keeps the last layout without a build.
+        let skip_hint = lay.as_ref().is_some_and(|l| l.incremental_skip_build.replace(false));
+        if skip_hint && incremental_layout::mode() == incremental_layout::Mode::On {
+            if let Some(tree) = lay.as_ref().and_then(|l| self.skipped_build(l, bounds)) {
+                return tree;
+            }
+        }
+        let mut root_box = self.lay_out_document_pass(
+            building.clone(),
+            document,
+            external_stylesheets,
+            javascript_enabled,
+            bounds,
+            skip_hint,
+        );
+        // CQ1 (css-contain-3 §6.1): an `@container` query is answered with
+        // its container's laid-out content box, which the cascade cannot
+        // know before layout. The build answers with the sizes of the
+        // view's last layout; when this layout moved one, build and lay out
+        // again with the new sizes. A resize starts from the old sizes and
+        // settles the same way. Two more passes at most: a container whose
+        // size follows the rules it switches would otherwise never settle,
+        // and it keeps the last answer, as a later relayout would.
+        //
+        // A chain of more than two nested containers, each sized by the
+        // answer of the one outside it, can need more passes than that: the
+        // layout returns after the cap and the next relayout goes on from
+        // the sizes it stored. Such a layout is counted
+        // (`ViewLayout::container_unsettled`) and logged, so an oscillation
+        // shows instead of quietly tripling every relayout.
+        if let Some(lay) = lay.as_ref() {
+            if let Some(trusted) = container_query::take_trusted_containers() {
+                *lay.container_trusted.borrow_mut() = trusted;
+            }
+            for pass in 0..=2 {
+                if !lay.container_rules.get() {
+                    break;
+                }
+                let mut sizes = container_query::MeasuredContainers::new();
+                collect_container_sizes(&root_box, &lay.container_trusted.borrow(), &mut sizes);
+                let moved = {
+                    let used = lay.container_sizes.borrow();
+                    used.len() != sizes.len()
+                        || sizes.iter().any(|(node, (i, b))| {
+                            used.get(node)
+                                .is_none_or(|(ui, ub)| (ui - i).abs() > 0.01 || (ub - b).abs() > 0.01)
+                        })
+                };
+                *lay.container_sizes.borrow_mut() = sizes;
+                if !moved {
+                    break;
+                }
+                if pass == 2 {
+                    lay.container_unsettled.set(lay.container_unsettled.get() + 1);
+                    debug!("container query sizes still moving after the pass cap");
+                    break;
+                }
+                lay.container_passes.set(lay.container_passes.get() + 1);
+                root_box = self.lay_out_document_pass(
+                    building.clone(),
+                    document,
+                    external_stylesheets,
+                    javascript_enabled,
+                    bounds,
+                    false,
+                );
+                if let Some(trusted) = container_query::take_trusted_containers() {
+                    *lay.container_trusted.borrow_mut() = trusted;
+                }
+            }
+        }
+        root_box
+    }
+
+    /// One build and layout of `document` (`lay_out_document`).
+    fn lay_out_document_pass(
+        &self,
+        building: layout_ctx::BuildView,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
+        bounds: (u32, u32),
+        skip_hint: bool,
+    ) -> LayoutBox {
+        let lay = building.lay.clone();
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
@@ -11496,37 +11624,87 @@ impl layout_ctx::LayoutCtx {
         // full anyway and compares.
         use incremental_layout::Mode as IncMode;
         let inc_mode = if lay.is_some() { incremental_layout::mode() } else { IncMode::Off };
-        let inc_key = incremental_layout::Key { bounds, cb_width, fonts: self.web_font_count() };
-        let scrollbar_pass = unlaid.is_some() || !remembered.is_empty() || root_bar_always;
+        let mut inc_key = incremental_layout::Key { bounds, cb_width, fonts: rustkit_layout::webfonts::generation() };
         let mut incremental: Option<LayoutBox> = None;
+        let mut unchanged = false;
+        let mut diffed = false;
         if let (IncMode::Verify | IncMode::On, Some(lay)) = (inc_mode, lay.as_ref()) {
             let previous = lay.incremental_layout.borrow_mut().take();
             let mut stats = lay.incremental_stats.borrow_mut();
             stats.attempts += 1;
             match previous {
-                _ if scrollbar_pass => stats.fallback("scrollbar_pass"),
                 None => stats.fallback("no_retained"),
                 Some(prev) if prev.key != inc_key => stats.fallback("key_changed"),
-                Some(mut prev) => {
-                    let _layout_time = time_stage(Stage::Layout);
-                    match rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut prev.laid) {
-                        Ok(done) => {
-                            stats.last_visits = done.visits;
-                            stats.last_moved = done.moved;
-                            if done.path.is_some() {
-                                stats.relaid += 1;
-                                stats.last = format!(
-                                    "relaid(visits={} moved={} compared={} delta={:.1})",
-                                    done.visits, done.moved, done.compared, done.delta
-                                );
-                            } else {
-                                stats.unchanged += 1;
-                                stats.last = format!("unchanged(compared={})", done.compared);
+                Some(mut prev) => match prev.take_laid(&mut stats) {
+                    None => stats.fallback("laid_not_kept"),
+                    Some(mut laid) => {
+                        let _layout_time = time_stage(Stage::Layout);
+                        diffed = true;
+                        let relaid = rustkit_layout::incremental::relayout(&prev.unlaid, &root_box, &mut laid)
+                            .and_then(|done| {
+                                // The full pass's overflow pass (CH2.E7) on
+                                // the incremental tree: a styled bar that
+                                // comes or goes, or the root's, is the full
+                                // layout's second pass; anything else and
+                                // the incremental tree is what one pass
+                                // gives (its scroll extents are its
+                                // children's, spliced).
+                                if unlaid.is_some()
+                                    && scrollbar_pass_again(
+                                        &laid,
+                                        &remembered,
+                                        root_bar,
+                                        root_remembered,
+                                        cb_width,
+                                        bounds,
+                                    )
+                                {
+                                    return Err("scrollbar_changed");
+                                }
+                                Ok(done)
+                            });
+                        match relaid {
+                            Ok(done) => {
+                                stats.visits += done.visits;
+                                stats.last_diff_ms = done.diff_ms;
+                                stats.last_visits = done.visits;
+                                stats.last_moved = done.moved;
+                                if done.roots.is_empty() {
+                                    unchanged = true;
+                                    stats.unchanged += 1;
+                                    stats.last = format!("unchanged(compared={})", done.compared);
+                                } else {
+                                    stats.relaid += 1;
+                                    stats.roots += done.roots.len() as u32;
+                                    stats.hoists += done.hoists;
+                                    stats.bounded += done.bounded;
+                                    stats.last = format!(
+                                        "relaid(roots={} hoists={} bounded={} visits={} moved={} compared={} delta={:.1})",
+                                        done.roots.len(),
+                                        done.hoists,
+                                        done.bounded,
+                                        done.visits,
+                                        done.moved,
+                                        done.compared,
+                                        done.delta
+                                    );
+                                }
+                                incremental = Some(laid);
                             }
-                            incremental = Some(prev.laid);
+                            Err(why) => stats.fallback(why),
                         }
-                        Err(why) => stats.fallback(why),
                     }
+                },
+            }
+            if skip_hint && diffed && !unchanged {
+                // Verify (or a fallback) with a skip hint: the build the hint
+                // would have skipped must have changed nothing.
+                stats.skip_violations += 1;
+                stats.last_violation = stats.last.clone();
+                warn!(outcome = %stats.last, "incremental layout: skip hint, but the build changed");
+                #[cfg(test)]
+                if incremental_layout::panic_on_mismatch() && incremental.is_some() {
+                    panic!("incremental layout: build skip hinted, but the tree changed ({})", stats.last);
                 }
             }
         }
@@ -11537,7 +11715,7 @@ impl layout_ctx::LayoutCtx {
         if use_incremental {
             retain_unlaid = Some(std::mem::replace(&mut root_box, incremental.take().expect("incremental tree")));
             passes = 1;
-        } else if inc_mode != IncMode::Off && !scrollbar_pass {
+        } else if inc_mode != IncMode::Off {
             retain_unlaid = Some(root_box.clone());
         }
         for pass in 0..4 {
@@ -11606,6 +11784,18 @@ impl layout_ctx::LayoutCtx {
                 break;
             }
         }
+        // More than one pass: the next layout starts from this one's marks
+        // and root bar (`remembered`), so its unlaid tree is the last pass's.
+        if passes > 1 && retain_unlaid.is_some() {
+            if let Some(unlaid) = unlaid.as_ref() {
+                let mut marks = HashMap::new();
+                root_box.collect_scrollbar_marks(&mut marks);
+                let last = unlaid.clone();
+                last.apply_scrollbar_marks(&marks);
+                retain_unlaid = Some(last);
+                inc_key.cb_width = cb_width;
+            }
+        }
         if let Some(lay) = lay.as_ref() {
             lay.layout_passes.set(lay.layout_passes.get() + passes);
             lay.layout_builds.set(lay.layout_builds.get() + 1);
@@ -11632,41 +11822,116 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             if let Some(unlaid) = retain_unlaid {
+                // The tree the view publishes is kept (`adopt`), not a copy.
                 *lay.incremental_layout.borrow_mut() = Some(incremental_layout::Retained {
                     key: inc_key,
                     unlaid,
-                    laid: root_box.clone(),
+                    laid: incremental_layout::Laid::Pending,
+                    raw: Default::default(),
                 });
             }
         }
-
-        // Ensure body element fills viewport (common browser behavior)
-        // If body has zero or minimal height, extend it to viewport height
-        if !root_box.children.is_empty() {
-            let body_box = &mut root_box.children[0];
-            if body_box.dimensions.content.height < 1.0 {
-                // Body is empty or has no content - fill viewport
-                body_box.dimensions.content.height = bounds.1 as f32;
-                debug!(
-                    "Extended empty body to fill viewport height: {}px",
-                    bounds.1
-                );
+        let raw = finish_root(&mut root_box, bounds);
+        if let Some(lay) = lay.as_ref() {
+            if let Some(retained) = lay.incremental_layout.borrow_mut().as_mut() {
+                retained.raw = raw;
             }
         }
-
-        // The root (canvas) box always covers the FULL viewport: its
-        // background is the CSS canvas background (§14.2, set at build from
-        // html/body), which must paint to the viewport edges even when the
-        // page content is shorter.
-        root_box.dimensions.content.width =
-            root_box.dimensions.content.width.max(bounds.0 as f32);
-        root_box.dimensions.content.height = root_box
-            .dimensions
-            .content
-            .height
-            .max(bounds.1 as f32);
         root_box
     }
+
+    /// INC5 stage 2: the last layout again, without a build, when the view
+    /// keeps it under the same key and nothing animates.
+    fn skipped_build(&self, lay: &Rc<layout_ctx::ViewLayout>, bounds: (u32, u32)) -> Option<LayoutBox> {
+        if lay.animations.borrow().running() {
+            return None;
+        }
+        let mut slot = lay.incremental_layout.borrow_mut();
+        let retained = slot.as_mut()?;
+        let key = incremental_layout::Key {
+            bounds,
+            cb_width: bounds.0 as f32,
+            fonts: rustkit_layout::webfonts::generation(),
+        };
+        if retained.key != key {
+            return None;
+        }
+        let mut stats = lay.incremental_stats.borrow_mut();
+        let mut tree = retained.take_laid(&mut stats)?;
+        stats.attempts += 1;
+        stats.skipped_builds += 1;
+        stats.last_visits = 0;
+        stats.last_moved = 0;
+        stats.last = "skipped_build".into();
+        drop(stats);
+        lay.layout_passes.set(lay.layout_passes.get() + 1);
+        lay.layout_builds.set(lay.layout_builds.get() + 1);
+        retained.raw = finish_root(&mut tree, bounds);
+        Some(tree)
+    }
+}
+
+/// The root post-passes: an empty body fills the viewport, and the root
+/// (canvas) box covers it. Returns what they changed, so the incremental
+/// path can take the tree back as layout left it.
+/// Whether the overflow pass after a first layout pass would ask for
+/// another (`lay_out_document`'s loop at pass 0): a styled bar marked or
+/// unmarked, or the root's bar shown or dropped.
+fn scrollbar_pass_again(
+    tree: &LayoutBox,
+    remembered: &HashMap<usize, (bool, bool)>,
+    root_bar: f32,
+    root_remembered: bool,
+    cb_width: f32,
+    bounds: (u32, u32),
+) -> bool {
+    if tree.mark_overflowing_scrollbars(!remembered.is_empty()) {
+        return true;
+    }
+    let root_overflows = tree.dimensions.margin_box().height > bounds.1 as f32 + 0.5;
+    (root_bar > 0.0
+        && cb_width >= bounds.0 as f32
+        && root_overflows
+        && !matches!(tree.style.overflow_y, rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip))
+        || (root_remembered
+            && !root_overflows
+            && tree.style.overflow_y != rustkit_css::Overflow::Scroll
+            && cb_width < bounds.0 as f32)
+}
+
+fn finish_root(root_box: &mut LayoutBox, bounds: (u32, u32)) -> incremental_layout::RawRoot {
+    let mut raw = incremental_layout::RawRoot {
+        root: (root_box.dimensions.content.width, root_box.dimensions.content.height),
+        body_height: None,
+    };
+
+    // Ensure body element fills viewport (common browser behavior)
+    // If body has zero or minimal height, extend it to viewport height
+    if !root_box.children.is_empty() {
+        let body_box = &mut root_box.children[0];
+        if body_box.dimensions.content.height < 1.0 {
+            // Body is empty or has no content - fill viewport
+            raw.body_height = Some(body_box.dimensions.content.height);
+            body_box.dimensions.content.height = bounds.1 as f32;
+            debug!(
+                "Extended empty body to fill viewport height: {}px",
+                bounds.1
+            );
+        }
+    }
+
+    // The root (canvas) box always covers the FULL viewport: its
+    // background is the CSS canvas background (§14.2, set at build from
+    // html/body), which must paint to the viewport edges even when the
+    // page content is shorter.
+    root_box.dimensions.content.width =
+        root_box.dimensions.content.width.max(bounds.0 as f32);
+    root_box.dimensions.content.height = root_box
+        .dimensions
+        .content
+        .height
+        .max(bounds.1 as f32);
+    raw
 }
 
 impl layout_ctx::LayoutCtx {
@@ -11705,6 +11970,9 @@ impl layout_ctx::LayoutCtx {
             hover: self.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
             active: self.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
+            containers: self
+                .with_building_lay(|lay| containers_fingerprint(&lay.container_sizes.borrow()))
+                .unwrap_or(0),
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
@@ -11840,10 +12108,19 @@ impl layout_ctx::LayoutCtx {
             javascript_enabled,
         );
         let index_started = mark();
+        // CQ1: the view's last layout's container sizes answer the queries;
+        // `lay_out_document` lays out again while they move.
+        let measured_containers = self
+            .with_building_lay(|lay| {
+                lay.container_rules.set(prepared.any_container_rule);
+                lay.container_sizes.borrow().clone()
+            })
+            .unwrap_or_default();
         let _container_queries = container_query::DocumentScope::install(
             viewport,
             prepared.any_container_rule,
             prepared.container_first_letter,
+            measured_containers,
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -11990,9 +12267,10 @@ impl layout_ctx::LayoutCtx {
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
+        let html_node = document.document_element().map(|html| html.id.raw());
         let _html_container_scope = html_style
             .as_deref()
-            .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
+            .map(|s| container_query::ElementScope::enter(s, None, Some("html"), html_node));
 
         if let Some(lay) = self.building_lay() {
             lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
@@ -13361,6 +13639,7 @@ impl layout_ctx::LayoutCtx {
                         &layout_box.style,
                         parent_style,
                         Some(&tag_lower),
+                        Some(node.id.raw()),
                     );
                 // A floated `::first-letter` narrows later boxes like a
                 // floated `::before` (#782 HOLD 5); only the walk asks.
@@ -15794,6 +16073,16 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
+/// A size the child inherits: the parent's computed value. An `em` length
+/// computes to pixels in the parent's font (CSS Values 4 §6.1.1), so it is
+/// handed down as pixels; everything else is handed down as written.
+fn inherited_size(length: &rustkit_css::Length, parent: &ComputedStyle) -> rustkit_css::Length {
+    match (length, &parent.font_size) {
+        (rustkit_css::Length::Em(n), rustkit_css::Length::Px(font)) => rustkit_css::Length::Px(n * font),
+        _ => length.clone(),
+    }
+}
+
 impl Engine {
 
     /// Apply a single CSS property to a computed style.
@@ -15847,6 +16136,19 @@ impl Engine {
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
             "box-sizing" => style.box_sizing = parent.box_sizing,
+            // The box's sizes (LAY1): the parent's COMPUTED value, so a
+            // percentage stays a percentage and resolves against this box's
+            // own containing block, and an `em` length is the parent's
+            // (computed in the parent's font). A recorded search page's
+            // result cards are `a { width: inherit; height: inherit }` under
+            // a `width: 100%; height: 100%` box; the keyword used to leave the
+            // child at `auto`.
+            "width" => style.width = inherited_size(&parent.width, parent),
+            "height" => style.height = inherited_size(&parent.height, parent),
+            "min-width" => style.min_width = inherited_size(&parent.min_width, parent),
+            "min-height" => style.min_height = inherited_size(&parent.min_height, parent),
+            "max-width" => style.max_width = inherited_size(&parent.max_width, parent),
+            "max-height" => style.max_height = inherited_size(&parent.max_height, parent),
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
             "cursor" => style.cursor = parent.cursor,
@@ -24236,16 +24538,7 @@ impl Engine {
             if writes.layer_only && writes.values.is_empty() && writes.checked.is_empty() && !built_since_publish.get() {
                 let layout = published.as_ref().and_then(|w| w.upgrade());
                 match layout.map(|layout| {
-                    let view = layout_ctx::BuildView {
-                        id,
-                        lay: Some(lay.clone()),
-                        url: building.url.clone(),
-                        viewport: building.viewport,
-                        dpr: building.dpr,
-                        focus: lay.focused_node.get(),
-                        external_sheets: sheets.clone(),
-                        external_sheet_owners: owners.clone(),
-                    };
+                    let view = building.for_build();
                     forced_animation_frame(&lctx, &lay, &document, &layout, view, bounds)
                 }) {
                     Some(Ok(geometry)) => return Some(geometry),
@@ -24275,16 +24568,7 @@ impl Engine {
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
-                layout_ctx::BuildView {
-                    id,
-                    lay: Some(lay.clone()),
-                    url: building.url.clone(),
-                    viewport: building.viewport,
-                    dpr: building.dpr,
-                    focus: lay.focused_node.get(),
-                    external_sheets: sheets.clone(),
-                    external_sheet_owners: owners.clone(),
-                },
+                building.for_build(),
                 &document,
                 &sheets,
                 javascript_enabled,
@@ -24299,6 +24583,7 @@ impl Engine {
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
+            incremental_layout::adopt(&lay, &built);
             debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
             // The geometry is built on the first read that needs it, as
             // `publish_geometry` does: a scrollTo after the write needs only
@@ -45862,6 +46147,33 @@ fn spot_on_bar(bar: rustkit_layout::scroll::BarGeometry, x: f32, y: f32) -> Opti
     Some(ScrollbarSpot::Track(bar, if before { -1.0 } else { 1.0 }))
 }
 
+/// CQ1: the content-box size of every size container in a laid-out tree
+/// that the build met in a trusted frame (`trusted`), keyed by raw DOM node
+/// id. An element's first box is its principal box. The block size is
+/// kept only for `container-type: size`: an `inline-size` container's
+/// height answers no query, so a change of it alone must not cost another
+/// pass or a memo miss (#1070 R1 MED 1).
+fn collect_container_sizes(
+    b: &LayoutBox,
+    trusted: &std::collections::HashSet<usize>,
+    sizes: &mut container_query::MeasuredContainers,
+) {
+    if let Some(node) = b.node_id {
+        if b.style.container_type != rustkit_css::ContainerType::Normal && trusted.contains(&node) {
+            let c = b.dimensions.content;
+            let block = if b.style.container_type == rustkit_css::ContainerType::Size {
+                c.height
+            } else {
+                0.0
+            };
+            sizes.entry(node).or_insert((c.width, block));
+        }
+    }
+    for child in &b.children {
+        collect_container_sizes(child, trusted, sizes);
+    }
+}
+
 /// CH2.E7: the width of the root's (the viewport's) styled scrollbar when
 /// it shows, 0 when the root has none (the platform's overlay bar).
 fn root_scrollbar_width(root: &LayoutBox) -> f32 {
@@ -46095,6 +46407,20 @@ struct StyleMemoKey {
     /// resolve against the element's font, so a face arriving between two
     /// builds can change a cascade.
     fonts: usize,
+    /// CQ1: the laid-out container sizes the build answers `@container`
+    /// queries with (`containers_fingerprint`).
+    containers: u64,
+}
+
+/// A fingerprint of a view's measured container sizes: a build that answers
+/// its `@container` queries with other sizes is another cascade.
+fn containers_fingerprint(sizes: &container_query::MeasuredContainers) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<_> = sizes.iter().map(|(n, (i, b))| (*n, i.to_bits(), b.to_bits())).collect();
+    entries.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut h);
+    h.finish()
 }
 
 /// What the build in progress does with the memo.
@@ -46975,6 +47301,7 @@ mod incremental_restyle_tests {
                 hover: None,
                 active: None,
                 fonts: 0,
+                containers: 0,
             };
             let mut changed = original.clone();
             mutate(&mut changed);
@@ -47262,6 +47589,7 @@ mod incremental_restyle_tests {
             hover: None,
             active: None,
             fonts: 0,
+            containers: 0,
         };
         let recorded_node = rustkit_dom::NodeId::new(7);
         let fresh_node = rustkit_dom::NodeId::new(8);
@@ -47320,6 +47648,7 @@ mod incremental_restyle_tests {
                 hover: None,
                 active: None,
                 fonts: 0,
+                containers: 0,
             })
             .expect("records");
         }

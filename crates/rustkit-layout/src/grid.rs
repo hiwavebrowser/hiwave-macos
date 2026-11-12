@@ -100,7 +100,11 @@ impl GridTrack {
             TrackSize::MaxContent => (false, true),
             TrackSize::MinMax(min, max) => {
                 let min_is_min = matches!(min.as_ref(), TrackSize::MinContent);
-                let max_is_max = matches!(max.as_ref(), TrackSize::MaxContent);
+                // An `auto` maximum is `max-content` for sizing, and the
+                // track stretches like `auto` (css-grid-1 §7.2.3.3):
+                // `minmax(0, auto)` beside a `minmax(0, 300px)` track takes
+                // the 700 left in 1000 (GR1, Chromium 148), not 0.
+                let max_is_max = matches!(max.as_ref(), TrackSize::MaxContent | TrackSize::Auto);
                 (min_is_min, max_is_max)
             }
             TrackSize::FitContent(_) => (true, false), // fit-content uses min-content as minimum
@@ -2117,6 +2121,10 @@ pub fn layout_grid_container(
                 // sibling was 38px in a 100px row.
                 let area_height = child.dimensions.content.height;
                 let child_containing = child.dimensions.clone();
+                // A grid item's percentage height resolves against its grid
+                // area, which is definite (css-grid §11.6): the block
+                // pre-pass's `auto` mark for it does not hold here (LAY1).
+                child.percent_height_is_auto = false;
                 crate::flex::layout_flex_container(child, &child_containing);
                 let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
@@ -2523,6 +2531,14 @@ pub fn layout_grid_container(
                     if !grandchild.children.is_empty() {
                         let grandchild_containing = grandchild.dimensions.clone();
                         if grandchild.style.display.is_flex() {
+                            // Its percentage height was just resolved against
+                            // the grid item's height, a stretched item's
+                            // definite cross size (css-sizing-3 §5.1): the
+                            // pre-pass's `auto` mark is stale. With it the flex
+                            // pass sized the image-gallery's `height: 100%;
+                            // min-height: 200px` tiles by their content, 23px
+                            // (batch 56, LAY1).
+                            grandchild.percent_height_is_auto = false;
                             crate::flex::layout_flex_container(grandchild, &grandchild_containing);
                         } else if grandchild.style.display.is_grid() {
                             layout_grid_container(grandchild, grandchild.dimensions.content.width, grandchild.dimensions.content.height);
@@ -3578,6 +3594,26 @@ pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
 /// out-of-flow box from its own content. The contribution rule still applies
 /// to every CHILD walked below, exactly as before.
 pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
+    min_content_width_impl(layout_box, true)
+}
+
+/// The min-content size of the box's CONTENT (border box), with its own
+/// pixel `width` not read back as the answer: css-flexbox-1 §4.5's content
+/// size suggestion. A flex item's automatic minimum is the smaller of this
+/// and its specified width; reading `width: 24px` back here made that
+/// minimum the width itself, so the item never shrank (CB6b).
+pub(crate) fn content_min_content_width(layout_box: &LayoutBox) -> f32 {
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) && !matches!(layout_box.box_type, BoxType::Text(_))
+    {
+        return 0.0;
+    }
+    min_content_width_impl(layout_box, false)
+}
+
+fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
@@ -3614,7 +3650,8 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     }
 
     // An explicit pixel width fixes the contribution regardless of content.
-    if let Length::Px(w) = style.width {
+    if let (true, Length::Px(w)) = (use_own_width, &style.width) {
+        let w = *w;
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
@@ -4361,11 +4398,25 @@ fn distribute_span_contributions(
                 }
                 open = still_open;
             }
-            // Beyond limits.
+            // Beyond limits, only tracks with an intrinsic or flexible
+            // sizing function (css-grid-1 §12.5.1): a fixed `minmax(0,
+            // 300px)` track is never sized by its items, so an item wider
+            // than 300 overflows it (GR1; Chromium 148 keeps the track 300
+            // around a 500px child, the engine pushed it to 500).
             if extra > EPS {
-                let per_track = extra / growable.len() as f32;
-                for &i in &growable {
-                    tracks[i].base_size += per_track;
+                let beyond: Vec<usize> = growable
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let t = &tracks[i];
+                        t.is_min_content || t.is_max_content || t.is_flexible
+                    })
+                    .collect();
+                if !beyond.is_empty() {
+                    let per_track = extra / beyond.len() as f32;
+                    for &i in &beyond {
+                        tracks[i].base_size += per_track;
+                    }
                 }
             }
         }
@@ -4458,6 +4509,21 @@ fn size_grid_tracks_filling(
         }
     }
 
+    // Maximize tracks (css-grid-1 §12.6), BEFORE the flexible tracks
+    // (§12.7): free space grows every track with a finite growth limit
+    // toward it, equal shares, freezing each at its limit. Only what is left
+    // is the leftover an `fr` is found in. Run after the `fr` tracks, the
+    // flexible tracks took all of it first: an empty `minmax(0, 300px)`
+    // sidebar beside `minmax(0, 1fr)` came out 0 where Chrome gives 300
+    // (GR1, a real-site sidebar under CQ1).
+    //
+    // A `fit-content()` track waits until after the `fr` tracks, as before:
+    // its growth limit here is the `fit-content` argument, not the smaller
+    // of that and its items' max-content (which this pass does not have),
+    // so maximizing it first gave `fit-content(300px)` around a 100px box
+    // 300 where Chromium 148 keeps it 100 beside a `1fr`.
+    maximize_tracks(tracks, available_space, false);
+
     // Step 3: Distribute remaining space to flexible tracks.
     //
     // css-grid-1 §12.7.1 "find the size of an fr": the hypothetical fr size
@@ -4518,8 +4584,41 @@ fn size_grid_tracks_filling(
         }
     }
 
-    // Step 4: Distribute remaining space to auto tracks if any space left
-    // Per spec, this is the "maximize tracks" step - grow tracks to their growth_limit
+    // `fit-content()` tracks take what the flexible tracks left.
+    maximize_tracks(tracks, available_space, true);
+
+    // What maximize left (nothing when it filled the space) goes to the
+    // auto tracks below, when the content alignment is `normal`/`stretch`.
+    let used_space: f32 = tracks.iter().map(|t| t.size).sum();
+    let remaining = (available_space - used_space).max(0.0);
+
+    // If there's still remaining space and we have tracks with infinite growth_limit,
+    // distribute to them equally
+    if remaining > 0.01 && fill_auto {
+        let infinite_tracks: Vec<usize> = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_flexible && t.growth_limit == f32::INFINITY)
+            .map(|(i, _)| i)
+            .collect();
+
+        if !infinite_tracks.is_empty() {
+            let per_track = remaining / infinite_tracks.len() as f32;
+            for i in infinite_tracks {
+                tracks[i].size += per_track;
+            }
+        }
+    }
+
+    // Step 5: Calculate positions (starting from 0, alignment applied separately)
+    position_tracks(tracks, gap);
+}
+
+/// css-grid-1 §12.6 maximize tracks: the free space in `available_space`
+/// grows every inflexible track with a finite growth limit toward it, equal
+/// shares, freezing each at its limit. `fit_content`: whether
+/// `fit-content()` tracks take part (see `size_grid_tracks_filling`).
+fn maximize_tracks(tracks: &mut [GridTrack], available_space: f32, fit_content: bool) {
     let mut used_space: f32 = tracks.iter().map(|t| t.size).sum();
     let mut remaining = (available_space - used_space).max(0.0);
 
@@ -4529,7 +4628,12 @@ fn size_grid_tracks_filling(
         let growable: Vec<(usize, f32)> = tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| !t.is_flexible && t.growth_limit > t.size && t.growth_limit < f32::INFINITY)
+            .filter(|(_, t)| {
+                !t.is_flexible
+                    && (fit_content || t.fit_content_limit.is_none())
+                    && t.growth_limit > t.size
+                    && t.growth_limit < f32::INFINITY
+            })
             .map(|(i, t)| (i, t.growth_limit - t.size)) // (index, room_to_grow)
             .collect();
 
@@ -4558,27 +4662,6 @@ fn size_grid_tracks_filling(
         used_space = tracks.iter().map(|t| t.size).sum();
         remaining = (available_space - used_space).max(0.0);
     }
-
-    // If there's still remaining space and we have tracks with infinite growth_limit,
-    // distribute to them equally
-    if remaining > 0.01 && fill_auto {
-        let infinite_tracks: Vec<usize> = tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| !t.is_flexible && t.growth_limit == f32::INFINITY)
-            .map(|(i, _)| i)
-            .collect();
-
-        if !infinite_tracks.is_empty() {
-            let per_track = remaining / infinite_tracks.len() as f32;
-            for i in infinite_tracks {
-                tracks[i].size += per_track;
-            }
-        }
-    }
-
-    // Step 5: Calculate positions (starting from 0, alignment applied separately)
-    position_tracks(tracks, gap);
 }
 
 /// The gutters of a track list: one between each two tracks that are not
@@ -6341,10 +6424,12 @@ mod tests {
 
         size_grid_tracks(&mut tracks, 400.0, 0.0);
 
-        // First track has min=100px, max=200px
-        // It should start at 100px, and fr gets remaining 300px
-        assert_eq!(tracks[0].size, 100.0); // Gets base size
-        assert_eq!(tracks[1].size, 300.0); // Remaining goes to fr
+        // First track has min=100px, max=200px. Maximize tracks (§12.6)
+        // runs before the fr is found (§12.7), so it grows to its 200 and
+        // the fr takes the other 200 (GR1; Chromium 148 on this shape:
+        // 200 and 200, where this test had expected 100 and 300).
+        assert_eq!(tracks[0].size, 200.0);
+        assert_eq!(tracks[1].size, 200.0);
     }
 
     #[test]

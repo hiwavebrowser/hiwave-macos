@@ -261,6 +261,9 @@ fn percent_height_marks_in_nested_flex_columns_lay_out_identically() {
 /// Not a test of behaviour: with `RUSTKIT_LAYOUT_MEMO_REPORT=<file>` set, writes what the memo did
 /// over the whole run to that file. The name sorts last, so on a serial run every other test has
 /// already laid out its pages. Used to report how many memo hits a corpus run exercised.
+///
+/// VALID ONLY WITH `--test-threads=1` (the corpus command): the totals are process-wide and the sort
+/// order is what puts this test last; under parallel `cargo test` or nextest they are wrong or zero.
 #[test]
 fn zzz_report_memo_totals_for_the_corpus_run() {
     if let Ok(path) = std::env::var("RUSTKIT_LAYOUT_MEMO_REPORT") {
