@@ -5365,11 +5365,45 @@ const WRAPPERS_JS: &str = r#"
             return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
         });
     });
-    // The global document's title is an own property the engine sets; a
-    // DOMParser document reads its first <title> (HTML §3.1.3).
-    getter(Document.prototype, 'title', function () {
-        var t = this.querySelector('title');
-        return t ? t.textContent.replace(/[\t\n\f\r ]+/g, ' ').trim() : '';
+    // `document.title` (HTML §3.1.3): the document's first HTML <title>
+    // in tree order (an SVG <title> inside the page is not one). Read, it
+    // is that element's own text with ASCII whitespace stripped and
+    // collapsed; set, it replaces the element's children, making a <title>
+    // at the end of the head when the document has none.
+    // Chrome 148 goes one step past the standard: set with no <title> and
+    // no <head> to hold one, the value is still read back until a <title>
+    // appears. `titleless` keeps that value.
+    var titleless = new WeakMap();
+    function titleElement(doc) {
+        var all = doc.querySelectorAll('title');
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].namespaceURI === 'http://www.w3.org/1999/xhtml') return all[i];
+        }
+        return null;
+    }
+    function collapsed(text) {
+        return text.replace(/[\t\n\f\r ]+/g, ' ').replace(/^ | $/g, '');
+    }
+    accessor(Document.prototype, 'title', function () {
+        var t = titleElement(this);
+        if (!t) return collapsed(titleless.get(this) || '');
+        titleless.delete(this);
+        var text = '';
+        for (var c = t.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3) text += c.data;
+        }
+        return collapsed(text);
+    }, function (value) {
+        value = String(value);
+        var t = titleElement(this);
+        if (!t) {
+            var head = this.head;
+            if (!head) { titleless.set(this, value); return; }
+            t = this.createElement('title');
+            head.appendChild(t);
+        }
+        titleless.delete(this);
+        t.textContent = value;
     });
 
     // `document.currentScript` (HTML §3.1.1): the classic <script> element

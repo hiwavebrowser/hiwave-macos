@@ -13,7 +13,7 @@ line('no title', function () { return JSON.stringify(document.title) + ' titles=
 line('set x', function () { document.title = 'x'; var t = document.head.lastChild; return JSON.stringify(document.title) + ' titles=' + q() + ' last-of-head=' + t.localName + ' ns=' + t.namespaceURI + ' text=' + JSON.stringify(t.textContent) + ' kids=' + t.childNodes.length; });
 line('set y', function () { document.title = 'y'; var t = document.querySelector('head title'); return JSON.stringify(document.title) + ' titles=' + q() + ' text=' + JSON.stringify(t.textContent) + ' kids=' + t.childNodes.length; });
 line('whitespace', function () { document.querySelector('head title').textContent = '  a \n\t b\f c\r  '; return JSON.stringify(document.title); });
-line('other spaces stay', function () { document.querySelector('head title').textContent = ' a  b '; return JSON.stringify(document.title); });
+line('other spaces stay', function () { document.querySelector('head title').textContent = ' a  b '; return 'char codes ' + Array.prototype.map.call(document.title, function (c) { return c.charCodeAt(0); }).join(','); });
 line('set keeps spaces in the element', function () { document.title = '  p   q  '; return JSON.stringify(document.querySelector('head title').textContent) + ' ' + JSON.stringify(document.title); });
 line('set empty', function () { document.title = ''; var t = document.querySelector('head title'); return JSON.stringify(document.title) + ' titles=' + q() + ' kids=' + t.childNodes.length; });
 line('set null, 5', function () { document.title = null; var a = document.title; document.title = 5; return JSON.stringify(a) + ' ' + JSON.stringify(document.title); });

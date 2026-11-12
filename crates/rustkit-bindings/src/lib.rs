@@ -1684,7 +1684,6 @@ impl DomBindings {
             // getElementsBy*, documentElement/head/body) is Rust-backed and
             // installed by `dom::install`.
             var document = {
-                title: '',
                 readyState: 'loading',
                 cookie: '',
                 domain: '',
@@ -2167,9 +2166,8 @@ impl DomBindings {
         self.mutation_log.take();
 
         // Sync to JS
-        let title = document.title().unwrap_or_default();
+        // (`document.title` reads the new document's <title> itself.)
         let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&format!("document.title = {:?};", title))?;
         runtime.evaluate_script("document.readyState = 'complete';")?;
 
         // Rebind the DOM wrappers. Wrappers handed out for a previous
