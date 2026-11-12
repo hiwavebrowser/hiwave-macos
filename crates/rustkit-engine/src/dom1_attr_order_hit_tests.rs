@@ -34,7 +34,6 @@ fn report_of(page: &str) -> (Engine, EngineViewId, Vec<String>) {
 /// Lines still off, each for a reason outside this row. They must still
 /// DIFFER: a line that starts matching comes off the list.
 ///
-/// * `XMLSerializer`: not on this branch (STR-11 adds it).
 /// * `style set before another attribute`: Chrome writes an element's
 ///   `style` attribute lazily, when something next reads its attributes,
 ///   so `el.style.color = 'red'` followed by `setAttribute('x', ..)` reads
@@ -46,7 +45,6 @@ fn report_of(page: &str) -> (Engine, EngineViewId, Vec<String>) {
 /// * `rect field`: a bare text input is 19 tall here and 21 in Chrome
 ///   (SET3, on the settings stack).
 const KNOWN: &[&str] = &[
-    "XMLSerializer: ",
     "style set before another attribute: ",
     "fixed (",
     "rect fixed: ",
