@@ -74,12 +74,19 @@
         checks.set(el, v);
         noteChecked(el, v);
     }
-    accessor(Input, 'checked', function () {
-        return checks.has(this) ? checks.get(this) : this.hasAttribute('checked');
-    }, function (v) {
-        setChecked(this, !!v);
-        if (v && this.type === 'radio') radioGroup(this).forEach(function (o) { setChecked(o, false); });
-    });
+    // The checkedness itself. The engine's own changes (a click's
+    // activation, a label, a radio group) go through these two, never
+    // through the `checked` accessor below: that one is script's, and a
+    // page may have wrapped it (React's value tracker does, and takes a
+    // write it sees for a state it already knows).
+    function isChecked(el) {
+        return checks.has(el) ? checks.get(el) : el.hasAttribute('checked');
+    }
+    function check(el, v) {
+        setChecked(el, !!v);
+        if (v && el.type === 'radio') radioGroup(el).forEach(function (o) { setChecked(o, false); });
+    }
+    accessor(Input, 'checked', function () { return isChecked(this); }, function (v) { check(this, v); });
 
     // ---- activation behaviour of a click (HTML §4.10.5.1.15 checkbox,
     // §4.10.5.1.16 radio button, §4.10.4 label, §4.11.2 summary). dom.rs's
@@ -132,16 +139,16 @@
         }
         // Legacy-pre-activation: the control is already in its new state
         // when the click's listeners run, and a cancelled click undoes it.
-        var was = el.checked, radio = el.type === 'radio';
-        var before = radio ? radioGroup(el).filter(function (o) { return o.checked; })[0] : null;
-        el.checked = radio ? true : !was;
+        var was = isChecked(el), radio = el.type === 'radio';
+        var before = radio ? radioGroup(el).filter(isChecked)[0] : null;
+        check(el, radio ? true : !was);
         return function (ok) {
             if (!ok) {
-                el.checked = was;
-                if (before) before.checked = true;
+                check(el, was);
+                if (before) check(before, true);
                 return;
             }
-            if (el.checked === was || !el.isConnected) return;
+            if (isChecked(el) === was || !el.isConnected) return;
             fire(el, 'input');
             fire(el, 'change');
         };
