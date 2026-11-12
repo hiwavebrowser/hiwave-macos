@@ -10,7 +10,7 @@
     var g = globalThis;
     if (typeof g.__rustkit_worker_spawn !== 'function') return;
     var spawn = g.__rustkit_worker_spawn, post = g.__rustkit_worker_post,
-        poll = g.__rustkit_worker_poll, terminate = g.__rustkit_worker_terminate;
+        poll = g.__rustkit_worker_poll, reply = g.__rustkit_worker_reply, terminate = g.__rustkit_worker_terminate;
     var states = new WeakMap();
     var live = {};
     var MAX_QUEUED = 1024;
@@ -31,10 +31,8 @@
         g.setTimeout(function () {
             if (st.dead) return;
             st.dead = true;
-            var ev = typeof g.ErrorEvent === 'function'
-                ? new g.ErrorEvent('error', { message: 'Failed to load worker script' })
-                : new g.Event('error');
-            fire(w, ev);
+            // A plain Event, not an ErrorEvent, as in Chrome.
+            fire(w, new g.Event('error'));
         }, 0);
     }
     function encode(message) {
@@ -43,6 +41,26 @@
         }
         var json = JSON.stringify(message);
         return json === undefined ? 'null' : json;
+    }
+
+    // importScripts: fetch the scripts under the page's fetch policy and
+    // answer the worker, which waits for the whole set.
+    function serviceFetch(st, rid, urlsJson) {
+        var urls = JSON.parse(urlsJson), out = [], left = urls.length, net = g.__rustkit_net, id = st.id;
+        function settle(i, value) {
+            out[i] = value;
+            if (--left === 0 && !st.dead && st.id === id) reply(id, rid, JSON.stringify(out));
+        }
+        urls.forEach(function (raw, i) {
+            var href;
+            try { href = new g.URL(raw, st.href).href; } catch (_) { settle(i, { ok: false }); return; }
+            var nid = net ? net.request({ url: href, destination: 'script', mode: 'cors', credentials: 'same-origin' }, function (r) {
+                if (!r.ok || r.status < 200 || r.status >= 300) { settle(i, { ok: false }); return; }
+                try { settle(i, { ok: true, src: new g.TextDecoder().decode(fromBase64(r.body_b64)) }); }
+                catch (_) { settle(i, { ok: false }); }
+            }) : 0;
+            if (!nid) settle(i, { ok: false });
+        });
     }
 
     function pump() {
@@ -60,10 +78,17 @@
                 if (it.k === 'm') {
                     fire(st.w, new g.MessageEvent('message', { data: JSON.parse(it.d), origin: '' }));
                 } else if (it.k === 'e') {
-                    var ev = typeof g.ErrorEvent === 'function'
-                        ? new g.ErrorEvent('error', { message: it.m })
-                        : new g.Event('error');
+                    var info = JSON.parse(it.m), ev;
+                    if (typeof g.ErrorEvent === 'function') {
+                        ev = new g.ErrorEvent('error', {
+                            message: info.m, filename: info.f || st.href, lineno: info.l, colno: info.c, cancelable: true
+                        });
+                    } else {
+                        ev = new g.Event('error', { cancelable: true });
+                    }
                     fire(st.w, ev);
+                } else if (it.k === 'f') {
+                    serviceFetch(st, it.r, it.u);
                 } else if (it.k === 'x') {
                     delete live[key];
                 }
@@ -102,7 +127,7 @@
             } catch (e) {
                 throw dom("Failed to construct 'Worker': Script at '" + String(url) + "' cannot be accessed from origin '" + (g.location && g.location.origin) + "'.", 'SyntaxError');
             }
-            var st = { w: this, id: 0, dead: false, queue: [], net: 0, on: {}, reg: {} };
+            var st = { w: this, href: u.href, id: 0, dead: false, queue: [], net: 0, on: {}, reg: {} };
             states.set(this, st);
             var name = options && options.name !== undefined ? String(options.name) : '';
             var net = g.__rustkit_net;

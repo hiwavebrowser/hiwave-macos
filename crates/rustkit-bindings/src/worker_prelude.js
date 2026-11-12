@@ -2,10 +2,10 @@
 // its own, on a thread of its own, and starts from nothing: no `window`, no
 // `document`, no storage, none of the page's objects. Only what a worker
 // scope has is defined here. The host supplies `__rk_worker_out`,
-// `__rk_worker_close` and `__rk_worker_error`.
+// `__rk_worker_close`, `__rk_worker_error` and `__rk_worker_fetch`.
 (function (g) {
     'use strict';
-    var out = g.__rk_worker_out, closeHost = g.__rk_worker_close, errorHost = g.__rk_worker_error;
+    var out = g.__rk_worker_out, closeHost = g.__rk_worker_close, errorHost = g.__rk_worker_error, fetchHost = g.__rk_worker_fetch;
     var listeners = Object.create(null);
     var closing = false;
 
@@ -22,7 +22,7 @@
             this.bubbles = false;
             this.cancelable = false;
         }
-        preventDefault() {}
+        preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
         stopPropagation() {}
         stopImmediatePropagation() { this.__stop = true; }
     }
@@ -37,7 +37,27 @@
             this.ports = [];
         }
     }
+    class ErrorEvent extends Event {
+        constructor(type, init) {
+            super(type);
+            init = init || {};
+            this.cancelable = true;
+            this.message = init.message === undefined ? '' : String(init.message);
+            this.filename = init.filename === undefined ? '' : String(init.filename);
+            this.lineno = init.lineno | 0;
+            this.colno = init.colno | 0;
+            this.error = 'error' in init ? init.error : null;
+        }
+    }
+    class DOMException extends Error {
+        constructor(message, name) {
+            super(message === undefined ? '' : String(message));
+            Object.defineProperty(this, 'name', { value: name === undefined ? 'Error' : String(name), configurable: true });
+        }
+    }
     hide('Event', Event);
+    hide('ErrorEvent', ErrorEvent);
+    hide('DOMException', DOMException);
     hide('MessageEvent', MessageEvent);
 
     function addEventListener(type, cb) {
@@ -60,7 +80,7 @@
             try {
                 if (typeof list[i] === 'function') list[i].call(g, ev);
                 else list[i].handleEvent(ev);
-            } catch (e) { errorHost(String(e && e.message !== undefined ? e.message : e)); }
+            } catch (e) { reportError(e, true); }
             if (ev.__stop) break;
         }
         return true;
@@ -87,6 +107,71 @@
         });
     });
 
+    // An uncaught error: an `error` event on the scope first, and if no
+    // handler cancels it, an `error` event on the Worker object in the page.
+    function reportError(e, inHandler) {
+        var msg = 'Uncaught ' + (e && typeof e === 'object' && e.name !== undefined ? e.name + ': ' + e.message : String(e));
+        var href = g.location ? g.location.href : '';
+        var ev = new ErrorEvent('error', { message: msg, filename: href, lineno: 0, colno: 0, error: e });
+        if (!inHandler) dispatchEvent(ev);
+        if (!ev.defaultPrevented) errorHost(JSON.stringify({ m: msg, f: href, l: 0, c: 0 }));
+    }
+
+    // Timers run on the worker thread's own clock; the host sleeps until
+    // `__rk_worker_next` says one is due and calls `__rk_worker_run_due`.
+    var timers = [], seq = 1, nextId = 1;
+    function schedule(cb, delay, args, every) {
+        delay = Number(delay);
+        if (!(delay > 0)) delay = 0;
+        if (every && delay < 1) delay = 1;
+        var id = nextId++;
+        timers.push({ id: id, due: Date.now() + delay, seq: seq++, every: every ? delay : 0, cb: cb, args: args });
+        return id;
+    }
+    function clearTimer(id) {
+        for (var i = 0; i < timers.length; i++) if (timers[i].id === id) { timers.splice(i, 1); return; }
+    }
+    hide('setTimeout', function setTimeout(cb, delay) { return schedule(cb, delay, [].slice.call(arguments, 2), false); });
+    hide('setInterval', function setInterval(cb, delay) { return schedule(cb, delay, [].slice.call(arguments, 2), true); });
+    hide('clearTimeout', clearTimer);
+    hide('clearInterval', clearTimer);
+    hide('queueMicrotask', function queueMicrotask(cb) {
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'queueMicrotask' on 'WorkerGlobalScope': The callback provided as parameter 1 is not a function.");
+        Promise.resolve().then(function () { try { cb(); } catch (e) { reportError(e); } });
+    });
+    hide('__rk_worker_next', function () {
+        if (closing || !timers.length) return -1;
+        var due = timers[0].due;
+        for (var i = 1; i < timers.length; i++) if (timers[i].due < due) due = timers[i].due;
+        return Math.max(0, due - Date.now());
+    });
+    hide('__rk_worker_run_due', function () {
+        for (var guard = 0; guard < 1000 && !closing; guard++) {
+            var n = Date.now(), best = -1;
+            for (var i = 0; i < timers.length; i++) {
+                var t = timers[i];
+                if (t.due > n) continue;
+                if (best < 0 || t.due < timers[best].due || (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
+            }
+            if (best < 0) return;
+            var timer = timers[best];
+            if (timer.every) {
+                // Counted from its due time, so a late start does not reorder it
+                // against other timers; one over a second behind is not caught up.
+                timer.due += timer.every;
+                if (timer.due < n - 1000) timer.due = n + timer.every;
+                timer.seq = seq++;
+            } else timers.splice(best, 1);
+            try {
+                if (typeof timer.cb === 'function') timer.cb.apply(g, timer.args);
+                else (0, eval)(String(timer.cb));
+            } catch (e) { reportError(e); }
+        }
+    });
+    hide('__rk_worker_run', function (source) {
+        try { (0, eval)(source); } catch (e) { reportError(e); }
+    });
+
     hide('self', g);
     hide('name', '');
     hide('postMessage', function postMessage(message) {
@@ -96,8 +181,19 @@
         out(json === undefined ? 'null' : json);
     });
     hide('close', function close() { closing = true; closeHost(); });
+    // Synchronous: the worker thread waits while the page fetches the
+    // scripts under its own fetch policy. Every script must load before
+    // the first one runs.
     hide('importScripts', function importScripts() {
-        throw new Error('importScripts is not available yet');
+        var urls = [].map.call(arguments, String);
+        if (!urls.length || closing) return;
+        var raw = fetchHost(JSON.stringify(urls)), res = raw ? JSON.parse(raw) : null;
+        for (var i = 0; i < urls.length; i++) {
+            if (!res || !res[i] || !res[i].ok) {
+                throw new DOMException("Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '" + urls[i] + "' failed to load.", 'NetworkError');
+            }
+        }
+        for (var j = 0; j < res.length; j++) (0, eval)(res[j].src);
     });
     hide('__rk_worker_setup', function (name, locJson) {
         g.name = String(name);

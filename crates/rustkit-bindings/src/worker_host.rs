@@ -32,11 +32,15 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 enum FromWorker {
     Message(String),
+    /// An uncaught error, as JSON `{m, f, l, c}`.
     Error(String),
+    /// `importScripts`: the worker waits for the page's answer.
+    Fetch { rid: u64, urls: String },
 }
 
 struct Handle {
     to: Sender<String>,
+    reply: Sender<String>,
     from: Receiver<FromWorker>,
     control: Arc<ViewControl>,
     thread: JoinHandle<()>,
@@ -74,6 +78,7 @@ fn item(m: FromWorker) -> Value {
     match m {
         FromWorker::Message(d) => json!({"k": "m", "d": d}),
         FromWorker::Error(m) => json!({"k": "e", "m": m}),
+        FromWorker::Fetch { rid, urls } => json!({"k": "f", "r": rid, "u": urls}),
     }
 }
 
@@ -90,16 +95,17 @@ pub fn install(runtime: &mut JsRuntime) -> Result<(), rustkit_js::JsError> {
             let (source, name, loc) = (arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let (to, rx) = channel();
+            let (reply, reply_rx) = channel();
             let (tx, from) = channel();
             let control = Watchdog::shared().view_control();
             let c = control.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("worker-{id}"))
-                .spawn(move || worker_main(source, name, loc, rx, tx, c));
+                .spawn(move || worker_main(source, name, loc, rx, reply_rx, tx, c));
             let Ok(thread) = thread else {
                 return JsValue::Number(0.0);
             };
-            WORKERS.with(|w| w.borrow_mut().insert(id, Handle { to, from, control, thread }));
+            WORKERS.with(|w| w.borrow_mut().insert(id, Handle { to, reply, from, control, thread }));
             JsValue::Number(id as f64)
         }),
     )?;
@@ -111,6 +117,19 @@ pub fn install(runtime: &mut JsRuntime) -> Result<(), rustkit_js::JsError> {
             WORKERS.with(|w| {
                 if let Some(h) = w.borrow().get(&id) {
                     let _ = h.to.send(json);
+                }
+            });
+            JsValue::Undefined
+        }),
+    )?;
+    runtime.register_host_function(
+        "__rustkit_worker_reply",
+        3,
+        Box::new(|args| {
+            let (id, json) = (arg_id(args), arg_str(args, 2));
+            WORKERS.with(|w| {
+                if let Some(h) = w.borrow().get(&id) {
+                    let _ = h.reply.send(json);
                 }
             });
             JsValue::Undefined
@@ -168,6 +187,7 @@ fn worker_main(
     name: String,
     location: String,
     rx: Receiver<String>,
+    reply_rx: Receiver<String>,
     out: Sender<FromWorker>,
     control: Arc<ViewControl>,
 ) {
@@ -197,6 +217,28 @@ fn worker_main(
                 JsValue::Undefined
             }),
         );
+        // importScripts: ask the page, then wait for its answer (or the end).
+        let (tx, ctl) = (out.clone(), control.clone());
+        let rid_counter = Cell::new(0u64);
+        let _ = rt.register_host_function(
+            "__rk_worker_fetch",
+            1,
+            Box::new(move |args| {
+                let rid = rid_counter.get() + 1;
+                rid_counter.set(rid);
+                let _ = tx.send(FromWorker::Fetch { rid, urls: arg_str(args, 0) });
+                loop {
+                    if ctl.stops_all() {
+                        return JsValue::String(String::new());
+                    }
+                    match reply_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(r) => return JsValue::String(r),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(_) => return JsValue::String(String::new()),
+                    }
+                }
+            }),
+        );
         let closed = closed.clone();
         let _ = rt.register_host_function(
             "__rk_worker_close",
@@ -210,7 +252,7 @@ fn worker_main(
     let quoted = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
     let report = |e: String, control: &ViewControl| {
         if !control.stops_all() {
-            let _ = out.send(FromWorker::Error(e));
+            let _ = out.send(FromWorker::Error(json!({"m": e, "f": "", "l": 0, "c": 0}).to_string()));
         }
     };
 
@@ -220,7 +262,7 @@ fn worker_main(
             .evaluate_script(&format!("__rk_worker_setup({}, {})", quoted(&name), quoted(&location)))
             .is_ok();
     if started {
-        if let Err(e) = rt.evaluate_script(&source) {
+        if let Err(e) = rt.evaluate_script(&format!("__rk_worker_run({})", quoted(&source))) {
             report(e.to_string(), &control);
         }
         let _ = rt.run_jobs();
@@ -230,13 +272,37 @@ fn worker_main(
     rt.end_turn(&stamp);
 
     while started && !closed.get() && !control.stops_all() {
-        let Ok(json) = rx.recv() else { break };
+        // Sleep until a message arrives or the next timer is due.
+        let wait = match rt.evaluate_script("__rk_worker_next()") {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            _ => None,
+        };
+        let message = match wait {
+            None => match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => break,
+            },
+            Some(0) => None,
+            Some(ms) => match rx.recv_timeout(Duration::from_millis(ms)) {
+                Ok(m) => Some(m),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(_) => break,
+            },
+        };
         rt.begin_turn(&stamp, TURN_BUDGET);
-        let call = format!("__rk_worker_dispatch({})", quoted(&json));
-        if let Err(e) = rt.evaluate_script(&call) {
-            report(e.to_string(), &control);
+        if let Some(json) = message {
+            let call = format!("__rk_worker_dispatch({})", quoted(&json));
+            if let Err(e) = rt.evaluate_script(&call) {
+                report(e.to_string(), &control);
+            }
+            let _ = rt.run_jobs();
         }
-        let _ = rt.run_jobs();
+        if !closed.get() {
+            if let Err(e) = rt.evaluate_script("__rk_worker_run_due()") {
+                report(e.to_string(), &control);
+            }
+            let _ = rt.run_jobs();
+        }
         rt.end_turn(&stamp);
     }
 }
