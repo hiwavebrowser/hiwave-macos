@@ -35,6 +35,7 @@ pub enum MemoMode {
 }
 
 thread_local! {
+    static LIVE: Cell<i64> = const { Cell::new(0) };
     static MODE_OVERRIDE: Cell<Option<MemoMode>> = const { Cell::new(None) };
     static MIN_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static EPOCH: Cell<u64> = const { Cell::new(1) };
@@ -164,13 +165,38 @@ struct BoxOutputs {
     context_floats: Option<FloatContext>,
 }
 
-#[derive(Clone)]
 struct MemoEntry {
     key: MemoKey,
     outputs: Vec<BoxOutputs>,
     end_height: f32,
     end_margin: MarginCollapseContext,
-    origin: (f32, f32),
+}
+
+impl MemoEntry {
+    fn new(key: MemoKey, outputs: Vec<BoxOutputs>, end_height: f32, end_margin: MarginCollapseContext) -> Self {
+        LIVE.with(|n| n.set(n.get() + 1));
+        MemoEntry { key, outputs, end_height, end_margin }
+    }
+}
+
+impl Drop for MemoEntry {
+    fn drop(&mut self) {
+        let _ = LIVE.try_with(|n| n.set(n.get() - 1));
+    }
+}
+
+/// How many recorded results (whole-subtree snapshots) are alive on this thread. Zero once a root
+/// layout has finished: the memo is per root layout, so nothing may keep a snapshot after it.
+pub fn live_memo_entries() -> i64 {
+    LIVE.with(|n| n.get())
+}
+
+/// Drop every recorded result below `b` (a root layout has ended).
+pub(crate) fn clear_memos(b: &mut LayoutBox) {
+    b.layout_memo = None;
+    for c in &mut b.children {
+        clear_memos(c);
+    }
 }
 
 /// A box's recorded child layouts for one root layout. A cloned box starts with none.
@@ -441,8 +467,7 @@ impl LayoutBox {
             .take()
             .filter(|m| m.epoch == epoch)
             .unwrap_or_else(|| Box::new(BoxMemo { epoch, entries: Vec::new() }));
-        let origin = (self.dimensions.content.x, self.dimensions.content.y);
-        let hit = memo.entries.iter().position(|e| e.key == key);
+        let mut hit = memo.entries.iter().position(|e| e.key == key);
 
         let mut predicted: Option<String> = None;
         let mut verifying = false;
@@ -450,6 +475,8 @@ impl LayoutBox {
             let entry = memo.entries.remove(i);
             match mode {
                 MemoMode::On => {
+                    // A recorded result for a tree of another shape cannot be written back: it is
+                    // dropped, and this call is a miss that records a fresh one.
                     if restore(self, &entry.outputs) {
                         count(|c| {
                             c.hits += 1;
@@ -491,7 +518,13 @@ impl LayoutBox {
                 }
                 MemoMode::Off => {}
             }
-            memo.entries.insert(0, entry);
+            if mode == MemoMode::On {
+                // Reaching here in `on` means the restore failed (a success returned above).
+                count(|c| c.misses += 1);
+                hit = None;
+            } else {
+                memo.entries.insert(0, entry);
+            }
         } else {
             count(|c| c.misses += 1);
         }
@@ -531,13 +564,7 @@ impl LayoutBox {
                     count(|c| c.stored += 1);
                     memo.entries.insert(
                         0,
-                        MemoEntry {
-                            key,
-                            outputs,
-                            end_height: self.dimensions.content.height,
-                            end_margin: margin_context.clone(),
-                            origin,
-                        },
+                        MemoEntry::new(key, outputs, self.dimensions.content.height, margin_context.clone()),
                     );
                     memo.entries.truncate(2);
                 }

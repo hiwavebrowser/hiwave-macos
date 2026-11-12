@@ -4408,6 +4408,10 @@ impl LayoutBox {
         layout_memo::bump_epoch();
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
+        if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
+            layout_memo::clear_memos(self);
+        }
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content

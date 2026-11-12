@@ -268,3 +268,26 @@ fn zzz_report_memo_totals_for_the_corpus_run() {
         std::fs::write(path, format!("{totals:?}\n")).expect("write report");
     }
 }
+
+/// R1 on #1073 (MED): the memo's whole-subtree snapshots must not stay on the tree after the root
+/// layout, or a page's resident memory would carry two copies of every big subtree's output. The
+/// engine (so the laid-out tree) stays alive while the entries are counted.
+#[test]
+fn no_snapshot_outlives_the_root_layout() {
+    let html = nest(&[FLEX, BLOCK], 24);
+    for mode in [MemoMode::On, MemoMode::Verify] {
+        set_memo_mode(Some(mode));
+        set_memo_min_subtree(Some(1));
+        take_memo_counters();
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine.create_headless_view(Bounds { x: 0, y: 0, width: 1200, height: 800 }).expect("view");
+        engine.load_html(id, &html).expect("load_html");
+        let stored = take_memo_counters().stored;
+        let alive = rustkit_layout::layout_memo::live_memo_entries();
+        set_memo_mode(None);
+        set_memo_min_subtree(None);
+        assert!(stored > 0, "{mode:?}: nothing was recorded, the test proves nothing");
+        assert_eq!(alive, 0, "{mode:?}: {alive} of {stored} recorded results outlived the root layout");
+        drop(engine);
+    }
+}
