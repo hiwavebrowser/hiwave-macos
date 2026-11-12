@@ -29270,11 +29270,7 @@ fn geometry_snapshot_with(
         let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
-        let holds_fixed = transformed
-            || !b.style.filter.is_empty()
-            || !b.style.backdrop_filter.is_empty()
-            || b.style.will_change_holds_fixed
-            || b.style.contain_holds_fixed;
+        let holds_fixed = transformed || b.holds_fixed_boxes();
         let under = Scrollers {
             flow: inner,
             absolute: if positioned || holds_fixed { inner } else { scrollers.absolute },

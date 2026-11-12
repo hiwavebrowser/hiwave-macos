@@ -2336,7 +2336,7 @@ impl LayoutBox {
             ScrollerGap::ToContainingBlock if self.holds_absolute_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
-            ScrollerGap::ToTransform if self.transforms_descendants() => {
+            ScrollerGap::ToTransform if self.carries_fixed_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
             _ => {}
@@ -2665,6 +2665,77 @@ impl LayoutBox {
     pub fn layout(&mut self, containing_block: &Dimensions) {
         self.layout_with_definite_height(containing_block, containing_block.content.height);
         self.apply_relative_offsets(containing_block);
+        self.reanchor_fixed_boxes(None);
+    }
+
+    /// Whether this box is the containing block of the `position: fixed`
+    /// boxes inside it, which then move with it instead of staying in the
+    /// viewport (css-transforms-1 §3, filter-effects-1 §5, css-contain-2
+    /// §3; the list is Chrome for Testing 148's, LAY2): any transform, an
+    /// identity one included (`transform`, `translate`, `rotate`, `scale`),
+    /// `perspective`, a `filter` or `backdrop-filter`, `will-change` naming
+    /// one of those, `contain: layout | paint | strict | content`. Not an
+    /// inline box, which no transform applies to.
+    pub fn holds_fixed_boxes(&self) -> bool {
+        let style = &self.style;
+        !matches!(
+            self.box_type,
+            BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak | BoxType::AnonymousBlock
+        ) && (!style.transform.ops.is_empty()
+            || style.translate.is_some()
+            || style.rotate.is_some()
+            || style.scale.is_some()
+            || style.stacks & rustkit_css::STACKS_PERSPECTIVE != 0
+            || !style.filter.is_empty()
+            || !style.backdrop_filter.is_empty()
+            || style.will_change_holds_fixed
+            || style.contain_holds_fixed)
+    }
+
+    /// Put every `position: fixed` box under this one where its insets say,
+    /// against its real containing block: the viewport, or the padding box
+    /// of the nearest ancestor that `holds_fixed_boxes` (`holder`).
+    ///
+    /// A fixed box is first placed against the viewport while its parent is
+    /// laid out, at the parent's position of that moment. Every later move
+    /// of an ancestor (an absolute box going from its static position to
+    /// its insets, a flex or grid item being placed, a relative offset)
+    /// carries the whole subtree, the fixed box with it: one inside
+    /// `position: absolute; left: 400px; top: 10px` whose static position
+    /// was (0, 20) ended up (400, -10) away from its own `left` / `top`.
+    /// So the insets are applied again once nothing above moves. An axis
+    /// with no inset keeps the static position, which does move with the
+    /// ancestors.
+    /// A `position: fixed` box somewhere under this one.
+    pub(crate) fn has_fixed_box_below(&self) -> bool {
+        self.children.iter().any(|c| c.position == Position::Fixed || c.has_fixed_box_below())
+    }
+
+    fn reanchor_fixed_boxes(&mut self, holder: Option<&Dimensions>) {
+        let own = self.holds_fixed_boxes().then(|| self.abspos_containing_block());
+        let holder = own.as_ref().or(holder);
+        for child in &mut self.children {
+            if child.position == Position::Fixed {
+                let containing_block = match holder {
+                    Some(holder) => Some(holder.clone()),
+                    None => (child.viewport.0 > 0.0 && child.viewport.1 > 0.0).then(|| Dimensions {
+                        content: Rect::new(0.0, 0.0, child.viewport.0, child.viewport.1),
+                        ..Default::default()
+                    }),
+                };
+                if let Some(containing_block) = containing_block {
+                    let (x, y) = (child.dimensions.content.x, child.dimensions.content.y);
+                    child.apply_position_offsets_absolute(&containing_block);
+                    let (dx, dy) = (child.dimensions.content.x - x, child.dimensions.content.y - y);
+                    if dx != 0.0 || dy != 0.0 {
+                        for below in &mut child.children {
+                            Self::shift_subtree(below, dx, dy);
+                        }
+                    }
+                }
+            }
+            child.reanchor_fixed_boxes(holder);
+        }
     }
 
     /// Perform layout with an explicit definite height for percentage resolution.
@@ -4483,6 +4554,7 @@ impl LayoutBox {
     ) {
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        self.reanchor_fixed_boxes(None);
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -8605,6 +8677,12 @@ impl LayoutBox {
         !self.style.effective_transform().is_identity()
     }
 
+    /// The fixed boxes under this box move with it and with the page: it
+    /// transforms them, or is their containing block (`holds_fixed_boxes`).
+    fn carries_fixed_boxes(&self) -> bool {
+        self.transforms_descendants() || self.holds_fixed_boxes()
+    }
+
     /// Whether a point in this box can land on it: not when it is not
     /// shown, and not when it is `pointer-events: none`. Both inherit and
     /// a descendant can undo either, so its children are tested all the same.
@@ -8625,7 +8703,7 @@ impl LayoutBox {
     }
 
     fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         for (index, child) in self.children.iter().enumerate() {
@@ -8658,7 +8736,7 @@ impl LayoutBox {
         outer_z: Option<i32>,
         hits: &mut Vec<(i32, HitTestResult)>,
     ) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         let first = hits.len();
@@ -8839,7 +8917,7 @@ impl LayoutBox {
         let absolute_clipped = if self.holds_absolute_boxes() { flow_clipped } else { clipped.1 };
 
         // Check children in reverse paint order (topmost first)
-        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
+        let skip_held_fixed = skip_held_fixed && !self.carries_fixed_boxes();
         let paint_order = self.get_paint_order();
         // What this box's own scroll adds to the point, for its children.
         let scroll = self.element_scroll.get();
@@ -10723,9 +10801,10 @@ pub struct DisplayList {
     open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
-    /// How many ancestors of the box being painted have a `transform`. A
-    /// transformed box is the containing block of the fixed boxes inside
-    /// it (css-transforms-1 §3), so those move with it and with the page.
+    /// How many ancestors of the box being painted have a `transform` or
+    /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
+    /// box is the containing block of the fixed boxes inside it
+    /// (css-transforms-1 §3), so those move with it and with the page.
     transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
@@ -11074,6 +11153,12 @@ impl DisplayList {
         // Check if this box has a transform
         let transform = layout_box.style.effective_transform();
         let has_transform = !transform.is_identity();
+        // Counted with the transformed ancestors: the fixed boxes under a
+        // box that holds them move with the page too.
+        let holds_fixed = !has_transform && layout_box.holds_fixed_boxes();
+        if holds_fixed {
+            self.transformed_ancestors += 1;
+        }
         if has_transform {
             let border_box = layout_box.dimensions.border_box();
             // Compute transform matrix
@@ -11290,6 +11375,9 @@ impl DisplayList {
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
+        }
+        if holds_fixed {
             self.transformed_ancestors -= 1;
         }
 

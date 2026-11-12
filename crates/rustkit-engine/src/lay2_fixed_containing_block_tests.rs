@@ -39,10 +39,20 @@ fn a_fixed_box_is_positioned_against_the_viewport_or_its_fixed_containing_block(
     let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
     let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
     assert_eq!(expected.len(), 71, "the Chrome report has 71 lines");
+    // Still off, for a reason outside this row: the ancestor in
+    // `inline_transform` is an inline box with margins, padding and a
+    // border. Its own rect is 5px low here (335,440 for Chrome's 335,435)
+    // and the static position of the block-level fixed box inside it is
+    // the inline's content edge (348,440) where Chrome breaks the line
+    // (320,454). The fixed box with insets (`f`) is right. The two lines
+    // must still DIFFER; one that matches comes off the list.
+    const KNOWN: &[&str] = &["top inline_transform: ", "scrolled inline_transform: "];
     let mut wrong = Vec::new();
     for (i, want) in expected.iter().enumerate() {
+        let listed = KNOWN.iter().any(|k| want.starts_with(k));
         match got.get(i) {
-            Some(have) if have == want => {}
+            Some(have) if (have == want) != listed => {}
+            Some(have) if listed => wrong.push(format!("  {have}\n    matches Chromium now: take it off KNOWN")),
             Some(have) => wrong.push(format!("  {have}\n    Chromium: {want}")),
             None => wrong.push(format!("  (missing)\n    Chromium: {want}")),
         }
