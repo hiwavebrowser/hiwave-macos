@@ -1988,11 +1988,28 @@ pub struct LayoutBox {
     pub hit_overflow: HitOverflowMark,
 }
 
+thread_local! {
+    /// How many `position: fixed` boxes this thread's layouts have placed.
+    /// A root layout reads it before and after: a tree that placed none
+    /// has none to re-anchor, and skips that walk (`reanchor_fixed_boxes`).
+    static FIXED_BOXES_PLACED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// `LayoutBox::hit_overflow`. A note the hit test keeps beside the layout,
 /// not part of it: two trees that lay out the same are the same tree
 /// whether or not a point was ever asked of them, so it prints as nothing.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct HitOverflowMark(std::cell::Cell<u8>);
+
+/// A copy starts with no mark: the engine copies a laid-out tree to move
+/// boxes on it (an animation frame answered to a forced read), and a mark
+/// made before the move would stop the hit test at a box something now
+/// reaches out of.
+impl Clone for HitOverflowMark {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
 
 impl HitOverflowMark {
     fn get(&self) -> u8 {
@@ -2663,9 +2680,12 @@ impl LayoutBox {
     /// callers lay out a child with `layout_with_definite_height`, which is
     /// the same thing without the pass, so the pass runs once per tree.
     pub fn layout(&mut self, containing_block: &Dimensions) {
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_definite_height(containing_block, containing_block.content.height);
         self.apply_relative_offsets(containing_block);
-        self.reanchor_fixed_boxes(None);
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
     }
 
     /// Whether this box is the containing block of the `position: fixed`
@@ -2673,9 +2693,10 @@ impl LayoutBox {
     /// viewport (css-transforms-1 §3, filter-effects-1 §5, css-contain-2
     /// §3; the list is Chrome for Testing 148's, LAY2): any transform, an
     /// identity one included (`transform`, `translate`, `rotate`, `scale`),
-    /// `perspective`, a `filter` or `backdrop-filter`, `will-change` naming
-    /// one of those, `contain: layout | paint | strict | content`. Not an
-    /// inline box, which no transform applies to.
+    /// `perspective`, `transform-style: preserve-3d`, a `filter` or
+    /// `backdrop-filter`, `will-change` naming one of those, `contain:
+    /// layout | paint | strict | content`, `content-visibility: auto |
+    /// hidden`. Not an inline box, which no transform applies to.
     pub fn holds_fixed_boxes(&self) -> bool {
         let style = &self.style;
         !matches!(
@@ -2685,7 +2706,11 @@ impl LayoutBox {
             || style.translate.is_some()
             || style.rotate.is_some()
             || style.scale.is_some()
-            || style.stacks & rustkit_css::STACKS_PERSPECTIVE != 0
+            || style.stacks
+                & (rustkit_css::STACKS_PERSPECTIVE
+                    | rustkit_css::STACKS_PRESERVE_3D
+                    | rustkit_css::STACKS_CONTENT_VISIBILITY)
+                != 0
             || !style.filter.is_empty()
             || !style.backdrop_filter.is_empty()
             || style.will_change_holds_fixed
@@ -4552,9 +4577,13 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
-        self.reanchor_fixed_boxes(None);
+        // Only a tree that placed a fixed box has one to place again.
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -5332,6 +5361,7 @@ impl LayoutBox {
                 self.apply_position_offsets_absolute(containing_block);
             }
             Position::Fixed => {
+                FIXED_BOXES_PLACED.with(|n| n.set(n.get().wrapping_add(1)));
                 // CSS2 §10.1: a fixed element's containing block is the
                 // VIEWPORT, not the block that laid it out. Resolving
                 // bottom:0 against the root's flow height painted

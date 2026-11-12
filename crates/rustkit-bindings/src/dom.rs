@@ -1609,6 +1609,26 @@ fn id_list(nodes: impl IntoIterator<Item = Rc<Node>>) -> JsValue {
     JsValue::String(ids.join(" "))
 }
 
+/// A UTF-16 offset in a text node's data as the two character counts the
+/// layout numbers a run by: the characters before it, and those characters
+/// after white-space collapsing (each run of white space as one).
+fn text_offsets(data: &str, offset: usize) -> (usize, usize) {
+    let (mut units, mut chars, mut collapsed, mut in_space) = (0, 0, 0, false);
+    for c in data.chars() {
+        if units >= offset {
+            break;
+        }
+        units += c.len_utf16();
+        chars += 1;
+        let space = matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        if !(space && in_space) {
+            collapsed += 1;
+        }
+        in_space = space;
+    }
+    (chars, collapsed)
+}
+
 fn number_arg(args: &[JsValue], index: usize) -> Option<f32> {
     match args.get(index) {
         Some(JsValue::Number(n)) if n.is_finite() => Some(*n as f32),
@@ -2315,33 +2335,70 @@ pub(crate) fn install(
         }),
     )?;
 
-    // textRects(node, start, end): where those characters of a text node
-    // are, as a flat [x, y, w, h, ...] JSON array in document coordinates;
-    // "[]" before a layout or for a node with no box.
+    // rangeTextRects(gen, "node from to;node from to;..."): where the
+    // characters [from, to) of each of those text nodes are (offsets in
+    // UTF-16 units, as a Range has them), as a JSON array with one flat
+    // [x, y, w, h, ...] array per node, in document coordinates; an empty
+    // one before a layout or for a node with no box. One call for a whole
+    // range: a selection over a long page asks about thousands of nodes.
     let h = host.clone();
     let d = dirty.clone();
     runtime.register_host_function(
-        "__rustkit_dom_text_rects",
-        5,
+        "__rustkit_dom_range_text_rects",
+        2,
         Box::new(move |args| {
             DomHost::ensure_fresh_geometry(&h, &d, "text_rects");
             let host = h.borrow();
-            let (Some(node), Some(start), Some(end)) =
-                (number_arg(args, 0), number_arg(args, 1), number_arg(args, 2))
-            else {
-                return JsValue::String("[]".to_string());
-            };
-            let Some(rects) = host.text_rects.clone() else {
-                return JsValue::String("[]".to_string());
-            };
-            let at = |i: usize, fallback: f32| number_arg(args, i).unwrap_or(fallback).max(0.0) as usize;
-            let span = (start.max(0.0) as usize, end.max(0.0) as usize);
-            let collapsed = (at(3, start), at(4, end));
-            let flat: Vec<String> = rects(node as usize, span, collapsed)
-                .iter()
-                .flat_map(|r| r.iter().map(|v| if v.is_finite() { v.to_string() } else { "0".to_string() }))
+            let asks = string_arg(args, 1).unwrap_or("");
+            let document = args.first().and_then(|g| host.document_for(g));
+            let answers: Vec<String> = asks
+                .split(';')
+                .filter(|ask| !ask.is_empty())
+                .map(|ask| {
+                    let mut numbers = ask.split(' ').filter_map(|n| n.parse::<usize>().ok());
+                    let (Some(id), Some(from), Some(to)) = (numbers.next(), numbers.next(), numbers.next()) else {
+                        return "[]".to_string();
+                    };
+                    let (Some(rects), Some(node)) =
+                        (host.text_rects.as_ref(), document.and_then(|d| d.get_node(NodeId::new(id))))
+                    else {
+                        return "[]".to_string();
+                    };
+                    let NodeType::Text(data) = &node.node_type else {
+                        return "[]".to_string();
+                    };
+                    let (from, to) = (text_offsets(data, from), text_offsets(data, to));
+                    let flat: Vec<String> = rects(id, (from.0, to.0), (from.1, to.1))
+                        .iter()
+                        .flat_map(|r| r.iter().map(|v| if v.is_finite() { v.to_string() } else { "0".to_string() }))
+                        .collect();
+                    format!("[{}]", flat.join(","))
+                })
                 .collect();
-            JsValue::String(format!("[{}]", flat.join(",")))
+            JsValue::String(format!("[{}]", answers.join(",")))
+        }),
+    )?;
+
+    // svgHit(gen, svg, x, y, width, height): the shape of an `<svg>` a point
+    // is on (from the top left of its content box, whose size is given),
+    // as its NodeId; -1 when it is on none.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_svg_hit",
+        6,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let number = |i: usize| match args.get(i) {
+                Some(JsValue::Number(n)) if n.is_finite() => Some(*n),
+                _ => None,
+            };
+            let (Some(svg), Some(x), Some(y), Some(w), Some(height)) =
+                (host.node(args), number(2), number(3), number(4), number(5))
+            else {
+                return JsValue::Number(-1.0);
+            };
+            crate::svg_geometry::shape_at(&svg, (x, y), (w, height))
+                .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64))
         }),
     )?;
 
@@ -2623,16 +2680,46 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit, textRects: __rustkit_dom_text_rects, setAdopted: __rustkit_dom_set_adopted,
+        hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+
+    // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
+    // this closure's and are read with methods taken now, before any page
+    // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
+    // or `Object.defineProperty` afterwards changes nothing here.
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
+        setDrop = uncurry(WeakSet.prototype['delete']);
+    var defineOwn = Object.defineProperty;
+    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    // Give an event object its `isTrusted`: an own accessor with no setter
+    // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
+    // for an object that will not take it.
+    function stamp(ev) {
+        if (setHas(STAMPED, ev)) return;
+        defineOwn(ev, 'isTrusted', { get: TRUST_GET, set: undefined, enumerable: true, configurable: false });
+        setAdd(STAMPED, ev);
+    }
+    // The engine made this event. It reads trusted through its one
+    // dispatch, the next `dispatchEvent` of it; one dispatched again (by
+    // a page that kept it) is not trusted any more.
+    function trust(ev) {
+        stamp(ev);
+        setAdd(TRUSTED, ev);
+        setAdd(UNDISPATCHED, ev);
+        return ev;
+    }
+    // For the embedder's other scripts, which hold the host object.
+    __rk.trust = trust;
 
     if (typeof g.DOMException !== 'function') {
         g.DOMException = function DOMException(message, name) {
@@ -4734,29 +4821,10 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(list, 'length', { value: rects.length });
         return list;
     }
-    // A UTF-16 offset in `data` as a count of characters.
-    function charCount(data, offset) {
-        var n = 0;
-        for (var i = 0; i < offset && i < data.length; i++) {
-            var c = data.charCodeAt(i);
-            if (c < 0xDC00 || c > 0xDFFF) n++;
-        }
-        return n;
-    }
-    function textRects(node, from, to) {
-        var s = node[SLOT];
-        if (!s || s.gen !== gen) return [];
-        // Both numberings: the node's characters, and those characters
-        // after white-space collapsing (layout knows which the run uses).
-        var data = node.data;
-        function collapsed(offset) { return charCount(data.slice(0, offset).replace(/[ \t\n\r\f]+/g, ' '), offset); }
-        var flat = JSON.parse(N.textRects(s.id, charCount(data, from), charCount(data, to), collapsed(from), collapsed(to)));
-        var out = [], sx = scrollOffset('x'), sy = scrollOffset('y');
-        for (var i = 0; i + 3 < flat.length; i += 4) out.push(rect(flat[i] - sx, flat[i + 1] - sy, flat[i + 2], flat[i + 3]));
-        return out;
-    }
     function rangeRects(r) {
-        var out = [], start = r.start, end = r.end;
+        // `out` in tree order, a text node as null until the one host call
+        // below answers for all of them (`asks`).
+        var out = [], asks = [], start = r.start, end = r.end;
         // The first node at or after the start, and the first one past the end.
         var node = start.node.nodeType === 1 || start.node.nodeType === 9 || start.node.nodeType === 11
             ? (start.node.childNodes[start.offset] || nextSkipping(start.node)) : start.node;
@@ -4772,13 +4840,25 @@ const WRAPPERS_JS: &str = r#"
             if (node.nodeType === 3) {
                 var from = node === start.node ? start.offset : 0;
                 var to = node === end.node ? end.offset : node.length;
-                Array.prototype.push.apply(out, textRects(node, from, to));
+                var s = node[SLOT];
+                if (s && s.gen === gen) {
+                    asks.push(s.id + ' ' + from + ' ' + to);
+                    out.push(null);
+                }
             } else if (node.nodeType === 1 && selected(node) && !(node.parentNode && node.parentNode.nodeType === 1 && selected(node.parentNode))) {
                 var own = node.getClientRects();
                 for (var k = 0; k < own.length; k++) out.push(own[k]);
             }
         }
-        return out;
+        if (!asks.length) return out;
+        var answers = JSON.parse(N.rangeTextRects(gen, asks.join(';'))), next = 0, all = [];
+        var sx = scrollOffset('x'), sy = scrollOffset('y');
+        out.forEach(function (item) {
+            if (item !== null) { all.push(item); return; }
+            var flat = answers[next++] || [];
+            for (var i = 0; i + 3 < flat.length; i += 4) all.push(rect(flat[i] - sx, flat[i + 1] - sy, flat[i + 2], flat[i + 3]));
+        });
+        return all;
     }
     Range.prototype.getClientRects = function () {
         return rectList(rangeRects(slots(this, 'getClientRects')));
@@ -5147,8 +5227,8 @@ const WRAPPERS_JS: &str = r#"
             }
             if (!changed) return false;
             var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
-            ev.isTrusted = true;
-            host.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(host, ev);
             return true;
         },
         configurable: true, enumerable: false, writable: true
@@ -5164,6 +5244,18 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // An `<svg>` is one box in the layout. The shape of it a client point
+    // is on, else the `<svg>`: found host-side, from the shapes' geometry
+    // (svg_geometry.rs `shape_at`), with nothing a page can replace on the
+    // way.
+    var svgClientRect = Element.prototype.getBoundingClientRect;
+    function svgShapeAt(svg, x, y) {
+        var s = svg[SLOT];
+        if (!s || s.gen !== gen) return svg;
+        var r = svgClientRect.call(svg), b = geom(svg, 'client');
+        var id = N.svgHit(s.gen, s.id, x - r.left - (b ? round(b.bl) : 0), y - r.top - (b ? round(b.bt) : 0), r.width, r.height);
+        return id >= 0 ? (wrap(id) || svg) : svg;
+    }
     function pointHit(x, y, method) {
         x = Number(x);
         y = Number(y);
@@ -5190,7 +5282,7 @@ const WRAPPERS_JS: &str = r#"
         while (node && node.nodeType !== 1) node = node.parentElement || node.parentNode;
         // An `<svg>` is one box in the layout: the shape under the point
         // is found from its geometry (web_svg_geometry.js).
-        if (node && node.localName === 'svg' && typeof g.__rkSvgHit === 'function') node = g.__rkSvgHit(node, Number(x), Number(y));
+        if (node && node.localName === 'svg') node = svgShapeAt(node, Number(x), Number(y));
         return node && node.nodeType === 1 ? node : null;
     };
     Document.prototype.elementsFromPoint = function (x, y) {
@@ -5282,8 +5374,8 @@ const WRAPPERS_JS: &str = r#"
             loadedImages.delete(target);
             failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
             var ev = new Event('error');
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
             settleDecodes(target, false);
         },
         configurable: true, enumerable: false, writable: true
@@ -5304,8 +5396,8 @@ const WRAPPERS_JS: &str = r#"
             // No URL: a `data:` image, which is its own `src`.
             loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
             var ev = new Event('load');
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
             settleDecodes(target, true);
         },
         configurable: true, enumerable: false, writable: true
@@ -5388,8 +5480,8 @@ const WRAPPERS_JS: &str = r#"
             init.bubbles = true;
             init.cancelable = type === 'transitionend';
             var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5402,8 +5494,8 @@ const WRAPPERS_JS: &str = r#"
             init.bubbles = true;
             init.cancelable = false;
             var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5419,8 +5511,8 @@ const WRAPPERS_JS: &str = r#"
             if (!target) return true;
             // The pointer is on a shape of an `<svg>`, which the layout
             // sees as one box: the event's target is the shape.
-            if (target.localName === 'svg' && typeof g.__rkSvgHit === 'function' && typeof init.clientX === 'number') {
-                target = g.__rkSvgHit(target, init.clientX, init.clientY);
+            if (target.localName === 'svg' && typeof init.clientX === 'number') {
+                target = svgShapeAt(target, init.clientX, init.clientY);
             }
             // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
             var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
@@ -5440,7 +5532,7 @@ const WRAPPERS_JS: &str = r#"
                 init.pressure = init.buttons ? 0.5 : 0;
             }
             var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
-            ev.isTrusted = true;
+            trust(ev);
             // Where the point is in the document and in the target's box.
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
@@ -5453,7 +5545,7 @@ const WRAPPERS_JS: &str = r#"
             Object.keys(at).forEach(function (k) {
                 Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
             });
-            return target.dispatchEvent(ev);
+            return dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5483,7 +5575,7 @@ const WRAPPERS_JS: &str = r#"
             if (!(ev.dataTransfer instanceof Object)) {
                 Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
             }
-            ev.isTrusted = true;
+            trust(ev);
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
@@ -5491,7 +5583,7 @@ const WRAPPERS_JS: &str = r#"
             Object.keys(at).forEach(function (k) {
                 Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
             });
-            var notCancelled = target.dispatchEvent(ev);
+            var notCancelled = dispatchTo(target, ev);
             // A cancelled dragstart ends the drag before it began.
             var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
             return (notCancelled ? '1:' : '0:') + settled;
@@ -5504,8 +5596,10 @@ const WRAPPERS_JS: &str = r#"
     // (UI Events §3.7). With nothing focused in the engine (`id` null) it
     // goes to the page's active element: what script focused, else the
     // body. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireKey', {
-        value: function (id, type, init) {
+    // On the host object, not the document: a page can neither call it
+    // (the event is trusted) nor replace it. The key arrives as an
+    // argument, never in script source (`DomBindings::fire_key_event`).
+    __rk.fireKey = function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : g.document.activeElement;
             if (!target) return true;
             init.bubbles = true;
@@ -5522,11 +5616,9 @@ const WRAPPERS_JS: &str = r#"
                 init.charCode = 0;
             }
             var ev = new g.KeyboardEvent(type, init);
-            ev.isTrusted = true;
-            return target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
     // A key's Windows virtual-key code, which is what `keyCode` is on every
     // platform, for a US layout: a letter is its capital, a shifted digit or
     // mark is the key it is on.
@@ -5548,16 +5640,14 @@ const WRAPPERS_JS: &str = r#"
     // The text a key is about to insert in an editable element: a trusted
     // `textInput` TextEvent after the keypress, before the insertion and its
     // `input` (Chrome for Testing 148). Returns false when cancelled.
-    Object.defineProperty(Document.prototype, '__rkFireTextInput', {
-        value: function (id, data) {
+    // On the host object, as `fireKey` is.
+    __rk.fireTextInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target || typeof g.__rkNewTextEvent !== 'function') return true;
-            var ev = g.__rkNewTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
-            ev.isTrusted = true;
-            return target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            if (!target || typeof __rk.newTextEvent !== 'function') return true;
+            var ev = __rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
     // What the user typed changed the control's value: `input`, which
     // bubbles and cannot be cancelled (Input Events §5.1). `data` is the
     // inserted text, null for a deletion.
@@ -5574,8 +5664,8 @@ const WRAPPERS_JS: &str = r#"
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
             });
-            ev.isTrusted = true;
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5899,6 +5989,9 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
         }
+        // Only the engine's own event, on its one dispatch, is trusted.
+        stamp(event);
+        if (setHas(UNDISPATCHED, event)) setDrop(UNDISPATCHED, event); else setDrop(TRUSTED, event);
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
         event.target = t;
@@ -5923,6 +6016,10 @@ const WRAPPERS_JS: &str = r#"
         return !event.defaultPrevented;
     };
 
+    // The engine's own dispatches go through this, whatever a page has put
+    // in place of `dispatchEvent` since.
+    var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
+
     function Event(type, init) {
         if (!(this instanceof Event)) {
             throw new TypeError("Failed to construct 'Event': Please use the 'new' operator.");
@@ -5939,7 +6036,7 @@ const WRAPPERS_JS: &str = r#"
         this.target = null;
         this.currentTarget = null;
         this.eventPhase = 0;
-        this.isTrusted = false;
+        stamp(this);
         this.timeStamp = Date.now();
     }
     // The legacy initializers; they do nothing during dispatch.

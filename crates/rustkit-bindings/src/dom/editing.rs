@@ -321,6 +321,6 @@ pub(crate) fn install(
             JsValue::String(report.to_string())
         }),
     )?;
-    runtime.evaluate_script(include_str!("editing.js"))?;
+    runtime.evaluate_with_host(include_str!("editing.js"))?;
     Ok(())
 }

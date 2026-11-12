@@ -217,10 +217,10 @@
         if (sel.multiple || sel.selectedIndex === index) return false;
         pick(sel, function (x) { return x === o; });
         var input = new g.Event('input', { bubbles: true, composed: true });
-        input.isTrusted = true;
+        __rk.trust(input);
         sel.dispatchEvent(input);
         var change = new g.Event('change', { bubbles: true });
-        change.isTrusted = true;
+        __rk.trust(change);
         sel.dispatchEvent(change);
         return true;
     });

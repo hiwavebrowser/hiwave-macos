@@ -373,7 +373,7 @@
                 name + "') is invalid.", 'NotSupportedError');
         }
         // TextEvent has no constructor for script; this is its only maker.
-        var e = C === g.TextEvent ? g.__rkNewTextEvent('') : new C('');
+        var e = C === g.TextEvent ? __rk.newTextEvent('') : new C('');
         e[UNINIT] = true;
         return e;
     };

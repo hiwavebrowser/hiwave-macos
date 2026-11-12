@@ -71,7 +71,7 @@
     // HTML §6.6.3: whether the document's window has the system focus. The
     // engine says when its view lost or regained it (`set_view_focused`); a
     // view that was never told is taken as focused, as a headless Chrome is.
-    value('hasFocus', function hasFocus() { return g.document.__rkViewFocused !== false; });
+    value('hasFocus', function hasFocus() { return __rk.viewFocused !== false; });
     value('exitFullscreen', function exitFullscreen() { return Promise.resolve(); });
     value('adoptNode', function adoptNode(node) {
         if (node === null || typeof node !== 'object' || typeof node.nodeType !== 'number') {

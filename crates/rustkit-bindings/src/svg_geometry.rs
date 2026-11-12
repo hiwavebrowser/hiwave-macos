@@ -12,6 +12,7 @@
 //! and not 62.83 (Chrome for Testing 148,
 //! docs/diagnostics/2026-11-12/str8_svg_geometry_readystate_serializer_cft148.txt).
 
+use rustkit_dom::{Node, NodeType};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 
 type P = (f64, f64);
@@ -687,11 +688,10 @@ fn flatten(path: &Path) -> Vec<Vec<P>> {
 /// Whether the point is on the shape as painted: inside its fill (the
 /// nonzero rule over its subpaths, each closed) when it has one, or within
 /// half the stroke width of its outline when it has a stroke.
-fn hit(kind: &str, spec: &str, point: P, fill: bool, stroke_width: f64) -> bool {
-    let contours = flatten(&shape(kind, spec));
+fn hit_contours(contours: &[Vec<P>], point: P, fill: bool, stroke_width: f64) -> bool {
     if fill {
         let mut winding = 0i32;
-        for contour in &contours {
+        for contour in contours {
             for i in 0..contour.len() {
                 let (a, b) = (contour[i], contour[(i + 1) % contour.len()]);
                 let side = (b.0 - a.0) * (point.1 - a.1) - (point.0 - a.0) * (b.1 - a.1);
@@ -708,7 +708,7 @@ fn hit(kind: &str, spec: &str, point: P, fill: bool, stroke_width: f64) -> bool 
     }
     if stroke_width > 0.0 {
         let reach = stroke_width / 2.0;
-        for contour in &contours {
+        for contour in contours {
             for pair in contour.windows(2) {
                 let (a, b) = (pair[0], pair[1]);
                 let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -723,23 +723,338 @@ fn hit(kind: &str, spec: &str, point: P, fill: bool, stroke_width: f64) -> bool 
     false
 }
 
-pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
-    // hit(kind, spec, x, y, fill, strokeWidth): is the point on the shape.
-    runtime.register_host_function(
-        "__rustkit_svg_hit",
-        6,
-        Box::new(|args| {
-            let (Some(JsValue::String(kind)), Some(JsValue::String(spec))) = (args.first(), args.get(1)) else {
-                return JsValue::Boolean(false);
-            };
-            let number = |i: usize| match args.get(i) {
-                Some(JsValue::Number(n)) if n.is_finite() => *n,
+#[cfg(test)]
+fn hit(kind: &str, spec: &str, point: P, fill: bool, stroke_width: f64) -> bool {
+    hit_contours(&flatten(&shape(kind, spec)), point, fill, stroke_width)
+}
+
+// ---- The shape under a pointer ----
+//
+// The layout sees an `<svg>` as one box. Which shape in it a point is on
+// (`elementFromPoint`, the target of the engine's mouse events) is found
+// here, from the DOM: the shapes are listed once, front to back, each with
+// the matrix that takes a point of the `<svg>` to its user space and with
+// its bounds, and the list is kept until a tree changes. A pointer move
+// over a chart of thousands of paths is then a bounds test for each and
+// the outline of the few it is near (R1 MED 1: it was script, re-reading
+// every shape's attributes and ancestors on every event).
+
+type Matrix = [f64; 6];
+const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+
+fn multiply(m: &Matrix, n: &Matrix) -> Matrix {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
+}
+
+fn invert(m: &Matrix) -> Option<Matrix> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    Some([
+        m[3] / det,
+        -m[1] / det,
+        -m[2] / det,
+        m[0] / det,
+        (m[2] * m[5] - m[3] * m[4]) / det,
+        (m[1] * m[4] - m[0] * m[5]) / det,
+    ])
+}
+
+/// Script's `parseFloat`: the number the text starts with, if a finite one.
+fn parse_float(text: &str) -> Option<f64> {
+    let t = text.trim_start().as_bytes();
+    let mut i = 0;
+    if matches!(t.first(), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let digits_from = i;
+    while t.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    let mut digits = i - digits_from;
+    if t.get(i) == Some(&b'.') {
+        let mut j = i + 1;
+        while t.get(j).is_some_and(u8::is_ascii_digit) {
+            j += 1;
+        }
+        digits += j - i - 1;
+        i = j;
+    }
+    if digits == 0 {
+        return None;
+    }
+    if matches!(t.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(t.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        if t.get(j).is_some_and(u8::is_ascii_digit) {
+            while t.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    std::str::from_utf8(&t[..i]).ok()?.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+/// Script's `Number(text)` for one item of a number list: NaN when it is
+/// not a number.
+fn list_number(text: &str) -> f64 {
+    if text.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'e' | b'E')) {
+        text.parse().unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+fn number_list(text: &str) -> Vec<f64> {
+    text.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).map(list_number).collect()
+}
+
+/// A `transform` attribute as a matrix; `None` when it has none or one
+/// that does not parse.
+fn transform_of(text: Option<&str>) -> Option<Matrix> {
+    let text = text.filter(|t| !t.is_empty())?;
+    let bytes = text.as_bytes();
+    let mut m = IDENTITY;
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &text[i..];
+        let found = ["matrix", "translate", "scale", "rotate", "skewX", "skewY"].into_iter().find_map(|name| {
+            let after = rest.strip_prefix(name)?.trim_start();
+            let args = after.strip_prefix('(')?;
+            let close = args.find(')')?;
+            Some((name, &args[..close], text.len() - args.len() + close + 1))
+        });
+        let Some((name, args, next)) = found else {
+            i += 1;
+            while i < bytes.len() && !text.is_char_boundary(i) {
+                i += 1;
+            }
+            continue;
+        };
+        let a = number_list(args);
+        if a.iter().any(|n| !n.is_finite()) {
+            return None;
+        }
+        let t: Matrix = match (name, a.len()) {
+            ("matrix", 6) => [a[0], a[1], a[2], a[3], a[4], a[5]],
+            ("translate", 1..) => [1.0, 0.0, 0.0, 1.0, a[0], a.get(1).copied().unwrap_or(0.0)],
+            ("scale", 1..) => [a[0], 0.0, 0.0, a.get(1).copied().unwrap_or(a[0]), 0.0, 0.0],
+            ("rotate", 1..) => {
+                let r = a[0].to_radians();
+                let turn = [r.cos(), r.sin(), -r.sin(), r.cos(), 0.0, 0.0];
+                if a.len() >= 3 {
+                    multiply(&multiply(&[1.0, 0.0, 0.0, 1.0, a[1], a[2]], &turn), &[1.0, 0.0, 0.0, 1.0, -a[1], -a[2]])
+                } else {
+                    turn
+                }
+            }
+            ("skewX", 1) => [1.0, 0.0, a[0].to_radians().tan(), 1.0, 0.0, 0.0],
+            ("skewY", 1) => [1.0, a[0].to_radians().tan(), 0.0, 1.0, 0.0, 0.0],
+            _ => return None,
+        };
+        m = multiply(&m, &t);
+        i = next;
+    }
+    Some(m)
+}
+
+/// `viewBox` and `preserveAspectRatio` as a matrix (SVG 2 §8.2), for an
+/// `<svg>` whose viewport is `size`.
+fn view_box_matrix(svg: &Node, size: (f64, f64)) -> Matrix {
+    let vb = number_list(svg.get_attribute("viewBox").unwrap_or(""));
+    if vb.len() != 4 || !(vb[2] > 0.0) || !(vb[3] > 0.0) {
+        return IDENTITY;
+    }
+    let (w, h) = size;
+    if !(w > 0.0) || !(h > 0.0) {
+        return IDENTITY;
+    }
+    let ratio = svg.get_attribute("preserveAspectRatio").filter(|p| !p.is_empty()).unwrap_or("xMidYMid meet");
+    let mut parts = ratio.split_whitespace();
+    let align = parts.next().unwrap_or("");
+    let (sx, sy) = (w / vb[2], h / vb[3]);
+    if align == "none" {
+        return [sx, 0.0, 0.0, sy, -vb[0] * sx, -vb[1] * sy];
+    }
+    let s = if parts.next() == Some("slice") { sx.max(sy) } else { sx.min(sy) };
+    let tx = if align.contains("xMid") {
+        (w - vb[2] * s) / 2.0
+    } else if align.contains("xMax") {
+        w - vb[2] * s
+    } else {
+        0.0
+    };
+    let ty = if align.contains("YMid") {
+        (h - vb[3] * s) / 2.0
+    } else if align.contains("YMax") {
+        h - vb[3] * s
+    } else {
+        0.0
+    };
+    [s, 0.0, 0.0, s, tx - vb[0] * s, ty - vb[1] * s]
+}
+
+/// One shape of an `<svg>`, ready to be asked about a point.
+struct HitShape {
+    node: usize,
+    /// From the `<svg>`'s content box to the shape's user space.
+    inverse: Matrix,
+    kind: String,
+    spec: String,
+    fill: bool,
+    stroke_width: f64,
+    /// Bounds and outline, made when a point is first near enough to ask.
+    outline: std::cell::OnceCell<([f64; 4], Vec<Vec<P>>)>,
+}
+
+/// The properties a shape takes from its ancestors when it has no
+/// attribute of its own, in this order.
+const INHERITED: [&str; 6] = ["pointer-events", "visibility", "display", "fill", "stroke", "stroke-width"];
+
+/// Elements that paint nothing where they are.
+const NEVER_HIT: [&str; 14] = [
+    "defs", "symbol", "clipPath", "mask", "marker", "pattern", "linearGradient", "radialGradient", "filter", "title",
+    "desc", "metadata", "style", "script",
+];
+
+fn is_shape(name: &str) -> bool {
+    matches!(name, "path" | "polyline" | "polygon" | "rect" | "circle" | "ellipse" | "line")
+}
+
+/// The shape's geometry as `shape` reads it: `d`, `points`, or the
+/// numbers in order, an absent or unreadable one as `x`.
+fn spec_of(node: &Node, kind: &str) -> String {
+    let numbers = |names: &[&str]| -> String {
+        names
+            .iter()
+            .map(|name| node.get_attribute(name).and_then(parse_float).map_or("x".to_string(), |n| n.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match kind {
+        "path" => node.get_attribute("d").unwrap_or("").to_string(),
+        "polyline" | "polygon" => node.get_attribute("points").unwrap_or("").to_string(),
+        "rect" => numbers(&["x", "y", "width", "height", "rx", "ry"]),
+        "circle" => numbers(&["cx", "cy", "r"]),
+        "ellipse" => numbers(&["cx", "cy", "rx", "ry"]),
+        _ => numbers(&["x1", "y1", "x2", "y2"]),
+    }
+}
+
+/// List the shapes under `container`, the last painted first.
+fn list_shapes<'a>(
+    container: &'a Node,
+    matrix: &Matrix,
+    viewport: (f64, f64),
+    inherited: [Option<&'a str>; 6],
+    out: &mut Vec<HitShape>,
+) {
+    let kids = container.children();
+    for kid in kids.iter().rev() {
+        let NodeType::Element { tag_name, namespace, .. } = &kid.node_type else { continue };
+        if namespace != SVG_NAMESPACE || NEVER_HIT.contains(&tag_name.as_str()) {
+            continue;
+        }
+        let mut own = inherited;
+        for (slot, name) in own.iter_mut().zip(INHERITED) {
+            if let Some(value) = kid.get_attribute(name).filter(|v| *v != "inherit") {
+                *slot = Some(value);
+            }
+        }
+        if is_shape(tag_name) {
+            if own[0] == Some("none") || own[1] == Some("hidden") || own[2] == Some("none") {
+                continue;
+            }
+            let to_page = multiply(matrix, &transform_of(kid.get_attribute("transform")).unwrap_or(IDENTITY));
+            let Some(inverse) = invert(&to_page) else { continue };
+            let stroke_width = match own[4] {
+                Some(stroke) if stroke != "none" => own[5].and_then(parse_float).unwrap_or(1.0),
                 _ => 0.0,
             };
-            let fill = matches!(args.get(4), Some(JsValue::Boolean(true)));
-            JsValue::Boolean(hit(kind, spec, (number(2), number(3)), fill, number(5)))
-        }),
-    )?;
+            out.push(HitShape {
+                node: kid.id.raw(),
+                inverse,
+                kind: tag_name.clone(),
+                spec: spec_of(kid, tag_name),
+                fill: own[3] != Some("none"),
+                stroke_width,
+                outline: std::cell::OnceCell::new(),
+            });
+        } else if tag_name == "svg" {
+            // A nested `<svg>`: its own viewport, placed at its x and y.
+            let number = |name: &str, fallback: f64| kid.get_attribute(name).and_then(parse_float).unwrap_or(fallback);
+            let size = (number("width", viewport.0), number("height", viewport.1));
+            let local = multiply(&[1.0, 0.0, 0.0, 1.0, number("x", 0.0), number("y", 0.0)], &view_box_matrix(kid, size));
+            list_shapes(kid, &multiply(matrix, &local), size, own, out);
+        } else {
+            let local = transform_of(kid.get_attribute("transform")).unwrap_or(IDENTITY);
+            list_shapes(kid, &multiply(matrix, &local), viewport, own, out);
+        }
+    }
+}
+
+struct ShapeList {
+    svg: usize,
+    generation: u64,
+    size: (f64, f64),
+    shapes: Vec<HitShape>,
+}
+
+thread_local! {
+    /// The shapes of the `<svg>` last asked about, until a tree changes.
+    static SHAPES: std::cell::RefCell<Option<std::rc::Rc<ShapeList>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The shape of the outermost `<svg>` element `svg` that `point` is on:
+/// the last one painted there, by its fill and its stroke. `point` is from
+/// the top left of the `<svg>`'s content box, whose size is `size`.
+pub(crate) fn shape_at(svg: &Node, point: P, size: (f64, f64)) -> Option<usize> {
+    let generation = rustkit_dom::mutation_generation();
+    let kept = SHAPES.with(|s| {
+        s.borrow().as_ref().filter(|l| l.svg == svg.id.raw() && l.generation == generation && l.size == size).cloned()
+    });
+    let list = kept.unwrap_or_else(|| {
+        let mut shapes = Vec::new();
+        let mut inherited = [None; 6];
+        for (slot, name) in inherited.iter_mut().zip(INHERITED) {
+            *slot = svg.get_attribute(name).filter(|v| *v != "inherit");
+        }
+        list_shapes(svg, &view_box_matrix(svg, size), size, inherited, &mut shapes);
+        let list = std::rc::Rc::new(ShapeList { svg: svg.id.raw(), generation, size, shapes });
+        SHAPES.with(|s| *s.borrow_mut() = Some(list.clone()));
+        list
+    });
+    list.shapes.iter().find_map(|shape| {
+        let m = &shape.inverse;
+        let local = (m[0] * point.0 + m[2] * point.1 + m[4], m[1] * point.0 + m[3] * point.1 + m[5]);
+        let (bounds, contours) = shape.outline.get_or_init(|| {
+            let path = self::shape(&shape.kind, &shape.spec);
+            let [x, y, w, h] = bbox(&path);
+            let reach = shape.stroke_width / 2.0;
+            ([x - reach, y - reach, x + w + reach, y + h + reach], flatten(&path))
+        });
+        (local.0 >= bounds[0]
+            && local.1 >= bounds[1]
+            && local.0 <= bounds[2]
+            && local.1 <= bounds[3]
+            && hit_contours(contours, local, shape.fill, shape.stroke_width))
+        .then_some(shape.node)
+    })
+}
+
+pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
     runtime.register_host_function(
         "__rustkit_svg_geometry",
         3,

@@ -98,7 +98,7 @@
         if (s.closed || !s.queue.length) return;
         var m = s.queue.shift();
         var event = new g.MessageEvent('message', { data: m.data, ports: m.ports });
-        event.isTrusted = true;
+        __rk.trust(event);
         port.dispatchEvent(event);
     }
 
@@ -227,7 +227,7 @@
             var own = g.location ? String(g.location.origin) : 'null';
             if (origin !== null && (own === 'null' || origin !== own)) return;
             var event = new MessageEvent('message', { data: data, origin: own, lastEventId: '', source: g, ports: ports });
-            event.isTrusted = true;
+            __rk.trust(event);
             g.dispatchEvent(event);
         }, 0);
     });

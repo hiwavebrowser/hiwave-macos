@@ -8,17 +8,46 @@ use crate::{ParseError, ParseResult};
 
 /// A start tag's attributes, in source order. A name written twice keeps
 /// its first value and the later ones are dropped (HTML §13.2.5.33).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TagAttrs(Vec<(String, String)>);
+///
+/// A list searched in order, which is fastest for the handful a tag has;
+/// past `NAME_SET_FROM` attributes the names are also kept in a set, so a
+/// tag with a hundred thousand of them is not a search of the list for
+/// each one.
+#[derive(Debug, Clone, Default)]
+pub struct TagAttrs(Vec<(String, String)>, Option<std::collections::HashSet<String>>);
+
+const NAME_SET_FROM: usize = 32;
+
+impl PartialEq for TagAttrs {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for TagAttrs {}
 
 impl TagAttrs {
     fn push_first(&mut self, name: String, value: String) {
-        if !self.0.iter().any(|(n, _)| *n == name) {
-            self.0.push((name, value));
+        let seen = match &self.1 {
+            Some(names) => names.contains(&name),
+            None => self.0.iter().any(|(n, _)| *n == name),
+        };
+        if seen {
+            return;
         }
+        if self.0.len() >= NAME_SET_FROM {
+            let all = &self.0;
+            self.1
+                .get_or_insert_with(|| all.iter().map(|(n, _)| n.clone()).collect())
+                .insert(name.clone());
+        }
+        self.0.push((name, value));
     }
 
     pub fn get(&self, name: &str) -> Option<&String> {
+        if self.1.as_ref().is_some_and(|names| !names.contains(name)) {
+            return None;
+        }
         self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
@@ -36,6 +65,7 @@ impl TagAttrs {
 
     pub fn clear(&mut self) {
         self.0.clear();
+        self.1 = None;
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {

@@ -29053,13 +29053,24 @@ fn stamp_element_scrolls(root: &LayoutBox, scrolls: &rustkit_bindings::SharedEle
 /// `Range.getClientRects` over the tree `layout` gives: where the
 /// characters of a text node are (`LayoutBox::text_range_rects`).
 fn layout_text_rects(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> rustkit_bindings::TextRects {
-    std::rc::Rc::new(move |node, span, collapsed| match layout() {
-        Some(layout) => layout
-            .text_range_rects(node, span, collapsed)
+    // Where each text node's runs are in the tree last asked about, found
+    // in one walk (R1 MED 2: a range asks about every text node in it, and
+    // each ask walked the whole tree). Held weakly: while it is, the tree
+    // at that address is not changed in place (`Rc::make_mut` moves it).
+    type Indexed = (std::rc::Weak<LayoutBox>, rustkit_layout::selection::TextRunIndex);
+    let indexed: std::cell::RefCell<Option<Indexed>> = std::cell::RefCell::new(None);
+    std::rc::Rc::new(move |node, span, collapsed| {
+        let Some(layout) = layout() else { return Vec::new() };
+        let mut indexed = indexed.borrow_mut();
+        if !indexed.as_ref().is_some_and(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&layout))) {
+            *indexed = Some((Rc::downgrade(&layout), layout.text_run_index()));
+        }
+        let index = &indexed.as_ref().expect("just set").1;
+        layout
+            .text_range_rects_in(index, node, span, collapsed)
             .into_iter()
             .map(|r| [r.x, r.y, r.width, r.height])
-            .collect(),
-        None => Vec::new(),
+            .collect()
     })
 }
 

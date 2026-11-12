@@ -12,12 +12,21 @@
 //! hashing one: see `attr_cost_bench` for the measured parse and lookup
 //! times against the `HashMap` this replaced. The method names are that
 //! map's, so the callers read as before.
+//!
+//! Past `NAME_SET_FROM` attributes the names are also kept in a set: a
+//! name that is not there is known without the search, so building an
+//! element with a hundred thousand attributes (a generated page, or a
+//! hostile one) is linear and not a search of the list for each.
 
 /// Attribute names to values, in insertion order.
 #[derive(Debug, Clone, Default)]
 pub struct AttrMap {
     pairs: Vec<(String, String)>,
+    /// Every name in `pairs`, once there are more than `NAME_SET_FROM`.
+    names: Option<std::collections::HashSet<String>>,
 }
+
+const NAME_SET_FROM: usize = 32;
 
 /// The same names with the same values, in any order: what the map this
 /// replaced compared, and what DOM `isEqualNode` asks (DOM §4.4).
@@ -36,7 +45,7 @@ impl AttrMap {
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { pairs: Vec::with_capacity(capacity) }
+        Self { pairs: Vec::with_capacity(capacity), names: None }
     }
 
     pub fn len(&self) -> usize {
@@ -47,16 +56,24 @@ impl AttrMap {
         self.pairs.is_empty()
     }
 
+    /// False only when the name is known not to be here.
+    fn may_have(&self, name: &str) -> bool {
+        self.names.as_ref().is_none_or(|names| names.contains(name))
+    }
+
     fn position(&self, name: &str) -> Option<usize> {
+        if !self.may_have(name) {
+            return None;
+        }
         self.pairs.iter().position(|(n, _)| n == name)
     }
 
     pub fn get(&self, name: &str) -> Option<&String> {
-        self.pairs.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.position(name).map(|at| &self.pairs[at].1)
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut String> {
-        self.pairs.iter_mut().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.position(name).map(|at| &mut self.pairs[at].1)
     }
 
     pub fn contains_key(&self, name: &str) -> bool {
@@ -69,6 +86,12 @@ impl AttrMap {
         match self.position(&name) {
             Some(at) => Some(std::mem::replace(&mut self.pairs[at].1, value)),
             None => {
+                if self.pairs.len() >= NAME_SET_FROM {
+                    let pairs = &self.pairs;
+                    self.names
+                        .get_or_insert_with(|| pairs.iter().map(|(n, _)| n.clone()).collect())
+                        .insert(name.clone());
+                }
                 self.pairs.push((name, value));
                 None
             }
@@ -77,15 +100,23 @@ impl AttrMap {
 
     /// Remove `name`; the attributes after it keep their order.
     pub fn remove(&mut self, name: &str) -> Option<String> {
-        self.position(name).map(|at| self.pairs.remove(at).1)
+        let at = self.position(name)?;
+        if let Some(names) = &mut self.names {
+            names.remove(name);
+        }
+        Some(self.pairs.remove(at).1)
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&String, &mut String) -> bool) {
         self.pairs.retain_mut(|(n, v)| keep(n, v));
+        if self.names.is_some() {
+            self.names = Some(self.pairs.iter().map(|(n, _)| n.clone()).collect());
+        }
     }
 
     pub fn clear(&mut self) {
         self.pairs.clear();
+        self.names = None;
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&String, &String)> + ExactSizeIterator + Clone {
@@ -144,7 +175,8 @@ impl From<std::collections::HashMap<String, String>> for AttrMap {
     fn from(map: std::collections::HashMap<String, String>) -> Self {
         let mut pairs: Vec<(String, String)> = map.into_iter().collect();
         pairs.sort();
-        Self { pairs }
+        let names = (pairs.len() > NAME_SET_FROM).then(|| pairs.iter().map(|(n, _)| n.clone()).collect());
+        Self { pairs, names }
     }
 }
 

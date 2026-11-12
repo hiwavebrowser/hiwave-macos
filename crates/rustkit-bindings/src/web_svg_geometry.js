@@ -147,8 +147,6 @@
     // Not here: `transform` set from CSS, CSS `fill` / `stroke` /
     // `pointer-events` (the attributes are read, inherited through the
     // ancestors), `text`, `use`, clip paths and masks in hit testing.
-    var hitShape = g.__rustkit_svg_hit;
-    delete g.__rustkit_svg_hit;
     var IDENTITY = [1, 0, 0, 1, 0, 0];
     var elementRect = g.Element.prototype.getBoundingClientRect;
     function isSvg(n) { return !!n && n.nodeType === 1 && n.namespaceURI === SVG_NS; }
@@ -304,45 +302,4 @@
         var box = clientBox(this);
         return box ? [box] : elementRects.call(this);
     });
-
-    // The shape under a client point: the last one painted that the point
-    // is on, by its fill and its stroke, or null (the `<svg>` itself).
-    function attribute(el, name) {
-        for (var n = el; isSvg(n); n = n.parentNode) {
-            var v = n.getAttribute(name);
-            if (v !== null && v !== 'inherit') return v;
-        }
-        return null;
-    }
-    function shapeAt(container, x, y) {
-        var kids = container.children;
-        for (var i = kids.length - 1; i >= 0; i--) {
-            var kid = kids[i];
-            if (!isSvg(kid) || /^(defs|symbol|clipPath|mask|marker|pattern|linearGradient|radialGradient|filter|title|desc|metadata|style|script)$/.test(kid.localName)) continue;
-            if (SPEC[kid.localName]) {
-                if (attribute(kid, 'pointer-events') === 'none' || attribute(kid, 'visibility') === 'hidden' || attribute(kid, 'display') === 'none') continue;
-                var m = screenCtm(kid), inv = m && invert(m);
-                if (!inv) continue;
-                var stroke = attribute(kid, 'stroke'), width = 0;
-                if (stroke !== null && stroke !== 'none') {
-                    width = parseFloat(attribute(kid, 'stroke-width'));
-                    if (!isFinite(width)) width = 1;
-                }
-                if (hitShape(kid.localName, SPEC[kid.localName](kid), inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5],
-                             attribute(kid, 'fill') !== 'none', width)) return kid;
-            } else {
-                var found = shapeAt(kid, x, y);
-                if (found) return found;
-            }
-        }
-        return null;
-    }
-    // For elementFromPoint and the engine's mouse events (dom.rs): the
-    // layout answers the `<svg>`; this names the shape in it.
-    if (typeof hitShape === 'function') {
-        Object.defineProperty(g, '__rkSvgHit', {
-            value: function (svg, x, y) { return shapeAt(svg, x, y) || svg; },
-            configurable: true, enumerable: false, writable: true
-        });
-    }
 })(globalThis);

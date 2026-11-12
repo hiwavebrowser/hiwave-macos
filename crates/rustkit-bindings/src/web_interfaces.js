@@ -140,9 +140,11 @@
         });
     }
     // WheelEvent's legacy deltas and its mode constants (UI Events §5.5;
-    // Chrome for Testing 148): `wheelDeltaX` / `wheelDeltaY` are what the
-    // init gave, else the event's own deltaX / deltaY; `wheelDelta` is what
-    // the init gave, else the Y one, else the X one.
+    // measured in Chrome for Testing 148, ten inits in the SVG2 fixture):
+    // `wheelDeltaX` / `wheelDeltaY` are what the init gave, else the
+    // event's own deltaX / deltaY with the SAME sign, as whole numbers
+    // (100.7 reads 100, 0.5 reads 0); `wheelDelta` is the Y one, else the X
+    // one, and a `wheelDelta` in the init is not read.
     var WE = g.WheelEvent;
     if (WE && !Object.prototype.hasOwnProperty.call(WE.prototype, 'wheelDelta')) {
         var WHEEL = typeof WeakMap === 'function' ? new WeakMap() : null;
@@ -150,10 +152,10 @@
             var e = Reflect.construct(WE, arguments.length < 2 ? [type] : [type, init], new.target || WheelEventWithLegacy);
             var i = init || {};
             if (WHEEL) {
+                var whole = function (v) { v = Math.trunc(Number(v)); return isFinite(v) ? v : 0; };
                 WHEEL.set(e, {
-                    x: i.wheelDeltaX === undefined ? e.deltaX : Number(i.wheelDeltaX),
-                    y: i.wheelDeltaY === undefined ? e.deltaY : Number(i.wheelDeltaY),
-                    both: i.wheelDelta === undefined ? null : Number(i.wheelDelta)
+                    x: whole(i.wheelDeltaX === undefined ? e.deltaX : i.wheelDeltaX),
+                    y: whole(i.wheelDeltaY === undefined ? e.deltaY : i.wheelDeltaY)
                 });
             }
             return e;
@@ -161,11 +163,11 @@
         WheelEventWithLegacy.prototype = WE.prototype;
         Object.defineProperty(WE.prototype, 'constructor', { value: WheelEventWithLegacy, writable: true, configurable: true });
         Object.setPrototypeOf(WheelEventWithLegacy, Object.getPrototypeOf(WE));
-        var legacy = function (e) { return (WHEEL && WHEEL.get(e)) || { x: e.deltaX || 0, y: e.deltaY || 0, both: null }; };
+        var legacy = function (e) { return (WHEEL && WHEEL.get(e)) || { x: Math.trunc(e.deltaX) || 0, y: Math.trunc(e.deltaY) || 0 }; };
         Object.defineProperty(WE.prototype, 'wheelDeltaX', { get: function () { return legacy(this).x; }, configurable: true, enumerable: true });
         Object.defineProperty(WE.prototype, 'wheelDeltaY', { get: function () { return legacy(this).y; }, configurable: true, enumerable: true });
         Object.defineProperty(WE.prototype, 'wheelDelta', {
-            get: function () { var l = legacy(this); return l.both !== null ? l.both : (l.y || l.x); }, configurable: true, enumerable: true
+            get: function () { var l = legacy(this); return l.y || l.x; }, configurable: true, enumerable: true
         });
         [['DOM_DELTA_PIXEL', 0], ['DOM_DELTA_LINE', 1], ['DOM_DELTA_PAGE', 2]].forEach(function (pair) {
             [WheelEventWithLegacy, WE.prototype].forEach(function (o) {
@@ -192,7 +194,8 @@
     }
     // TextEvent (UI Events §7.2, legacy): what `textInput` is. Script cannot
     // construct one; `document.createEvent('TextEvent')` and the engine's
-    // own `textInput` (dom.rs `__rkFireTextInput`) make them here.
+    // own `textInput` (dom.rs `fireTextInput`) make them here, through a
+    // maker on the host object, which no page script holds.
     if (g.UIEvent && g.TextEvent === undefined) {
         var makingText = false;
         var TextEvent = function TextEvent(type, init) {
@@ -209,13 +212,10 @@
             this.data = data === undefined ? 'undefined' : String(data);
         };
         def('TextEvent', TextEvent);
-        Object.defineProperty(g, '__rkNewTextEvent', {
-            value: function (type, init) {
-                makingText = true;
-                try { return new TextEvent(type, init); } finally { makingText = false; }
-            },
-            configurable: true, enumerable: false, writable: true
-        });
+        __rk.newTextEvent = function (type, init) {
+            makingText = true;
+            try { return new TextEvent(type, init); } finally { makingText = false; }
+        };
     }
     // InputEvent.getTargetRanges() (Input Events §4.1.1): the ranges the
     // edit will affect, as StaticRanges. A new array of new ranges on every
