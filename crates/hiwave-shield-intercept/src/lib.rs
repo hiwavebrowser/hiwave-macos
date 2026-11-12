@@ -16,41 +16,9 @@
 use hiwave_shield::ResourceType as ShieldResourceType;
 use url::Url;
 use rustkit_net::{BlockReason, InterceptAction, InterceptHandler, Request, RequestDestination};
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, trace};
-
-/// Blocked domains for ad/tracker blocking.
-/// These are the most common ad and tracking domains.
-const BLOCKED_DOMAINS: &[&str] = &[
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "adtrafficquality.google",
-    "ads.twitter.com",
-    "facebook.com/tr",
-    "connect.facebook.net",
-    "tr.snapchat.com",
-    "amazon-adsystem.com",
-    "criteo.com",
-    "adnxs.com",
-    "adsrvr.org",
-    "adroll.com",
-    "taboola.com",
-    "outbrain.com",
-    "rubiconproject.com",
-    "openx.net",
-    "pubmatic.com",
-    "scorecardresearch.com",
-    "chartbeat.com",
-    "segment.io",
-    "segment.com",
-    "mixpanel.com",
-    "hotjar.com",
-    "fullstory.com",
-    "googletagmanager.com",
-];
 
 /// Thread-safe adapter that implements rustkit-net's InterceptHandler.
 pub struct ShieldInterceptHandler {
@@ -58,8 +26,6 @@ pub struct ShieldInterceptHandler {
     enabled: Arc<AtomicBool>,
     /// Counter for blocked requests.
     blocked_count: Arc<AtomicU64>,
-    /// Set of blocked domain patterns (fallback + tests).
-    blocked_domains: HashSet<String>,
     /// Per-destination attempted/blocked census.
     census: Arc<ShieldCensus>,
     /// Callback to notify when a request is blocked (for UI updates).
@@ -73,15 +39,9 @@ impl ShieldInterceptHandler {
         // allow-until-ready window starts closing at construction, not at
         // the first request.
         let _ = shield_worker();
-        let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
         Self {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count: Arc::new(AtomicU64::new(0)),
-            blocked_domains,
             census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
@@ -92,15 +52,9 @@ impl ShieldInterceptHandler {
         // Production constructor (webview_rustkit path): start closing the
         // pending window here too, not only in new().
         let _ = shield_worker();
-        let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
         Self {
             enabled: Arc::new(AtomicBool::new(true)),
             blocked_count,
-            blocked_domains,
             census: Arc::new(ShieldCensus::default()),
             on_blocked: None,
         }
@@ -138,27 +92,20 @@ impl ShieldInterceptHandler {
         self
     }
 
-    /// Check if a host should be blocked.
-    fn should_block_host(&self, host: &str) -> bool {
-        self.floor_domain(host).is_some()
-    }
-
-    /// What the interim floor says about `request` while the filter lists are still building.
+    /// What the interim floor says about `request` while the filter lists are still building: the
+    /// built-in defaults (SH2), the same rules the compiled engine carries as its own, so a request
+    /// is judged the same before and after the lists are ready. It was a separate hand-kept domain
+    /// list that blocked more than the engine (all of criteo.com, connect.facebook.net and
+    /// googletagmanager.com) and judged a tracker's own site by the same rule. The engine is
+    /// neither `Send` nor `Sync`, so each thread that asks builds its own, once (about 40 rules).
     fn pending_floor(&self, request: &Request) -> Option<BlockReason> {
-        request
-            .url
-            .host_str()
-            .and_then(|host| self.floor_domain(host))
-            .map(|domain| BlockReason { list: "domain-floor".into(), rule: Some(domain.to_string()) })
-    }
-
-    /// The interim list's domain that `host` is, or is under.
-    fn floor_domain(&self, host: &str) -> Option<&str> {
-        let host_lower = host.to_lowercase();
-        self.blocked_domains
-            .iter()
-            .find(|domain| host_lower == **domain || host_lower.ends_with(&format!(".{}", domain)))
-            .map(String::as_str)
+        thread_local! {
+            static FLOOR: hiwave_shield::AdBlocker = hiwave_shield::AdBlocker::new();
+        }
+        let source = request.referrer.as_ref().unwrap_or(&request.url);
+        FLOOR
+            .with(|engine| engine.check(&request.url, source, dest_to_shield(request.destination)))
+            .map(|found| BlockReason { list: "domain-floor".into(), rule: found.rule })
     }
 
     /// Convert HTTP method and URL to a shield ResourceType.
@@ -620,23 +567,23 @@ mod tests {
     #[test]
     fn known_tracker_subresources_are_blocked() {
         // Deterministic regardless of EasyList readiness: the pending floor
-        // uses BLOCKED_DOMAINS, and the compiled engine includes the same
-        // hosts. Either path must Block before bytes.
+        // is the compiled engine's own defaults (SH2), so both paths agree.
+        // Either path must Block before bytes.
         let handler = ShieldInterceptHandler::new();
         let action = handler.intercept(&test_request_with(
             "https://doubleclick.net/pagead.js",
             RequestDestination::Script,
             Some("https://news.example/"),
         ));
-        // Before the lists are ready: the floor and its domain. Once ready,
+        // Before the lists are ready: the floor and the default rule it shares with the engine. Once ready,
         // with no `name_matched_rules()` (these tests never call it), two
         // lists name neither list nor rule; with no lists on disk the engine
         // is the defaults, one list that names its rule.
         match action {
             InterceptAction::BlockedBy(reason) => assert!(
-                reason.list == "domain-floor" && reason.rule.as_deref() == Some("doubleclick.net")
+                reason.list == "domain-floor" && reason.rule.as_deref() == Some("||doubleclick.net^$third-party")
                     || reason.list == hiwave_shield::UNATTRIBUTED && reason.rule.is_none()
-                    || reason.list == "HiWave defaults" && reason.rule.as_deref() == Some("||doubleclick.net^"),
+                    || reason.list == "HiWave defaults" && reason.rule.as_deref() == Some("||doubleclick.net^$third-party"),
                 "{reason:?}"
             ),
             other => panic!("not blocked with a reason: {other:?}"),
@@ -733,10 +680,15 @@ mod tests {
     #[test]
     fn subdomain_of_a_blocked_host_is_blocked_by_the_floor() {
         let handler = ShieldInterceptHandler::new();
-        assert!(handler.should_block_host("secure.adnxs.com"));
-        assert!(handler.should_block_host("ADNXS.COM"));
-        assert!(!handler.should_block_host("not-adnxs.com"));
-        assert!(!handler.should_block_host("example.com"));
+        let blocked = |url: &str| {
+            handler
+                .pending_floor(&test_request_with(url, RequestDestination::Script, Some("https://news.example/")))
+                .is_some()
+        };
+        assert!(blocked("https://secure.adnxs.com/a.js"));
+        assert!(blocked("https://ADNXS.COM/a.js"));
+        assert!(!blocked("https://not-adnxs.com/a.js"));
+        assert!(!blocked("https://example.com/a.js"));
     }
 
     #[test]
