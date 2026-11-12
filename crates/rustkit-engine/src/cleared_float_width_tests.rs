@@ -25,7 +25,9 @@ const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-11/cleared_
 ///   that height;
 /// * a grid item's floats are placed at an earlier, narrower width and stay
 ///   stacked (`gr_none`: the second float at 0,10 in a 200-wide item).
-/// Their widths are asserted; their heights are not.
+/// Their widths are asserted, and their heights are asserted to DIFFER: the
+/// test fails when a listed height starts matching, so the entry is removed
+/// with the fix that closes it.
 const KNOWN_HEIGHT: &[&str] = &[
     "fx_none", "fx_lr2", "fx_l_r_cl", "fx_three", "gr_none", "gr_lr2", "gr_l_r_cl", "gr_three",
 ];
@@ -64,13 +66,21 @@ fn a_cleared_float_ends_the_run_of_floats_on_its_side() {
             (w.parse().unwrap(), h.parse().unwrap())
         })
         .collect();
+    assert_eq!(expected.len(), 55, "the Chrome table has 55 boxes");
+    assert_eq!(got.len(), expected.len(), "the page answered for every box");
+    // Widths to 0.1 px (the float + text rows are 125.8). A listed height
+    // must still DIFFER: one that starts matching comes off `KNOWN_HEIGHT`.
     let wrong: Vec<String> = expected
         .iter()
         .zip(&got)
         .filter(|((id, w, h), got)| {
-            (got.0 - w).abs() > 0.5 || ((got.1 - h).abs() > 0.5 && !KNOWN_HEIGHT.contains(id))
+            let height_matches = (got.1 - h).abs() <= 0.5;
+            (got.0 - w).abs() > 0.1 || height_matches == KNOWN_HEIGHT.contains(id)
         })
-        .map(|((id, w, h), got)| format!("{id}: {}x{} (Chromium {w}x{h})", got.0, got.1))
+        .map(|((id, w, h), got)| {
+            let listed = if KNOWN_HEIGHT.contains(id) { ", listed in KNOWN_HEIGHT" } else { "" };
+            format!("{id}: {}x{} (Chromium {w}x{h}{listed})", got.0, got.1)
+        })
         .collect();
     assert!(wrong.is_empty(), "{} of {} boxes differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
