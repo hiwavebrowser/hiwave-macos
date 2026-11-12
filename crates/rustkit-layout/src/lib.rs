@@ -1982,6 +1982,54 @@ pub struct LayoutBox {
     /// css-grid-1 §6), so its auto height encloses its floats. Set by the
     /// flex and grid containers on their in-flow children.
     pub formatting_root: bool,
+    /// Whether anything under this box can be hit outside its border box,
+    /// as `mark_hit_overflow` found it for this layout: 0 not known (the
+    /// hit test looks), 1 nothing (the hit test stops here), 2 something.
+    pub hit_overflow: HitOverflowMark,
+}
+
+/// `LayoutBox::hit_overflow`. A note the hit test keeps beside the layout,
+/// not part of it: two trees that lay out the same are the same tree
+/// whether or not a point was ever asked of them, so it prints as nothing.
+#[derive(Clone, Default)]
+pub struct HitOverflowMark(std::cell::Cell<u8>);
+
+impl HitOverflowMark {
+    fn get(&self) -> u8 {
+        self.0.get()
+    }
+
+    fn set(&self, mark: u8) {
+        self.0.set(mark);
+    }
+}
+
+impl std::fmt::Debug for HitOverflowMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// What a box and the boxes under it reach, for `mark_hit_overflow`: one
+/// rectangle each for the boxes its ancestors' clips apply to, the absolute
+/// boxes still looking for their containing block, and the fixed ones.
+struct HitReach {
+    flow: Option<Rect>,
+    absolute: Option<Rect>,
+    fixed: Option<Rect>,
+    /// Something here moves without a layout (a transform, a sticky box):
+    /// where it reaches is not known from the layout alone.
+    moves: bool,
+}
+
+fn union_reach(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            Some(Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y))
+        }
+        (a, b) => a.or(b),
+    }
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2041,6 +2089,7 @@ impl LayoutBox {
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
             formatting_root: false,
+            hit_overflow: HitOverflowMark::default(),
         }
     }
 
@@ -8330,7 +8379,8 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, (0.0, 0.0), 0, false)
+        self.ensure_hit_overflow();
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false, (false, false))
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -8343,6 +8393,7 @@ impl LayoutBox {
     /// fixed box with a negative `z-index` is under the page; the others
     /// are over it, the highest `z-index` and then the latest first.
     pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
         self.top_held_or_page(held, viewport_x, viewport_y, scroll)
@@ -8359,6 +8410,7 @@ impl LayoutBox {
         scroll: (f32, f32),
         held_fixed: &[Vec<usize>],
     ) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         for path in held_fixed {
             let mut ancestors = Vec::with_capacity(path.len());
@@ -8380,7 +8432,7 @@ impl LayoutBox {
                 .iter()
                 .find(|a| a.position == Position::Fixed)
                 .map_or(at.z_index, |outer| outer.z_index);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true, (false, false)) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -8402,7 +8454,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true, (false, false));
         match top {
             Some((z_index, hit)) if z_index >= 0 => {
                 // Pages with no sticky box pay for nothing here.
@@ -8613,7 +8665,7 @@ impl LayoutBox {
         for child in &self.children {
             let fixed = child.position == Position::Fixed;
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true, (false, false)) {
                     hit.viewport_fixed = true;
                     hits.push((outer_z.unwrap_or(child.z_index), hit));
                 }
@@ -8649,11 +8701,98 @@ impl LayoutBox {
         }
     }
 
+    /// Whether this box clips what it holds for hit testing, as it clips
+    /// the painting: any `overflow` but `visible`. The root and the body
+    /// hand theirs to the viewport.
+    fn clips_hit_overflow(&self) -> bool {
+        use rustkit_css::Overflow;
+        (self.style.overflow_x != Overflow::Visible || self.style.overflow_y != Overflow::Visible)
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::LineBreak)
+            && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
+    }
+
+    /// Find, for every box of this layout, whether anything under it can
+    /// be hit outside its border box (`hit_overflow`). A box outside its
+    /// ancestor's box is still hit (an absolutely positioned menu under a
+    /// short header, a float in a zero-height parent, content taller than
+    /// an `overflow: visible` box), so the hit test cannot stop at a box
+    /// the point is outside of unless it knows nothing of it reaches
+    /// there. Made at the first hit test of a layout (the engine calls
+    /// `forget_hit_overflow` when it stores or patches one).
+    ///
+    /// A clipping box keeps its in-flow content in; an absolute box under
+    /// it gets out when its containing block is further up. A transformed
+    /// or sticky box moves without a layout, so the boxes above one are
+    /// always looked into.
+    pub fn mark_hit_overflow(&self) {
+        self.hit_reach();
+    }
+
+    /// The boxes of this layout changed (a new layout, a patched one, an
+    /// animation frame): the next hit test from this root marks them
+    /// again. The marks cost one walk, so they are made when a point asks.
+    pub fn forget_hit_overflow(&self) {
+        self.hit_overflow.set(0);
+    }
+
+    /// The marks, made if this root has none.
+    fn ensure_hit_overflow(&self) {
+        if self.hit_overflow.get() == 0 {
+            self.mark_hit_overflow();
+        }
+    }
+
+    fn hit_reach(&self) -> HitReach {
+        let own = self.dimensions.border_box();
+        let (mut flow, mut absolute, mut fixed, mut below_moves) = (None, None, None, false);
+        for child in &self.children {
+            let reach = child.hit_reach();
+            below_moves |= reach.moves;
+            match child.position {
+                Position::Absolute => absolute = union_reach(absolute, reach.flow),
+                Position::Fixed => fixed = union_reach(fixed, reach.flow),
+                _ => flow = union_reach(flow, reach.flow),
+            }
+            absolute = union_reach(absolute, reach.absolute);
+            fixed = union_reach(fixed, reach.fixed);
+        }
+        let clips = self.clips_hit_overflow();
+        let mut reach = Some(own);
+        if !clips {
+            reach = union_reach(reach, flow);
+        }
+        // The absolute (fixed) boxes this box is the containing block of
+        // are its own overflow from here up, or clipped by it.
+        if self.holds_absolute_boxes() {
+            if !clips {
+                reach = union_reach(reach, absolute);
+            }
+            absolute = None;
+        }
+        if self.transforms_descendants() {
+            if !clips {
+                reach = union_reach(reach, fixed);
+            }
+            fixed = None;
+        }
+        let outside = |r: Option<Rect>| {
+            r.is_some_and(|r| r.x < own.x || r.y < own.y || r.right() > own.right() || r.bottom() > own.bottom())
+        };
+        let reaches_out = below_moves || outside(reach) || outside(absolute) || outside(fixed);
+        self.hit_overflow.set(if reaches_out { 2 } else { 1 });
+        let moves = self.own_transform().is_some() || self.sticky_rule.get().is_some();
+        HitReach { flow: reach, absolute, fixed, moves: below_moves || moves }
+    }
+
     /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
     /// those with the viewport point). `escaped` is what static scrollers
     /// since the nearest containing block of absolute boxes added to the
     /// point: an absolute box under them is not in their scrolling box.
+    /// `clipped` says the point is outside a clipping ancestor: for this
+    /// box, and for the absolute boxes under it whose containing block is
+    /// above it. A clipped box is not hit; an absolute box under it whose
+    /// containing block is outside the clip still is.
     fn hit_test_internal(
         &self,
         x: f32,
@@ -8661,6 +8800,7 @@ impl LayoutBox {
         escaped: (f32, f32),
         depth: u32,
         skip_held_fixed: bool,
+        clipped: (bool, bool),
     ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
         // (`PushTransform`): the point is taken back to where they are
@@ -8687,10 +8827,16 @@ impl LayoutBox {
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
-        // Check if the point is within our border box
-        if !border_box.contains(x, y) {
+        // Outside our border box the point can still be on something we
+        // hold: a box that overflows us. `mark_hit_overflow` says when
+        // nothing does.
+        let inside = border_box.contains(x, y);
+        if !inside && self.hit_overflow.get() == 1 {
             return None;
         }
+        let flow_clipped =
+            clipped.0 || (self.clips_hit_overflow() && !self.dimensions.padding_box().contains(x, y));
+        let absolute_clipped = if self.holds_absolute_boxes() { flow_clipped } else { clipped.1 };
 
         // Check children in reverse paint order (topmost first)
         let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
@@ -8713,7 +8859,14 @@ impl LayoutBox {
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
-            if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
+            let child_clipped = match child.position {
+                Position::Absolute => (absolute_clipped, absolute_clipped),
+                Position::Fixed => (false, false),
+                _ => (flow_clipped, absolute_clipped),
+            };
+            if let Some(mut result) =
+                child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed, child_clipped)
+            {
                 self.note_scroller_of_hit(child, &mut result);
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
@@ -8724,7 +8877,7 @@ impl LayoutBox {
         // No child was hit, so we are the target, if we can be one: a
         // see-through overlay or a closed menu leaves the point to
         // whatever is under it.
-        if !self.is_hit_target() {
+        if !inside || clipped.0 || !self.is_hit_target() {
             return None;
         }
 

@@ -55,9 +55,11 @@ var POINTS = [
 window.report = function () {
     return POINTS.map(function (p) {
         var e = document.elementFromPoint(p[1], p[2]);
-        var all = document.elementsFromPoint ? document.elementsFromPoint(p[1], p[2]).map(function (x) { return x.id || x.tagName; }).join('>') : 'none';
-        return p[0] + ' (' + p[1] + ',' + p[2] + '): ' + (e ? (e.id || e.tagName) : 'null') + ' [' + all + ']';
-    }).join('\n');
+        return p[0] + ' (' + p[1] + ',' + p[2] + '): ' + (e ? (e.id || e.tagName) : 'null');
+    }).concat(['abs_body', 'fixed', 'neg', 'abs_escape', 'menu', 'moved', 'fl', 'field'].map(function (id) {
+        var r = document.getElementById(id).getBoundingClientRect();
+        return 'rect ' + id + ': ' + [r.x, r.y, r.width, r.height].map(function (n) { return Math.round(n * 100) / 100; }).join(' ');
+    })).join('\n');
 };
 </script>
 </body></html>

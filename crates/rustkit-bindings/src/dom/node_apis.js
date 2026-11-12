@@ -91,7 +91,14 @@
     function attrNode(el, name) {
         var byName = attrs.get(el);
         if (!byName) attrs.set(el, byName = Object.create(null));
-        return byName[name] || (byName[name] = hidden(hidden(Object.create(Attr.prototype), OWNER, el), NAME, name));
+        return byName[name] || (byName[name] = newAttr(el, name));
+    }
+    // The owner can change: an Attr taken off one element may be set on
+    // another (`setNamedItem`), and `createAttribute` makes one with none.
+    function newAttr(el, name) {
+        var a = hidden(Object.create(Attr.prototype), NAME, name);
+        Object.defineProperty(a, OWNER, { value: el, writable: true });
+        return a;
     }
     // The stored name `name` refers to on `el`, or null (HTML lowercases).
     function storedName(el, name) {
@@ -109,12 +116,12 @@
         return this[NAME] === 'xmlns' ? PREFIX_NS.xmlns : nsOf(this[NAME]);
     });
     getter(Attr.prototype, 'ownerElement', function () {
-        return !gone.has(this) && this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
+        return !gone.has(this) && this[OWNER] && this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
     });
     getter(Attr.prototype, 'nodeType', function () { return 2; });
     getter(Attr.prototype, 'specified', function () { return true; });
     getter(Attr.prototype, 'parentNode', function () { return null; });
-    getter(Attr.prototype, 'ownerDocument', function () { return this[OWNER].ownerDocument; });
+    getter(Attr.prototype, 'ownerDocument', function () { return this[OWNER] ? this[OWNER].ownerDocument : g.document; });
     ['value', 'nodeValue', 'textContent'].forEach(function (k) {
         Object.defineProperty(Attr.prototype, k, {
             get: function () {
@@ -148,6 +155,44 @@
         gone.set(a, v);
         return a;
     }
+    // DOM §4.9.2 "set an attribute": `a` becomes the element's Attr for its
+    // name (replacing, and returning, the one it had). An Attr another
+    // element still has cannot be taken.
+    function attach(el, a, method) {
+        if (!(a instanceof Attr)) {
+            throw new TypeError("Failed to execute '" + method + "' on 'NamedNodeMap': parameter 1 is not of type 'Attr'.");
+        }
+        var name = a[NAME], owner = gone.has(a) ? null : a[OWNER];
+        if (owner && owner !== el && owner.hasAttribute(name)) fail(method, 'NamedNodeMap', 'InUseAttributeError');
+        if (owner === el && el.hasAttribute(name)) return a;
+        var value = a.value, byName = attrs.get(el), old = null;
+        if (el.hasAttribute(name)) {
+            old = attrNode(el, name);
+            gone.set(old, old.value);
+        }
+        gone.delete(a);
+        a[OWNER] = el;
+        el.setAttribute(name, value);
+        if (!byName) attrs.set(el, byName = Object.create(null));
+        byName[name] = a;
+        return old;
+    }
+    NamedNodeMap.prototype.setNamedItem = function (a) { return attach(this[OWNER], a, 'setNamedItem'); };
+    NamedNodeMap.prototype.setNamedItemNS = function (a) { return attach(this[OWNER], a, 'setNamedItemNS'); };
+    Element.prototype.setAttributeNode = function (a) { return attach(this, a, 'setAttributeNode'); };
+    Element.prototype.setAttributeNodeNS = function (a) { return attach(this, a, 'setAttributeNodeNS'); };
+    // An Attr with no element yet (DOM §4.5 createAttribute): HTML
+    // documents lowercase the name.
+    Document.prototype.createAttribute = function (name) {
+        name = String(name);
+        if (!/^[^\s\/>=\0]+$/.test(name)) {
+            throw new DOMException("Failed to execute 'createAttribute' on 'Document': The localName provided ('" +
+                name + "') contains an invalid character.", 'InvalidCharacterError');
+        }
+        var a = newAttr(null, name.toLowerCase());
+        gone.set(a, '');
+        return a;
+    };
     NamedNodeMap.prototype.removeNamedItem = function (name) {
         var a = this.getNamedItem(name);
         if (!a) fail('removeNamedItem', 'NamedNodeMap', 'NotFoundError');

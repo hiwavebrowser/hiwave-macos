@@ -11,6 +11,7 @@
 //! 4. **Mutation support**: Node insertion, removal, attribute modification
 //! 5. **Event dispatch**: DOM Events with capture/bubble phases
 
+pub mod attr_map;
 pub mod events;
 pub mod clipboard;
 pub mod forms;
@@ -31,6 +32,7 @@ pub use images::{
     CrossOrigin, FaviconLink, ImageDecoding, ImageElement, ImageElementManager, ImageLoading,
     ImageLoadingState, PictureElement, PictureSource,
 };
+pub use attr_map::AttrMap;
 pub use shadow::{is_valid_custom_element_name, ShadowRootInit, ShadowRootMode};
 
 use std::cell::{Cell, RefCell};
@@ -141,7 +143,7 @@ pub enum NodeType {
     Element {
         tag_name: String,
         namespace: String,
-        attributes: HashMap<String, String>,
+        attributes: AttrMap,
     },
     Text(String),
     Comment(String),
@@ -551,7 +553,7 @@ impl DocumentSink {
         name: String,
         attrs: Vec<(String, String)>,
         in_svg: bool,
-    ) -> (String, &'static str, HashMap<String, String>) {
+    ) -> (String, &'static str, AttrMap) {
         let svg = name == "svg" || (in_svg && !svg_names::breaks_out_of_svg(&name, &attrs));
         if svg {
             let attributes = attrs
@@ -1509,7 +1511,7 @@ mod attr_cost_bench;
 mod node_write_tests {
     use super::*;
 
-    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn attrs(pairs: &[(&str, &str)]) -> AttrMap {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 

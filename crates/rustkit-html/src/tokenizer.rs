@@ -5,7 +5,52 @@
 
 use crate::entities;
 use crate::{ParseError, ParseResult};
-use std::collections::HashMap;
+
+/// A start tag's attributes, in source order. A name written twice keeps
+/// its first value and the later ones are dropped (HTML §13.2.5.33).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagAttrs(Vec<(String, String)>);
+
+impl TagAttrs {
+    fn push_first(&mut self, name: String, value: String) {
+        if !self.0.iter().any(|(n, _)| *n == name) {
+            self.0.push((name, value));
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.0.iter().map(|(n, v)| (n, v))
+    }
+}
+
+impl IntoIterator for TagAttrs {
+    type Item = (String, String);
+    type IntoIter = std::vec::IntoIter<(String, String)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 
 /// Token types emitted by the tokenizer.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,7 +64,7 @@ pub enum Token {
     /// Start tag (e.g., `<div>` or `<img />`)
     StartTag {
         name: String,
-        attrs: HashMap<String, String>,
+        attrs: TagAttrs,
         self_closing: bool,
     },
     /// End tag (e.g., `</div>`)
@@ -83,7 +128,7 @@ pub struct Tokenizer {
     /// The name of the last emitted start tag (for RAWTEXT/RCDATA/ScriptData end tag matching)
     last_start_tag_name: String,
     current_tag_name: String,
-    current_attrs: HashMap<String, String>,
+    current_attrs: TagAttrs,
     current_attr_name: String,
     current_attr_value: String,
     self_closing: bool,
@@ -103,7 +148,7 @@ impl Tokenizer {
             return_state: None,
             last_start_tag_name: String::new(),
             current_tag_name: String::new(),
-            current_attrs: HashMap::new(),
+            current_attrs: TagAttrs::default(),
             current_attr_name: String::new(),
             current_attr_value: String::new(),
             self_closing: false,
@@ -180,7 +225,7 @@ impl Tokenizer {
         if !self.current_attr_name.is_empty() {
             let name = std::mem::take(&mut self.current_attr_name);
             let value = std::mem::take(&mut self.current_attr_value);
-            self.current_attrs.insert(name, value);
+            self.current_attrs.push_first(name, value);
         }
     }
 

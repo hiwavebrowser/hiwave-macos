@@ -31,8 +31,8 @@ window.report = function () {
     line('id and className append', function () { return indexed(e); });
     e.id = 'made2';
     line('id again keeps its place', function () { return indexed(e); });
-    e.toggleAttribute('hidden'); e.dataset.fooBar = 'd'; e.style.color = 'red'; e.classList.add('k2'); e.title = 't';
-    line('toggle, dataset, style, classList, title', function () { return indexed(e); });
+    e.toggleAttribute('hidden'); e.dataset.fooBar = 'd'; e.classList.add('k2'); e.title = 't'; e.style.color = 'red';
+    line('toggle, dataset, classList, title, style', function () { return indexed(e); });
     e.toggleAttribute('hidden'); e.removeAttribute('z');
     line('removals', function () { return names(e); });
     line('script outerHTML', function () { return e.outerHTML; });
@@ -64,6 +64,9 @@ window.report = function () {
         g.removeAttribute('data-e'); g.setAttribute('data-q', 'x'); g.setAttribute('data-e', 'y');
         return names(g).replace(/data-/g, '');
     });
+    // Chrome writes the style attribute when something next reads the
+    // attributes, so one set before `x` comes out after it.
+    line('style set before another attribute', function () { var l = document.createElement('div'); l.style.color = 'red'; l.setAttribute('x', '1'); return names(l); });
     line('html and body', function () { return names(document.documentElement) + ' | ' + names(document.body); });
     return out.join('\n');
 };

@@ -1669,8 +1669,8 @@ const RAW_TEXT_ELEMENTS: &[&str] = &[
 ];
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
-/// Attributes come out sorted by name: rustkit-dom keeps them in a
-/// HashMap, so source order is gone.
+/// Attributes come out in the element's own order (the order they were
+/// written or set in), as Chrome writes them.
 fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
     match &node.node_type {
         NodeType::Element {
@@ -1680,13 +1680,11 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         } => {
             out.push('<');
             out.push_str(tag_name);
-            let mut names: Vec<&String> = attributes.keys().collect();
-            names.sort();
-            for name in names {
+            for (name, value) in attributes.iter() {
                 out.push(' ');
                 out.push_str(name);
                 out.push_str("=\"");
-                escape_into(&attributes[name], true, out);
+                escape_into(value, true, out);
                 out.push('"');
             }
             out.push('>');
@@ -1801,12 +1799,11 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
-        // Space-separated (a name never holds whitespace) and sorted:
-        // rustkit-dom keeps attributes in a HashMap, so source order is gone.
+        // Space-separated (a name never holds whitespace), in the element's
+        // own order.
         "attrNames" => match &node.node_type {
             NodeType::Element { attributes, .. } => {
-                let mut names: Vec<&str> = attributes.keys().map(String::as_str).collect();
-                names.sort_unstable();
+                let names: Vec<&str> = attributes.keys().map(String::as_str).collect();
                 JsValue::String(names.join(" "))
             }
             _ => JsValue::Null,
@@ -2299,9 +2296,11 @@ pub(crate) fn install(
             let (Some(x), Some(y)) = (number_arg(args, 0), number_arg(args, 1)) else {
                 return JsValue::Null;
             };
+            // With a layout, a point no box is under answers -1: the
+            // root element's, in the wrappers.
             if let Some(tester) = host.hit_tester.clone() {
                 return tester(x, y, host.window_scroll())
-                    .map_or(JsValue::Null, |id| JsValue::Number(id as f64));
+                    .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64));
             }
             box_hit(&host, x, y).map_or(JsValue::Null, |id| JsValue::Number(id as f64))
         }),
@@ -2995,10 +2994,11 @@ const WRAPPERS_JS: &str = r#"
     function equalNodes(a, b) {
         if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
         if (a.nodeType === 1) {
+            // The same attributes, in any order (DOM §4.4 "equals").
             var names = a.getAttributeNames();
-            if (names.join(' ') !== b.getAttributeNames().join(' ')) return false;
+            if (names.length !== b.getAttributeNames().length) return false;
             for (var k = 0; k < names.length; k++) {
-                if (a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
+                if (!b.hasAttribute(names[k]) || a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
             }
         } else if (a.nodeType === 3 || a.nodeType === 7 || a.nodeType === 8) {
             if (a.textContent !== b.textContent) return false;
@@ -5005,6 +5005,12 @@ const WRAPPERS_JS: &str = r#"
         var w = g.innerWidth, h = g.innerHeight;
         if (typeof w === 'number' && typeof h === 'number' && (x < 0 || y < 0 || x >= w || y >= h)) return null;
         var id = N.hit(x, y);
+        // A point of the viewport no box is under is the root element's
+        // (Chrome for Testing 148: HTML below a short body, not BODY).
+        if (id === -1) {
+            var root = g.document.documentElement;
+            return root && root[SLOT] ? root[SLOT].id : null;
+        }
         return id == null ? null : id;
     }
     Document.prototype.elementFromPoint = function (x, y) {
@@ -5965,7 +5971,7 @@ mod tests {
                  try { m.isEqualNode({}); } catch (e) { r.push(e.name); } \
                  r.join('|')"
             ),
-            "class,data-z,id|0|false|true|false|true|false|true|false|false|true|false|TypeError"
+            "id,class,data-z|0|false|true|false|true|false|true|false|false|true|false|TypeError"
         );
     }
 

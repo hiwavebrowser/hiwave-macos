@@ -5335,7 +5335,7 @@ mod tests {
         );
         assert_eq!(
             eval_string(&b, "document.getElementById('outside').outerHTML"),
-            "<p class=\"x\" id=\"outside\">Out</p>"
+            "<p id=\"outside\" class=\"x\">Out</p>"
         );
         // Escaping: text escapes & < > and NBSP; attributes also escape ".
         // Void elements have no end tag; raw-text elements are not escaped.

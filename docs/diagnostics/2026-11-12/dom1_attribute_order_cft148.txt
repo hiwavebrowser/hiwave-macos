@@ -13,7 +13,7 @@ set existing keeps its place: z=again,a=2,m=3
 remove then add goes last: z=again,m=3,a=back
 id and className append: z=again,m=3,a=back,id=made,class=k
 id again keeps its place: z=again,m=3,a=back,id=made2,class=k
-toggle, dataset, style, classList, title: z=again,m=3,a=back,id=made2,class=k k2,hidden=,data-foo-bar=d,title=t,style=color: red;
+toggle, dataset, classList, title, style: z=again,m=3,a=back,id=made2,class=k k2,hidden=,data-foo-bar=d,title=t,style=color: red;
 removals: m,a,id,class,data-foo-bar,title,style
 script outerHTML: <div m="3" a="back" id="made2" class="k k2" data-foo-bar="d" title="t" style="color: red;"></div>
 removeNamedItem / setNamedItem: a,id,class,data-foo-bar,title,style,m,first
@@ -29,4 +29,5 @@ template: q,p,o
 insertAdjacentHTML: n,m,l
 XMLSerializer: <div xmlns="http://www.w3.org/1999/xhtml" id="p" z="1" a="2" class="c" data-b="3" m=""></div>
 many: q,w,r,t,y,u,i,o,p,a,s,d,f,g,h,j,k,l,e
+style set before another attribute: x,style
 html and body:  | 

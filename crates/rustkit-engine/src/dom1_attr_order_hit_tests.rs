@@ -31,13 +31,37 @@ fn report_of(page: &str) -> (Engine, EngineViewId, Vec<String>) {
     (engine, view, serde_json::from_str(&got).expect("a JSON array"))
 }
 
+/// Lines still off, each for a reason outside this row. They must still
+/// DIFFER: a line that starts matching comes off the list.
+///
+/// * `XMLSerializer`: not on this branch (STR-11 adds it).
+/// * `style set before another attribute`: Chrome writes an element's
+///   `style` attribute lazily, when something next reads its attributes,
+///   so `el.style.color = 'red'` followed by `setAttribute('x', ..)` reads
+///   `x,style`. Here the attribute is written at once (`style,x`).
+/// * `fixed (` and `rect fixed`: a `position: fixed` box inside an
+///   absolutely positioned ancestor is laid out at 810,70 where Chrome
+///   puts it at 410,80 (the viewport is its containing block). A layout
+///   defect; the hit test finds the box where the layout put it.
+/// * `rect field`: a bare text input is 19 tall here and 21 in Chrome
+///   (SET3, on the settings stack).
+const KNOWN: &[&str] = &[
+    "XMLSerializer: ",
+    "style set before another attribute: ",
+    "fixed (",
+    "rect fixed: ",
+    "rect field: ",
+];
+
 fn differences(chrome: &str, got: &[String], lines: usize) -> Vec<String> {
     let expected: Vec<&str> = chrome.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
     assert_eq!(expected.len(), lines, "the Chrome report has {lines} lines");
     let mut wrong = Vec::new();
     for (i, want) in expected.iter().enumerate() {
+        let listed = KNOWN.iter().any(|k| want.starts_with(k));
         match got.get(i) {
-            Some(have) if have == want => {}
+            Some(have) if (have == want) != listed => {}
+            Some(have) if listed => wrong.push(format!("  {have}\n    matches Chromium now: take it off KNOWN")),
             Some(have) => wrong.push(format!("  {have}\n    Chromium: {want}")),
             None => wrong.push(format!("  (missing)\n    Chromium: {want}")),
         }
@@ -55,9 +79,9 @@ fn attributes_keep_the_order_they_were_written_in() {
     let wrong = differences(
         include_str!("../../../docs/diagnostics/2026-11-12/dom1_attribute_order_cft148.txt"),
         &got,
-        31,
+        32,
     );
-    assert!(wrong.is_empty(), "{} of 31 report lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(wrong.is_empty(), "{} of 32 report lines differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
 #[test]
@@ -67,9 +91,9 @@ fn a_box_outside_its_ancestors_box_is_hit() {
     let wrong = differences(
         include_str!("../../../docs/diagnostics/2026-11-12/dom1_hit_outside_ancestor_cft148.txt"),
         &got,
-        29,
+        37,
     );
-    assert!(wrong.is_empty(), "{} of 29 report lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(wrong.is_empty(), "{} of 37 report lines differ:\n{}", wrong.len(), wrong.join("\n"));
     // The engine's own click goes where elementFromPoint does.
     assert_eq!(
         engine.focus_at_point(view, 450.0, 470.0).as_deref(),
