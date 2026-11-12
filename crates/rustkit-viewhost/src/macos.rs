@@ -577,11 +577,17 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 // reports pixels. AppKit's horizontal sign is the inverse
                 // of tao's, which is the sign the app's scroll code speaks.
                 let scale = if precise { 1.0 } else { 40.0 };
+                // AppKit gives the steps of a gesture a phase, and its
+                // inertia a momentum phase (NSEventPhase, 0 is none); a
+                // mouse's wheel has neither.
+                let phase: usize = msg_send![event, phase];
+                let momentum: usize = msg_send![event, momentumPhase];
                 let scroll = PendingScroll {
                     x: lpt.x,
                     y: frame.size.height - lpt.y,
                     dx: -raw_dx * scale,
                     dy: raw_dy * scale,
+                    gesture: phase != 0 || momentum != 0,
                 };
                 // A wheel right after a wheel is summed into it in the
                 // queue: a trackpad flick is ~50 events a second and the

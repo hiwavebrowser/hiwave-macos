@@ -4075,22 +4075,13 @@ impl Engine {
     /// becomes the held target: a box at its end hands on at once, as
     /// Chromium does.
     ///
-    /// A wheel over a viewport point; `gesture` says whether it is a step
-    /// of a gesture (a trackpad's, which the platform marks with a phase)
-    /// or a wheel on its own (a mouse's).
-    pub fn wheel_at(
-        &mut self,
-        id: EngineViewId,
-        x: f32,
-        y: f32,
-        delta_x: f32,
-        delta_y: f32,
-        gesture: bool,
-    ) -> Result<bool, EngineError> {
-        let _ = gesture;
-        self.scroll_at(id, x, y, delta_x, delta_y)
-    }
-
+    /// The hold is for the steps of a gesture only (WHL2): a trackpad's
+    /// scroll, which the platform marks with a phase. A wheel on its own (a
+    /// mouse's notch) goes to what is under the pointer however soon after
+    /// the last one, as in Chrome, and so does the first step of a gesture
+    /// after such a wheel. `scroll_at` is a step of a gesture; `wheel_at`
+    /// takes which it is.
+    ///
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
     pub fn scroll_at(
@@ -4100,6 +4091,20 @@ impl Engine {
         y: f32,
         delta_x: f32,
         delta_y: f32,
+    ) -> Result<bool, EngineError> {
+        self.wheel_at(id, x, y, delta_x, delta_y, true)
+    }
+
+    /// A wheel over a viewport point (`scroll_at` has the rules); `gesture`
+    /// says whether it is a step of a gesture or a wheel on its own.
+    pub fn wheel_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
     ) -> Result<bool, EngineError> {
         // The page hears the wheel when it has a listener for one
         // (`DomBindings::wants_wheel`); a page with none runs no script
@@ -4114,7 +4119,7 @@ impl Engine {
                 .and_then(|v| v.bindings.as_ref())
                 .is_some_and(|bindings| bindings.wants_wheel());
         if !listening {
-            return self.scroll_by_wheel(id, x, y, delta_x, delta_y);
+            return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
         }
         let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
             self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
@@ -4122,7 +4127,7 @@ impl Engine {
         if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
             return Ok(false);
         }
-        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y)?;
+        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture)?;
         if !cancelable {
             self.fire_wheel(id, x, y, delta_x, delta_y, false);
         }
@@ -4137,24 +4142,27 @@ impl Engine {
         y: f32,
         delta_x: f32,
         delta_y: f32,
+        gesture: bool,
     ) -> Result<bool, EngineError> {
         // An open `<select>` drop-down takes the wheel.
         if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
             return Ok(moved);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        let recent = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        // Only a step of a gesture stays on what the step before it moved.
+        let held = recent.filter(|g| gesture && g.gesture);
         let held_target = held
             .map(|g| g.target)
             .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
         let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
-        let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
+        let rest = recent.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
         let (changed, rest) = match target {
             WheelTarget::Window => (self.scroll_view(id, delta_x, delta_y)?, (0.0, 0.0)),
             WheelTarget::Element(node) => self.wheel_element(id, node, delta_x, delta_y, rest)?,
         };
         if let Some(view) = self.views.get_mut(&id) {
-            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
+            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest, gesture });
         }
         Ok(changed)
     }
@@ -29144,9 +29152,10 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
     computed_read::set_root_font(root_style);
 }
 
-/// How long after a wheel the next one still belongs to its gesture. macOS
-/// marks a real gesture's phases, but the input queue does not carry them; a
+/// How long after a step of a gesture the next step still belongs to it. A
 /// flick's events, inertia included, come much closer together than this.
+/// Which wheels are steps of a gesture is the platform's to say (macOS
+/// marks them with a phase; `PendingScroll::gesture`).
 const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// CH2.E7: a thumb drag in progress. The scroll follows the pointer's
@@ -29180,6 +29189,8 @@ struct WheelGesture {
     last: std::time::Instant,
     /// What rounding the last step to a whole pixel left over.
     rest: (f32, f32),
+    /// Whether that wheel was a step of a gesture (`Engine::wheel_at`).
+    gesture: bool,
 }
 
 /// Copy the view's element scroll offsets onto the scrollers of a layout tree,
