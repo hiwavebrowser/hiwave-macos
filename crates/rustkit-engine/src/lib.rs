@@ -343,6 +343,10 @@ pub use page_protocol::{
     PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
+/// Tell script runtimes made on the calling thread how much native stack they may use before a
+/// built-in that recurses in Rust throws a `RangeError` (see `rustkit_js`). Call it first thing
+/// on a thread whose stack size is known.
+pub use rustkit_js::set_thread_native_stack_budget;
 pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };

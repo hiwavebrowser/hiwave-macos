@@ -2927,6 +2927,10 @@ fn default_content_thread_on() {
 fn main() {
     #[cfg(target_os = "macos")]
     default_content_thread_on();
+    // The window thread runs the page when the content thread is off: half its real stack is the
+    // native-recursion budget (the 1 MiB fallback would throw on pages Chrome renders).
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    rustkit_engine::set_thread_native_stack_budget(Some(main_thread_stack_size() / 2));
     // Initialize logging with log compatibility. `RUST_LOG` selects the
     // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
