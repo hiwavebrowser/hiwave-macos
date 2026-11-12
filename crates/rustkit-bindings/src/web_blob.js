@@ -263,4 +263,7 @@
         }
         return clone(value);
     });
+
+    // For web_file_reader.js, which deletes it: a Blob's bytes.
+    Object.defineProperty(g, '__rkBlobBytes', { value: function (blob) { return blob[BYTES]; }, configurable: true, writable: true });
 })(globalThis);

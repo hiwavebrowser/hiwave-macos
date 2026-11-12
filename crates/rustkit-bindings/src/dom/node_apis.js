@@ -34,6 +34,22 @@
     getter(Element.prototype, 'namespaceURI', function () {
         var s = I.slotOf(this); return NS(s.gen, 'of', s.id);
     });
+    // The SVG shape and container interfaces (SVG 2 §4.6, §10), by local
+    // name. The geometry methods are web_svg_geometry.js's.
+    var SVG_PROTOS = Object.create(null);
+    (function () {
+        var Graphics = g.SVGGraphicsElement, Geometry = iface('SVGGeometryElement', Graphics);
+        [['path', 'SVGPathElement'], ['rect', 'SVGRectElement'], ['circle', 'SVGCircleElement'],
+         ['ellipse', 'SVGEllipseElement'], ['line', 'SVGLineElement'], ['polyline', 'SVGPolylineElement'],
+         ['polygon', 'SVGPolygonElement']].forEach(function (pair) {
+            SVG_PROTOS[pair[0]] = iface(pair[1], Geometry).prototype;
+        });
+        [['g', 'SVGGElement'], ['defs', 'SVGDefsElement'], ['use', 'SVGUseElement'], ['image', 'SVGImageElement'],
+         ['a', 'SVGAElement'], ['switch', 'SVGSwitchElement'], ['foreignObject', 'SVGForeignObjectElement'],
+         ['text', 'SVGTextElement']].forEach(function (pair) {
+            SVG_PROTOS[pair[0]] = iface(pair[1], Graphics).prototype;
+        });
+    })();
     // SVG elements get the SVG interfaces (the tag table already maps
     // `svg`); elements in any other non-HTML namespace are plain Element.
     I.extendElementProto(function (id, base) {
@@ -41,7 +57,8 @@
         if (ns === null || ns === HTML_NS) return base(id);
         if (ns !== SVG_NS) return Element.prototype;
         var p = base(id);
-        return p === g.SVGSVGElement.prototype ? p : g.SVGElement.prototype;
+        if (p === g.SVGSVGElement.prototype) return p;
+        return SVG_PROTOS[I.local(id)] || g.SVGElement.prototype;
     });
     var HOOKS = g.__rkDomHooks;
     Document.prototype.createElementNS = function (ns, qualified) {

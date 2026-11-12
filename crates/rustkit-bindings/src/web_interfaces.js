@@ -7,7 +7,7 @@
 //
 // What is deliberately NOT defined here: Worker, WebAssembly, Notification,
 // AudioContext, OffscreenCanvas, BroadcastChannel,
-// MessageChannel, FileReader, Request/Response/Headers, ReadableStream and
+// MessageChannel, Request/Response/Headers, ReadableStream and
 // friends, Image/Option/Audio, CSS, CustomElementRegistry, Intl. Pages decide
 // what to do by `typeof Worker`; a constructor that exists but does nothing
 // would send them down the wrong path. Those arrive with real behaviour

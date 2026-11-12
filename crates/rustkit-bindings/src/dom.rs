@@ -5868,6 +5868,7 @@ const WRAPPERS_JS: &str = r#"
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        local: function (id) { return N.info(gen, id, 'local'); },
         setFragmentProto: function (f) { fragmentProto = f; },
         extendElementProto: function (f) {
             var base = elementProto;

@@ -8098,6 +8098,8 @@ impl Engine {
         // make stay with the load's own pump.
         let mut offered = false;
         let mut rest = order.into_iter();
+        // `readyState` has moved on from `loading`.
+        let mut parsing_ended = false;
         // Counts the scripts that reach their run, as before LAT17.
         let mut index = 0usize;
         while let Some(position) = rest.next() {
@@ -8178,6 +8180,15 @@ impl Engine {
                 facts.cancelled(&inspector, &label);
                 cancel_rest(feed, &mut rest);
                 return;
+            }
+            // The parser is done once the classic scripts have run: the
+            // deferred and module scripts (and the async ones this load runs
+            // after them) see `interactive` (HTML §13.2.7 "the end"; Chrome
+            // for Testing 148 fires `readystatechange` before the first of
+            // them). The DOMContentLoaded step's own update is then a no-op.
+            if !parsing_ended && feed.entries[position].2 >= 1 {
+                parsing_ended = true;
+                let _ = bindings.set_ready_state("interactive");
             }
             let text = match source {
                 Ok(text) => text,

@@ -133,6 +133,7 @@ mod web_canvas_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
+mod svg_geometry;
 mod web_url;
 
 pub use dom::{
@@ -1162,6 +1163,13 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // getBBox, getTotalLength, getPointAtLength on SVG shapes (svg_geometry.rs,
+        // web_svg_geometry.js); needs the SVG interfaces node_apis.js made.
+        svg_geometry::install(&mut runtime)?;
+        // XMLSerializer (web_xml_serializer.js).
+        runtime.evaluate_script(include_str!("web_xml_serializer.js"))?;
+        // FileReader over web_blob.js's Blob (web_file_reader.js); an EventTarget.
+        runtime.evaluate_script(include_str!("web_file_reader.js"))?;
         // A constructible DataTransfer and the drag data store the engine's drag and
         // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
         runtime.evaluate_script(include_str!("web_dnd.js"))?;
@@ -2666,10 +2674,11 @@ impl DomBindings {
     /// Set `document.readyState` (`loading` / `interactive` / `complete`)
     /// and fire `readystatechange` on the document. That is the spec's
     /// readiness update: the event comes before `DOMContentLoaded` and
-    /// before `window` `load`.
+    /// before `window` `load`. A state the document is already in changes
+    /// nothing and fires nothing.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            "if (document.readyState !== {0:?}) {{ document.readyState = {0:?}; window.__rustkit_fire('document', 'readystatechange'); }}",
             state
         ))?;
         Ok(())
