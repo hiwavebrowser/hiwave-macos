@@ -4830,12 +4830,15 @@ const WRAPPERS_JS: &str = r#"
             ? (start.node.childNodes[start.offset] || nextSkipping(start.node)) : start.node;
         var stop = end.node.nodeType === 1 || end.node.nodeType === 9 || end.node.nodeType === 11
             ? (end.node.childNodes[end.offset] || nextSkipping(end.node)) : nextSkipping(end.node);
-        function selected(n) {
-            var p = n.parentNode;
-            if (!p) return false;
-            var i = childIndex(p, n);
-            return !pointBefore({ node: p, offset: i }, start) && !pointBefore(end, { node: p, offset: i + 1 });
-        }
+        // A node is selected when the range holds all of it: neither end
+        // is in it. (Every node this is asked about is one the walk below
+        // visits, or the parent of one: none is wholly before the start or
+        // wholly after the end.) Looked up in two sets made once, not by
+        // counting siblings for each node: a range over a long list asked
+        // about every item, and counted to it each time.
+        var holdsAnEnd = new Set();
+        [start.node, end.node].forEach(function (n) { for (; n; n = n.parentNode) holdsAnEnd.add(n); });
+        function selected(n) { return !!n.parentNode && !holdsAnEnd.has(n); }
         for (; node && node !== stop; node = nextInTree(node)) {
             if (node.nodeType === 3) {
                 var from = node === start.node ? start.offset : 0;
