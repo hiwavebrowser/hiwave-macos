@@ -18924,13 +18924,15 @@ impl Engine {
                         }
                         None => attributes,
                     };
-                    let mut keys: Vec<&String> = attributes.keys().collect();
-                    keys.sort();
-                    for k in keys {
+                    // The pairs themselves, by name: nothing is looked up
+                    // again, so nothing can be missing.
+                    let mut pairs: Vec<(&String, &String)> = attributes.iter().collect();
+                    pairs.sort_by(|a, b| a.0.cmp(b.0));
+                    for (name, value) in pairs {
                         out.push(' ');
-                        out.push_str(k);
+                        out.push_str(name);
                         out.push_str("=\"");
-                        out.push_str(&attributes[k].replace('"', "&quot;"));
+                        out.push_str(&value.replace('"', "&quot;"));
                         out.push('"');
                     }
                     out.push('>');

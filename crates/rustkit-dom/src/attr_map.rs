@@ -22,7 +22,9 @@
 #[derive(Debug, Clone, Default)]
 pub struct AttrMap {
     pairs: Vec<(String, String)>,
-    /// Every name in `pairs`, once there are more than `NAME_SET_FROM`.
+    /// Every name in `pairs`, from the first time there are more than
+    /// `NAME_SET_FROM` until the map is cleared. Exactly those names:
+    /// every change to `pairs` changes it too.
     names: Option<std::collections::HashSet<String>>,
 }
 
@@ -86,7 +88,10 @@ impl AttrMap {
         match self.position(&name) {
             Some(at) => Some(std::mem::replace(&mut self.pairs[at].1, value)),
             None => {
-                if self.pairs.len() >= NAME_SET_FROM {
+                // The set is kept from this size on, and once there is
+                // one it is told of every name, however few are left: a
+                // name the set does not have is taken as absent.
+                if self.names.is_some() || self.pairs.len() >= NAME_SET_FROM {
                     let pairs = &self.pairs;
                     self.names
                         .get_or_insert_with(|| pairs.iter().map(|(n, _)| n.clone()).collect())
