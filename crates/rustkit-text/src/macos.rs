@@ -201,7 +201,7 @@ pub struct FontMetrics {
 fn is_system_family(lower: &str) -> bool {
     matches!(
         lower,
-        "system-ui" | "-apple-system" | "blinkmacsystemfont" | ".applesystemuifont"
+        "system-ui" | "blinkmacsystemfont" | ".applesystemuifont"
     )
 }
 
@@ -315,6 +315,23 @@ pub fn ct_weight_trait(css_weight: u16) -> f64 {
 /// text, enough to wrap a string Chrome fits.
 pub fn create_system_font_with_weight(size: f64, css_weight: u16) -> CTFont {
     let base = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+    system_font_weighted(base, size, css_weight)
+}
+
+/// The system font's italic at `css_weight`: the italic face first, then the
+/// weight on it, so the `wght` variation is not lost to the trait copy
+/// (Chrome for Testing 148: italic system-ui is .SFNS-RegularItalic, at 700
+/// .SFNS-BoldItalic).
+pub fn create_system_italic_with_weight(size: f64, css_weight: u16) -> CTFont {
+    use core_text::font_descriptor::kCTFontItalicTrait;
+    let upright = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+    let base = upright
+        .clone_with_symbolic_traits(kCTFontItalicTrait, kCTFontItalicTrait)
+        .unwrap_or(upright);
+    system_font_weighted(base, size, css_weight)
+}
+
+fn system_font_weighted(base: CTFont, size: f64, css_weight: u16) -> CTFont {
     if css_weight == 400 {
         return base;
     }
@@ -884,6 +901,10 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
             return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
+        // Not a family Chrome knows (CB7b): skipped, as an uninstalled font is.
+        if lower == "-apple-system" {
+            continue;
+        }
         if is_system_family(&lower) {
             return Ok(font::new_ui_font_for_language(
                 font::kCTFontSystemFontType,
@@ -897,8 +918,12 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
             return Ok(f);
         }
     }
-    // Nothing in the list exists here: take Core Text's substitute rather
-    // than no font at all.
+    // Nothing in the list exists here: Chrome's default (standard) font,
+    // Times, as layout's chain takes (`FontFamilyChain::serif`); Core Text's
+    // own substitute only if that is missing too.
+    if let Some(f) = named_font(map_generic("serif", "serif"), size) {
+        return Ok(f);
+    }
     font::new_from_name(family, size).map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
@@ -921,13 +946,24 @@ fn create_font_with_traits(
             return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
+        // Not a family Chrome knows (CB7b): skipped, as an uninstalled font is.
+        if lower == "-apple-system" {
+            continue;
+        }
 
         // System font: resolve the real weighted face via kCTFontWeightTrait,
         // as Chrome/Skia do. "-Bold" name variants never exist for it, and the
         // UI-font API alone offers only Regular/Bold — so the previous
         // `weight >= 600` gate shaped 300 as Regular and 600 as Bold.
-        if is_system_family(&lower) && !italic {
-            return Ok(create_system_font_with_weight(size, weight));
+        if is_system_family(&lower) {
+            // An italic system family is the system font's italic (before,
+            // it fell through to the name guesses and on to the default
+            // serif: Times-Italic where layout measured SF).
+            return Ok(if italic {
+                create_system_italic_with_weight(size, weight)
+            } else {
+                create_system_font_with_weight(size, weight)
+            });
         }
 
         let mapped = map_generic(&lower, fam);
@@ -961,6 +997,14 @@ fn create_font_with_traits(
         }
     }
 
+    // Nothing in the list exists here: Chrome's default (standard) font in
+    // the requested weight and style, as layout's chain measures it (Times
+    // Bold for `font: bold 14px -apple-system`; Chrome for Testing 148:
+    // Times-Bold, Times-Italic, Times-BoldItalic). `create_font` alone would
+    // paint Times-Roman for all three (Prometheus R1 on #1074).
+    if let Some(f) = family_face(map_generic("serif", "serif"), size, weight, italic) {
+        return Ok(f);
+    }
     // Fall back to base font resolution over the same list
     create_font(family, size)
 }
@@ -2347,6 +2391,72 @@ mod tests {
         }
     }
 
+    /// Paint resolves `-apple-system` as Chrome does: an unknown family,
+    /// skipped (CB7b; Chrome for Testing 148, see the layout chain's pin).
+    #[test]
+    fn create_font_skips_apple_system_like_chrome() {
+        let ps = |family: &str| create_font(family, 14.0).expect("a font").postscript_name();
+        assert_eq!(ps("-apple-system"), ps("serif"), "alone: the default serif");
+        assert_eq!(ps("-apple-system, BlinkMacSystemFont"), ps("system-ui"));
+        assert_eq!(ps("BlinkMacSystemFont"), ps("system-ui"));
+        assert_eq!(ps("-apple-system, \"Segoe UI\", Helvetica"), "Helvetica");
+    }
+
+    /// A bold or italic `-apple-system` (or any all-unknown list) paints in
+    /// the weighted default face, as layout measures it. Chrome for Testing
+    /// 148 (CSS.getPlatformFontsForNode, 14px): 700 is Times-Bold, italic
+    /// Times-Italic, both Times-BoldItalic (Prometheus R1 MED on #1074).
+    #[test]
+    fn an_all_unknown_list_paints_the_weighted_default_face() {
+        let ps = |weight: u16, italic: bool| {
+            create_font_with_traits("-apple-system", 14.0, weight, italic)
+                .expect("a font")
+                .postscript_name()
+        };
+        assert_eq!(ps(700, false), "Times-Bold");
+        assert_eq!(ps(400, true), "Times-Italic");
+        assert_eq!(ps(700, true), "Times-BoldItalic");
+        assert_eq!(ps(400, false), "Times-Roman");
+    }
+
+    /// An italic system family paints the system font's italic, not the
+    /// default serif (Prometheus delta R1 MED on #1074). Chrome for Testing
+    /// 148 (CSS.getPlatformFontsForNode, 14px): italic system-ui and italic
+    /// BlinkMacSystemFont are .SFNS-RegularItalic, italic 700 is
+    /// .SFNS-BoldItalic.
+    #[test]
+    fn an_italic_system_family_paints_the_system_italic() {
+        use core_text::font_descriptor;
+        for family in ["system-ui", "BlinkMacSystemFont", "-apple-system, system-ui"] {
+            let regular = create_font_with_traits(family, 14.0, 400, true).expect("a font");
+            assert!(
+                !regular.postscript_name().starts_with("Times"),
+                "{family} italic is the system font, got {}",
+                regular.postscript_name()
+            );
+            assert_eq!(regular.family_name(), create_font("system-ui", 14.0).unwrap().family_name(), "{family}");
+            assert!(regular.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} italic trait");
+            let bold = create_font_with_traits(family, 14.0, 700, true).expect("a font");
+            assert!(bold.symbolic_traits() & font_descriptor::kCTFontItalicTrait != 0, "{family} 700 italic trait");
+            // Bold by its width (a variable face need not set the bold
+            // trait): Chrome 72.73 for italic 400 and 78.48 for italic 700.
+            let width = |f: &CTFont| {
+                use core_foundation::attributed_string::CFMutableAttributedString;
+                use core_foundation::base::CFRange;
+                use core_foundation::string::CFString;
+                use core_text::line::CTLine;
+                use core_text::string_attributes::kCTFontAttributeName;
+                let mut astr = CFMutableAttributedString::new();
+                astr.replace_str(&CFString::new("Hello world"), CFRange::init(0, 0));
+                let range = CFRange::init(0, astr.char_len());
+                unsafe { astr.set_attribute(range, kCTFontAttributeName, f) };
+                CTLine::new_with_attributed_string(astr.as_concrete_TypeRef()).get_typographic_bounds().width
+            };
+            assert!((width(&regular) - 72.73).abs() < 0.3, "{family} italic 400 width {}", width(&regular));
+            assert!((width(&bold) - 78.48).abs() < 0.3, "{family} italic 700 width {}", width(&bold));
+        }
+    }
+
     /// An Apple emoji glyph advances as far as Chrome for Testing 148 places
     /// the next character (span widths of one `🔍` at each size, Helvetica
     /// primary, CB7a). Core Text's tracked advance is a pixel wider at most
@@ -2446,7 +2556,7 @@ mod tests {
     /// (8.44px wide, not 18).
     #[test]
     fn a_text_default_emoji_takes_the_cascade_face_like_chrome() {
-        let system = create_font("-apple-system", 14.0).expect("system font");
+        let system = create_font("system-ui", 14.0).expect("system font");
         let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
         let ps = |primary: &CTFont, ch: char| {
             fallback_face_for(primary, ch).map(|(f, _)| f.postscript_name()).unwrap_or_default()
@@ -2486,7 +2596,7 @@ mod tests {
         const ACE: &str = "AppleColorEmoji";
         // "" is the primary's own PostScript name.
         const P: &str = "";
-        let system = create_font("-apple-system", 14.0).expect("system font");
+        let system = create_font("system-ui", 14.0).expect("system font");
         let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
         let menlo = named_font("Menlo", 14.0).expect("Menlo is installed");
         type Row = (char, [&'static str; 3]);

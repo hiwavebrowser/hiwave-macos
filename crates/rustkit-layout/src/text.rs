@@ -187,13 +187,24 @@ impl FontFamilyChain {
 
     /// Resolve a CSS font-family value to a chain.
     pub fn from_css_value(value: &str) -> Self {
-        let families: Vec<&str> = value
+        let listed: Vec<&str> = value
             .split(',')
             .map(|s| s.trim().trim_matches('"').trim_matches('\''))
             .collect();
+        // `-apple-system` is WebKit's name for the system font; Chrome has
+        // never supported it, so it is an unknown family and the stack goes
+        // on to the next one (Chrome for Testing 148: `-apple-system` alone
+        // is the default serif, `-apple-system, "Segoe UI", Helvetica` is
+        // Helvetica). CB7b.
+        let families: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|f| !f.eq_ignore_ascii_case("-apple-system"))
+            .collect();
 
         if families.is_empty() {
-            return Self::sans_serif();
+            // Only unknown names: Chrome's default (standard) font.
+            return if listed.is_empty() { Self::sans_serif() } else { Self::serif() };
         }
 
         let primary = families[0];
@@ -203,7 +214,7 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
-            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
+            "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
@@ -217,10 +228,7 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui"
-                        || lower == "-apple-system"
-                        || lower == "blinkmacsystemfont"
-                    {
+                    if lower == "system-ui" || lower == "blinkmacsystemfont" {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
@@ -3117,11 +3125,36 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(system.primary, "Segoe UI");
 
-        let apple = FontFamilyChain::from_css_value("-apple-system");
-        #[cfg(target_os = "macos")]
-        assert_eq!(apple.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(apple.primary, "Segoe UI");
+        let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
+        assert_eq!(blink.primary, system.primary);
+    }
+
+    /// `-apple-system` is WebKit's name for the system font. Chrome has never
+    /// supported it: it is an unknown family, skipped in the stack like any
+    /// font that is not installed (CB7b). Chrome for Testing 148 on macOS,
+    /// `getBoundingClientRect` of "Hello world" at 14px: `-apple-system`
+    /// alone is 67.27, as the default serif (Times) is, where the system
+    /// font is 72.34; `-apple-system, BlinkMacSystemFont` is the system
+    /// font; `-apple-system, "Segoe UI", Helvetica` is Helvetica (69.25).
+    #[test]
+    fn apple_system_is_an_unknown_family_as_in_chrome() {
+        let serif = FontFamilyChain::serif();
+        let alone = FontFamilyChain::from_css_value("-apple-system");
+        assert_eq!(alone.primary, serif.primary, "-apple-system alone is the default serif");
+        let system = FontFamilyChain::from_css_value("system-ui");
+        let then_blink = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont");
+        assert_eq!(then_blink.primary, system.primary, "the next family, the system font");
+        let stack = FontFamilyChain::from_css_value("-apple-system, \"Segoe UI\", Helvetica");
+        let mut walk = std::iter::once(stack.primary.as_str())
+            .chain(stack.fallbacks.iter().map(String::as_str));
+        assert!(
+            !walk.any(|f| f == system.primary || f.eq_ignore_ascii_case("-apple-system")),
+            "no system font ahead of Helvetica: {} {:?}",
+            stack.primary,
+            stack.fallbacks
+        );
+        assert_eq!(stack.primary, "Segoe UI");
+        assert_eq!(stack.fallbacks.first().map(String::as_str), Some("Helvetica"));
     }
 
     /// A generic keyword after families that are not installed resolves
