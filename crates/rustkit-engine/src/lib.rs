@@ -6706,6 +6706,18 @@ impl Engine {
             }
             return !not_cancelled;
         };
+        // A focused checkbox or radio button takes no text: Space's keydown
+        // is taken and clicks it at the keyup, like a button's.
+        if key_code != 0x0D && self.is_checkable_input(id, focused.raw()) {
+            let not_cancelled = self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt);
+            if key == " " && !ctrl && !alt {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.space_armed = not_cancelled.then_some(focused.raw());
+                }
+                return true;
+            }
+            return false;
+        }
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
