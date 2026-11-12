@@ -126,3 +126,191 @@ def test_no_window_between_five_and_half_past_seven_eastern(monkeypatch, tmp_pat
             entered = False
         assert entered == ok, (now, entered)
         assert not (tmp_path / "lock").exists()  # released either way
+
+
+# ── R1 on #1083 ────────────────────────────────────────────────────────────
+
+class Clock:
+    """A clock the guards read and their waits move: `sleep` advances it."""
+
+    def __init__(self, hhmm):
+        self.t = (hhmm // 100) * 3600.0 + (hhmm % 100) * 60.0
+        self.idle_from = 0.0  # the seat is idle from this time on
+
+    def time(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+
+    def minutes(self, offset_s=0):
+        return int((self.t + offset_s) // 60) % 1440
+
+    def idle(self):
+        return 9999.0 if self.t >= self.idle_from else 0.0
+
+
+def moving(monkeypatch, tmp_path, hhmm):
+    clock = Clock(hhmm)
+    monkeypatch.setattr(run, "time", clock)
+    monkeypatch.setattr(run, "eastern_minutes", clock.minutes)
+    monkeypatch.setattr(run, "hid_idle_seconds", clock.idle)
+    monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
+    return clock
+
+
+def test_a_wait_for_an_idle_seat_that_runs_toward_five_is_refused_after_the_wait(monkeypatch, tmp_path):
+    # 16:10, a 20-minute run: fine at entry (ends 16:30). The seat goes
+    # idle at 16:45; by then the run would end at 17:05.
+    clock = moving(monkeypatch, tmp_path, 1610)
+    clock.idle_from = 16 * 3600 + 45 * 60
+    try:
+        with run.WindowLock(20 * 60, 3600):
+            entered = True
+    except SystemExit as e:
+        entered, code = False, e.code
+    assert not entered and code == 2
+    assert clock.t >= clock.idle_from, "it did wait for the seat"
+    assert not (tmp_path / "lock").exists()
+
+
+def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_path):
+    # 16:10, a 20-minute run, idle seat: the lock is given. The load wait
+    # that follows lasts until 16:45: launching now could show a window at 17:05.
+    clock = moving(monkeypatch, tmp_path, 1610)
+    with run.WindowLock(20 * 60, 0) as lock:
+        lock.clear_to_launch()  # 16:10: fine
+        clock.sleep(35 * 60)
+        try:
+            lock.clear_to_launch()
+            refused = False
+        except SystemExit:
+            refused = True
+        assert refused
+        # ... and somebody sitting down in the meantime is seen as well
+        clock.t = 9 * 3600.0
+        clock.idle_from = clock.t + 1
+        try:
+            lock.clear_to_launch()
+            refused = False
+        except SystemExit:
+            refused = True
+        assert refused
+    assert not (tmp_path / "lock").exists()
+
+
+def test_a_run_whose_wall_limit_crosses_five_is_refused_at_entry(monkeypatch, tmp_path):
+    moving(monkeypatch, tmp_path, 1610)
+    try:
+        with run.WindowLock(60 * 60, 0):
+            entered = True
+    except SystemExit:
+        entered = False
+    assert not entered and not (tmp_path / "lock").exists()
+
+
+def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
+    lsof = "p123\nn127.0.0.1:5000->127.0.0.1:6000\nn*:5353\nn192.168.1.5:50000->203.0.113.7:443\nn[::1]:1->[::1]:2\n"
+    assert run.off_machine_peers(lsof) == {"203.0.113.7:443"}
+    log = tmp_path / "app.log"
+    log.write_text("Loading URL url=http://127.0.0.1:5000/index.html\nDownloading filter list: X from https://lists.example.test/x.txt\n")
+    assert run.log_off_machine(log) == ["lists.example.test"]
+
+    class FakeSink:
+        hosts = ["CONNECT accounts.google.com", "GET fonts.example.test"]
+    seen = run.off_machine("chrome", FakeSink, [], [], None)
+    assert seen == {"sink_proxy": ["GET fonts.example.test"]}, seen  # Chrome's own host was refused, not counted
+    assert run.off_machine("hiwave", None, [], [], {"non_loopback_origins": []}) == {}
+
+
+FAKE_ENGINE = '''#!/usr/bin/env python3
+import sys, json, time, urllib.request
+url = sys.argv[sys.argv.index("--url") + 1]
+base = url.split("/index.html")[0]
+urllib.request.urlopen(url).read()
+EXTRA
+urllib.request.urlopen(urllib.request.Request(base + "/__stress/result", data=json.dumps({"score": 42.0, "metrics": {}}).encode(), method="POST")).read()
+time.sleep(30)
+'''
+
+
+def run_with_fake_engine(monkeypatch, tmp_path, extra):
+    suite = tmp_path / "suite"
+    suite.mkdir(parents=True)
+    (suite / "index.html").write_text("<!doctype html><html><head></head><body></body></html>")
+    engine = tmp_path / "engine.py"
+    engine.write_text(FAKE_ENGINE.replace("EXTRA", extra))
+    engine.chmod(0o755)
+    monkeypatch.setattr(run, "check_pin", lambda s: (suite, {"version": "t", "sha": "0" * 40}))
+    monkeypatch.setattr(run, "wait_for_load", lambda limit, wait: True)
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "speedometer", "--engine", "hiwave-headless",
+                                      "--binary", str(engine), "--label", "fake", "--out", str(out), "--timeout", "20"])
+    code = run.main()
+    return code, json.loads(next(out.glob("*.json")).read_text())
+
+
+def test_an_offline_run_is_ok_and_one_that_left_the_machine_is_invalid(monkeypatch, tmp_path):
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "clean", "")
+    assert (code, rec["status"], rec["score"], rec["off_machine"]) == (0, "ok", 42.0, {}), rec
+    # The engine's log names a URL that is not this machine: the run is
+    # invalid, exits non-zero, and its score is kept apart.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "leaky",
+                                     'print("Loading image url=https://cdn.example.test/a.png", flush=True)')
+    assert code == 1 and rec["status"] == "invalid" and rec["score"] is None and rec["discarded_score"] == 42.0, rec
+    assert rec["off_machine"] == {"engine_log_urls": ["cdn.example.test"]}, rec
+
+
+def test_a_real_window_run_refuses_when_the_app_would_download_its_filter_lists(monkeypatch, tmp_path):
+    monkeypatch.setattr(run, "FILTER_LISTS", tmp_path / "no-such-cache")
+    assert run.seed_filter_lists(tmp_path / "profile") == 0
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "easylist.txt").write_text("||ads.example.test^\n")
+    monkeypatch.setattr(run, "FILTER_LISTS", cache)
+    assert run.seed_filter_lists(tmp_path / "profile") == 1
+    assert (tmp_path / "profile/Library/Application Support/hiwave/filter-lists/easylist.txt").is_file()
+
+
+def test_compare_is_not_a_pass_when_it_compared_nothing(tmp_path):
+    record(tmp_path, "speedometer", "base", 100.0, 0)
+    record(tmp_path, "speedometer", "cand", 100.0, 0)
+    p = subprocess.run([sys.executable, str(HERE / "report.py"), "--compare", "base", "cnad", str(tmp_path)], capture_output=True, text=True)
+    assert p.returncode == 1 and "candidate did not" in p.stdout, p.stdout  # the base has runs, the typo has none
+    p = subprocess.run([sys.executable, str(HERE / "report.py"), "--compare", "bsae", "cnad", str(tmp_path)], capture_output=True, text=True)
+    assert p.returncode == 2 and "nothing to compare" in p.stderr, (p.stdout, p.stderr)
+
+
+def test_a_base_without_a_score_or_discarded_for_load_is_a_finding(tmp_path):
+    record(tmp_path, "speedometer", "base", None, 0, status="hung")
+    record(tmp_path, "speedometer", "cand", 100.0, 0)
+    record(tmp_path, "motionmark", "base", 100.0, 0, load=4.0)  # the base's only run started under load
+    record(tmp_path, "motionmark", "cand", 100.0, 0)
+    code, rows = compare(tmp_path)
+    assert code == 1
+    assert rows["speedometer"]["verdict"].startswith("NO BASE SCORE") and rows["motionmark"]["verdict"].startswith("NO BASE SCORE"), rows
+
+
+def test_both_arms_need_the_same_n_and_a_candidate_run_that_failed_is_a_finding(tmp_path):
+    for i in range(3):
+        record(tmp_path, "speedometer", "base", 100.0, i)
+        record(tmp_path, "jetstream", "base", 100.0, i)
+    for i in range(2):
+        record(tmp_path, "speedometer", "cand", 100.0, i)  # N 3 against 2
+        record(tmp_path, "jetstream", "cand", 100.0, i)
+    record(tmp_path, "jetstream", "cand", None, 2, status="hung")  # 3 runs, one did not finish
+    code, rows = compare(tmp_path)
+    assert code == 1
+    assert rows["speedometer"]["verdict"].startswith("UNEQUAL N"), rows["speedometer"]
+    assert rows["jetstream"]["verdict"].startswith("CANDIDATE FAILED 1 OF 3"), rows["jetstream"]
+
+
+def test_the_pin_check_does_not_read_a_git_failure_as_clean(monkeypatch, tmp_path):
+    (tmp_path / "Speedometer" / ".git").mkdir(parents=True)  # a directory git cannot read as a repository
+    monkeypatch.setattr(run, "SUITES_DIR", tmp_path)
+    try:
+        run.check_pin("speedometer")
+        refused = ""
+    except SystemExit as e:
+        refused = str(e.code)
+    assert "git could not read" in refused, refused

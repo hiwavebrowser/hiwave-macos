@@ -27,7 +27,9 @@ page; the suite on disk is not edited). Output: one JSON file per run in
 --out (default ~/zg-measure/stress-runs), read by report.py.
 
 Exit code: 0 a score was read, 1 the suite did not finish (failed, hung,
-crashed, timed out), 2 the run could not start.
+crashed, timed out) or the run was not offline (`invalid`: something was
+seen leaving this machine, and the score is dropped), 2 the run could not
+start.
 """
 import argparse
 import datetime
@@ -234,6 +236,88 @@ class Sink:
                 conn.close()
 
 
+class SocketWatch:
+    """What a HiWave process is connected to, sampled once a second with
+    `lsof -i`: any TCP or UDP peer that is not this machine is recorded.
+    This is how the real-window arm is observed (the app has no network
+    log to read and no offline switch). A connection that opens and closes
+    between two samples is not seen; the app log's URLs are scanned too
+    (`log_off_machine`), and headless runs also have the engine's event log
+    when they are left to write it."""
+
+    def __init__(self, interval=1.0):
+        self.pids, self.interval, self.peers, self.samples, self.stop = [], interval, set(), 0, threading.Event()
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
+
+    def add(self, pid):
+        """Watch `pid` too (the app is started twice: once to write its
+        first-run state, once on the runner page)."""
+        self.pids.append(pid)
+
+    def loop(self):
+        while not self.stop.is_set():
+            for pid in list(self.pids):
+                try:
+                    out = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-i", "-Fn"],
+                                         capture_output=True, text=True, timeout=10).stdout
+                except (OSError, subprocess.TimeoutExpired):
+                    out = ""
+                self.samples += 1
+                self.peers.update(off_machine_peers(out))
+            self.stop.wait(self.interval)
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=12)
+        return sorted(self.peers)
+
+
+def is_loopback(host):
+    host = host.strip("[]").lower()
+    return host in ("localhost", "::1", "0:0:0:0:0:0:0:1") or host.startswith("127.")
+
+
+def off_machine_peers(lsof_names):
+    """Remote ends that are not loopback, from `lsof -Fn` name lines
+    (`n127.0.0.1:50000->93.184.216.34:443`)."""
+    peers = set()
+    for line in lsof_names.splitlines():
+        if not line.startswith("n") or "->" not in line:
+            continue
+        remote = line.split("->", 1)[1]
+        host = remote.rsplit(":", 1)[0]
+        if not is_loopback(host):
+            peers.add(remote)
+    return peers
+
+
+def log_off_machine(path):
+    """Hosts of http(s) URLs in the engine's log that are not loopback."""
+    try:
+        text = pathlib.Path(path).read_text(errors="replace")
+    except OSError:
+        return []
+    hosts = {m.group(1) for m in re.finditer(r"https?://(\[[0-9a-fA-F:]+\]|[^/:\s\"']+)", text)}
+    return sorted(h for h in hosts if not is_loopback(h))
+
+
+def off_machine(engine, sink, watch_peers, log_hosts, events):
+    """Everything this run saw leave the machine, by how it was seen."""
+    seen = {}
+    if sink is not None:
+        page = [h for h in sorted(set(sink.hosts)) if h.split(" ")[-1] not in CHROME_OWN_HOSTS]
+        if page:
+            seen["sink_proxy"] = page
+    if watch_peers:
+        seen["sockets"] = list(watch_peers)
+    if log_hosts:
+        seen["engine_log_urls"] = list(log_hosts)
+    if events and events.get("non_loopback_origins"):
+        seen["event_log_origins"] = list(events["non_loopback_origins"])
+    return seen
+
+
 # ── guards ─────────────────────────────────────────────────────────────────
 
 def wait_for_load(limit, wait_s):
@@ -282,22 +366,40 @@ class WindowLock:
                         sys.exit(2)
                     time.sleep(10)
         try:
-            # Neither the start nor the latest possible end may fall in the
-            # quiet window, and the run may not span it.
-            start, end = eastern_minutes(), eastern_minutes() + self.limit_s / 60.0
-            if start < QUIET[1] and end >= QUIET[0]:
-                raise SystemExit("a window could be up between 17:00 and 19:30 ET; not run")
+            self.check_quiet()  # before waiting: no point holding the lock
             end = time.time() + self.wait_s
             while hid_idle_seconds() < MIN_IDLE_S:
                 if time.time() >= end:
                     raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
                                      % (hid_idle_seconds(), MIN_IDLE_S))
                 time.sleep(15)
+            self.check_quiet()  # the wait moved the clock
         except SystemExit as e:
             self.__exit__()
             print(e, file=sys.stderr)
             sys.exit(2)
         return self
+
+    def check_quiet(self):
+        """Refuse when a window could be up between 17:00 and 19:30 ET:
+        now is inside the quiet window, or the run's latest possible end
+        (now + its wall limit) reaches 17:00. Read from the clock at the
+        time of the call, so it is asked again after every wait."""
+        start = eastern_minutes()
+        end = start + self.limit_s / 60.0
+        if start < QUIET[1] and end >= QUIET[0]:
+            raise SystemExit("a window could be up between 17:00 and 19:30 ET "
+                             "(now %02d:%02d ET, the run may last %d min); not run"
+                             % (start // 60, start % 60, self.limit_s // 60))
+
+    def clear_to_launch(self):
+        """The last check, immediately before the window goes up: the
+        waits since the lock was taken (idle seat, load) may have run into
+        the quiet window, and someone may have sat down."""
+        self.check_quiet()
+        if hid_idle_seconds() < MIN_IDLE_S:
+            raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
+                             % (hid_idle_seconds(), MIN_IDLE_S))
 
     def __exit__(self, *exc):
         if self.held:
@@ -312,11 +414,18 @@ class NoLock:
     def __enter__(self):
         return self
 
+    def clear_to_launch(self):
+        pass
+
     def __exit__(self, *exc):
         pass
 
 
 # ── engines ────────────────────────────────────────────────────────────────
+
+class NotOffline(Exception):
+    """The run cannot be made without leaving this machine."""
+
 
 class Proc:
     """A process this run started; stop() ends that pid and nothing else."""
@@ -341,16 +450,41 @@ class Proc:
         return self.proc.returncode
 
 
-def start_hiwave(binary, url, work, extra_env):
+FILTER_LISTS = pathlib.Path(os.environ.get(
+    "STRESS_FILTER_LISTS", pathlib.Path.home() / "Library" / "Application Support" / "hiwave" / "filter-lists"))
+
+
+def seed_filter_lists(profile):
+    """On a profile with no fresh filter-list cache the app downloads
+    EasyList and EasyPrivacy at start-up (hiwave-shield `filter_lists.rs`):
+    two off-machine requests before the suite has begun. Give the throwaway
+    profile this machine's cached copies (public lists, nothing personal),
+    dated now so the app takes them as fresh. Returns how many it copied."""
+    dest = profile / "Library" / "Application Support" / "hiwave" / "filter-lists"
+    copied = 0
+    if FILTER_LISTS.is_dir():
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in FILTER_LISTS.iterdir():
+            if f.is_file() and f.stat().st_size > 0:
+                shutil.copyfile(f, dest / f.name)  # copyfile: the copy's mtime is now
+                copied += 1
+    return copied
+
+
+def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     """As tools/real_window/driver.py does: let the app write its own
     first-run state under a throwaway $HOME, point the restored tab at
-    `url`, start again."""
+    `url`, start again. `on_pid` is told each process it starts."""
     import driver as rw
     profile = work / "profile"
     profile.mkdir(parents=True)
+    if seed_filter_lists(profile) == 0:
+        raise NotOffline("no cached filter lists under %s: the app's first launch would download them. "
+                         "Start HiWave once on this machine, or point STRESS_FILTER_LISTS at a copy" % FILTER_LISTS)
     env = {"HIWAVE_TEST_HOOKS": "0"}
     env.update(extra_env)
     seed = rw.App(binary, profile, work / "seed.log", env).start()
+    on_pid(seed.proc.pid)
     end = time.time() + 20
     while time.time() < end and seed.alive() and not seed.state_file.is_file():
         time.sleep(0.1)
@@ -364,6 +498,7 @@ def start_hiwave(binary, url, work, extra_env):
     app = rw.App(binary, profile, work / "app.log", env)
     app.state_file.write_text(json.dumps(state))
     app.start()
+    on_pid(app.proc.pid)
 
     class Handle:
         log_path = work / "app.log"
@@ -421,8 +556,13 @@ def check_pin(suite):
     d = SUITES_DIR / pin["dir"]
     if not (d / ".git").is_dir():
         sys.exit("no checkout at %s; run tools/stress/fetch.sh" % d)
-    head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(d), "status", "--porcelain"], capture_output=True, text=True).stdout.strip()
+    rev = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True)
+    st = subprocess.run(["git", "-C", str(d), "status", "--porcelain"], capture_output=True, text=True)
+    if rev.returncode != 0 or st.returncode != 0:
+        # An answer git could not give is not "clean and on its pin".
+        sys.exit("git could not read %s (rev-parse %d, status %d): %s"
+                 % (d, rev.returncode, st.returncode, (rev.stderr or st.stderr).strip()[:300]))
+    head, dirty = rev.stdout.strip(), st.stdout.strip()
     if head != pin["sha"] or dirty:
         sys.exit("%s is not on its pin (head %s, pin %s%s); run tools/stress/fetch.sh"
                  % (d, head[:12], pin["sha"][:12], ", dirty" if dirty else ""))
@@ -554,6 +694,7 @@ def main():
     visible = args.engine == "hiwave" or (args.engine == "chrome" and args.headed)
     sink = Sink() if args.engine == "chrome" else None
     handle = None
+    watch, watch_peers = None, []
     status, exit_code = "not-started", None
 
     def bail(signum, frame):
@@ -564,21 +705,39 @@ def main():
     load_before = os.getloadavg()
     started = time.time()
     try:
-        with (WindowLock(limit + 60, args.lock_wait) if visible else NoLock()):
+        with (WindowLock(limit + 60, args.lock_wait) if visible else NoLock()) as lock:
             try:
+                refused = None
                 if not wait_for_load(max_load, args.load_wait):
-                    print("load rose to %.1f while waiting for the window; not run" % os.getloadavg()[0], file=sys.stderr)
+                    refused = "load rose to %.1f while waiting for the window" % os.getloadavg()[0]
+                else:
+                    try:
+                        lock.clear_to_launch()
+                    except SystemExit as e:
+                        refused = str(e)
+                if refused:
+                    print("%s; not run" % refused.replace("; not run", ""), file=sys.stderr)
                     httpd.shutdown()
                     shutil.rmtree(work, ignore_errors=True)
                     sys.exit(2)  # the lock is released on the way out
                 load_before = os.getloadavg()
                 started = time.time()
                 record.t0 = record.last = started
+                if args.engine != "chrome":
+                    watch = SocketWatch()
                 if args.engine == "hiwave":
-                    handle = start_hiwave(binary, url, work, extra_env)
+                    try:
+                        handle = start_hiwave(binary, url, work, extra_env, watch.add)
+                    except NotOffline as e:
+                        print("%s; not run" % e, file=sys.stderr)
+                        watch.close()
+                        httpd.shutdown()
+                        shutil.rmtree(work, ignore_errors=True)
+                        sys.exit(2)
                     record.t0 = record.last = started = time.time()
                 elif args.engine == "hiwave-headless":
                     handle = start_headless(binary, url, work, limit, extra_env)
+                    watch.add(handle.proc.pid)
                 else:
                     handle = start_chrome(binary, url, work, args.headed, sink)
                 status = "running"
@@ -607,6 +766,8 @@ def main():
             except KeyboardInterrupt:
                 status = "interrupted"
             finally:
+                if watch is not None:
+                    watch_peers = watch.close()
                 if handle is not None:
                     exit_code = handle.stop()
     finally:
@@ -618,6 +779,15 @@ def main():
     if status == "ok" and score is None:
         status = "failed"
     findings, tail = log_findings(work / "app.log") if handle is not None else ([], "")
+    # Offline is a condition of the run, not a note on it: anything seen
+    # leaving this machine makes the run invalid and its score is dropped.
+    events = headless_events(work / "events.jsonl") if args.engine == "hiwave-headless" else None
+    log_hosts = sorted(set(log_off_machine(work / "app.log") + log_off_machine(work / "seed.log"))) \
+        if args.engine != "chrome" else []
+    left = off_machine(args.engine, sink, watch_peers, log_hosts, events)
+    discarded_score = None
+    if left:
+        status, discarded_score, score = "invalid", score, None
     run = {
         "schema": 1,
         "suite": args.suite,
@@ -649,21 +819,26 @@ def main():
         "not_found": record.not_found,
         "done_get_score": record.done_score,
         "log_findings": findings,
+        "off_machine": left,
+        "discarded_score": discarded_score,
+        "offline_checks": (["sink_proxy"] if sink is not None else
+                           ["sockets (%d samples)" % (watch.samples if watch else 0), "engine_log_urls"]
+                           + (["event_log_origins"] if events else [])),
         "host": {"cpus": os.cpu_count(), "machine": os.uname().machine, "os": os.uname().release},
     }
     if status not in ("ok",):
         run["log_tail"] = tail
     if sink is not None:
         # Chrome asks these for itself (sign-in, component updates, autofill)
-        # whatever page is open; the sink refused them too. Anything else is
-        # the page's and is a finding.
-        seen = sorted(set(sink.hosts))
-        run["browser_own_requests"] = [h for h in seen if h.split(" ")[-1] in CHROME_OWN_HOSTS]
-        run["non_loopback_requests"] = [h for h in seen if h.split(" ")[-1] not in CHROME_OWN_HOSTS]
+        # whatever page is open. The sink refused them, so they did not
+        # leave the machine either; anything else it saw is the page's.
+        run["browser_own_requests"] = [h for h in sorted(set(sink.hosts)) if h.split(" ")[-1] in CHROME_OWN_HOSTS]
     if args.engine == "hiwave-headless":
-        run["headless_events"] = headless_events(work / "events.jsonl")
+        run["headless_events"] = events
     path = out / (name + ".json")
     path.write_text(json.dumps(run, indent=1) + "\n")
+    if left:
+        print("INVALID: this run was not offline: %s" % json.dumps(left), file=sys.stderr)
     if args.keep or status != "ok":
         keep = out / (name + ".work")
         for f in ("app.log", "seed.log", "events.jsonl"):

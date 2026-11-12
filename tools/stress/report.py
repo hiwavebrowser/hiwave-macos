@@ -14,8 +14,11 @@ started at a 1-minute load of 3 or more is discarded (the `disc` column).
 labels have scores for: the candidate regresses when its median is below the
 base's median by more than max(FLOOR %, the base's own min-max spread %).
 FLOOR defaults to 3 (--floor). Higher is better for all three suites. Exit
-code 1 when any suite regresses, or when the base scored and the candidate
-did not.
+code 0 only when every suite either label has runs for was compared and
+came out within noise or improved. Exit code 1 for any finding: a
+regression, a base without a score, a candidate without one, a candidate
+that failed any of its runs, or a different N on the two arms. Exit code 2
+when nothing was compared at all (a mistyped label).
 
 This report is its own: it is not part of the chrome board, RS1, WPT or the
 parity campaign.
@@ -124,29 +127,38 @@ def main():
 
     base, cand = args.compare
     rows, bad = [], False
-    for suite, engine in sorted({(k[0], k[1]) for k in table}):
-        b, c = table.get((suite, engine, base)), table.get((suite, engine, cand))
-        if not b and not c:
-            continue
+    empty = {"n": 0, "n_ok": 0, "not_ok": [], "discarded": 0}
+    for suite, engine in sorted({(k[0], k[1]) for k in table if k[2] in (base, cand)}):
+        b, c = table.get((suite, engine, base)) or empty, table.get((suite, engine, cand)) or empty
         row = {"suite": suite, "engine": engine, "base": b, "cand": c}
-        if not b or "median" not in b:
-            row["verdict"] = "NO BASE SCORE"
-        elif not c or "median" not in c:
+        # Every way a pair can fail to be a clean comparison is a finding:
+        # only "within noise" and "improved" leave the exit code at 0.
+        if "median" not in b:
+            row["verdict"] = "NO BASE SCORE (%d runs, %d discarded for load)" % (b["n"], b["discarded"])
+        elif "median" not in c:
             row["verdict"] = "REGRESSION (base scored, candidate did not)"
-            bad = True
+        elif c["n_ok"] < c["n"]:
+            row["verdict"] = "CANDIDATE FAILED %d OF %d RUNS (%s)" % (c["n"] - c["n_ok"], c["n"], ",".join(c["not_ok"]))
+        elif b["n_ok"] != c["n_ok"]:
+            row["verdict"] = "UNEQUAL N (base %d, candidate %d)" % (b["n_ok"], c["n_ok"])
         else:
             row["delta_pct"] = (c["median"] - b["median"]) / b["median"] * 100
             row["threshold_pct"] = max(args.floor, b["spread_pct"])
             if row["delta_pct"] < -row["threshold_pct"]:
                 row["verdict"] = "REGRESSION"
-                bad = True
             elif row["delta_pct"] > row["threshold_pct"]:
                 row["verdict"] = "improved"
             else:
                 row["verdict"] = "within noise"
-            if c["n_ok"] < c["n"] or b["n_ok"] < b["n"]:
-                row["verdict"] += " (some runs did not finish)"
+        row["finding"] = row["verdict"] not in ("improved", "within noise")
+        bad = bad or row["finding"]
         rows.append(row)
+    if not rows:
+        # A mistyped label compares nothing; nothing compared is not a pass.
+        print("nothing to compare: no %sruns labelled %r or %r under %s (labels there: %s)"
+              % ("partial " if args.partial else "", base, cand, ", ".join(args.dirs),
+                 ", ".join(sorted({k[2] for k in table})) or "none"), file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(rows, indent=1))
         return 1 if bad else 0

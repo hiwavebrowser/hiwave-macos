@@ -85,9 +85,10 @@ One JSON file per run in `--out` (default `~/zg-measure/stress-runs`):
 `score`, `sub_scores`, `wall_s`, `load_avg_before`/`after`, `errors` (what
 the page threw or logged with `console.error`), `last_progress`,
 `log_findings` (lines of the app's log that say a script was stopped or the
-process died) and, when the run did not finish, `log_tail`.
+process died), `off_machine`, `offline_checks` and, when the run did not
+finish, `log_tail`.
 
-`status`: `ok` (a score was read), `failed` (the suite itself reported a
+`status`: `ok` (a score was read), `invalid` (the run was not offline), `failed` (the suite itself reported a
 failure), `hung` (nothing from the page for `--stall` seconds), `timeout`,
 `exited` (the engine process ended first), `interrupted`.
 
@@ -98,20 +99,34 @@ the per-benchmark scores in its `/report` body.
 
 ## Offline
 
-A run makes no request off this machine:
+Offline is a condition of a run, not a note on it. Anything seen leaving
+this machine ends the run as `invalid`: exit code 1, `score` null (what it
+read is kept as `discarded_score`), and `off_machine` says what was seen and
+how. How each engine is observed:
 
-- the suites reference no external URL from their runner pages or workloads
-  at these pins (checked by running them: see below);
-- `chrome` runs go through a local sink proxy that refuses and records every
-  non-loopback request. `non_loopback_requests` must be empty.
-  `browser_own_requests` lists what Chrome asked for itself (sign-in,
-  component update, autofill hosts), which the sink refused too;
-- `hiwave-headless --until-exit` runs list every request origin from the
-  engine's event log in `headless_events.request_origins`;
-  `non_loopback_origins` must be empty.
+- **chrome**: every non-loopback request goes to a local sink proxy that
+  refuses and records it. What Chrome asks for itself whatever page is open
+  (sign-in, component update, autofill hosts) is listed apart in
+  `browser_own_requests`: the sink refused those too, so they did not leave
+  the machine. Anything else the sink saw is the page's and invalidates.
+- **hiwave** (real window) and **hiwave-headless**: the app has no offline
+  switch and no network log to read, so the process is watched from
+  outside: its sockets are sampled once a second (`lsof -i`) for a peer
+  that is not loopback, and every `http(s)` URL in its log is checked.
+  Limit: a connection that opens and closes between two samples and is not
+  logged would be missed. Headless runs left to finish (`--until-exit`)
+  also check every request origin in the engine's event log.
+- **the app's own start-up**: on a profile with no fresh filter-list cache
+  HiWave downloads EasyList and EasyPrivacy when it starts. `run.py` gives
+  its throwaway profile this machine's cached copies
+  (`~/Library/Application Support/hiwave/filter-lists`, or
+  `$STRESS_FILTER_LISTS`; public lists, nothing personal) so no request is
+  made, and refuses to start (exit 2) when there is no cache to copy. Both
+  launches of the app (the one that writes its first-run state and the one
+  on the runner page) are watched.
 
-The real-window app is not covered by either check: what the app itself asks
-for at start-up is outside this harness.
+The suites themselves reference no off-machine subresource at these pins
+(0 `script`/`img`/`link`/`iframe` tags with an absolute URL).
 
 ## Headless or window
 
@@ -128,6 +143,14 @@ of record is the real window's. Do not mix engines in one comparison:
 
 `report.py --compare BASE CAND`: the candidate regresses when its median is
 below the base's median by more than `max(3 %, the base's min-max spread)`,
-both at the same N on the same machine in the same session. A suite the base
-scores and the candidate does not is a regression. A regression is a landing
-finding, read before it is rerun.
+both at the same N on the same machine in the same session. Exit code 0
+only when every suite either label has runs for was compared and came out
+within noise or improved. Every other outcome is a finding and exits 1: a
+regression, a base with no score (none ran, none finished, or all were
+discarded for load), a candidate with no score, a candidate that failed
+any of its runs, a different N on the two arms. Nothing compared at all (a
+mistyped label) exits 2. A finding is read before it is rerun.
+
+Real-window runs also re-check the 17:00-19:30 ET window after every wait
+(idle seat, load) and once more immediately before the app starts, and
+refuse when now plus the run's wall limit reaches 17:00.
