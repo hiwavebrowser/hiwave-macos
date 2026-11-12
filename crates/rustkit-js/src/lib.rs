@@ -597,6 +597,14 @@ impl JsRuntime {
         let blobs = bytes::Blobs::default();
         #[cfg(feature = "boa")]
         let host = host_object(&diag, &byte_stash, &blobs, &mut context);
+        // One object every realm's host object holds as `shared`:
+        // what the documents of a frame tree must agree on (which events
+        // are the engine's) is kept there, not once per realm.
+        #[cfg(feature = "boa")]
+        {
+            let shared = boa_engine::object::ObjectInitializer::new(&mut context).build();
+            let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut context);
+        }
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -660,6 +668,9 @@ impl JsRuntime {
             let console = self.setup_console();
             // The new realm's own host object, made in it.
             let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &mut self.context);
+            if let Ok(shared) = self.host.get(boa_engine::js_string!("shared"), &mut self.context) {
+                let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut self.context);
+            }
             self.realm_hosts.push(Some(host));
             self.enter_realm(outer);
             console?;

@@ -2731,8 +2731,15 @@ const WRAPPERS_JS: &str = r#"
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
-    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
-    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    // The documents of a frame tree share these (`__rk.shared` is
+    // one object for every realm of the runtime): an event made in one
+    // window and dispatched in another is stamped once, and reads the same.
+    var SHARED = __rk.shared || {};
+    var TRUSTED = SHARED.trusted || (SHARED.trusted = new WeakSet()),
+        UNDISPATCHED = SHARED.undispatched || (SHARED.undispatched = new WeakSet()),
+        STAMPED = SHARED.stamped || (SHARED.stamped = new WeakSet());
+    var TRUST_GET = SHARED.trustGet || (SHARED.trustGet =
+        Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get);
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
     // for an object that will not take it.
