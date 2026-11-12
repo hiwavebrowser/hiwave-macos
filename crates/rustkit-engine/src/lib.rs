@@ -6275,17 +6275,20 @@ impl Engine {
             let listed = child.evaluate_named(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
-                   return [s.getAttribute('src'), s.textContent, t === '' || /javascript|ecmascript/.test(t)]; }))",
+                   return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
                 "rustkit#frames",
             );
-            let scripts: Vec<(Option<String>, String, bool)> = match listed {
+            let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
                 _ => Vec::new(),
             };
-            for (index, (src, text, classic)) in scripts.into_iter().enumerate() {
-                if !classic {
+            // Module scripts are deferred: after the classic ones, in order.
+            let mut modules: Vec<(String, String)> = Vec::new();
+            for (index, (src, text, kind)) in scripts.into_iter().enumerate() {
+                if kind.is_empty() {
                     continue;
                 }
+                let is_module = kind == "module";
                 let (source, name) = match src {
                     Some(src) => {
                         let Ok(url) = target.join(&src) else { continue };
@@ -6298,10 +6301,56 @@ impl Engine {
                             _ => continue,
                         }
                     }
+                    None if is_module => (text, format!("{target}#inline-module-{}", index + 1)),
                     None => (text, format!("frame-inline#{}", index + 1)),
                 };
+                if is_module {
+                    modules.push((name, source));
+                    continue;
+                }
                 if let Err(e) = child.evaluate_named(&source, &name) {
                     debug!(error = %e, "frames: a child script threw");
+                }
+            }
+            if !modules.is_empty() {
+                // The module map and base are the runtime's: the frame's
+                // graph is loaded with the frame's URL as base, then the
+                // page's base is put back.
+                child.set_module_base(target.as_str());
+                for (url, source) in modules {
+                    let Ok(handle) = child.begin_module(&url, &source) else { continue };
+                    for _ in 0..64 {
+                        let wanted = child.take_module_requests();
+                        if wanted.is_empty() {
+                            break;
+                        }
+                        for requested in wanted {
+                            let outcome = match Url::parse(&requested) {
+                                Ok(u) if u.origin() == target.origin() => {
+                                    match loader.fetch(referrer.get_for(u.clone(), RequestDestination::Script)).await {
+                                        Ok(response) if response.ok() => {
+                                            let final_url = response.url.to_string();
+                                            response
+                                                .text()
+                                                .await
+                                                .map(|source| rustkit_js::FetchedModule { final_url, source })
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        Ok(response) => Err(format!("status {}", response.status.as_u16())),
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                }
+                                _ => Err("not same-origin with the frame".to_string()),
+                            };
+                            child.supply_module(&requested, outcome);
+                        }
+                    }
+                    if let rustkit_js::ModuleState::Failed(why) | rustkit_js::ModuleState::Threw(why) = child.poll_module(&handle) {
+                        debug!(module = %url, %why, "frames: a child module did not run");
+                    }
+                }
+                if let Some(page) = &page_url {
+                    child.set_module_base(page.as_str());
                 }
             }
             if let Some(frame) = self.views.get_mut(&fid) {
