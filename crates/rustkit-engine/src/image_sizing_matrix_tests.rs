@@ -29,9 +29,6 @@ const READ: &str = "Array.prototype.map.call(document.querySelectorAll('img'), f
 /// `box` or `nat`). A listed cell that starts to match fails the test, so
 /// the list cannot go stale.
 const GAPS: &[&str] = &[
-    // `sizes="calc(...)"` is not evaluated: the slot falls back to 100vw.
-    "matrix@1:m3:box",
-    "matrix@2:m3:box",
     // An `<img>` flex item's height does not follow its flexed or
     // stretched width through the image's ratio. a7 is the column case
     // with `width="300"` and `height: auto`: 300x200, the natural height,
