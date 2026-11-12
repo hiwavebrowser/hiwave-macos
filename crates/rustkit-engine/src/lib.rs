@@ -1318,32 +1318,13 @@ const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_s
 /// already the story.
 const MAX_PENDING_INPUTS: usize = 256;
 
-struct ViewState {
-    /// What the last wheel moved, while a run of wheels holds to it.
-    wheel_gesture: Option<WheelGesture>,
-    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
-    /// the release.
-    scrollbar_drag: Option<ScrollbarDrag>,
-    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
-    scrollbar_hover: Option<WheelTarget>,
-    /// CH2.E7: the element a press on a styled scrollbar went to (the
-    /// scroller, or the root element for the viewport's bar). Until the
-    /// release, the press's mouse events target it, and the release fires
-    /// no `click` (Chrome).
-    scrollbar_pressed: Option<usize>,
-    id: EngineViewId,
-    /// Counts the display lists this view has been given.
-    frame_generation: u64,
-    presented: Option<PresentedFrame>,
-    /// Counts the frames this view has presented (a diagnostic: the threads
-    /// plan's per-view frame count; the tests read it to see how many draws
-    /// one input cost).
-    frames_presented: u64,
-    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
-    /// document the app loads into such a view (`load_html`) gets the app
-    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
-    app_owned: bool,
-    viewhost_id: ViewId,
+/// What a view holds for the document it shows: the document, its script
+/// bindings, style and layout data, display list, scroll position and the
+/// bookkeeping of its load. Split out of [`ViewState`] (Stage 0 of the
+/// nested-browsing-contexts plan) so that a nested document can own one
+/// too. A pure move: no field changed name, type or meaning, and
+/// `ViewState` derefs to it, so `view.document` reads as before.
+struct DocState {
     url: Option<Url>,
     title: Option<String>,
     /// The HTTP status the view's document came with; None for a document
@@ -1363,19 +1344,6 @@ struct ViewState {
     /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
     display_list: Option<Arc<DisplayList>>,
-    /// The element the developer tools outline on this page
-    /// (`Engine::devtools_highlight`), drawn over the display list.
-    devtools_highlight: Option<usize>,
-    /// The inputs the view took since its last commit
-    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
-    /// the next commit for the input-to-present log (LAT1c), or are
-    /// counted `no_frame` when their turn changed no frame.
-    input_pending: Vec<InputMark>,
-    /// Inputs since the last commit that presented no frame of their own.
-    inputs_unpresented: u32,
-    /// The host of the view's current visit, as `wgate::begin_visit` was
-    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
-    visit_host: Arc<str>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The canvases of the page's bindings, held apart from them: the
@@ -1386,36 +1354,6 @@ struct ViewState {
     /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
     /// not change is not painted again.
     canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
-    /// The view's stop state: the interrupt word another thread (the
-    /// watchdog, later the user's Stop) sets to end its running script.
-    /// Lives as long as the view; each new document's bindings get it.
-    control: Arc<rustkit_js::ViewControl>,
-    navigation: NavigationStateMachine,
-    /// This view's newest navigation (threads plan M3b): one more for each
-    /// `load_url` or `load_html`, never for Stop. A load captures it before
-    /// its first await and re-checks it, and the view's cancel watermark
-    /// (`ViewControl::cancel_nav`), at every await and between its scripts
-    /// and subresource phases. A newer navigation, `Engine::stop` or a
-    /// [`NavCanceller`] on another thread makes the load stale, and a stale
-    /// load abandons without touching view state.
-    ///
-    /// Fetches still out when a load is cancelled are dropped with the
-    /// load's future; their responses never reach the engine.
-    nav_id: u64,
-    /// Wakes a load waiting on the network when its navigation is
-    /// cancelled from another thread ([`NavCanceller`]).
-    nav_signal: Arc<tokio::sync::Notify>,
-    /// The decode pool's key (D1): a decode that comes back with an older
-    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
-    /// with every new `nav_id` and also on every Stop and observed cancel,
-    /// so Stop on a loaded page still drops the decodes it has out while
-    /// later images on the same document (and `nav_id`) decode normally.
-    decode_epoch: u64,
-    #[allow(dead_code)]
-    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
-    /// A listener cancelled the `pointerdown` of the press in progress:
-    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
-    compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
     /// What the script writes flushed for the next relayout could restyle
@@ -1426,15 +1364,6 @@ struct ViewState {
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
-    /// CH2.E22: the last focus the user moved was moved by the pointer
-    /// (Chromium's last focus type): script's focus then matches
-    /// `:focus-visible` only on a control that takes typed text. False
-    /// until the first, and after a focus moved from the keyboard. Kept
-    /// across documents, as Chromium keeps it per page.
-    focus_by_pointer: bool,
-    /// CH2.E22: the focused button a Space keydown went to; its keyup
-    /// clicks it.
-    space_armed: Option<usize>,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -1442,41 +1371,9 @@ struct ViewState {
     /// What the last full layout was built with: the chains and the view's
     /// size (`Engine::repaint_restyled`).
     laid_with: Option<LaidWith>,
-    /// Where the pointer was at its last move, in viewport coordinates.
-    pointer_at: Option<(f32, f32)>,
-    /// The frame (`frame_generation`, scroll offset) the hovered chain was
-    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
-    /// moved since hit-tests the still pointer again.
-    hover_hit_at: Option<(u64, (f32, f32))>,
-    /// The primary button is held: between a press and its release.
-    primary_button_down: bool,
-    /// The element the press in progress landed on (raw NodeId).
-    press_target: Option<usize>,
     /// The document selection as the engine paints it (`selection.rs`),
     /// and the drag that is moving it.
     doc_selection: Option<selection::DocSelection>,
-    select_drag: Option<selection::SelectDrag>,
-    /// Which press of a multi-click the button went down for (1 single,
-    /// 2 double...): the release fires `dblclick` after the second.
-    press_clicks: u32,
-    /// The click count the press or release being dispatched reports as
-    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
-    event_clicks: u32,
-    /// What the window was last told about the pointer: the cursor and
-    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
-    hover_reported: Option<HoverFeedback>,
-    /// HTML drag and drop: the press's drag candidate, or the drag in
-    /// progress (drag_drop.rs).
-    drag: drag_drop::DragState,
-    /// The press in progress has had its say on the focus (it moved it, or
-    /// a listener cancelled the press): the release leaves the focus alone.
-    press_settled_focus: bool,
-    /// Whether the view itself has focus.
-    view_focused: bool,
-    /// The view host said the view lost the system focus and has not said
-    /// it came back: `document.hasFocus()` is false. A view that was never
-    /// told either way (a headless one) reads as focused.
-    view_blurred: bool,
     /// Current scroll offset (x, y) in pixels.
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
@@ -1491,15 +1388,6 @@ struct ViewState {
     /// with no sheets was cascaded in full and then thrown away.
     /// `load_subresources` takes this and lays out even if every sheet failed.
     initial_layout_deferred: bool,
-    /// Headless bounds (only set for headless views, None for window-based views).
-    headless_bounds: Option<Bounds>,
-    /// Bounds the view was given since its last layout (`set_view_bounds`):
-    /// the next live turn lays out once, at these, and fires `resize`.
-    pending_resize: Option<Bounds>,
-    /// The viewport last published to the page (`window.innerWidth` /
-    /// `innerHeight`). A later resize at this size is not an event, and a
-    /// queued size the view has already left is not dispatched.
-    announced_viewport: Option<(u32, u32)>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -1573,12 +1461,148 @@ struct ViewState {
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
     relayout_stats: RelayoutStats,
-    /// The view's Inspector record (see `inspector`).
-    inspector: Arc<Inspector>,
     /// What the style and layout build reads and writes of this view
     /// (`layout_ctx::ViewLayout`): focus, the pointer chains, control
     /// state, the sheet cache, the rule index, html's overflow.
     lay: Rc<layout_ctx::ViewLayout>,
+}
+
+struct ViewState {
+    /// The top-level document's state (see [`DocState`]).
+    doc: DocState,
+    /// What the last wheel moved, while a run of wheels holds to it.
+    wheel_gesture: Option<WheelGesture>,
+    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
+    /// the release.
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
+    scrollbar_hover: Option<WheelTarget>,
+    /// CH2.E7: the element a press on a styled scrollbar went to (the
+    /// scroller, or the root element for the viewport's bar). Until the
+    /// release, the press's mouse events target it, and the release fires
+    /// no `click` (Chrome).
+    scrollbar_pressed: Option<usize>,
+    id: EngineViewId,
+    /// Counts the display lists this view has been given.
+    frame_generation: u64,
+    presented: Option<PresentedFrame>,
+    /// Counts the frames this view has presented (a diagnostic: the threads
+    /// plan's per-view frame count; the tests read it to see how many draws
+    /// one input cost).
+    frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
+    viewhost_id: ViewId,
+    /// The element the developer tools outline on this page
+    /// (`Engine::devtools_highlight`), drawn over the display list.
+    devtools_highlight: Option<usize>,
+    /// The inputs the view took since its last commit
+    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
+    /// the next commit for the input-to-present log (LAT1c), or are
+    /// counted `no_frame` when their turn changed no frame.
+    input_pending: Vec<InputMark>,
+    /// Inputs since the last commit that presented no frame of their own.
+    inputs_unpresented: u32,
+    /// The host of the view's current visit, as `wgate::begin_visit` was
+    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
+    visit_host: Arc<str>,
+    /// The view's stop state: the interrupt word another thread (the
+    /// watchdog, later the user's Stop) sets to end its running script.
+    /// Lives as long as the view; each new document's bindings get it.
+    control: Arc<rustkit_js::ViewControl>,
+    navigation: NavigationStateMachine,
+    /// This view's newest navigation (threads plan M3b): one more for each
+    /// `load_url` or `load_html`, never for Stop. A load captures it before
+    /// its first await and re-checks it, and the view's cancel watermark
+    /// (`ViewControl::cancel_nav`), at every await and between its scripts
+    /// and subresource phases. A newer navigation, `Engine::stop` or a
+    /// [`NavCanceller`] on another thread makes the load stale, and a stale
+    /// load abandons without touching view state.
+    ///
+    /// Fetches still out when a load is cancelled are dropped with the
+    /// load's future; their responses never reach the engine.
+    nav_id: u64,
+    /// Wakes a load waiting on the network when its navigation is
+    /// cancelled from another thread ([`NavCanceller`]).
+    nav_signal: Arc<tokio::sync::Notify>,
+    /// The decode pool's key (D1): a decode that comes back with an older
+    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
+    /// with every new `nav_id` and also on every Stop and observed cancel,
+    /// so Stop on a loaded page still drops the decodes it has out while
+    /// later images on the same document (and `nav_id`) decode normally.
+    decode_epoch: u64,
+    #[allow(dead_code)]
+    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
+    /// CH2.E22: the last focus the user moved was moved by the pointer
+    /// (Chromium's last focus type): script's focus then matches
+    /// `:focus-visible` only on a control that takes typed text. False
+    /// until the first, and after a focus moved from the keyboard. Kept
+    /// across documents, as Chromium keeps it per page.
+    focus_by_pointer: bool,
+    /// CH2.E22: the focused button a Space keydown went to; its keyup
+    /// clicks it.
+    space_armed: Option<usize>,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The frame (`frame_generation`, scroll offset) the hovered chain was
+    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
+    /// moved since hit-tests the still pointer again.
+    hover_hit_at: Option<(u64, (f32, f32))>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
+    /// The click count the press or release being dispatched reports as
+    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
+    event_clicks: u32,
+    /// What the window was last told about the pointer: the cursor and
+    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
+    hover_reported: Option<HoverFeedback>,
+    /// HTML drag and drop: the press's drag candidate, or the drag in
+    /// progress (drag_drop.rs).
+    drag: drag_drop::DragState,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
+    /// Whether the view itself has focus.
+    view_focused: bool,
+    /// The view host said the view lost the system focus and has not said
+    /// it came back: `document.hasFocus()` is false. A view that was never
+    /// told either way (a headless one) reads as focused.
+    view_blurred: bool,
+    /// Headless bounds (only set for headless views, None for window-based views).
+    headless_bounds: Option<Bounds>,
+    /// Bounds the view was given since its last layout (`set_view_bounds`):
+    /// the next live turn lays out once, at these, and fires `resize`.
+    pending_resize: Option<Bounds>,
+    /// The viewport last published to the page (`window.innerWidth` /
+    /// `innerHeight`). A later resize at this size is not an event, and a
+    /// queued size the view has already left is not dispatched.
+    announced_viewport: Option<(u32, u32)>,
+    /// The view's Inspector record (see `inspector`).
+    inspector: Arc<Inspector>,
+}
+
+impl std::ops::Deref for ViewState {
+    type Target = DocState;
+    fn deref(&self) -> &DocState {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for ViewState {
+    fn deref_mut(&mut self) -> &mut DocState {
+        &mut self.doc
+    }
 }
 
 impl ViewState {
@@ -3443,18 +3467,53 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
-            lay: Rc::default(),
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3462,9 +3521,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3475,14 +3531,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3492,36 +3542,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3565,18 +3591,53 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3584,9 +3645,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3597,14 +3655,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3614,36 +3666,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3704,18 +3732,53 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3723,9 +3786,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3736,14 +3796,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3753,36 +3807,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3931,7 +3961,7 @@ impl Engine {
             // As `fire_mouse`: a document being left hears no `resize`;
             // `innerWidth`/`innerHeight` are kept current all the same.
             let leaving = view.control.stops_all();
-            if let Some(bindings) = view.bindings.as_ref() {
+            if let Some(bindings) = view.doc.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
                 if leaving {
                     debug!(?id, "Resize event not dispatched: the document is being left");
@@ -3951,7 +3981,7 @@ impl Engine {
                     // A stopped listener's error is the stop itself, which has
                     // its own record.
                     let fired = if stopped.is_some() { Ok(()) } else { fired };
-                    view.script_log.extend(stopped);
+                    view.doc.script_log.extend(stopped);
                     if let Err(e) = fired {
                         let record = ScriptRecord {
                             source: "event:resize".into(),
@@ -3959,9 +3989,9 @@ impl Engine {
                             elapsed_ms: 0,
                             outcome: ScriptOutcome::Threw(e.to_string()),
                         };
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5643,7 +5673,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return fallback;
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return fallback;
         };
         // The window has asked to leave this document (`navigate`,
@@ -5676,13 +5706,13 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
                     };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                 }
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
-        view.script_log.extend(stopped);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, &source, 0);
+        view.doc.script_log.extend(stopped);
         answer
     }
 
@@ -6122,7 +6152,7 @@ impl Engine {
             && self
                 .views
                 .get(&id)
-                .is_some_and(|view| view.load_tail.is_none());
+                .is_some_and(|view| view.doc.load_tail.is_none());
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
@@ -6130,15 +6160,15 @@ impl Engine {
         };
         let _turn = rustkit_js::DiagTurn::enter("live");
         rustkit_js::set_diag_nav(view.nav_id);
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return out;
         };
-        let policy = view.script_policy.clone();
-        let document = view.url.clone();
+        let policy = view.doc.script_policy.clone();
+        let document = view.doc.url.clone();
         let inspector = view.inspector.clone();
-        let live_requests = &mut view.live_requests;
-        let live_modules = &mut view.live_modules;
-        let live_modules_started = &mut view.live_modules_started;
+        let live_requests = &mut view.doc.live_requests;
+        let live_modules = &mut view.doc.live_modules;
+        let live_modules_started = &mut view.doc.live_modules_started;
         // A module supplied this turn can ask for more, or for the network:
         // the next turn is due at once.
         let mut supplied_modules = false;
@@ -6204,7 +6234,7 @@ impl Engine {
         // The animation clock is the timer clock as the timers left it, so
         // the layout below (and the one `settle_animations` makes) reads
         // the transitions at this turn's time.
-        view.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
+        view.doc.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -6360,8 +6390,8 @@ impl Engine {
             // `in_flight`. A turn whose JavaScript budget is already spent
             //             only enqueues.
             // The open tail already ran its one script for this turn.
-            if view.load_tail.is_none() {
-                let inserted = view.live_inserted.clone();
+            if view.doc.load_tail.is_none() {
+                let inserted = view.doc.live_inserted.clone();
                 let execute = !script_js_exhausted();
                 let found = script_net::drive_inserted_scripts(
                     bindings,
@@ -6379,8 +6409,8 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
                 for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    if view.doc.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
                 }
             }
@@ -6410,12 +6440,12 @@ impl Engine {
         } else {
             bindings.next_timer_delay()
         };
-        view.script_log.extend(stopped);
+        view.doc.script_log.extend(stopped);
         let threw = threw
             .into_iter()
             .chain(reported.into_iter().map(|message| ("timers", ScriptOutcome::Threw(message))));
         for (source, outcome) in threw {
-            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+            if view.doc.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 // The log is full; the Inspector's buffer bounds itself (the
                 // page's errors reached it from their reports above).
                 if let ScriptOutcome::EngineFailed(failure) = &outcome {
@@ -6429,7 +6459,7 @@ impl Engine {
                 elapsed_ms: 0,
                 outcome,
             };
-            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+            inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -10458,20 +10488,20 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        view.held_fixed = Some(root_box.held_fixed_paths());
+        view.doc.held_fixed = Some(root_box.held_fixed_paths());
         // Which boxes hold something outside their own box is found again
         // at the next hit test (`LayoutBox::forget_hit_overflow`).
         root_box.forget_hit_overflow();
-        view.layout = Some(Rc::new(root_box));
-        if let Some(layout) = view.layout.as_ref() {
-            incremental_layout::adopt(&view.lay, layout);
+        view.doc.layout = Some(Rc::new(root_box));
+        if let Some(layout) = view.doc.layout.as_ref() {
+            incremental_layout::adopt(&view.doc.lay, layout);
         }
-        view.laid_with = Some(LaidWith {
-            hover: view.lay.hover_chain.borrow().clone(),
-            active: view.lay.active_chain.borrow().clone(),
-            focused: view.lay.focused_node.get().map(|node| node.raw()),
-            focus_chain: view.lay.focus_chain.borrow().clone(),
-            focus_visible: view.lay.focus_visible.get(),
+        view.doc.laid_with = Some(LaidWith {
+            hover: view.doc.lay.hover_chain.borrow().clone(),
+            active: view.doc.lay.active_chain.borrow().clone(),
+            focused: view.doc.lay.focused_node.get().map(|node| node.raw()),
+            focus_chain: view.doc.lay.focus_chain.borrow().clone(),
+            focus_visible: view.doc.lay.focus_visible.get(),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -24499,18 +24529,18 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
         // Read before the take, which clears it.
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
-        Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
-        let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
-        let element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+        Self::note_forced_layouts(id, &mut view.doc.relayout_stats, bindings);
+        Self::apply_script_control_writes(&mut view.doc.lay.edit_states.borrow_mut(), &mut view.doc.lay.checked_states.borrow_mut(), bindings);
+        let max = Self::script_scroll_clamp(view.doc.max_scroll_offset, dirty);
+        let scrolled = Self::apply_script_scroll(&mut view.doc.scroll_offset, max, bindings);
+        let element_scrolled = std::mem::take(&mut view.doc.lay.element_scrolls.borrow_mut().unpainted);
         let canvas_painted = bindings.take_canvas_painted();
         // LAT2: script's animated-style layer is all that was written (a
         // Web Animations frame): a frame that moves only paint keeps the
@@ -24540,11 +24570,11 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
         if dirty != DomDirty::Clean {
-            view.pending_dirty = Some(view.dirty_set(&log));
+            view.doc.pending_dirty = Some(view.dirty_set(&log));
         }
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
