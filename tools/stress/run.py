@@ -567,7 +567,10 @@ def main():
         with (WindowLock(limit + 60, args.lock_wait) if visible else NoLock()):
             try:
                 if not wait_for_load(max_load, args.load_wait):
-                    raise SystemExit("load rose to %.1f while waiting for the window; not run" % os.getloadavg()[0])
+                    print("load rose to %.1f while waiting for the window; not run" % os.getloadavg()[0], file=sys.stderr)
+                    httpd.shutdown()
+                    shutil.rmtree(work, ignore_errors=True)
+                    sys.exit(2)  # the lock is released on the way out
                 load_before = os.getloadavg()
                 started = time.time()
                 record.t0 = record.last = started
