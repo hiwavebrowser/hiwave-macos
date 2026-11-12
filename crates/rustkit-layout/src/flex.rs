@@ -2081,7 +2081,7 @@ fn create_flex_item<'a>(
             // (css-contain-2 §3.2; Chromium 148: two `flex: 1` containers
             // in a 200px row are 100 each though one holds 300px).
             Axis::Horizontal
-                if layout_box.style.container_type != rustkit_css::ContainerType::Normal =>
+                if layout_box.style.has_inline_size_containment() =>
             {
                 crate::grid::horizontal_padding_border(&layout_box.style)
             }
@@ -3607,8 +3607,7 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, defin
                 // line-height fallback below (Chromium 148: a `flex: 0 0
                 // auto` container around 300px with `padding: 0 5px` is 10).
                 Axis::Horizontal
-                    if style.container_type != rustkit_css::ContainerType::Normal
-                        && style.writing_mode == rustkit_css::WritingMode::HorizontalTb =>
+                    if style.has_inline_size_containment() =>
                 {
                     0.0
                 }

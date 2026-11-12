@@ -124,6 +124,8 @@ struct State {
     /// measurable containers an estimated answer was derived under.
     asked: HashMap<usize, Vec<Asked>>,
     fragile: HashSet<usize>,
+    /// This build replays memoized styles (`note_replaying`).
+    replaying: bool,
     /// The root element's font size, CSS px (`rem`); set by the first
     /// element entered.
     root_em: Option<f32>,
@@ -157,6 +159,7 @@ impl DocumentScope {
             trusted: HashSet::new(),
             asked: HashMap::new(),
             fragile: HashSet::new(),
+            replaying: false,
             root_em: None,
             first_letter_floats,
             frames: vec![Frame {
@@ -189,7 +192,7 @@ impl Drop for DocumentScope {
                     fragile: state.fragile,
                     rem: state.root_em.unwrap_or(16.0),
                     viewport: state.viewport,
-                    replayed: false,
+                    replayed: state.replaying,
                 })
             });
         }
@@ -200,6 +203,17 @@ thread_local! {
     /// The trusted size containers of the last build that ran the walk
     /// (`take_build_facts`).
     static LAST_TRUSTED: RefCell<Option<BuildFacts>> = const { RefCell::new(None) };
+}
+
+/// Tells the walk whether the build in progress replays memoized styles,
+/// so that its record is merged into the recording build's
+/// (`BuildFacts::absorb`).
+pub(crate) fn note_replaying(replaying: bool) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.replaying = replaying;
+        }
+    });
 }
 
 /// What the last build's walk on this thread left (`BuildFacts`), or `None`
@@ -238,16 +252,26 @@ pub(crate) struct BuildFacts {
 }
 
 impl BuildFacts {
-    /// Take a later build's facts. A build that replayed memoized styles
-    /// walked the tree without asking anything (`asked` and `fragile`
-    /// empty): what the recording build asked still describes its styles,
-    /// so that record is kept. Keeping a stale record can only cost a
-    /// re-pass, never skip a needed one.
+    /// Take a later build's facts. A recording build asked everything its
+    /// styles depend on: its record replaces the old one. A build that
+    /// replayed memoized styles asked only where the memo missed (often
+    /// nothing): what the recording build asked still describes the styles
+    /// it replayed, so the two records are merged. A record that is too
+    /// large can only cost a re-pass, never skip a needed one.
     pub(crate) fn absorb(&mut self, later: BuildFacts) {
-        if later.asked.is_empty() && later.fragile.is_empty() {
-            self.trusted = later.trusted;
-        } else {
+        if !later.replayed {
             *self = later;
+            return;
+        }
+        self.trusted = later.trusted;
+        self.fragile.extend(later.fragile);
+        for (node, asked) in later.asked {
+            let kept = self.asked.entry(node).or_default();
+            for a in asked {
+                if !kept.iter().any(|k| k.condition == a.condition) {
+                    kept.push(a);
+                }
+            }
         }
     }
 
@@ -328,20 +352,12 @@ impl ElementScope {
             // laid-out content box, as Chrome answers (css-contain-3 §6.1),
             // wherever it sits: a flex or grid item, a float, a box after a
             // float. Its descendants' estimates start from it too.
-            if let (Some(n), true) = (
-                node,
-                frame.trusted
-                    && style.container_type != ContainerType::Normal
-                    && style.display != Display::None,
-            ) {
+            if let (Some(n), true) = (node, frame.trusted && style.has_inline_size_containment()) {
                 state.trusted.insert(n);
                 frame.measurable = Some(n);
             }
             if let Some(&(inline, block)) = node.and_then(|n| state.measured.get(&n)) {
-                if frame.trusted
-                    && style.container_type != ContainerType::Normal
-                    && style.display != Display::None
-                {
+                if frame.trusted && style.has_inline_size_containment() {
                     frame.width = Some(inline);
                     frame.container = Some(Some(Container {
                         names: style.container_name.clone(),

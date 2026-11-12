@@ -12129,6 +12129,9 @@ impl layout_ctx::LayoutCtx {
         let style_memo = (!traced)
             .then(|| StyleMemoBuild::begin(memo_key))
             .flatten();
+        // A replaying build asks `@container` conditions only where the
+        // memo misses: its record merges into the recording build's.
+        container_query::note_replaying(style_memo.as_ref().is_some_and(StyleMemoBuild::replays));
 
         // Every element's cascade below consults this; it is dropped (and
         // uninstalled) when the build returns. A replaying build takes its
