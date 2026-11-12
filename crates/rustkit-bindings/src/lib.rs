@@ -1343,27 +1343,20 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_navigation_requests()
     }
 
-    /// The external classic scripts script inserted since the last call,
-    /// oldest first. The engine fetches each and runs it as that element's
-    /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
     /// The text of the Blob behind a `blob:` URL this page made with
     /// `URL.createObjectURL`, or `None` when nothing stands behind it (never
     /// made, or revoked). For `<script src="blob:...">`: the engine has no
     /// network to ask for such a URL.
     pub fn blob_url_text(&self, url: &str) -> Option<String> {
-        // The fragment is not part of the name. Stripped here, and the
-        // store read as a bare global the page cannot redefine: this runs
-        // with no script budget, so it must run nothing of the page's.
-        let name = url.split('#').next().unwrap_or(url);
-        let quoted = serde_json::to_string(name).ok()?;
-        match self.runtime.borrow_mut().evaluate_bookkeeping(&format!(
-            "typeof __rustkit_blob_urls === 'object' ? __rustkit_blob_urls.text({quoted}) : null"
-        )) {
-            Ok(JsValue::String(text)) => Some(text),
-            _ => None,
-        }
+        // The host's store, read in Rust: no script runs, so nothing of
+        // the page's can be on this path.
+        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// The external classic scripts script inserted since the last call,
+    /// oldest first. The engine fetches each and runs it as that element's
+    /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
     pub fn take_inserted_scripts(&self) -> Vec<InsertedScript> {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
@@ -1601,7 +1594,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_platform.js"))?;
 
         // Blob, File, FormData, AbortController/AbortSignal, structuredClone (web_blob.js).
-        runtime.evaluate_with_host(include_str!("web_blob.js"))?;
+        runtime.evaluate_script(include_str!("web_blob.js"))?;
 
         // The observer interfaces and requestIdleCallback (web_observers.js).
         runtime.evaluate_script(include_str!("web_observers.js"))?;

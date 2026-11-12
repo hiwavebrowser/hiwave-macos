@@ -289,7 +289,10 @@ fn the_engines_blob_lookup_runs_no_page_script() {
         let _ = b.blob_url_text(&made);
     }
     assert_eq!(ev(&b, "window.hijacked"), "0", "a trap ran outside the page's own turn");
-    assert_eq!(ev(&b, "typeof __rustkit_blob_urls"), "undefined", "the store is not on the window");
+    // (This page defined a window property of the store's old name above;
+    // a page that has not sees nothing of the store.)
+    let fresh = bindings();
+    assert_eq!(ev(&fresh, "typeof __rustkit_blob_urls + typeof __rkBlobInternals"), "undefinedundefined", "the store is not on the window");
     // ... and a global of that name the page declares is just the page's.
     let _ = b.evaluate("let __rustkit_blob_urls = { text: hit, get: hit, bytes: hit }; 0");
     assert_eq!(b.blob_url_text(&url).as_deref(), Some("window.fromBlob = 7;"));

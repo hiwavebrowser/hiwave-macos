@@ -64,30 +64,20 @@
         out[BYTES] = this[BYTES].slice(s, Math.max(s, e));
         return out;
     };
-    // ---- The blob URL store (File API §8.3): what `URL.createObjectURL`
-    // registers (web_url.js) and what a `blob:` URL is answered from: fetch()
-    // (web_fetch.js) and `<script src>` (the engine, through
-    // `DomBindings::blob_url_text`). A page reaches only its own blobs here.
-    //
-    // The engine asks `text` outside any script budget (it is bookkeeping,
-    // made while a script element waits), so nothing on that path may be
-    // the page's to replace: the store is frozen and cannot be redefined,
-    // the map has no prototype, the bytes are behind a symbol only this
-    // file holds, and the decoding is the host's. `url` arrives without its
-    // fragment (the callers strip it), so no String method runs here.
-    var blobUrls = Object.create(null), utf8Decode = __rk.utf8Decode;
-    function behind(url) { var b = blobUrls[url]; return b === undefined ? null : b; }
-    Object.defineProperty(g, '__rustkit_blob_urls', {
-        value: Object.freeze({
-            add: function (url, blob) { if (blob instanceof Blob) blobUrls[url] = blob; },
-            revoke: function (url) { delete blobUrls[url]; },
-            get: behind,
-            // The blob's bytes as text, or null when no blob stands behind `url`.
-            text: function (url) { var b = behind(url); return b === null ? null : utf8Decode(b[BYTES], true)[0]; },
-            bytes: function (url) { var b = behind(url); return b === null ? null : b[BYTES]; }
-        }),
-        writable: false, configurable: false, enumerable: false
-    });
+    // ---- Blob URLs (File API §8.3). The store is the host's (rustkit-js
+    // `bytes::Blobs`): `URL.createObjectURL` (web_url.js) copies the Blob's
+    // bytes into it, in the page's own turn, and nothing of it is on the
+    // window. The engine reads it without running script
+    // (`DomBindings::blob_url_text`); fetch() reads it through the bridge's
+    // util. web_url.js takes this and deletes it.
+    g.__rkBlobInternals = {
+        // The Blob's own bytes and type, or null for anything else.
+        record: function (blob) {
+            if (!(blob instanceof Blob)) return null;
+            var bytes = blob[BYTES];
+            return bytes instanceof Uint8Array ? { bytes: bytes, type: String(blob._type || '') } : null;
+        }
+    };
 
     Blob.prototype.text = function () { var self = this; return Promise.resolve().then(function () { return fromUtf8(self[BYTES]); }); };
     Blob.prototype.arrayBuffer = function () {

@@ -199,19 +199,21 @@
         needArg(arguments.length, 'parse');
         try { return new URL(url, base); } catch (e) { return null; }
     };
-    // Blob URLs: the store is web_blob.js's (`__rustkit_blob_urls`), which
-    // holds the Blob until the URL is revoked. Anything that is not a Blob
-    // (a MediaSource) still gets a URL nothing stands behind.
-    var blobCount = 0;
+    // Blob URLs: the bytes behind one are copied into the host's store
+    // here, in the page's turn (anything the page hooked on the way runs
+    // under its own budget), and only a real Blob's own bytes go in.
+    // Anything that is not a Blob (a MediaSource) gets a URL nothing
+    // stands behind.
+    var blobNumber = __rk.blobNumber, blobInternals = g.__rkBlobInternals, blobPut = __rk.blobPut, blobRevoke = __rk.blobRevoke;
+    delete g.__rkBlobInternals;
     URL.createObjectURL = function (object) {
-        var url = 'blob:' + (g.location && g.location.origin || 'null') + '/' + (++blobCount);
-        var store = g.__rustkit_blob_urls;
-        if (store) store.add(url, object);
+        var url = 'blob:' + (g.location && g.location.origin || 'null') + '/' + blobNumber();
+        var record = blobInternals ? blobInternals.record(object) : null;
+        if (record) blobPut(url, record.bytes, record.type);
         return url;
     };
     URL.revokeObjectURL = function (url) {
-        var store = g.__rustkit_blob_urls;
-        if (store) store.revoke(String(url));
+        blobRevoke(String(url).split('#')[0]);
     };
 
     g.URL = URL;

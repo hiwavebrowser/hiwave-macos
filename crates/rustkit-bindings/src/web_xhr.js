@@ -34,6 +34,11 @@
     // A delivered response's body: the bytes the bridge took from the
     // host, or (a result built by hand) its base64.
     function bodyBytes(r) { return r.bytes instanceof Uint8Array ? r.bytes : fromBase64(r.body_b64); }
+    // What stands behind a blob URL (the host's store): { bytes, type } or null.
+    function blobBehind(url) {
+        var found = __rk.blobGet(String(url).split('#')[0]);
+        return found ? { bytes: new Uint8Array(found[0]), type: found[1] } : null;
+    }
     function utf8(str) { return new g.TextEncoder().encode(str); }
 
     // ---- a small event target (the DOM one is for nodes)
@@ -466,7 +471,7 @@
     // Shared with the other surfaces built on the bridge (fetch): body
     // encoding and the byte/base64 helpers.
     Object.defineProperty(net, 'util', {
-        value: { toBase64: toBase64, fromBase64: fromBase64, bodyBytes: bodyBytes, utf8: utf8, encodeBody: encodeBody, domError: domError, report: report }
+        value: { toBase64: toBase64, fromBase64: fromBase64, bodyBytes: bodyBytes, blob: blobBehind, utf8: utf8, encodeBody: encodeBody, domError: domError, report: report }
     });
 
     function def(name, value) {

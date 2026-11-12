@@ -501,6 +501,9 @@ pub struct JsRuntime {
     /// a response body crosses into script as one buffer, not as text.
     #[cfg(feature = "boa")]
     byte_stash: bytes::Stash,
+    /// What stands behind the page's blob URLs (see `bytes::Blobs`).
+    #[cfg(feature = "boa")]
+    blobs: bytes::Blobs,
     /// Page script text, only while an embedder has asked to quote it in
     /// an error log. See [`JsRuntime::set_capture_script_sources`].
     sources: source_context::ScriptSources,
@@ -561,7 +564,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let byte_stash = bytes::Stash::default();
         #[cfg(feature = "boa")]
-        let host = host_object(&diag, &byte_stash, &mut context);
+        let blobs = bytes::Blobs::default();
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &byte_stash, &blobs, &mut context);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -586,6 +591,8 @@ impl JsRuntime {
             host,
             #[cfg(feature = "boa")]
             byte_stash,
+            #[cfg(feature = "boa")]
+            blobs,
             sources: source_context::ScriptSources::default(),
         };
 
@@ -1279,6 +1286,22 @@ impl JsRuntime {
         }
     }
 
+    /// The bytes behind a blob URL of this runtime's pages (its fragment,
+    /// if any, is not part of the name), or `None` when nothing stands
+    /// behind it. Reads the host's store: no script runs.
+    pub fn blob_bytes(&self, url: &str) -> Option<Vec<u8>> {
+        #[cfg(feature = "boa")]
+        {
+            let name = url.split('#').next().unwrap_or(url);
+            self.blobs.borrow().get(name).map(|(bytes, _)| bytes.clone())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = url;
+            None
+        }
+    }
+
     /// Forget the bytes stashed under `key`, if script did not take them.
     pub fn drop_stashed_bytes(&mut self, key: u64) {
         #[cfg(feature = "boa")]
@@ -1490,6 +1513,7 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
 fn host_object(
     diag: &std::rc::Rc<diag::Diagnostics>,
     byte_stash: &bytes::Stash,
+    blobs: &bytes::Blobs,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsObject {
     use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
@@ -1519,7 +1543,7 @@ fn host_object(
     let mut host = ObjectInitializer::new(context);
     host.function(report_error, js_string!("reportError"), 1)
         .function(unsupported, js_string!("unsupported"), 2);
-    bytes::install(&mut host, byte_stash);
+    bytes::install(&mut host, byte_stash, blobs);
     host.build()
 }
 

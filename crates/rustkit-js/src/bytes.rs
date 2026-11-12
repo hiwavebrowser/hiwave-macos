@@ -38,6 +38,48 @@ use std::rc::Rc;
 /// Bytes waiting for script to take them, by key.
 pub(crate) type Stash = Rc<RefCell<HashMap<u64, Vec<u8>>>>;
 
+/// What stands behind the page's blob URLs: a copy of the Blob's bytes and
+/// its type, by URL (without fragment). Kept on the host side: the engine
+/// reads it without running any script (`JsRuntime::blob_bytes`), and the
+/// page has no object to replace. One store per runtime, so the same-origin
+/// documents of a frame tree share it, as they share blob URLs.
+pub(crate) type Blobs = Rc<RefCell<BlobStore>>;
+
+/// The most the blob URLs of one runtime keep alive, in bytes. Every
+/// `createObjectURL` copies its Blob out of the script heap, so without a
+/// bound a loop over one large Blob grows the process without limit. Past
+/// it a new URL has nothing behind it (as for a revoked one).
+pub(crate) const MAX_BLOB_STORE_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Default)]
+pub(crate) struct BlobStore {
+    records: HashMap<String, (Vec<u8>, String)>,
+    /// The bytes of all records together.
+    held: usize,
+    /// The last number handed out for a URL: one sequence for the whole
+    /// runtime, so two documents sharing the store never make the same URL.
+    last: u64,
+}
+
+impl BlobStore {
+    pub(crate) fn get(&self, url: &str) -> Option<&(Vec<u8>, String)> {
+        self.records.get(url)
+    }
+    fn put(&mut self, url: String, bytes: Vec<u8>, kind: String) {
+        self.remove(&url);
+        if bytes.len() > MAX_BLOB_STORE_BYTES - self.held {
+            return;
+        }
+        self.held += bytes.len();
+        self.records.insert(url, (bytes, kind));
+    }
+    fn remove(&mut self, url: &str) {
+        if let Some((bytes, _)) = self.records.remove(url) {
+            self.held -= bytes.len();
+        }
+    }
+}
+
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
     GeneralPurposeConfig::new()
@@ -157,7 +199,66 @@ fn string_arg(args: &[JsValue]) -> JsResult<JsString> {
 }
 
 /// Add the byte natives to the host object under construction.
-pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash) {
+pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &Blobs) {
+    let put = blobs.clone();
+    // SAFETY: the closures below hold an `Rc` of plain bytes and strings:
+    // nothing the collector would need to trace.
+    // `blobPut(url, bytes, type)`: keep a copy of `bytes` behind `url`.
+    // `bytes` must be a real ArrayBuffer or view (`with_bytes`).
+    let blob_put = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let url = string_arg(args)?.to_std_string_escaped();
+            let bytes = with_bytes(args.get(1), context, <[u8]>::to_vec)?;
+            let kind = args
+                .get(2)
+                .and_then(JsValue::as_string)
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            put.borrow_mut().put(url, bytes, kind);
+            Ok(JsValue::undefined())
+        })
+    };
+    let get = blobs.clone();
+    // `blobGet(url)`: `[ArrayBuffer, type]`, or `undefined`.
+    let blob_get = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let url = string_arg(args)?.to_std_string_escaped();
+            let found = get.borrow().get(&url).cloned();
+            match found {
+                Some((bytes, kind)) => {
+                    let buffer = array_buffer(&bytes, context)?;
+                    let parts = [
+                        JsValue::from(buffer),
+                        JsValue::from(JsString::from(kind.as_str())),
+                    ];
+                    Ok(JsArray::from_iter(parts, context).into())
+                }
+                None => Ok(JsValue::undefined()),
+            }
+        })
+    };
+    let revoke = blobs.clone();
+    let blob_revoke = unsafe {
+        NativeFunction::from_closure(move |_this, args, _context| {
+            if let Ok(url) = string_arg(args) {
+                revoke.borrow_mut().remove(&url.to_std_string_escaped());
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let number = blobs.clone();
+    // `blobNumber()`: the next number for a blob URL.
+    let blob_number = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _context| {
+            let mut store = number.borrow_mut();
+            store.last += 1;
+            Ok(JsValue::from(store.last as f64))
+        })
+    };
+    host.function(blob_number, js_string!("blobNumber"), 0)
+        .function(blob_put, js_string!("blobPut"), 3)
+        .function(blob_get, js_string!("blobGet"), 1)
+        .function(blob_revoke, js_string!("blobRevoke"), 1);
     let taken = stash.clone();
     // SAFETY: the closure holds an `Rc` of plain bytes: nothing the
     // collector would need to trace.

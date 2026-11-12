@@ -126,5 +126,5 @@ pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
             }
         }),
     )?;
-    runtime.evaluate_script(include_str!("web_url.js")).map(|_| ())
+    runtime.evaluate_with_host(include_str!("web_url.js")).map(|_| ())
 }
