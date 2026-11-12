@@ -13751,9 +13751,7 @@ impl layout_ctx::LayoutCtx {
                 // (trees with the same sheet text share one slice).
                 if let Some(sheets) = host_scope.sheets() {
                     let source = RuleIndex::source_of(sheets);
-                    // RED STUB
-                    let wanted = false
-                        && !TREE_RULE_INDEX_OFF.with(Cell::get)
+                    let wanted = !TREE_RULE_INDEX_OFF.with(Cell::get)
                         && !TREE_RULE_INDEXES.with(|c| c.borrow().contains_key(&source));
                     if wanted {
                         let index = Rc::new(self.build_rule_index(sheets));
