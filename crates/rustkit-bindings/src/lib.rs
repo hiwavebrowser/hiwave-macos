@@ -1591,6 +1591,19 @@ impl DomBindings {
 
         runtime.evaluate_script(&window_js.replace("__NAVIGATOR_PLATFORM__", NAVIGATOR_PLATFORM))?;
 
+        // The monotonic clock behind `performance.now()` (STR-9), before web_platform.js reads it.
+        let time_origin = std::time::Instant::now(); // this page's time origin
+        runtime.register_host_function(
+            "__rustkit_now_ms",
+            0,
+            Box::new(move |_| {
+                let start = &time_origin;
+                // 0.1 ms steps, as Chrome's coarsened clock: finer is a fingerprinting aid.
+                let tenths = (start.elapsed().as_secs_f64() * 10_000.0).floor();
+                JsValue::Number(tenths / 10.0)
+            }),
+        )?;
+
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;

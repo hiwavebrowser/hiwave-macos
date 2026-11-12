@@ -48,7 +48,7 @@
         var entries = [];
         var performance = {
             timeOrigin: origin,
-            now: function () { return Date.now() - origin; },
+            now: typeof g.__rustkit_now_ms === 'function' ? g.__rustkit_now_ms : function () { return Date.now() - origin; },
             mark: function (name) {
                 var e = { name: String(name), entryType: 'mark', startTime: performance.now(), duration: 0 };
                 entries.push(e);
