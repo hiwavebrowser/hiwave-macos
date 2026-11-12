@@ -465,6 +465,8 @@ mod cleared_float_width_tests;
 mod dom1_attr_order_hit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod str8_web_api_tests;
+#[cfg(all(test, feature = "headless"))]
+mod spd1_key_click_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
