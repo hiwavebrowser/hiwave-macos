@@ -244,3 +244,30 @@ fetch('/data.txt').then(function (r) { return r.text(); }).then(function (t) { l
         rustkit_layout::DisplayCommand::SolidColor(color, _) if color.r == 0 && color.g == 255 && color.b == 0));
     assert!(green, "the frame's paint is not in the parent's display list");
 }
+
+/// A loop that turns again only when the last turn asked for it (a timer
+/// due, a request out), as the app's and parity-capture's do, still
+/// finishes a frame navigation started from a `load` handler. Found with
+/// Speedometer 3.1 on the integration branch: its runner sets `src` for
+/// the next workload from the frame's `load` path, the page then had no
+/// timer and nothing out, and the loop slept (149 s, until its window
+/// ended) before the frame request was taken.
+#[test]
+fn a_frame_request_made_during_a_turn_asks_for_the_next_turn() {
+    let page = "<!doctype html><body><iframe id=f></iframe><script>
+window.loads = 0; var f = document.getElementById('f');
+f.onload = function () { loads++; if (loads === 1) f.src = '/other.html'; };
+f.src = '/child.html';
+</script></body>";
+    let mut page = Page::load(true, page);
+    let mut turns = 0;
+    loop {
+        let turn = page.rt.block_on(page.engine.pump_live(page.view, 20));
+        turns += 1;
+        if turns >= 40 || (turn.next_timer_ms.is_none() && turn.in_flight == 0) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(turn.next_timer_ms.unwrap_or(10).min(20)));
+    }
+    assert_eq!(page.js("[loads, f.contentDocument.title].join()"), r#"String("2,other-title")"#, "after {turns} turns");
+}
