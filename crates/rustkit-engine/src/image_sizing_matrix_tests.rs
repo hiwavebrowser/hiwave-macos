@@ -29,16 +29,6 @@ const READ: &str = "Array.prototype.map.call(document.querySelectorAll('img'), f
 /// `box` or `nat`). A listed cell that starts to match fails the test, so
 /// the list cannot go stale.
 const GAPS: &[&str] = &[
-    // An `<img>` flex item's height does not follow its flexed or
-    // stretched width through the image's ratio. a7 is the column case
-    // with `width="300"` and `height: auto`: 300x200, the natural height,
-    // where Chrome has 300x150.
-    "attrs@1:a7:box",
-    "attrs@2:a7:box",
-    "matrix@1:m24:box",
-    "matrix@2:m24:box",
-    "matrix@1:m25:box",
-    "matrix@2:m25:box",
     // `naturalWidth`/`naturalHeight` are the decoded pixels, not the
     // density-corrected size.
     "matrix@1:m2:nat",
