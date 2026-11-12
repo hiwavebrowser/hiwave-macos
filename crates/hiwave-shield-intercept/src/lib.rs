@@ -640,6 +640,50 @@ mod tests {
         assert_eq!(census[2].1, 1, "script blocked");
     }
 
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// Logs carry shapes, never bodies (the standing rule): the handler logs a blocked request by
+    /// its host. Its path, query and fragment, and the page it came from, are not logged.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let handler = ShieldInterceptHandler::new();
+        let action = tracing::subscriber::with_default(subscriber, || {
+            handler.intercept(&test_request_with(
+                "https://adsrvr.org/pixel/u123abc?session=s3cr3t#frag9",
+                RequestDestination::Script,
+                Some("https://inbox.example/mail/thread42?token=t0k3n"),
+            ))
+        });
+        assert!(!matches!(action, InterceptAction::Allow), "adsrvr.org is blocked: {action:?}");
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("adsrvr.org"), "the block is logged, by host: {text}");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9", "inbox", "thread42", "t0k3n"] {
+            assert!(!text.contains(secret), "{secret} reached a log line: {text}");
+        }
+    }
+
     /// SH1, end to end through the app's own worker and the lists on disk: once the engine is
     /// READY (the test waits for it, bounded, instead of racing it) the bare floor host is still
     /// blocked, which the lists alone did not do (EasyList names `ad.doubleclick.net`, not the

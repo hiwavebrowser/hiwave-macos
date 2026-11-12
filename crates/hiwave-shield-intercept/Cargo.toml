@@ -16,3 +16,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 http = "1.0"
 dirs = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

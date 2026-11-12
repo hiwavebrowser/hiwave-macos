@@ -1416,3 +1416,70 @@ mod replay_proxy_tests {
     }
 }
 
+#[cfg(test)]
+mod blocked_request_log_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// Everything logged, at any level, while `f` runs on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Logs carry shapes, never bodies (the standing rule): a request the shield blocks is logged by
+    /// its scheme and host. Its path, query and fragment (signed URLs, ids, tokens) are not.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        struct Refuse;
+        impl InterceptHandler for Refuse {
+            fn intercept(&self, _: &Request) -> InterceptAction {
+                InterceptAction::Block
+            }
+        }
+        let mut interceptor = RequestInterceptor::new();
+        interceptor.add_handler(Arc::new(Refuse));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let loader = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(interceptor)).unwrap();
+        let request = Request::get(Url::parse("https://tracker.example/pixel/u123abc?session=s3cr3t#frag9").unwrap());
+        let text = logged(|| {
+            let err = rt.block_on(loader.fetch(request)).err().expect("blocked");
+            assert!(matches!(err, NetError::Blocked(_)));
+        });
+        // The blocked-request line only: the loader's general debug line keeps the whole URL by the
+        // existing convention (CH3.A6), and is not what this row is about.
+        let blocked: Vec<&str> = text.lines().filter(|l| l.contains("blocked")).collect();
+        let text = blocked.join("
+");
+        assert!(text.contains("Request blocked by interceptor"), "the block is still logged: {text}");
+        assert!(text.contains("tracker.example"), "by its host: {text}");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9"] {
+            assert!(!text.contains(secret), "{secret} reached the blocked-request line: {text}");
+        }
+    }
+}
