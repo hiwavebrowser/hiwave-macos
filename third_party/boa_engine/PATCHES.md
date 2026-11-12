@@ -491,3 +491,11 @@ function environment, and the inner arrow read the wrong one (strict and sloppy;
 showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: ArrayBuffer transfer without `experimental` (arraybuffer transfer)
+
+`ArrayBuffer.prototype.transfer`, `transferToFixedLength` and the `detached` getter were behind Boa's
+`experimental` feature, so no page saw them. The four `#[cfg(feature = "experimental")]` gates in
+`src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
+transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
+(18 cases, Chrome for Testing 148.0.7778.216).
