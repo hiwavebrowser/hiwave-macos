@@ -2757,6 +2757,7 @@ dependencies = [
  "http",
  "rustkit-net",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -5417,6 +5418,7 @@ version = "0.1.0"
 dependencies = [
  "num_cpus",
  "rustkit-canvas",
+ "rustkit-common",
  "rustkit-core",
  "rustkit-css",
  "rustkit-dom",

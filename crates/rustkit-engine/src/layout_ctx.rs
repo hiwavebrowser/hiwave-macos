@@ -604,6 +604,9 @@ pub(crate) struct ViewLayout {
     /// `container_sizes` measures (`container_query::take_trusted_containers`).
     pub(crate) container_trusted: RefCell<std::collections::HashSet<usize>>,
     pub(crate) container_passes: Cell<u32>,
+    /// LAT22 probe: why reads built the tree instead of being answered
+    /// from an animation frame, by reason.
+    pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
     pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds

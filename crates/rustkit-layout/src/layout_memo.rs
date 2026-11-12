@@ -163,9 +163,10 @@ struct BoxOutputs {
     table_caption_shift: Option<(f32, f32)>,
     percent_height_is_auto: bool,
     context_floats: Option<FloatContext>,
-    /// LAY1 bookkeeping (a height, and a padding-box rect in absolute coordinates, so relative here):
+    /// LAY1 bookkeeping (the (width, percentage base) the children were last laid out at, and a padding-box
+    /// rect in absolute coordinates, so relative here):
     /// set or reset by every layout of the box, so a skipped layout must leave what it would have.
-    children_percent_base: Option<f32>,
+    children_laid_at: Option<(f32, f32)>,
     abspos_cb_hint: Option<Rect>,
 }
 
@@ -310,7 +311,7 @@ fn snapshot(b: &LayoutBox) -> Option<Vec<BoxOutputs>> {
                 table_caption_shift: c.table_caption_shift,
                 percent_height_is_auto: c.percent_height_is_auto,
                 context_floats,
-                children_percent_base: c.children_percent_base,
+                children_laid_at: c.children_laid_at,
                 abspos_cb_hint: c.abspos_cb_hint.map(|r| Rect { x: r.x - ox, y: r.y - oy, ..r }),
             });
             if !walk(c, ox, oy, out) {
@@ -344,7 +345,7 @@ fn restore(b: &mut LayoutBox, outputs: &[BoxOutputs]) -> bool {
             c.table_caption_shift = o.table_caption_shift;
             c.percent_height_is_auto = o.percent_height_is_auto;
             c.context_floats = o.context_floats.as_ref().map(|f| f.translated(ox, oy));
-            c.children_percent_base = o.children_percent_base;
+            c.children_laid_at = o.children_laid_at;
             c.abspos_cb_hint = o.abspos_cb_hint.map(|r| Rect { x: r.x + ox, y: r.y + oy, ..r });
             walk(c, ox, oy, it);
         }
@@ -438,9 +439,9 @@ impl BoxOutputs {
             }
             && self.percent_height_is_auto == other.percent_height_is_auto
             && close_floats(&self.context_floats, &other.context_floats)
-            && match (self.children_percent_base, other.children_percent_base) {
+            && match (self.children_laid_at, other.children_laid_at) {
                 (None, None) => true,
-                (Some(x), Some(y)) => close(x, y),
+                (Some((w1, b1)), Some((w2, b2))) => close(w1, w2) && close(b1, b2),
                 _ => false,
             }
             && match (&self.abspos_cb_hint, &other.abspos_cb_hint) {

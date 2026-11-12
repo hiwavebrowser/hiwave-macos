@@ -1,0 +1,12 @@
+# Chrome for Testing 148.0.7778.216, headless, getBoundingClientRect (x width, height)
+# fixture: float_in_flex_grid_items.html (16px Helvetica, float:left width:10px)
+# id     width     height   (container rows r*/c*/g* are 400 wide)
+r1i      10        30       row flex-start, float only (30px)
+r2i      35.7969   30       row flex-start, float 30px + "text"
+r3i      35.7969   18       row flex-start, float 5px + "text"
+r4i      10        30       row stretch, float only, beside an "x" item
+c1i      400       30       column flex, float only
+c2i      400       30       column flex, float + "text"
+g1i      400       30       grid align-items:start, float only
+g2i      400       30       grid align-items:start, float + "text"
+g3i      400       30       grid stretch, float only
