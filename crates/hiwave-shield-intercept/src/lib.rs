@@ -127,7 +127,9 @@ impl ShieldInterceptHandler {
         self.census.snapshot()
     }
 
-    /// Set a callback to be called when a request is blocked.
+    /// Set a callback to be called when a request is blocked. It is handed the FULL URL, for
+    /// in-process use (a counter, a UI badge); a callback must not log it, as the shield's own log
+    /// lines carry the host only (the standing rule: logs carry shapes, never bodies).
     pub fn with_on_blocked<F>(mut self, callback: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -222,7 +224,7 @@ impl ShieldInterceptHandler {
 
 impl InterceptHandler for ShieldInterceptHandler {
     fn intercept(&self, request: &Request) -> InterceptAction {
-        trace!(url = %request.url, "Shield checking request");
+        trace!(host = %rustkit_net::origin_for_log(&request.url), "Shield checking request");
 
         // Privacy pin 2026-09-29: interception happens BEFORE bytes; the
         // census counts every attempt per destination so "blocked" is a
@@ -277,7 +279,7 @@ impl InterceptHandler for ShieldInterceptHandler {
         if let Some(reason) = blocked {
             self.census.blocked(dest);
             self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            debug!(url = %request.url, ?dest, list = %reason.list, "Shield blocked request");
+            debug!(host = %rustkit_net::origin_for_log(&request.url), ?dest, list = %reason.list, "Shield blocked request");
             if let Some(ref callback) = self.on_blocked {
                 callback(request.url.as_str());
             }

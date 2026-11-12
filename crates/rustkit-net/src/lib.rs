@@ -55,6 +55,20 @@ pub fn url_for_log(url: &Url) -> String {
     shown.to_string()
 }
 
+/// `url` as a SHIELD log line may carry it: scheme and host (and a non-default port) only. No path,
+/// query or fragment (signed URLs, ids, tokens) and no userinfo; a `data:` URL is just `data:`. For a
+/// line about a request the shield blocks, where the tracker's host is the shape worth keeping and
+/// the rest of the URL is not (the standing rule: logs carry shapes, never bodies).
+pub fn origin_for_log(url: &Url) -> String {
+    match url.host_str() {
+        Some(host) => match url.port() {
+            Some(port) => format!("{}://{host}:{port}", url.scheme()),
+            None => format!("{}://{host}", url.scheme()),
+        },
+        None => format!("{}:", url.scheme()),
+    }
+}
+
 /// [`url_for_log`] for text that may not parse as a URL (a relative
 /// reference, an `@font-face` `src` list): each `?…`/`#…` run is cut up
 /// to the next `)`, quote, comma or white space.
@@ -785,11 +799,11 @@ impl ResourceLoader {
             match action {
                 InterceptAction::Allow => {}
                 InterceptAction::Block => {
-                    warn!(url = %url_for_log(&request.url), "Request blocked by interceptor");
+                    warn!(url = %origin_for_log(&request.url), "Request blocked by interceptor");
                     return Err(NetError::Blocked(None));
                 }
                 InterceptAction::BlockedBy(reason) => {
-                    warn!(url = %url_for_log(&request.url), list = %reason.list, "Request blocked by interceptor");
+                    warn!(url = %origin_for_log(&request.url), list = %reason.list, "Request blocked by interceptor");
                     return Err(NetError::Blocked(Some(reason)));
                 }
                 InterceptAction::Redirect(new_url) => {

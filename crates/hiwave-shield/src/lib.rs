@@ -292,7 +292,9 @@ impl AdBlocker {
                 let result = self.engine.check_network_request(&req);
 
                 if result.matched {
-                    log::debug!("Blocked: {} (from {})", url, source_url);
+                    // The host only: not the path or query (signed URLs, tokens) and not the page it
+                    // came from (browsing history). Logs carry shapes, never bodies.
+                    log::debug!("Blocked: {}", url.host_str().unwrap_or("-"));
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
                     self.trackers_blocked.fetch_add(1, Ordering::Relaxed);
                     // Without rule names the engine writes "NetworkFilter".
@@ -304,7 +306,9 @@ impl AdBlocker {
                 }
             }
             Err(e) => {
-                log::warn!("Failed to create request for {}: {}", url, e);
+                // Host only, and not the error's text, which may quote the URL.
+                let _ = e;
+                log::warn!("Failed to create request for {}", url.host_str().unwrap_or("-"));
                 None
             }
         }
