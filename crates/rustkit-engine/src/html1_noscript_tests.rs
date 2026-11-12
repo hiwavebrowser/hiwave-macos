@@ -25,7 +25,14 @@ const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_no
 /// 0x0 and `offsetParent` null, as here); the UA sheet here says `none`,
 /// which is what `getComputedStyle` answers. The line must still DIFFER:
 /// when it matches it comes off the list.
-const KNOWN: &[&str] = &["does not render: "];
+const KNOWN: &[&str] = &[
+    "does not render: ",
+    // Read back from an element the page made that is in no document:
+    // Chrome writes the noscript's text raw, we escape it (the parse is
+    // right; see html1_noscript_serialize_tests for why unknown is escaped).
+    "innerHTML set on a live element: ",
+    "innerHTML set on a noscript: ",
+];
 
 fn load(config: EngineConfig) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
     let server = serve_routes(vec![

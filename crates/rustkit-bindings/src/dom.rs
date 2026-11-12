@@ -1718,16 +1718,37 @@ const VOID_ELEMENTS: &[&str] = &[
     "keygen", "link", "meta", "param", "source", "track", "wbr",
 ];
 
-/// Elements whose Text children serialize unescaped. `noscript` is one
-/// when scripting is on, which is where its children are text.
-const RAW_TEXT_ELEMENTS: &[&str] = &[
-    "style", "script", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext",
-];
+/// Elements whose Text children serialize unescaped, wherever they are.
+/// `noscript` is one more only where scripting is on for the node
+/// (`noscript_is_raw`).
+const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
+
+/// Whether a `<noscript>` under `node` writes its text children as they
+/// are (HTML §13.3: when scripting is enabled for the node). That is in
+/// the page's own document, when the page runs script. Everywhere else
+/// the text is escaped like any other: in a document `DOMParser` or
+/// `createHTMLDocument` made (a Document node of its own), in template
+/// contents, and in a tree that is in no document, where nothing records
+/// which document made it. Chrome writes a detached node of the page's
+/// document raw; escaped is the safe answer when that is not known, since
+/// raw text read out of an inert tree is markup once it is parsed again.
+fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
+    let Some(page) = page.filter(|d| d.scripting()) else {
+        return false;
+    };
+    let mut top = node.clone();
+    while let Some(parent) = top.parent() {
+        top = parent;
+    }
+    Rc::ptr_eq(&top, page.root())
+}
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
 /// Attributes come out in the element's own order (the order they were
 /// written or set in), as Chrome writes them.
-fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
+///
+/// `raw_noscript`: `noscript_is_raw` for this tree.
+fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
     match &node.node_type {
         NodeType::Element {
             tag_name,
@@ -1745,7 +1766,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
             }
             out.push('>');
             if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
-                serialize_children(node, out, templates);
+                serialize_children(node, out, templates, raw_noscript);
                 out.push_str("</");
                 out.push_str(tag_name);
                 out.push('>');
@@ -1754,7 +1775,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         NodeType::Text(data) => {
             let raw = node
                 .parent()
-                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t)))
+                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t) || (raw_noscript && t == "noscript")))
                 .unwrap_or(false);
             if raw {
                 out.push_str(data);
@@ -1779,16 +1800,20 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates, raw_noscript),
     }
 }
 
 /// The children of `node`, serialized (`innerHTML`); a template's are
 /// its content's children.
-fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
-    let source = templates.get(&node.id.raw()).unwrap_or(node);
+fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
+    // A template's contents are in an inert document: scripting is off.
+    let (source, raw_noscript) = match templates.get(&node.id.raw()) {
+        Some(contents) => (contents, false),
+        None => (node, raw_noscript),
+    };
     for child in source.children() {
-        serialize_node(&child, out, templates);
+        serialize_node(&child, out, templates, raw_noscript);
     }
 }
 
@@ -1808,7 +1833,12 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
+fn node_info(
+    node: &Rc<Node>,
+    field: &str,
+    templates: &HashMap<usize, Rc<Node>>,
+    page: Option<&Rc<Document>>,
+) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -1866,12 +1896,12 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
         },
         "innerHTML" => {
             let mut out = String::new();
-            serialize_children(node, &mut out, templates);
+            serialize_children(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "outerHTML" => {
             let mut out = String::new();
-            serialize_node(node, &mut out, templates);
+            serialize_node(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
@@ -2169,7 +2199,9 @@ pub(crate) fn install(
                     };
                     JsValue::String(inner_text::inner_text(&node, &style))
                 }
-                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
+                (Some(node), Some(field)) => {
+                    node_info(&node, field, &host.templates.borrow(), host.document.as_ref())
+                }
                 _ => JsValue::Null,
             }
         }),

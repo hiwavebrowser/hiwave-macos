@@ -17,9 +17,14 @@ const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_no
 
 /// Lines that still differ, by their start: each must still differ.
 const KNOWN: &[&str] = &[
-    // A node made by an inert document and not yet in any tree: nothing
-    // records which document made it, so it reads as the page's.
-    "made in DOMParser doc, not inserted:",
+    // A noscript the page's own document made that is in no document yet
+    // (on its own, or under a fragment): Chrome writes it raw. Nothing here
+    // records which document made a detached node, and raw is the unsafe
+    // answer when that is unknown (a node made by an inert document would
+    // get it too), so it is escaped. Owner-document tracking for detached
+    // nodes is a row of its own.
+    "main, created, not inserted:",
+    "main, in a fragment:",
 ];
 
 #[test]
