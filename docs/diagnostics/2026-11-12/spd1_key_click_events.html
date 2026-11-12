@@ -39,6 +39,33 @@ function constructed() {
         f.removeEventListener('keyup', h);
         return got;
     }));
+    // What jQuery's event object does (TodoMVC-jQuery tests `e.which`): a
+    // wrapper whose `which` reads the native event's.
+    out.push('through a wrapper: ' + attempt(function () {
+        var got = '', f = document.getElementById('field');
+        function Wrapper(src) { this.originalEvent = src; this.type = src.type; this.target = src.target; }
+        Object.defineProperty(Wrapper.prototype, 'which', { get: function () { return this.originalEvent.which; }, enumerable: true, configurable: true });
+        function h(n) { var e = new Wrapper(n); got = e.which + ' ' + (e.which === 13) + ' ' + (e.target === f) + ' ' + JSON.stringify(f.value); }
+        f.addEventListener('keyup', h);
+        f.value = 'Buy milk';
+        f.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, keyCode: 13, which: 13, key: 'Enter' }));
+        f.removeEventListener('keyup', h);
+        f.value = '';
+        return got;
+    }));
+    // The Speedometer runner makes the event with ITS window's constructor
+    // and dispatches it at a node of the workload's frame.
+    out.push('from another window: ' + attempt(function () {
+        var got = '', f = document.getElementById('field'), frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        var Other = frame.contentWindow.KeyboardEvent;
+        function h(e) { got = e.which + ' ' + e.keyCode + ' ' + (e instanceof KeyboardEvent) + ' ' + (e instanceof Other) + ' ' + (e.target === f); }
+        f.addEventListener('keyup', h);
+        var r = f.dispatchEvent(new Other('keyup', { bubbles: true, cancelable: true, keyCode: 13, which: 13, key: 'Enter' }));
+        f.removeEventListener('keyup', h);
+        frame.remove();
+        return got + ' ' + r;
+    }));
     return out;
 }
 

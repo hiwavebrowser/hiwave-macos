@@ -109,9 +109,11 @@
     // `new KeyboardEvent('keyup', { keyCode: 13 }).which` is 13.
     if (g.UIEvent && !Object.prototype.hasOwnProperty.call(g.UIEvent.prototype, 'which')) {
         Object.defineProperty(g.UIEvent.prototype, 'which', {
+            // By what the event carries, not by `instanceof`: an event made
+            // with another window's constructor is still a key event here.
             get: function () {
-                if (g.KeyboardEvent && this instanceof g.KeyboardEvent) return this.keyCode;
-                if (ME && this instanceof ME) return this.button + 1;
+                if (typeof this.keyCode === 'number' && typeof this.charCode === 'number') return this.keyCode;
+                if (typeof this.button === 'number') return this.button + 1;
                 return 0;
             },
             configurable: true, enumerable: true
