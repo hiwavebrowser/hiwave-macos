@@ -3,8 +3,9 @@
 //!
 //! A real loopback server and the engine's live loop, as
 //! `inserted_script_live_tests`. The expected answers are Chrome for
-//! Testing 148.0.7778.216's on the same pages (recorded with the parity
-//! oracle's pinned binary; the values are quoted where they are asserted).
+//! Testing 148.0.7778.216's on the same pages (headless, recorded
+//! 2026-11-12 with the parity oracle's pinned binary; quoted where asserted;
+//! the cross-origin test's floor is a stated deviation).
 //! With `EngineConfig::nested_contexts` off nothing here changes: the last
 //! test pins that.
 
