@@ -39,11 +39,6 @@ fn chrome() -> std::collections::BTreeMap<String, (f64, f64)> {
         .collect()
 }
 
-/// Cells Chrome wraps or that the engine does not lay out the same way for a reason outside this
-/// row: `w120|Medium Button` wraps its label onto a second line (42 tall), which the engine does
-/// not do for a button (separate row), and its width is the declared 120 either way.
-const HEIGHT_NOT_PINNED: &[&str] = &["w120|Medium Button"];
-
 #[test]
 fn every_button_in_the_matrix_is_the_size_chrome_148_measured() {
     let (got, want) = (measured(), chrome());
@@ -52,7 +47,7 @@ fn every_button_in_the_matrix_is_the_size_chrome_148_measured() {
     for (id, (cw, ch)) in &want {
         let (w, h) = got[id];
         let width_ok = (w - cw).abs() < 0.75;
-        let height_ok = HEIGHT_NOT_PINNED.contains(&id.as_str()) || (h - ch).abs() < 0.75;
+        let height_ok = (h - ch).abs() < 0.75;
         if !(width_ok && height_ok) {
             wrong.push(format!("{id}: got {w:.2}x{h:.2}, Chrome 148 {cw:.2}x{ch:.2}"));
         }
