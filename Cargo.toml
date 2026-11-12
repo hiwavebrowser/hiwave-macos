@@ -158,3 +158,4 @@ strip = false
 # boa_engine 0.22.0 with a cross-thread interrupt word. See third_party/boa_engine/PATCHES.md.
 [patch.crates-io]
 boa_engine = { path = "third_party/boa_engine" }
+boa_parser = { path = "third_party/boa_parser" }
