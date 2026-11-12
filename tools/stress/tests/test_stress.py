@@ -314,3 +314,78 @@ def test_the_pin_check_does_not_read_a_git_failure_as_clean(monkeypatch, tmp_pat
     except SystemExit as e:
         refused = str(e.code)
     assert "git could not read" in refused, refused
+
+
+# ── delta R1 on #1083 ──────────────────────────────────────────────────────
+
+def test_the_sandbox_lets_loopback_through_and_refuses_everything_else(tmp_path):
+    import socket
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    probe = tmp_path / "probe.py"
+    # 203.0.113.1 is TEST-NET-3: the sandbox refuses the connect before a packet is made.
+    probe.write_text(
+        "import socket, sys\n"
+        "def dial(host, port):\n"
+        "    s = socket.socket(); s.settimeout(3)\n"
+        "    try:\n"
+        "        s.connect((host, port)); return 'connected'\n"
+        "    except OSError as e:\n"
+        "        return type(e).__name__\n"
+        "def resolve(name):\n"
+        "    try:\n"
+        "        socket.getaddrinfo(name, 80); return 'resolved'\n"
+        "    except OSError as e:\n"
+        "        return type(e).__name__\n"
+        "print(dial('127.0.0.1', int(sys.argv[1])), dial('203.0.113.1', 80), resolve('stress-control.invalid'))\n")
+    launcher = run.sandboxed(sys.executable, tmp_path)
+    p = subprocess.run([str(launcher), str(probe), str(port)], capture_output=True, text=True, timeout=30)
+    listener.close()
+    assert p.stdout.split() == ["connected", "PermissionError", "gaierror"], (p.stdout, p.stderr)
+
+
+def test_a_failed_socket_sample_is_not_a_clean_one_and_an_unobserved_run_is_invalid(monkeypatch, tmp_path):
+    class Answer:
+        def __init__(self, code, out="", err=""):
+            self.returncode, self.stdout, self.stderr = code, out, err
+    real = run.subprocess.run
+    monkeypatch.setattr(run.subprocess, "run", lambda *a, **k: Answer(1))
+    assert run.lsof_sockets(1) == ""  # no sockets: an answer
+    monkeypatch.setattr(run.subprocess, "run", lambda *a, **k: Answer(1, err="lsof: status error"))
+    assert run.lsof_sockets(1) is None
+    monkeypatch.setattr(run.subprocess, "run", real)
+    # A whole run in which lsof never answers: the score is not kept.
+    monkeypatch.setattr(run, "lsof_sockets", lambda pid: None)
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "blind", "")
+    assert code == 1 and rec["status"] == "invalid" and rec["score"] is None, rec
+    assert "unobserved" in rec["off_machine"], rec
+
+
+def test_the_filter_list_copy_takes_only_the_two_real_files(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "easylist.txt").write_text("||ads.example.test^\n")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not a filter list")
+    (cache / "easyprivacy.txt").symlink_to(secret)   # a link is not followed
+    (cache / "notes.txt").write_text("some other file")  # another name is not copied
+    monkeypatch.setattr(run, "FILTER_LISTS", cache)
+    assert run.seed_filter_lists(tmp_path / "profile") == 1
+    dest = tmp_path / "profile/Library/Application Support/hiwave/filter-lists"
+    assert sorted(f.name for f in dest.iterdir()) == ["easylist.txt"]
+
+
+def test_the_webkit_chrome_escape_hatch_is_refused(monkeypatch, tmp_path):
+    engine = tmp_path / "engine"
+    engine.write_text("#!/bin/sh\n")
+    engine.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "control", "--engine", "hiwave", "--binary", str(engine),
+                                      "--env", "HIWAVE_RUSTKIT_CHROME=0", "--out", str(tmp_path / "out")])
+    try:
+        run.main()
+        refused = ""
+    except SystemExit as e:
+        refused = str(e.code)
+    assert "HIWAVE_RUSTKIT_CHROME=0 is not allowed" in refused

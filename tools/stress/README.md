@@ -109,18 +109,34 @@ how. How each engine is observed:
   (sign-in, component update, autofill hosts) is listed apart in
   `browser_own_requests`: the sink refused those too, so they did not leave
   the machine. Anything else the sink saw is the page's and invalidates.
-- **hiwave** (real window) and **hiwave-headless**: the app has no offline
-  switch and no network log to read, so the process is watched from
-  outside: its sockets are sampled once a second (`lsof -i`) for a peer
-  that is not loopback, and every `http(s)` URL in its log is checked.
-  Limit: a connection that opens and closes between two samples and is not
-  logged would be missed. Headless runs left to finish (`--until-exit`)
-  also check every request origin in the engine's event log.
+- **hiwave** (real window) and **hiwave-headless**: the engine is started
+  under a seatbelt profile (`sandbox-exec`, `SANDBOX_PROFILE` in `run.py`)
+  that refuses every outbound connection that is not to this machine, the
+  resolver included. So the run cannot leave the machine, however short the
+  attempt. That it *tried* is read from the engine's own request log
+  (`HIWAVE_CONSOLE_LOG=1`: one `net start GET <url>` line per request,
+  script `fetch()`/XHR included) and from every other URL in its log. The
+  process's sockets are also sampled once a second (`lsof -i`); a sample
+  lsof did not answer is counted as failed, never as clean, and a run with
+  no answered sample is `invalid` (`unobserved`). Headless runs left to
+  finish (`--until-exit`) check the event log's request origins too.
+  Limits: the sandbox holds the engine's process and what it forks, not
+  another service's process. The app's WebKit views
+  (`HIWAVE_RUSTKIT_CHROME=0`) fetch through `com.apple.WebKit.Networking`,
+  so `run.py` refuses that setting. The request log costs a log line per
+  request, on both arms alike.
+- **positive control**: `--suite control` serves a page that tries one
+  off-machine fetch (TEST-NET-3) and then reports a score. It must end
+  `invalid` on every engine; run it when the harness or the app's logging
+  changes. (2026-11-11, develop 48b1191f: `invalid` on chrome, headless
+  and the real window.)
 - **the app's own start-up**: on a profile with no fresh filter-list cache
   HiWave downloads EasyList and EasyPrivacy when it starts. `run.py` gives
   its throwaway profile this machine's cached copies
-  (`~/Library/Application Support/hiwave/filter-lists`, or
-  `$STRESS_FILTER_LISTS`; public lists, nothing personal) so no request is
+  (`easylist.txt` and `easyprivacy.txt` from
+  `~/Library/Application Support/hiwave/filter-lists` or
+  `$STRESS_FILTER_LISTS`: those two names only, real files only, links not
+  followed; public lists, nothing personal) so no request is
   made, and refuses to start (exit 2) when there is no cache to copy. Both
   launches of the app (the one that writes its first-run state and the one
   on the runner page) are watched.

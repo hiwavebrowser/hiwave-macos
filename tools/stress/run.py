@@ -74,6 +74,10 @@ SUITE = {
     "speedometer": {"page": "/index.html", "timeout": 1500, "stall": 240},
     "motionmark": {"page": "/MotionMark/index.html", "timeout": 900, "stall": 180},
     "jetstream": {"page": "/index.html", "timeout": 3600, "stall": 600},
+    # Not a benchmark: tools/stress/control/index.html tries one off-machine
+    # fetch and then reports a score. A run of it must end `invalid` on
+    # every engine; `ok` means the offline check is blind there.
+    "control": {"page": "/index.html", "timeout": 60, "stall": 30},
 }
 
 
@@ -98,6 +102,8 @@ def runner_url(base, suite, args):
                  % (re.sub(r"[^A-Za-z0-9]", "", args.only[0]), args.test_interval or 30))
             return base + "/MotionMark/developer.html" + q
         return base + "/MotionMark/index.html"
+    if suite == "control":
+        return base + "/index.html"
     q = "?report=true"
     for t in args.only or []:
         q += "&test=" + t
@@ -246,6 +252,38 @@ class Sink:
                 conn.close()
 
 
+# The HiWave arms run under this seatbelt profile: every outbound
+# connection that is not to this machine is refused by the kernel, the
+# resolver included, so a run cannot leave the machine however briefly it
+# tries. It covers the process and what it forks. It does not cover
+# another service's process: the app's WebKit views (the
+# HIWAVE_RUSTKIT_CHROME=0 escape hatch) fetch through
+# com.apple.WebKit.Networking, so that setting is refused for a run.
+SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
+(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(deny mach-lookup (global-name "com.apple.dnssd.service"))
+"""
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# The engine's own request log (`net start GET <url>` per request, script
+# fetch()/XHR included), which `log_off_machine` reads: the sandbox refuses
+# an off-machine request, this is what says one was tried.
+NET_LOG_ENV = {"HIWAVE_CONSOLE_LOG": "1", "RUST_LOG": "warn,hiwave::console=info,rustkit_engine=info"}
+
+
+def sandboxed(binary, work):
+    """A launcher for `binary` under SANDBOX_PROFILE. It `exec`s, so the
+    process the caller starts and stops is the engine itself."""
+    profile = work / "loopback-only.sb"
+    profile.write_text(SANDBOX_PROFILE)
+    launcher = work / ("sandboxed-" + pathlib.Path(binary).name)
+    launcher.write_text('#!/bin/sh\nexec %s -f "%s" "%s" "$@"\n' % (SANDBOX_EXEC, profile, binary))
+    launcher.chmod(0o755)
+    return launcher
+
+
 class SocketWatch:
     """What a HiWave process is connected to, sampled once a second with
     `lsof -i`: any TCP or UDP peer that is not this machine is recorded.
@@ -256,7 +294,8 @@ class SocketWatch:
     when they are left to write it."""
 
     def __init__(self, interval=1.0):
-        self.pids, self.interval, self.peers, self.samples, self.stop = [], interval, set(), 0, threading.Event()
+        self.pids, self.interval, self.peers, self.stop = [], interval, set(), threading.Event()
+        self.samples, self.failed = 0, 0  # samples that answered, samples that did not
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -268,11 +307,10 @@ class SocketWatch:
     def loop(self):
         while not self.stop.is_set():
             for pid in list(self.pids):
-                try:
-                    out = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-i", "-Fn"],
-                                         capture_output=True, text=True, timeout=10).stdout
-                except (OSError, subprocess.TimeoutExpired):
-                    out = ""
+                out = lsof_sockets(pid)
+                if out is None:
+                    self.failed += 1  # not an answer: never read as "no sockets"
+                    continue
                 self.samples += 1
                 self.peers.update(off_machine_peers(out))
             self.stop.wait(self.interval)
@@ -281,6 +319,20 @@ class SocketWatch:
         self.stop.set()
         self.thread.join(timeout=12)
         return sorted(self.peers)
+
+
+def lsof_sockets(pid):
+    """`lsof -i` name lines for `pid`, or None when lsof did not answer.
+    lsof exits 1 with nothing on stderr when the process simply has no
+    sockets (or is gone): that is an answer. Anything else is a failed
+    sample."""
+    try:
+        r = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-i", "-Fn"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode == 0 or (r.returncode == 1 and not r.stderr.strip()):
+        return r.stdout
+    return None
 
 
 def is_loopback(host):
@@ -464,6 +516,9 @@ FILTER_LISTS = pathlib.Path(os.environ.get(
     "STRESS_FILTER_LISTS", pathlib.Path.home() / "Library" / "Application Support" / "hiwave" / "filter-lists"))
 
 
+FILTER_LIST_NAMES = ("easylist.txt", "easyprivacy.txt")  # hiwave-shield FILTER_LISTS
+
+
 def seed_filter_lists(profile):
     """On a profile with no fresh filter-list cache the app downloads
     EasyList and EasyPrivacy at start-up (hiwave-shield `filter_lists.rs`):
@@ -472,12 +527,16 @@ def seed_filter_lists(profile):
     dated now so the app takes them as fresh. Returns how many it copied."""
     dest = profile / "Library" / "Application Support" / "hiwave" / "filter-lists"
     copied = 0
-    if FILTER_LISTS.is_dir():
+    if FILTER_LISTS.is_dir() and not FILTER_LISTS.is_symlink():
         dest.mkdir(parents=True, exist_ok=True)
-        for f in FILTER_LISTS.iterdir():
-            if f.is_file() and f.stat().st_size > 0:
-                shutil.copyfile(f, dest / f.name)  # copyfile: the copy's mtime is now
-                copied += 1
+        # Only the two files the app reads, and only real files: a link
+        # (or any other name) in that directory is not followed or copied.
+        for name in FILTER_LIST_NAMES:
+            f = FILTER_LISTS / name
+            if f.is_symlink() or not f.is_file() or f.stat().st_size == 0:
+                continue
+            shutil.copyfile(f, dest / name, follow_symlinks=False)  # copyfile: the copy's mtime is now
+            copied += 1
     return copied
 
 
@@ -492,7 +551,9 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
         raise NotOffline("no cached filter lists under %s: the app's first launch would download them. "
                          "Start HiWave once on this machine, or point STRESS_FILTER_LISTS at a copy" % FILTER_LISTS)
     env = {"HIWAVE_TEST_HOOKS": "0"}
+    env.update(NET_LOG_ENV)
     env.update(extra_env)
+    binary = sandboxed(binary, work)
     seed = rw.App(binary, profile, work / "seed.log", env).start()
     on_pid(seed.proc.pid)
     end = time.time() + 20
@@ -527,8 +588,9 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
 
 
 def start_headless(binary, url, work, limit_s, extra_env):
-    env = dict(os.environ, **extra_env)
-    argv = [str(binary), "--url", url, "--width", "1280", "--height", "800",
+    env = dict(os.environ, **NET_LOG_ENV)
+    env.update(extra_env)
+    argv = [str(sandboxed(binary, work)), "--url", url, "--width", "1280", "--height", "800",
             "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
             "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
             "--event-log", str(work / "events.jsonl"), "--event-summary",
@@ -562,6 +624,8 @@ def sha1(path):
 
 
 def check_pin(suite):
+    if suite == "control":
+        return HERE / "control", {"version": "offline positive control", "sha": "0" * 40}
     pin = PINS[suite]
     d = SUITES_DIR / pin["dir"]
     if not (d / ".git").is_dir():
@@ -604,6 +668,8 @@ def scores(suite, record):
         sub = {k: v.get("score") for k, v in (r.get("tests") or {}).items()}
         return r.get("score"), sub, {"lower": r.get("lower"), "upper": r.get("upper"), "fps": r.get("fps"),
                                      "tests": r.get("tests")}
+    if suite == "control":
+        return r.get("score"), {}, None
     return r.get("score"), r.get("tests") or {}, {"failedTest": r.get("failedTest")}
 
 
@@ -669,6 +735,12 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
+    extra_env = dict(kv.split("=", 1) for kv in args.env)
+    if extra_env.get("HIWAVE_RUSTKIT_CHROME") == "0":
+        # WebKit views fetch through com.apple.WebKit.Networking, a process
+        # the sandbox on the app does not hold and the socket watch does
+        # not see.
+        sys.exit("HIWAVE_RUSTKIT_CHROME=0 is not allowed here: its WebKit views' requests cannot be kept on this machine")
     binary = pathlib.Path(args.binary).resolve()
     if not binary.is_file():
         sys.exit("no binary at %s" % binary)
@@ -680,7 +752,6 @@ def main():
     root, pin = check_pin(args.suite)
     limit = args.timeout or SUITE[args.suite]["timeout"]
     stall = args.stall or SUITE[args.suite]["stall"]
-    extra_env = dict(kv.split("=", 1) for kv in args.env)
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     bin_sha = sha1(binary)
@@ -785,7 +856,7 @@ def main():
 
     wall = round(time.time() - started, 1)
     score, sub, detail = scores(args.suite, record)
-    partial = bool(args.only or args.iterations or args.test_interval)
+    partial = bool(args.only or args.iterations or args.test_interval) or args.suite == "control"
     if status == "ok" and score is None:
         status = "failed"
     findings, tail = log_findings(work / "app.log") if handle is not None else ([], "")
@@ -795,6 +866,10 @@ def main():
     log_hosts = sorted(set(log_off_machine(work / "app.log") + log_off_machine(work / "seed.log"))) \
         if args.engine != "chrome" else []
     left = off_machine(args.engine, sink, watch_peers, log_hosts, events)
+    if watch is not None and handle is not None and watch.samples == 0:
+        # No socket sample ever answered: the run was not observed, and an
+        # unobserved run is not an offline one.
+        left["unobserved"] = ["0 of %d socket samples answered" % watch.failed]
     discarded_score = None
     if left:
         status, discarded_score, score = "invalid", score, None
@@ -832,7 +907,9 @@ def main():
         "off_machine": left,
         "discarded_score": discarded_score,
         "offline_checks": (["sink_proxy"] if sink is not None else
-                           ["sockets (%d samples)" % (watch.samples if watch else 0), "engine_log_urls"]
+                           ["loopback-only sandbox",
+                            "sockets (%d samples, %d failed)" % ((watch.samples, watch.failed) if watch else (0, 0)),
+                            "engine_log_urls"]
                            + (["event_log_origins"] if events else [])),
         "host": {"cpus": os.cpu_count(), "machine": os.uname().machine, "os": os.uname().release},
     }
