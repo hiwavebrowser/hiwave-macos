@@ -56,6 +56,9 @@ mod flex_item_min_height_tests;
 mod fit_content_width_tests;
 
 #[cfg(test)]
+mod emoji_cluster_tests;
+
+#[cfg(test)]
 mod zero_width_column_stretch_tests;
 #[cfg(test)]
 mod flex_item_specified_width_min_tests;
@@ -63,6 +66,7 @@ mod flex_item_specified_width_min_tests;
 mod flex_item_cross_guess_tests;
 #[cfg(test)]
 mod primary_emoji_font_tests;
+
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
@@ -1912,10 +1916,12 @@ pub struct LayoutBox {
     /// an auto-height out-of-flow parent (and the auto-height in-flow chain
     /// under it) sets it today; see `mark_percent_height_bases`.
     pub(crate) percent_height_is_auto: bool,
-    /// LAY1: the percentage base this box's in-flow children were last
-    /// laid out against on the block path (`None`: none, or not known). A
-    /// re-anchor that finds the same used height leaves them as they are.
-    pub(crate) children_percent_base: Option<f32>,
+    /// LAY1: the content width and the percentage base this box's in-flow
+    /// children were last laid out against on the block path (`None`: no
+    /// base, or not known). A re-anchor that finds the same used width AND
+    /// height leaves them as they are; one that stretches the box wider at
+    /// the same height lays them out again (#1043 R1, review 5860844422).
+    pub(crate) children_laid_at: Option<(f32, f32)>,
     /// LAY1: an absolutely positioned box whose parent is its containing
     /// block and knows its own height: that padding box, set by the parent
     /// before the flow pass lays the box out, so the box's children are
@@ -1971,6 +1977,11 @@ pub struct LayoutBox {
     /// box. A pseudo-element has no node of its own (`node_id` is `None`),
     /// so a paint-only animation frame finds its boxes by this.
     pub pseudo_animation_key: Option<usize>,
+    /// The box is a flex or grid item: it establishes an independent
+    /// formatting context whatever its own style says (css-flexbox-1 §3,
+    /// css-grid-1 §6), so its auto height encloses its floats. Set by the
+    /// flex and grid containers on their in-flow children.
+    pub formatting_root: bool,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2016,7 +2027,7 @@ impl LayoutBox {
             text_lines: None,
             text_flow_first_offset: None,
             percent_height_is_auto: false,
-            children_percent_base: None,
+            children_laid_at: None,
             abspos_cb_hint: None,
             root_element_height: None,
             table_span: table::TableSpan::default(),
@@ -2029,6 +2040,7 @@ impl LayoutBox {
             scrollbar_overflows: std::cell::Cell::new((false, false)),
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
+            formatting_root: false,
         }
     }
 
@@ -2629,7 +2641,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
-        self.children_percent_base = None;
+        self.children_laid_at = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -4437,7 +4449,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
-        self.children_percent_base = None;
+        self.children_laid_at = None;
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -4540,7 +4552,7 @@ impl LayoutBox {
         }
         self.mark_percent_height_bases(definite_for_children, containing_block);
         self.layout_block_children(definite_for_children);
-        self.children_percent_base = definite_for_children;
+        self.children_laid_at = definite_for_children.map(|h| (self.dimensions.content.width, h));
 
         // Height depends on children - use definite_height for percentage resolution
         self.calculate_block_height(definite_height);
@@ -4699,7 +4711,8 @@ impl LayoutBox {
                 float_context,
                 definite_for_children,
             );
-            self.children_percent_base = definite_for_children;
+            self.children_laid_at =
+                definite_for_children.map(|h| (self.dimensions.content.width, h));
         }
 
         // Height depends on children
@@ -5378,14 +5391,14 @@ impl LayoutBox {
             // re-anchor that changes nothing (a parent re-anchoring its
             // children again, or a layer its parent already sized through
             // `abspos_cb_hint`) costs nothing (#1043 R1 nit 1).
-            if self
-                .children_percent_base
-                .is_none_or(|base| (base - height).abs() > 0.01)
-            {
+            let width = self.dimensions.content.width;
+            if self.children_laid_at.is_none_or(|(laid_width, base)| {
+                (laid_width - width).abs() > 0.01 || (base - height).abs() > 0.01
+            }) {
                 self.mark_percent_height_bases(Some(height), containing_block);
                 self.layout_block_children(Some(height));
                 self.dimensions.content.height = height;
-                self.children_percent_base = Some(height);
+                self.children_laid_at = Some((width, height));
                 relaid = true;
             }
         }
@@ -6103,6 +6116,9 @@ impl LayoutBox {
                     }
                 }
                 child.layout_with_definite_height(&cb, cb.content.height);
+                // A box that is not a block never takes the hint (#1043 R1
+                // LOW): it must not outlive this layout.
+                child.abspos_cb_hint = None;
                 continue;
             }
 
@@ -6624,7 +6640,9 @@ impl LayoutBox {
         // grows to contain its floats (the auto height of a floated card
         // or an `overflow:hidden` row of floated items). Other boxes let
         // them overflow; a clearfix clears them above.
-        if !floats.is_empty() && crate::margin_collapse::establishes_bfc(&self.style, self.float) {
+        if !floats.is_empty()
+            && (self.formatting_root || crate::margin_collapse::establishes_bfc(&self.style, self.float))
+        {
             cursor_y = cursor_y.max(floats.clear_all());
         }
 
@@ -7188,6 +7206,7 @@ impl LayoutBox {
                 }
                 let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
+                child.abspos_cb_hint = None;
                 continue;
             }
 
@@ -7762,7 +7781,9 @@ impl LayoutBox {
 
         // A formatting root's auto height contains its floats (see
         // layout_block_children).
-        if !floats.is_empty() && crate::margin_collapse::establishes_bfc(&self.style, self.float) {
+        if !floats.is_empty()
+            && (self.formatting_root || crate::margin_collapse::establishes_bfc(&self.style, self.float))
+        {
             cursor_y = cursor_y.max(floats.clear_all());
         }
 

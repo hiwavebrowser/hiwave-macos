@@ -292,7 +292,9 @@ impl AdBlocker {
                 let result = self.engine.check_network_request(&req);
 
                 if result.matched {
-                    log::debug!("Blocked: {} (from {})", url, source_url);
+                    // The host only: not the path or query (signed URLs, tokens) and not the page it
+                    // came from (browsing history). Logs carry shapes, never bodies.
+                    log::debug!("Blocked: {}", url.host_str().unwrap_or("-"));
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
                     self.trackers_blocked.fetch_add(1, Ordering::Relaxed);
                     // Without rule names the engine writes "NetworkFilter".
@@ -304,7 +306,9 @@ impl AdBlocker {
                 }
             }
             Err(e) => {
-                log::warn!("Failed to create request for {}: {}", url, e);
+                // Host only, and not the error's text, which may quote the URL.
+                let _ = e;
+                log::warn!("Failed to create request for {}", url.host_str().unwrap_or("-"));
                 None
             }
         }
@@ -411,6 +415,45 @@ pub struct BlockingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Capture(std::sync::Mutex<Vec<String>>);
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            self.0.lock().unwrap().push(format!("{}", record.args()));
+        }
+        fn flush(&self) {}
+    }
+    static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+
+    /// Logs carry shapes, never bodies (the standing rule): a blocked request is logged by its host.
+    /// Its path, query and fragment and the page it came from (history, signed URLs, tokens) are not.
+    /// The test's own host marks its lines, so a parallel test's output cannot fail it.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        let _ = log::set_logger(&CAPTURE);
+        log::set_max_level(log::LevelFilter::Trace);
+        let blocker = AdBlocker::with_rules(&["||shape-probe-host.example^"]);
+        let url = Url::parse("https://shape-probe-host.example/pixel/u123abc?session=s3cr3t#frag9").unwrap();
+        let source = Url::parse("https://inbox.example/mail/thread42?token=t0k3n").unwrap();
+        assert!(blocker.should_block(&url, &source, ResourceType::Script));
+        let lines: Vec<String> = CAPTURE
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("shape-probe-host.example"))
+            .cloned()
+            .collect();
+        assert!(!lines.is_empty(), "the block is logged, by host");
+        let text = lines.join("
+");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9", "inbox", "thread42", "t0k3n"] {
+            assert!(!text.contains(secret), "{secret} reached a log line: {text}");
+        }
+    }
 
     /// A small stand-in for EasyList/EasyPrivacy: third-party-only rules for some hosts, the
     /// captcha allow EasyList carries (`@@||google.com/recaptcha/api2/`), its allow for the

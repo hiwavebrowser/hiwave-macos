@@ -460,6 +460,11 @@ fn layout_flex_container_at(
     used_inner_height: Option<f32>,
     resolved_percent_inner_height: Option<f32>,
 ) {
+    // A flex item is a formatting root (css-flexbox-1 §3): it encloses its
+    // floats. Marked before anything lays an item out.
+    for child in &mut container.children {
+        child.formatting_root = true;
+    }
     // Resolved once, up front, and read by both the main-size choice below
     // and step 11d's redistribution: these take `&LayoutBox`, and from the
     // moment the item list borrows `container.children` mutably no whole-box

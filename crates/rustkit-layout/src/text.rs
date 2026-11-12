@@ -187,13 +187,24 @@ impl FontFamilyChain {
 
     /// Resolve a CSS font-family value to a chain.
     pub fn from_css_value(value: &str) -> Self {
-        let families: Vec<&str> = value
+        let listed: Vec<&str> = value
             .split(',')
             .map(|s| s.trim().trim_matches('"').trim_matches('\''))
             .collect();
+        // `-apple-system` is WebKit's name for the system font; Chrome has
+        // never supported it, so it is an unknown family and the stack goes
+        // on to the next one (Chrome for Testing 148: `-apple-system` alone
+        // is the default serif, `-apple-system, "Segoe UI", Helvetica` is
+        // Helvetica). CB7b.
+        let families: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|f| !f.eq_ignore_ascii_case("-apple-system"))
+            .collect();
 
         if families.is_empty() {
-            return Self::sans_serif();
+            // Only unknown names: Chrome's default (standard) font.
+            return if listed.is_empty() { Self::sans_serif() } else { Self::serif() };
         }
 
         let primary = families[0];
@@ -203,7 +214,7 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
-            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
+            "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
@@ -217,10 +228,7 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui"
-                        || lower == "-apple-system"
-                        || lower == "blinkmacsystemfont"
-                    {
+                    if lower == "system-ui" || lower == "blinkmacsystemfont" {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
@@ -1643,10 +1651,31 @@ impl TextShaper {
             // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
+            // EM1: characters still to fold into the emoji sequence glyph
+            // the previous head started (Chrome shapes a ZWJ family, a
+            // skin-toned emoji, a flag, a keycap as ONE cluster with one
+            // advance). They are recorded `Ignorable`: no advance, nothing
+            // drawn of their own; paint draws the sequence at the head.
+            let mut fold_left = 0usize;
             let primary_emoji_advance = rustkit_text::macos::apple_emoji_advance(&ct_font);
 
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
+                if fold_left > 0 {
+                    fold_left -= 1;
+                    glyphs.push(PositionedGlyph {
+                        glyph_id: glyph_ids[utf16_idx],
+                        x: x_offset,
+                        y: 0.0,
+                        advance: 0.0,
+                        character: c,
+                        cluster: char_idx as u32,
+                        face: GlyphFace::Ignorable,
+                    });
+                    utf16_idx += c.len_utf16();
+                    char_idx += 1;
+                    continue;
+                }
                 let advance = glyph_advances[utf16_idx].width as f32;
 
                 // A character the chosen face has no glyph for is shaped by
@@ -1679,6 +1708,27 @@ impl TextShaper {
                         primary_has_glyph,
                     )
                 };
+                // The head of an emoji sequence its emoji face forms as one
+                // glyph takes the rest of its grapheme cluster with it.
+                // So does the head of a run whose own face is an Apple
+                // emoji face (`font-family: "Apple Color Emoji"`).
+                let primary_emoji_head =
+                    face == GlyphFace::Primary && primary_has_glyph && primary_emoji_advance.is_some();
+                if face == (GlyphFace::Fallback { emoji: true }) || primary_emoji_head {
+                    let n = rustkit_text::macos::emoji_cluster_len(&text_chars[char_idx..]);
+                    if n > 1 {
+                        let cluster: String = text_chars[char_idx..char_idx + n].iter().collect();
+                        let formed = if primary_emoji_head {
+                            rustkit_text::macos::emoji_cluster_glyph(&ct_font, &cluster)
+                        } else {
+                            rustkit_text::macos::fallback_face_for_presentation(&ct_font, c, true)
+                                .and_then(|(face, _)| rustkit_text::macos::emoji_cluster_glyph(&face, &cluster))
+                        };
+                        if let Some((_, covered)) = formed {
+                            fold_left = covered - 1;
+                        }
+                    }
+                }
                 let final_advance = match face {
                     // A primary Apple emoji face advances as it does when
                     // reached by fallback (#1072 R1 nit 4).
@@ -3117,11 +3167,36 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(system.primary, "Segoe UI");
 
-        let apple = FontFamilyChain::from_css_value("-apple-system");
-        #[cfg(target_os = "macos")]
-        assert_eq!(apple.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(apple.primary, "Segoe UI");
+        let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
+        assert_eq!(blink.primary, system.primary);
+    }
+
+    /// `-apple-system` is WebKit's name for the system font. Chrome has never
+    /// supported it: it is an unknown family, skipped in the stack like any
+    /// font that is not installed (CB7b). Chrome for Testing 148 on macOS,
+    /// `getBoundingClientRect` of "Hello world" at 14px: `-apple-system`
+    /// alone is 67.27, as the default serif (Times) is, where the system
+    /// font is 72.34; `-apple-system, BlinkMacSystemFont` is the system
+    /// font; `-apple-system, "Segoe UI", Helvetica` is Helvetica (69.25).
+    #[test]
+    fn apple_system_is_an_unknown_family_as_in_chrome() {
+        let serif = FontFamilyChain::serif();
+        let alone = FontFamilyChain::from_css_value("-apple-system");
+        assert_eq!(alone.primary, serif.primary, "-apple-system alone is the default serif");
+        let system = FontFamilyChain::from_css_value("system-ui");
+        let then_blink = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont");
+        assert_eq!(then_blink.primary, system.primary, "the next family, the system font");
+        let stack = FontFamilyChain::from_css_value("-apple-system, \"Segoe UI\", Helvetica");
+        let mut walk = std::iter::once(stack.primary.as_str())
+            .chain(stack.fallbacks.iter().map(String::as_str));
+        assert!(
+            !walk.any(|f| f == system.primary || f.eq_ignore_ascii_case("-apple-system")),
+            "no system font ahead of Helvetica: {} {:?}",
+            stack.primary,
+            stack.fallbacks
+        );
+        assert_eq!(stack.primary, "Segoe UI");
+        assert_eq!(stack.fallbacks.first().map(String::as_str), Some("Helvetica"));
     }
 
     /// A generic keyword after families that are not installed resolves

@@ -127,7 +127,9 @@ impl ShieldInterceptHandler {
         self.census.snapshot()
     }
 
-    /// Set a callback to be called when a request is blocked.
+    /// Set a callback to be called when a request is blocked. It is handed the FULL URL, for
+    /// in-process use (a counter, a UI badge); a callback must not log it, as the shield's own log
+    /// lines carry the host only (the standing rule: logs carry shapes, never bodies).
     pub fn with_on_blocked<F>(mut self, callback: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -222,7 +224,7 @@ impl ShieldInterceptHandler {
 
 impl InterceptHandler for ShieldInterceptHandler {
     fn intercept(&self, request: &Request) -> InterceptAction {
-        trace!(url = %request.url, "Shield checking request");
+        trace!(host = %rustkit_net::origin_for_log(&request.url), "Shield checking request");
 
         // Privacy pin 2026-09-29: interception happens BEFORE bytes; the
         // census counts every attempt per destination so "blocked" is a
@@ -277,7 +279,7 @@ impl InterceptHandler for ShieldInterceptHandler {
         if let Some(reason) = blocked {
             self.census.blocked(dest);
             self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            debug!(url = %request.url, ?dest, list = %reason.list, "Shield blocked request");
+            debug!(host = %rustkit_net::origin_for_log(&request.url), ?dest, list = %reason.list, "Shield blocked request");
             if let Some(ref callback) = self.on_blocked {
                 callback(request.url.as_str());
             }
@@ -638,6 +640,50 @@ mod tests {
         let census = handler.census_snapshot();
         assert_eq!(census[2].0, 1, "script attempted");
         assert_eq!(census[2].1, 1, "script blocked");
+    }
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// Logs carry shapes, never bodies (the standing rule): the handler logs a blocked request by
+    /// its host. Its path, query and fragment, and the page it came from, are not logged.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let handler = ShieldInterceptHandler::new();
+        let action = tracing::subscriber::with_default(subscriber, || {
+            handler.intercept(&test_request_with(
+                "https://adsrvr.org/pixel/u123abc?session=s3cr3t#frag9",
+                RequestDestination::Script,
+                Some("https://inbox.example/mail/thread42?token=t0k3n"),
+            ))
+        });
+        assert!(!matches!(action, InterceptAction::Allow), "adsrvr.org is blocked: {action:?}");
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("adsrvr.org"), "the block is logged, by host: {text}");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9", "inbox", "thread42", "t0k3n"] {
+            assert!(!text.contains(secret), "{secret} reached a log line: {text}");
+        }
     }
 
     /// SH1, end to end through the app's own worker and the lists on disk: once the engine is
