@@ -38,16 +38,10 @@ fn report_of(page: &str) -> (Engine, EngineViewId, Vec<String>) {
 ///   `style` attribute lazily, when something next reads its attributes,
 ///   so `el.style.color = 'red'` followed by `setAttribute('x', ..)` reads
 ///   `x,style`. Here the attribute is written at once (`style,x`).
-/// * `fixed (` and `rect fixed`: a `position: fixed` box inside an
-///   absolutely positioned ancestor is laid out at 810,70 where Chrome
-///   puts it at 410,80 (the viewport is its containing block). A layout
-///   defect; the hit test finds the box where the layout put it.
 /// * `rect field`: a bare text input is 19 tall here and 21 in Chrome
 ///   (SET3, on the settings stack).
 const KNOWN: &[&str] = &[
     "style set before another attribute: ",
-    "fixed (",
-    "rect fixed: ",
     "rect field: ",
 ];
 

@@ -8847,7 +8847,7 @@ impl LayoutBox {
             }
             absolute = None;
         }
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             if !clips {
                 reach = union_reach(reach, fixed);
             }
