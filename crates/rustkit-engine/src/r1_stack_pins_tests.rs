@@ -69,6 +69,89 @@ fn a_page_cannot_reach_the_engines_event_internals_or_forge_trust() {
     );
 }
 
+/// MED 3, as a page meets it: a box in a narrow parent is moved out of the
+/// parent by a transform Web Animation, and a script reads
+/// `elementFromPoint` in the frame it moves (answered from the animation
+/// frame placed on a copy of the painted boxes). The pointer was over the
+/// page before, so the painted boxes carry the hit test's marks from when
+/// the box was inside its parent; the copy must not keep them.
+#[test]
+fn a_box_a_web_animation_moves_out_of_its_parent_is_hit_where_the_frame_puts_it() {
+    let server = crate::script_net_tests::serve_routes(vec![(
+        "/",
+        "text/html",
+        "<!doctype html><style>body{margin:0}#p{width:40px;height:40px}#a{width:40px;height:40px;background:green}\
+         #tall{height:400px}</style><div id=p><div id=a></div></div><div id=tall></div>\
+         <script>var a = document.getElementById('a'); window.seen = [];</script>"
+            .to_string(),
+    )]);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    // In place for the first half, then 300px to the right, in one step.
+    engine
+        .execute_script(
+            view,
+            "a.animate([{transform:'translateX(0px)',easing:'steps(1, end)'},{transform:'translateX(0px)',offset:0.5,easing:'steps(1, start)'},\
+             {transform:'translateX(300px)'}],{duration:600,fill:'forwards'});\
+             (function f(){requestAnimationFrame(function(){\
+             var hit = document.elementFromPoint(320, 20);\
+             seen.push(Math.round(a.getBoundingClientRect().left) + ':' + (hit ? hit.id || hit.localName : 'null'));f();});})()",
+        )
+        .unwrap();
+    for _ in 0..70 {
+        // The pointer is over the page: the painted boxes are marked.
+        engine.mouse_move_at_point(view, 20.0, 20.0);
+        rt.block_on(engine.pump_live(view, 16));
+    }
+    let seen = js(&mut engine, view, "seen.join(' ')");
+    let reads: Vec<&str> = seen.split(' ').collect();
+    assert!(reads.iter().any(|r| r.starts_with("0:")), "read while in place: {seen}");
+    assert!(reads.iter().any(|r| r.starts_with("300:")), "read after the move: {seen}");
+    for read in &reads {
+        let (left, hit) = read.split_once(':').unwrap();
+        if left == "300" {
+            assert_eq!(hit, "a", "the box is hit where the frame put it: {seen}");
+        }
+    }
+}
+
+/// The trusted key and text events go to script through the host object
+/// (`JsRuntime::evaluate_host_turn`), and the page's listeners run inside
+/// that call: a listener that never returns is stopped by the turn's
+/// budget and reported, as one in any other script turn is.
+#[test]
+fn a_listener_looping_forever_in_a_trusted_key_or_text_event_is_stopped_and_reported() {
+    for event in ["keydown", "textInput"] {
+        let config = EngineConfig { interrupt_scripts_at_budget: true, live_turn_budget_ms: 300, ..EngineConfig::default() };
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+        engine
+            .load_html(
+                view,
+                &format!(
+                    "<!doctype html><body style=\"margin:0\"><input id=f style=\"display:block\">\
+                     <script>window.heard = 0; document.addEventListener('{event}', function () {{ heard++; while (true) {{}} }});</script>"
+                ),
+            )
+            .expect("load");
+        assert_eq!(engine.focus_at_point(view, 20.0, 8.0).as_deref(), Some("input"));
+        let started = std::time::Instant::now();
+        engine.handle_text_key(view, 0, "q", false, false, false);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "{event}: {took:?}");
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            log.iter().any(|r| r.outcome == ScriptOutcome::OverBudget && r.source == format!("event:{event}")),
+            "{event}: {log:#?}"
+        );
+        // The listener ran once, and the page is usable afterwards.
+        assert_eq!(js(&mut engine, view, "String(heard)"), "1", "{event}");
+    }
+}
+
 /// MED 1: a timing, run by hand in the parity profile, before and after:
 /// `cargo test -p rustkit-engine --lib --features headless --profile parity r1_svg_pointer_cost -- --ignored --nocapture`
 ///
