@@ -149,6 +149,17 @@ def test_a_record_dir_inside_the_checkout_is_refused():
     assert rw.record_dir_problem(pathlib.Path.home() / "Library" / "Logs" / "hiwave" / "recordings") is None
 
 
+def test_a_further_stop_signal_during_cleanup_is_ignored():
+    rw.install_stop_signals()
+    rw.ignore_stop_signals()
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGHUP)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+
 def test_sigterm_mid_run_stops_the_recording(tmp_path):
     """The batch runner kills the driver: the .mov is still finalised."""
     harness = tmp_path / "harness.py"

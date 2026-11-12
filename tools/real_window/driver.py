@@ -74,11 +74,19 @@ def record_dir_problem(path):
 
 def install_stop_signals():
     """SIGTERM and SIGHUP end the run the way an exception does, so the
-    `finally` blocks stop the app and finalise a recording."""
+    `finally` blocks stop the app and finalise a recording. Every run, not
+    only `--record`."""
     def stop(signum, _frame):
         raise SystemExit(128 + signum)
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, stop)
+
+
+def ignore_stop_signals():
+    """A second SIGTERM or SIGHUP during cleanup must not abandon it and
+    leave `screencapture` running."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
 
 
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
@@ -3508,6 +3516,9 @@ class Driver:
                 finally:
                     self.close_page()
         finally:
+            # A second SIGTERM during the 30 s waits below used to raise
+            # again and leave screencapture running.
+            ignore_stop_signals()
             if rec is not None:
                 recording = self.stop_recording(rec)
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
@@ -3555,6 +3566,7 @@ def main():
     try:
         return driver.run(names)
     finally:
+        ignore_stop_signals()
         driver.close_page()
 
 

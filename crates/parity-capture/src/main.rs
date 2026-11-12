@@ -792,11 +792,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
+        let load_began = Instant::now();
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
         }
-        // With script on, `load_html` ran the inline scripts.
-        if args.run_inline_scripts {
+        // `--run-inline-scripts` and `--live-ms` both turn script on for a
+        // file (T21). A script that threw is a failed capture either way,
+        // the same check the inline-scripts flag already made.
+        if args.run_inline_scripts || args.live_ms.is_some() {
             let log = engine.script_log(view_id).unwrap_or_default();
             if let Some(failed) = inline_script_failure(&log) {
                 return result.failed(
@@ -818,6 +821,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
             };
             result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -2104,6 +2108,30 @@ mod tests {
         }
         let live = result.live_stats.as_ref().expect("a file capture with --live-ms reports live_stats");
         assert!(live.timer_callbacks >= 2, "timer + frame callbacks: {}", live.timer_callbacks);
+        assert!(result.capture_ms.is_some_and(|ms| ms > 0.0), "{:?}", result.capture_ms);
+    }
+
+    /// `--live-ms` turns script on by itself. A file whose inline script
+    /// throws fails the capture, the same as `--run-inline-scripts`.
+    #[test]
+    fn a_file_capture_with_live_ms_fails_when_an_inline_script_throws() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-t21-throw-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, "<!doctype html><script>throw new Error('nope')</script>").unwrap();
+        let result = run_capture(&Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--live-ms",
+            "200",
+        ]).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(result.status, "error", "{:?}", result.error);
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("Inline script failed"), "{err}");
     }
 
     /// The board's fixture capture is unchanged: without `--live-ms` a file

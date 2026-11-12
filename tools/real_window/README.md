@@ -73,11 +73,15 @@ full set, the check names for up to three, else `<n>checks-<hash>`. The
 directory is outside the checkout on purpose (the repo is public);
 `--record-dir` inside the checkout is refused (exit 2).
 
-The recording stops when the run ends, when a check raises, on SIGTERM or
-SIGHUP (the driver turns them into an exit so its `finally` runs), and at
-`--record-max-s` (default 2 h) so a wedged run does not record for ever. A
-`kill -9` of the driver can leave `screencapture` running; stop it with
-`pkill -INT -x screencapture`. The run then gets `record` assertions: the
+SIGTERM and SIGHUP end every run, recorded or not, so the driver's
+`finally` closes the app. A further one of those signals during that
+cleanup is ignored, so a recording can finish stopping. The recording also
+stops when the run ends, when a check raises, and at `--record-max-s`
+(default 2 h) so a wedged run does not record for ever. A `kill -9` of the
+driver can leave `screencapture` running; stop it with
+`pkill -INT -x screencapture`. A recording is the whole display. Leave the
+file where the driver wrote it; do not attach it to a pull request, an
+issue, or a message. The run then gets `record` assertions: the
 recording covered the whole run, `screencapture` exited 0, the .mov exists,
 plays and has a video track (`hwdrive movie`, AVFoundation, no grant), and
 its length is within 5 s or 10% of the run. They are in `result.json`, with
