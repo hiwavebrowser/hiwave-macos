@@ -610,7 +610,7 @@ mod restore_tests {
         child.children_laid_at = Some((321.0, 45.0));
         parent.children.push(child);
         let outputs = snapshot(&parent).expect("snapshot");
-        parent.children[0].children_laid_at = Some((7.0, 45.0));
+        parent.children[0].children_laid_at = Some((7.0, 99.0));
         assert!(restore(&mut parent, &outputs));
         assert_eq!(parent.children[0].children_laid_at, Some((321.0, 45.0)));
         parent.children[0].children_laid_at = None;

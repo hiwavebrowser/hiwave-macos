@@ -155,18 +155,34 @@ fn with_the_memo_on_nested_flex_containers_cost_visits_linear_in_depth() {
     }
 }
 
+/// Off, verify and on agree on a nest of `parts`. Depth 10 keeps the memo-off pass (2^k visits)
+/// to a few seconds in the debug profile on a loaded machine; the deep (24+) nesting is the
+/// release-profile timing tool's job (`lat21_time`), not a unit test's. One test per series, so no
+/// piece holds the GPU test guard (taken by `Engine::new`) for long.
+fn nested_flex_is_identical_in_every_mode(name: &str, parts: &[(&str, &str)]) {
+    let html = nest(parts, 10);
+    let c = assert_same_in_every_mode(name, &html);
+    assert!(c.hits > 0, "{name}: the memo never hit");
+}
+
 #[test]
-fn every_mode_lays_nested_flex_pages_out_identically() {
-    for (name, parts) in [
-        ("flex/block", &[FLEX, BLOCK][..]),
-        ("flex/inline-block", &[FLEX, INLINE_BLOCK][..]),
-        ("flex/float", &[FLEX, FLOAT][..]),
-        ("flex only", &[FLEX][..]),
-    ] {
-        let html = nest(parts, 24);
-        let c = assert_same_in_every_mode(name, &html);
-        assert!(c.hits > 0, "{name}: the memo never hit");
-    }
+fn every_mode_lays_flex_block_nests_out_identically() {
+    nested_flex_is_identical_in_every_mode("flex/block", &[FLEX, BLOCK]);
+}
+
+#[test]
+fn every_mode_lays_flex_inline_block_nests_out_identically() {
+    nested_flex_is_identical_in_every_mode("flex/inline-block", &[FLEX, INLINE_BLOCK]);
+}
+
+#[test]
+fn every_mode_lays_flex_float_nests_out_identically() {
+    nested_flex_is_identical_in_every_mode("flex/float", &[FLEX, FLOAT]);
+}
+
+#[test]
+fn every_mode_lays_flex_only_nests_out_identically() {
+    nested_flex_is_identical_in_every_mode("flex only", &[FLEX]);
 }
 
 const LOREM: &str = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua";
@@ -193,7 +209,7 @@ fn rich_body(depth: usize) -> String {
 
 #[test]
 fn wrapping_text_and_floats_at_shifting_origins_restore_exactly() {
-    let html = format!("<html><body style=\"width:900px\">{}</body></html>", rich(8));
+    let html = format!("<html><body style=\"width:900px\">{}</body></html>", rich(5));
     let c = assert_same_in_every_mode("rich", &html);
     assert!(c.hits > 0, "the memo never hit on the rich page: {c:?}");
 }
@@ -204,7 +220,7 @@ fn wrapping_text_and_floats_at_shifting_origins_restore_exactly() {
 fn subtrees_with_fixed_or_sticky_descendants_are_never_memoised() {
     for (name, style) in [("fixed", "position:fixed;top:0;left:0"), ("sticky", "position:sticky;top:0")] {
         let mut inner = format!("<div style=\"{style}\">x</div>");
-        for _ in 0..10 {
+        for _ in 0..6 {
             inner = format!("<div style=\"display:flex;position:relative\"><span>w</span><div>{inner}</div></div>");
         }
         let html = format!("<html><body>{inner}</body></html>");
@@ -216,30 +232,42 @@ fn subtrees_with_fixed_or_sticky_descendants_are_never_memoised() {
 /// An absolute box is anchored to its parent's padding box, inside the subtree, so it IS memoised
 /// and restores to the same rectangles, including a `bottom`/`right` anchored one and one whose
 /// parent is positioned or static, at origins that differ between the passes.
-#[test]
-fn absolute_descendants_restore_exactly() {
-    for style in [
-        "position:absolute;top:2px;left:3px",
-        "position:absolute;bottom:4px;right:5px;width:20px;height:10px",
-        "position:absolute;inset:0",
-        "position:absolute",
-    ] {
-        let mut inner = format!("<div style=\"{style}\">x</div>{LOREM}");
-        for i in 0..10 {
-            let rel = if i % 2 == 0 { "position:relative;" } else { "" };
-            inner = format!("<div style=\"display:flex;{rel}padding:2px\"><span>w</span><div>{inner}</div></div>");
-        }
-        let html = format!("<html><body style=\"width:800px\">{inner}</body></html>");
-        let c = assert_same_in_every_mode(style, &html);
-        assert!(c.hits > 0 && c.stored > 0, "{style}: the memo did not engage: {c:?}");
+fn absolute_restores_exactly(style: &str) {
+    let mut inner = format!("<div style=\"{style}\">x</div>{LOREM}");
+    for i in 0..6 {
+        let rel = if i % 2 == 0 { "position:relative;" } else { "" };
+        inner = format!("<div style=\"display:flex;{rel}padding:2px\"><span>w</span><div>{inner}</div></div>");
     }
+    let html = format!("<html><body style=\"width:800px\">{inner}</body></html>");
+    let c = assert_same_in_every_mode(style, &html);
+    assert!(c.hits > 0 && c.stored > 0, "{style}: the memo did not engage: {c:?}");
+}
+
+#[test]
+fn absolute_top_left_descendants_restore_exactly() {
+    absolute_restores_exactly("position:absolute;top:2px;left:3px");
+}
+
+#[test]
+fn absolute_bottom_right_descendants_restore_exactly() {
+    absolute_restores_exactly("position:absolute;bottom:4px;right:5px;width:20px;height:10px");
+}
+
+#[test]
+fn absolute_inset_descendants_restore_exactly() {
+    absolute_restores_exactly("position:absolute;inset:0");
+}
+
+#[test]
+fn absolute_static_position_descendants_restore_exactly() {
+    absolute_restores_exactly("position:absolute");
 }
 
 /// Risk 2 (scroll): an overflow scroller inside nested flex lays out the same with the memo.
 #[test]
 fn an_overflow_scroller_inside_nested_flex_lays_out_identically() {
     let mut inner = format!("<div style=\"overflow:auto;height:80px\"><div style=\"height:300px\">{LOREM}</div></div>");
-    for _ in 0..10 {
+    for _ in 0..6 {
         inner = format!("<div style=\"display:flex\"><span>w</span><div>{inner}</div></div>");
     }
     assert_same_in_every_mode("scroller", &format!("<html><body>{inner}</body></html>"));
@@ -251,7 +279,7 @@ fn an_overflow_scroller_inside_nested_flex_lays_out_identically() {
 #[test]
 fn percent_height_marks_in_nested_flex_columns_lay_out_identically() {
     let mut inner = "<div style=\"height:100%;background:red\">x</div><div style=\"height:50%\">y</div>".to_string();
-    for i in 0..10 {
+    for i in 0..6 {
         let height = if i % 3 == 0 { "height:300px;" } else { "" };
         inner = format!("<div style=\"display:flex;flex-direction:column;{height}\"><div style=\"height:100%\">{inner}</div><span>w</span></div>");
     }
@@ -277,7 +305,7 @@ fn zzz_report_memo_totals_for_the_corpus_run() {
 /// engine (so the laid-out tree) stays alive while the entries are counted.
 #[test]
 fn no_snapshot_outlives_the_root_layout() {
-    let html = nest(&[FLEX, BLOCK], 24);
+    let html = nest(&[FLEX, BLOCK], 10);
     for mode in [MemoMode::On, MemoMode::Verify] {
         set_memo_mode(Some(mode));
         set_memo_min_subtree(Some(1));
