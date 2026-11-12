@@ -452,3 +452,13 @@ panicked the page thread on 17 of 17 loads.
 and stops at the first abrupt completion (marked `HIWAVE PATCH (sort)`). It
 serves `Array.prototype.sort`/`toSorted` and the typed-array `sort`/`toSorted`.
 Pinned in `crates/rustkit-engine/src/sort_comparator_tests.rs`.
+
+## Patch: `boa_parser` binding list across a newline (STR-5)
+
+`third_party/boa_parser` is crates.io `boa_parser` 0.22.0 exactly as published (first commit), wired
+through `[patch.crates-io]`. One change, marked `HIWAVE PATCH (STR-5)` in
+`src/parser/statement/declaration/lexical.rs`: after a `const`/`let` binding the list continues on a
+comma even when a line terminator precedes it. Upstream asked `peek_semicolon` first, which answers
+"found" for any token after a newline, so `const a = 1` then a line starting `, b = 2` threw
+`unexpected token ','` (Speedometer 3's Lit bundles are written that way). Pin:
+`crates/rustkit-js/tests/const_comma_newline.rs`.

@@ -280,6 +280,13 @@ where
                 decls.push(decl);
             }
 
+            // HIWAVE PATCH (STR-5): a comma continues the binding list even when a line terminator
+            // precedes it (a const list whose second binding starts a line with a comma).
+            // `peek_semicolon` reports "found" for any token after a newline, which ended the list
+            // and left the comma unexpected.
+            if cursor.next_if(Punctuator::Comma, interner)?.is_some() {
+                continue;
+            }
             match cursor.peek_semicolon(interner)? {
                 SemicolonResult::Found(_) => break,
                 SemicolonResult::NotFound(tk)
