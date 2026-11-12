@@ -3958,7 +3958,7 @@ fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
 /// The variants are listed rather than wildcarded so that a new control type
 /// has to answer this question explicitly instead of silently inheriting
 /// "min == max".
-fn form_control_min_content_width(style: &ComputedStyle, control: &crate::FormControlType) -> f32 {
+pub(crate) fn form_control_min_content_width(style: &ComputedStyle, control: &crate::FormControlType) -> f32 {
     match control {
         crate::FormControlType::Button { label, .. } => {
             let font_size = match style.font_size {
@@ -4048,6 +4048,30 @@ fn text_min_content_width(text: &str, style: &ComputedStyle) -> f32 {
         return measure(text);
     }
     text.split_whitespace().map(measure).fold(0.0f32, f32::max)
+}
+
+/// How many lines `text` takes in a box `avail` px wide: greedy word wrap, one line when the
+/// white-space value forbids wrapping, and a word wider than the box keeps its own line (it overflows).
+pub(crate) fn wrapped_line_count(text: &str, style: &ComputedStyle, avail: f32) -> usize {
+    if matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+        return 1;
+    }
+    let mut lines = 1;
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+            continue;
+        }
+        let candidate = format!("{line} {word}");
+        if spaced_text_width(&candidate, style) <= avail {
+            line = candidate;
+        } else {
+            lines += 1;
+            line = word.to_string();
+        }
+    }
+    lines
 }
 
 /// Max-content width of a text run: the full single-line measure.

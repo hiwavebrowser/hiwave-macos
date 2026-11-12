@@ -39,11 +39,6 @@ fn chrome() -> std::collections::BTreeMap<String, (f64, f64)> {
         .collect()
 }
 
-/// Cells Chrome wraps or that the engine does not lay out the same way for a reason outside this
-/// row: `w120|Medium Button` wraps its label onto a second line (42 tall), which the engine does
-/// not do for a button (separate row), and its width is the declared 120 either way.
-const HEIGHT_NOT_PINNED: &[&str] = &["w120|Medium Button"];
-
 #[test]
 fn every_button_in_the_matrix_is_the_size_chrome_148_measured() {
     let (got, want) = (measured(), chrome());
@@ -52,7 +47,7 @@ fn every_button_in_the_matrix_is_the_size_chrome_148_measured() {
     for (id, (cw, ch)) in &want {
         let (w, h) = got[id];
         let width_ok = (w - cw).abs() < 0.75;
-        let height_ok = HEIGHT_NOT_PINNED.contains(&id.as_str()) || (h - ch).abs() < 0.75;
+        let height_ok = (h - ch).abs() < 0.75;
         if !(width_ok && height_ok) {
             wrong.push(format!("{id}: got {w:.2}x{h:.2}, Chrome 148 {cw:.2}x{ch:.2}"));
         }
@@ -92,4 +87,41 @@ fn the_settings_remove_button_page_is_the_size_chrome_148_measured() {
         }
     }
     assert!(wrong.is_empty(), "{} of {} elements differ from Chrome 148:\n{}", wrong.len(), ids.len(), wrong.join("\n"));
+}
+
+/// CB3d: a button with a fixed width wraps its label onto more lines when the label does not fit,
+/// and the height follows (lines x line height + padding + border); `white-space: nowrap` keeps one
+/// line; `min-content` is the longest word. Chrome for Testing 148.0.7778.216, page
+/// `cb3d_button_label_wrap.html`.
+#[test]
+fn a_fixed_width_button_wraps_its_label_as_chrome_148_does() {
+    const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-11/cb3d_button_label_wrap.html");
+    const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-11/cb3d_button_label_wrap_cft148.json");
+    let want: serde_json::Value = serde_json::from_str(CHROME).expect("json");
+    let want = want.as_object().expect("object");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, PAGE).expect("load_html");
+    let out = engine
+        .execute_script(view, "String(document.getElementById('out').textContent)")
+        .unwrap();
+    let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out).to_string();
+    let mut wrong = Vec::new();
+    let mut seen = 0;
+    for part in text.split(";;") {
+        let Some((id, size)) = part.split_once('=') else { continue };
+        let Some((w, h)) = size.split_once('x') else { continue };
+        let (w, h): (f64, f64) = (w.parse().unwrap_or(f64::NAN), h.parse().unwrap_or(f64::NAN));
+        let (cw, ch) = (want[id][0].as_f64().unwrap(), want[id][1].as_f64().unwrap());
+        seen += 1;
+        if (w - cw).abs() > 0.75 || (h - ch).abs() > 0.75 {
+            wrong.push(format!("{id}: got {w:.2}x{h:.2}, Chrome 148 {cw:.2}x{ch:.2}"));
+        }
+    }
+    assert_eq!(seen, want.len(), "the page measured every cell");
+    assert!(wrong.is_empty(), "{} of {} cells differ from Chrome 148:
+{}", wrong.len(), want.len(), wrong.join("
+"));
 }
