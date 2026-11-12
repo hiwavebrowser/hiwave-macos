@@ -467,6 +467,8 @@ mod icon_box_shrink_tests;
 mod stretched_row_height_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod select_height_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod input_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
