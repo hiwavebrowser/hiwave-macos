@@ -1595,7 +1595,7 @@ impl DomBindings {
         web_crypto::install(runtime)?;
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
-        runtime.evaluate_script(include_str!("web_encoding.js"))?;
+        runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_with_host(include_str!("web_streams.js"))?;

@@ -84,8 +84,20 @@
         take: function () {
             return JSON.stringify(queue.splice(0));
         },
+        // A response's body does not travel in `json`: the engine leaves
+        // the bytes with the host and they are taken here, once, as
+        // `result.bytes` (a Uint8Array). `result.body_b64` is still there
+        // for whoever reads it, computed when read.
         deliver: function (json) {
             var result = JSON.parse(json);
+            if (result.ok && result.body_b64 === undefined && pending[result.id]) {
+                var bytes = new Uint8Array(__rk.takeBytes(result.id) || 0);
+                Object.defineProperty(result, 'bytes', { value: bytes });
+                Object.defineProperty(result, 'body_b64', {
+                    get: function () { return __rk.base64Encode(bytes); },
+                    enumerable: true, configurable: true
+                });
+            }
             return settle(result.id, result);
         },
         // Move one waiting callback out of fail_all's reach. The answer is

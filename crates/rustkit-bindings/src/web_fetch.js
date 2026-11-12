@@ -477,7 +477,7 @@
                     var h = new Headers();
                     (r.headers || []).forEach(function (e) { h[H].list.push([String(e[0]).toLowerCase(), String(e[1])]); });
                     h[H].guard = 'immutable';
-                    var status = r.status, bytes = U.fromBase64(r.body_b64);
+                    var status = r.status, bytes = U.bodyBytes(r);
                     if (type === 'opaque' || type === 'opaqueredirect') { status = 0; h[H].list = []; bytes = null; }
                     if (NULL_BODY_STATUS[status]) bytes = null;
                     resolve(makeResponse(bytes, type, status, type === 'opaque' || type === 'opaqueredirect' ? '' : (r.status_text || ''), h, type === 'opaque' ? '' : r.url, !!r.redirected));
