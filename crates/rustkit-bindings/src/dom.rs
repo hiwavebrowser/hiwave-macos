@@ -5334,7 +5334,47 @@ const WRAPPERS_JS: &str = r#"
             init.cancelable = true;
             init.composed = true;
             init.view = g;
+            // The legacy codes (UI Events §7.3; Chrome for Testing 148):
+            // `keydown` and `keyup` carry the key's virtual-key code and no
+            // charCode; `keypress` carries the character in both.
+            if (type === 'keypress') {
+                init.keyCode = init.charCode = init.key === 'Enter' ? 13 : (init.key.codePointAt(0) || 0);
+            } else {
+                init.keyCode = virtualKey(init.key);
+                init.charCode = 0;
+            }
             var ev = new g.KeyboardEvent(type, init);
+            ev.isTrusted = true;
+            return target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    // A key's Windows virtual-key code, which is what `keyCode` is on every
+    // platform, for a US layout: a letter is its capital, a shifted digit or
+    // mark is the key it is on.
+    var VK_NAMED = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20,
+        Escape: 27, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
+        ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, NumLock: 144, ScrollLock: 145 };
+    var VK_MARKS = { ' ': 32, ')': 48, '!': 49, '@': 50, '#': 51, '$': 52, '%': 53, '^': 54, '&': 55, '*': 56, '(': 57,
+        ';': 186, ':': 186, '=': 187, '+': 187, ',': 188, '<': 188, '-': 189, '_': 189, '.': 190, '>': 190,
+        '/': 191, '?': 191, '`': 192, '~': 192, '[': 219, '{': 219, '\\': 220, '|': 220, ']': 221, '}': 221,
+        "'": 222, '"': 222 };
+    function virtualKey(key) {
+        if (hasOwn(VK_NAMED, key)) return VK_NAMED[key];
+        if (hasOwn(VK_MARKS, key)) return VK_MARKS[key];
+        if (/^[a-z]$/.test(key)) return key.charCodeAt(0) - 32;
+        if (/^[A-Z0-9]$/.test(key)) return key.charCodeAt(0);
+        var f = /^F([1-9]|1[0-9]|2[0-4])$/.exec(key);
+        return f ? 111 + Number(f[1]) : 0;
+    }
+    // The text a key is about to insert in an editable element: a trusted
+    // `textInput` TextEvent after the keypress, before the insertion and its
+    // `input` (Chrome for Testing 148). Returns false when cancelled.
+    Object.defineProperty(Document.prototype, '__rkFireTextInput', {
+        value: function (id, data) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target || typeof g.__rkNewTextEvent !== 'function') return true;
+            var ev = g.__rkNewTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
             ev.isTrusted = true;
             return target.dispatchEvent(ev);
         },
@@ -5735,6 +5775,13 @@ const WRAPPERS_JS: &str = r#"
     // The nodes the event is going through, target first; empty outside dispatch.
     Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
+    // DOM §2.2: the legacy alias. Reading it is the stop-propagation flag;
+    // setting it true is stopPropagation(), setting it false does nothing.
+    Object.defineProperty(Event.prototype, 'cancelBubble', {
+        get: function () { return this[STOP] === true; },
+        set: function (v) { if (v) this[STOP] = true; },
+        enumerable: true, configurable: true
+    });
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
     Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
@@ -5783,8 +5830,16 @@ const WRAPPERS_JS: &str = r#"
     };
     Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
     g.DOMParser = DOMParser;
+    // HTML §6.4.4 "click()": nothing on a disabled form control; otherwise a
+    // synthetic pointer event, which in Chrome for Testing 148 is an
+    // untrusted, composed PointerEvent with detail 0, button 0, pointerId -1
+    // and an empty pointerType, at 0,0, with the window as its view.
     HTMLElement.prototype.click = function () {
-        var e = new Event('click', { bubbles: true, cancelable: true });
+        if (this.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(this.localName)) return;
+        var C = typeof g.PointerEvent === 'function' ? g.PointerEvent : g.MouseEvent;
+        var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
+                     pointerId: -1, pointerType: '' };
+        var e = typeof C === 'function' ? new C('click', init) : new Event('click', init);
         e[SYNTHETIC_CLICK] = true;
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.

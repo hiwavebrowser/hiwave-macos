@@ -107,7 +107,12 @@
         if (el.localName === 'label') {
             return function (ok) {
                 var c = ok ? el.control : null;
-                if (c && !c.hasAttribute('disabled')) c.click();
+                // The labeled control is focused, then clicked (Chrome for
+                // Testing 148: `focus` at the control before its `click`).
+                if (c && !c.hasAttribute('disabled')) {
+                    if (typeof c.focus === 'function') c.focus();
+                    c.click();
+                }
             };
         }
         if (el.localName === 'summary') {

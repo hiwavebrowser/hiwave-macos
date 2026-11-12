@@ -2528,12 +2528,29 @@ impl DomBindings {
             self.notify_user_activation();
         }
         let node = node.map_or("null".to_string(), |n| n.to_string());
+        // `textInput` rides the key path: the text a key is about to insert.
+        if event_type == "textInput" {
+            let result = self
+                .runtime
+                .borrow_mut()
+                .evaluate_script(&format!("document.__rkFireTextInput({node}, {:?})", data.key))?;
+            return Ok(!matches!(result, JsValue::Boolean(false)));
+        }
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
              ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
             data.key, data.code, data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// The view lost or regained the system focus: `document.hasFocus()`
+    /// answers it. A page that was never told reads as focused.
+    pub fn set_view_focused(&self, focused: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkViewFocused = {focused};"))?;
+        Ok(())
     }
 
     /// The user's click focused an element (by node id), or landed on

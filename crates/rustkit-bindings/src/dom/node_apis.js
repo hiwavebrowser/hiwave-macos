@@ -364,7 +364,7 @@
         focusevent: 'FocusEvent', hashchangeevent: 'HashChangeEvent', htmlevents: 'Event',
         keyboardevent: 'KeyboardEvent', messageevent: 'MessageEvent', mouseevent: 'MouseEvent',
         mouseevents: 'MouseEvent', storageevent: 'StorageEvent', svgevents: 'Event',
-        touchevent: 'TouchEvent', uievent: 'UIEvent', uievents: 'UIEvent'
+        textevent: 'TextEvent', touchevent: 'TouchEvent', uievent: 'UIEvent', uievents: 'UIEvent'
     };
     Document.prototype.createEvent = function (name) {
         var C = g[EVENT_INTERFACES[String(name).toLowerCase()]];
@@ -372,7 +372,8 @@
             throw new DOMException("Failed to execute 'createEvent' on 'Document': The provided event type ('" +
                 name + "') is invalid.", 'NotSupportedError');
         }
-        var e = new C('');
+        // TextEvent has no constructor for script; this is its only maker.
+        var e = C === g.TextEvent ? g.__rkNewTextEvent('') : new C('');
         e[UNINIT] = true;
         return e;
     };

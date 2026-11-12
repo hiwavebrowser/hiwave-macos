@@ -96,12 +96,52 @@
         ME.prototype.getModifierState = function (key) {
             return { Control: this.ctrlKey, Shift: this.shiftKey, Alt: this.altKey, Meta: this.metaKey }[key] === true;
         };
-        Object.defineProperty(ME.prototype, 'which', { get: function () { return this.button + 1; }, configurable: true, enumerable: true });
         ['x', 'pageX', 'offsetX'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientX; }, configurable: true, enumerable: true });
         });
         ['y', 'pageY', 'offsetY'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientY; }, configurable: true, enumerable: true });
+        });
+    }
+    // UIEvent.which (UI Events §7.3, legacy): a key event's keyCode, a mouse
+    // event's button + 1, else 0. Chrome for Testing 148 has it on
+    // UIEvent.prototype alone, and ignores a `which` in the init dictionary:
+    // `new KeyboardEvent('keyup', { keyCode: 13 }).which` is 13.
+    if (g.UIEvent && !Object.prototype.hasOwnProperty.call(g.UIEvent.prototype, 'which')) {
+        Object.defineProperty(g.UIEvent.prototype, 'which', {
+            get: function () {
+                if (g.KeyboardEvent && this instanceof g.KeyboardEvent) return this.keyCode;
+                if (ME && this instanceof ME) return this.button + 1;
+                return 0;
+            },
+            configurable: true, enumerable: true
+        });
+    }
+    // TextEvent (UI Events §7.2, legacy): what `textInput` is. Script cannot
+    // construct one; `document.createEvent('TextEvent')` and the engine's
+    // own `textInput` (dom.rs `__rkFireTextInput`) make them here.
+    if (g.UIEvent && g.TextEvent === undefined) {
+        var makingText = false;
+        var TextEvent = function TextEvent(type, init) {
+            if (!makingText) illegal();
+            g.UIEvent.call(this, type, init);
+            this.data = init && init.data !== undefined ? String(init.data) : '';
+        };
+        TextEvent.prototype = Object.create(g.UIEvent.prototype, { constructor: { value: TextEvent, writable: true, configurable: true } });
+        Object.defineProperty(TextEvent.prototype, Symbol.toStringTag, { value: 'TextEvent', configurable: true });
+        TextEvent.prototype.initTextEvent = function initTextEvent(type, bubbles, cancelable, view, data) {
+            if (this.eventPhase !== 0) return;
+            this.initEvent(type, !!bubbles, !!cancelable);
+            this.view = view || null;
+            this.data = data === undefined ? 'undefined' : String(data);
+        };
+        def('TextEvent', TextEvent);
+        Object.defineProperty(g, '__rkNewTextEvent', {
+            value: function (type, init) {
+                makingText = true;
+                try { return new TextEvent(type, init); } finally { makingText = false; }
+            },
+            configurable: true, enumerable: false, writable: true
         });
     }
     var KE = g.KeyboardEvent;

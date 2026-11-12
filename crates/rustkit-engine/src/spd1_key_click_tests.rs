@@ -51,7 +51,22 @@ fn synthetic_keys_and_clicks_answer_as_chrome() {
     for key in ["Enter", "Escape", "a", "A", "1", "!", " ", ";", "/", "Backspace", "ArrowLeft", "ArrowDown", "Delete", "Home"] {
         press(&mut engine, view, key);
     }
-    engine.click_at_point(view, 60.0, 210.0);
+    // The probe clicks #field; here the click goes to the middle of
+    // wherever the engine put the field, so this test is about the events.
+    let rect = engine
+        .execute_script(view, "(function () { var r = document.getElementById('field').getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join(' '); })()")
+        .expect("rect");
+    let numbers: Vec<f32> = rect
+        .trim_start_matches("String(\"")
+        .trim_end_matches("\")")
+        .split(' ')
+        .map(|n| n.parse().expect("a number"))
+        .collect();
+    let (x, y) = (numbers[0] + numbers[2] / 2.0, numbers[1] + numbers[3] / 2.0);
+    let under = engine
+        .execute_script(view, &format!("(function () {{ var e = document.elementFromPoint({x}, {y}); return (e ? e.tagName + '#' + e.id : 'none') + ' scrollY=' + scrollY + ' hash=' + location.hash; }})()"))
+        .expect("elementFromPoint");
+    assert_eq!(engine.focus_at_point(view, x, y).as_deref(), Some("input"), "the click focuses #field at {rect}; under the point: {under}");
     for key in ["a", "B", "2", "Backspace", "Enter", "Escape"] {
         press(&mut engine, view, key);
     }

@@ -1,6 +1,6 @@
 # Chrome for Testing 148.0.7778.216, headless, 800x600: window.report() after the key presses
 # Keys (Playwright keyboard.press), nothing focused: Enter Escape a A 1 ! Space ; / Backspace ArrowLeft ArrowDown Delete Home
-# then a click at (60,210) on #field and: a B 2 Backspace Enter Escape
+# then a click on #field and: a B 2 Backspace Enter Escape
 new keydown runner: keyCode=13 charCode=0 which=13 key=Enter
 new keydown keyCode: keyCode=13 charCode=0 which=13 key=
 new keydown which: keyCode=0 charCode=0 which=0 key=

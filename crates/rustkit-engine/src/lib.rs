@@ -1445,6 +1445,10 @@ struct ViewState {
     press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
+    /// The view host said the view lost the system focus and has not said
+    /// it came back: `document.hasFocus()` is false. A view that was never
+    /// told either way (a headless one) reads as focused.
+    view_blurred: bool,
     /// Current scroll offset (x, y) in pixels.
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
@@ -3463,6 +3467,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -3584,6 +3589,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -3722,6 +3728,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -6643,8 +6650,13 @@ impl Engine {
             }
             return true;
         }
+        // A key that types a character (and Enter) is followed by `keypress`
+        // when its keydown was not cancelled (UI Events §7.3; Chrome for
+        // Testing 148: Escape, Backspace and the arrows have none).
+        let types_character = key_code == 0x0D || (!ctrl && Self::is_typed_character(key));
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
-            let not_cancelled = self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
+            let not_cancelled = self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt)
+                && (!types_character || self.fire_key(id, None, "keypress", key_code, key, ctrl, shift, alt));
             // A focused button: Enter clicks it at the keydown; Space's
             // keydown is taken (no scroll) and clicks it at the keyup
             // (Chromium 143, CH2.E22).
@@ -6672,7 +6684,24 @@ impl Engine {
         {
             return false;
         }
+        // Then `keypress`, and in a text field or an editing host
+        // `textInput` with the text; cancelling either types nothing.
+        if key_code != 0x0D && types_character {
+            if !self.fire_key(id, Some(focused.raw()), "keypress", key_code, key, ctrl, shift, alt) {
+                return false;
+            }
+            let editable = self.focused_is_text_control(id) || self.is_editing_host(id, focused.raw());
+            if editable && !self.fire_key(id, Some(focused.raw()), "textInput", key_code, key, ctrl, shift, alt) {
+                return false;
+            }
+        }
         self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
+    }
+
+    /// `key` is one typed character (not a named key such as `Escape`).
+    fn is_typed_character(key: &str) -> bool {
+        let mut chars = key.chars();
+        matches!((chars.next(), chars.next()), (Some(c), None) if !c.is_control())
     }
 
     /// What a key does in the focused element `focused` once its keydown
@@ -6858,6 +6887,11 @@ impl Engine {
         }
         let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
+            return None;
+        }
+        // Enter is a character key: its `keypress` follows, and cancelling
+        // that stops the submission too.
+        if !self.fire_key(id, Some(focused), "keypress", 0x0D, "", false, false, false) {
             return None;
         }
         let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
@@ -7983,6 +8017,9 @@ impl Engine {
         let inspector = view.inspector.clone();
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        if view.view_blurred {
+            let _ = bindings.set_view_focused(false);
+        }
         bindings.set_loop_iteration_limit(loop_limit);
         bindings.set_max_job_iterations(microtask_job_cap(&self.config));
         bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
@@ -24841,6 +24878,10 @@ impl Engine {
                     .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = true;
+                    view.view_blurred = false;
+                    if let Some(bindings) = view.bindings.as_ref() {
+                        let _ = bindings.set_view_focused(true);
+                    }
                     let _ = self
                         .event_tx
                         .send(EngineEvent::ViewFocused { view_id: *id });
@@ -24855,6 +24896,10 @@ impl Engine {
                     .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = false;
+                    view.view_blurred = true;
+                    if let Some(bindings) = view.bindings.as_ref() {
+                        let _ = bindings.set_view_focused(false);
+                    }
                     // A drag whose release went to another window ends here.
                     let id = *id;
                     self.cancel_drag(id);
