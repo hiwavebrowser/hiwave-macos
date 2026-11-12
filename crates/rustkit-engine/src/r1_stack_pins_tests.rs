@@ -142,12 +142,12 @@ fn an_svg_shape_with_many_attributes_and_an_author_paint_rule_serializes() {
             &mut engine,
             view,
             "var d = document.getElementById('d'); \
-             for (var i = 0; i < 34; i++) d.setAttribute('data-b' + i, i); \
+             for (var i = 0; i < 34; i++) d.setAttribute('data-b' + i, i); /* 35 with its id */ \
              for (var i = 0; i < 4; i++) d.removeAttribute('data-b' + i); \
              d.setAttribute('title', 'added'); \
              [d.getAttribute('title'), d.hasAttribute('title'), d.attributes.length, /title=\"added\"/.test(d.outerHTML)].join(' ')"
         ),
-        "added true 31 true"
+        "added true 32 true"
     );
     // The same on the shape, then a frame: the serializer runs again.
     js(
@@ -158,6 +158,31 @@ fn an_svg_shape_with_many_attributes_and_an_author_paint_rule_serializes() {
     );
     engine.mouse_move_at_point(view, 50.0, 50.0);
     assert_eq!(js(&mut engine, view, "document.getElementById('r').getAttribute('data-new')"), "1");
+}
+
+/// The live panic itself (a page thread died loading a real page: `no such
+/// attribute` in the inline-SVG serializer). A shape with exactly 33
+/// attributes and no `style`, two of them presentation attributes whose
+/// author value is `inherit`: the serializer's copy drops those two (31
+/// left, under the size the name set is kept from), then adds `style`,
+/// which the stale set did not hold, then wrote every name it listed by
+/// looking it up.
+#[test]
+fn an_svg_shape_whose_author_paint_is_inherit_serializes_with_its_style_added() {
+    let mut attrs = String::new();
+    for i in 0..28 {
+        attrs.push_str(&format!(" data-a{i}=\"{i}\""));
+    }
+    // id, width, height, fill, stroke and 28 more: 33.
+    let (mut engine, view) = page(&format!(
+        "<!doctype html><style>#r {{ fill: inherit; stroke: inherit; stroke-width: 3px }}</style>\
+         <body style=\"margin:0\"><svg id=s width=200 height=100 fill=green stroke=blue style=\"display:block\">\
+         <rect id=r width=200 height=100 fill=red stroke=red{attrs}></rect></svg>"
+    ));
+    assert_eq!(js(&mut engine, view, "String(document.getElementById('r').attributes.length)"), "33");
+    // The page laid out and painted, and still answers.
+    engine.mouse_move_at_point(view, 50.0, 50.0);
+    assert_eq!(js(&mut engine, view, "document.elementFromPoint(50, 50).id"), "r");
 }
 
 /// The trusted key and text events go to script through the host object
