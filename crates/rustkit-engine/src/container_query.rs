@@ -96,6 +96,13 @@ struct Frame {
     /// Chrome's (`layout_trusted`), so a measured container here answers
     /// with it.
     trusted: bool,
+    /// CQ3: the element's node when this build may answer its queries with
+    /// a measurement (a size container in a trusted frame).
+    measurable: Option<usize>,
+    /// Computed font size, CSS px (a measurable container's `em`).
+    em: f32,
+    /// `container-type: size`.
+    is_size: bool,
 }
 
 /// The content-box size of each size container in a view's last layout,
@@ -113,6 +120,10 @@ struct State {
     /// ones whose measurements it can use (#1070 R1 LOW: the others are
     /// left out of the measurements and the memo fingerprint).
     trusted: HashSet<usize>,
+    /// CQ3: what this build asked of each measurable container, and the
+    /// measurable containers an estimated answer was derived under.
+    asked: HashMap<usize, Vec<Asked>>,
+    fragile: HashSet<usize>,
     /// The root element's font size, CSS px (`rem`); set by the first
     /// element entered.
     root_em: Option<f32>,
@@ -144,6 +155,8 @@ impl DocumentScope {
             viewport: (w, h),
             measured,
             trusted: HashSet::new(),
+            asked: HashMap::new(),
+            fragile: HashSet::new(),
             root_em: None,
             first_letter_floats,
             frames: vec![Frame {
@@ -153,6 +166,9 @@ impl DocumentScope {
                 new_context: true,
                 floats: false,
                 trusted: true,
+                measurable: None,
+                em: 16.0,
+                is_size: false,
             }],
         });
         Self {
@@ -166,23 +182,109 @@ impl Drop for DocumentScope {
         let previous = self.previous.take();
         let finished = STATE.with(|s| std::mem::replace(&mut *s.borrow_mut(), previous));
         if let Some(state) = finished {
-            LAST_TRUSTED.with(|t| *t.borrow_mut() = Some(state.trusted));
+            LAST_TRUSTED.with(|t| {
+                *t.borrow_mut() = Some(BuildFacts {
+                    trusted: state.trusted,
+                    asked: state.asked,
+                    fragile: state.fragile,
+                    rem: state.root_em.unwrap_or(16.0),
+                    viewport: state.viewport,
+                })
+            });
         }
     }
 }
 
 thread_local! {
     /// The trusted size containers of the last build that ran the walk
-    /// (`take_trusted_containers`).
-    static LAST_TRUSTED: RefCell<Option<HashSet<usize>>> = const { RefCell::new(None) };
+    /// (`take_build_facts`).
+    static LAST_TRUSTED: RefCell<Option<BuildFacts>> = const { RefCell::new(None) };
 }
 
-/// The size containers the last build on this thread met in a trusted
-/// frame, or `None` when no build has run the walk since the last call (a
-/// build that took a kept tree, or a page without `@container` rules).
-/// `LayoutCtx::lay_out_document` measures only these.
-pub(crate) fn take_trusted_containers() -> Option<HashSet<usize>> {
+/// What the last build's walk on this thread left (`BuildFacts`), or `None`
+/// when no build has run the walk since the last call (a build that took a
+/// kept tree, or a page without `@container` rules).
+pub(crate) fn take_build_facts() -> Option<BuildFacts> {
     LAST_TRUSTED.with(|t| t.borrow_mut().take())
+}
+
+/// One condition a build asked of a measurable container, and its answer.
+#[derive(Debug, Clone)]
+struct Asked {
+    condition: String,
+    em: f32,
+    is_size: bool,
+    answer: bool,
+}
+
+/// What a build's walk leaves for `LayoutCtx::lay_out_document`: which
+/// containers its layout may measure, and what the build asked of them, so
+/// that a measurement which changes no answer costs no second build (CQ3).
+#[derive(Debug, Default)]
+pub(crate) struct BuildFacts {
+    /// The size containers met in a trusted frame.
+    pub(crate) trusted: HashSet<usize>,
+    asked: HashMap<usize, Vec<Asked>>,
+    /// Measurable containers with an estimate-answered container under
+    /// them: the estimate starts from their size, so any move of theirs may
+    /// change an answer this record cannot re-check.
+    fragile: HashSet<usize>,
+    rem: f32,
+    viewport: (f32, f32),
+}
+
+impl BuildFacts {
+    /// Take a later build's facts. A build that replayed memoized styles
+    /// walked the tree without asking anything (`asked` and `fragile`
+    /// empty): what the recording build asked still describes its styles,
+    /// so that record is kept. Keeping a stale record can only cost a
+    /// re-pass, never skip a needed one.
+    pub(crate) fn absorb(&mut self, later: BuildFacts) {
+        if later.asked.is_empty() && later.fragile.is_empty() {
+            self.trusted = later.trusted;
+        } else {
+            *self = later;
+        }
+    }
+
+    /// Whether the build would answer some query differently with `sizes`
+    /// than it did with `used` (the sizes it was given).
+    pub(crate) fn answers_change(
+        &self,
+        used: &MeasuredContainers,
+        sizes: &MeasuredContainers,
+    ) -> bool {
+        let differs = |a: Option<&(f32, f32)>, b: Option<&(f32, f32)>| match (a, b) {
+            (Some(a), Some(b)) => (a.0 - b.0).abs() > 0.01 || (a.1 - b.1).abs() > 0.01,
+            (None, None) => false,
+            _ => true,
+        };
+        let moved = |node: &usize| differs(used.get(node), sizes.get(node));
+        if self.fragile.iter().any(moved) {
+            return true;
+        }
+        self.asked
+            .iter()
+            .filter(|(node, _)| moved(node))
+            .any(|(node, asked)| {
+                asked.iter().any(|a| {
+                    let now = sizes.get(node).is_some_and(|&(inline, block)| {
+                        rustkit_css::media::container_condition_matches(
+                            &a.condition,
+                            inline,
+                            a.is_size.then_some(block),
+                            rustkit_css::media::ContainerUnits {
+                                em: a.em,
+                                rem: self.rem,
+                                vw: self.viewport.0,
+                                vh: self.viewport.1,
+                            },
+                        )
+                    });
+                    now != a.answer
+                })
+            })
+    }
 }
 
 /// An element's frame; popped on drop. Its descendants (and its own
@@ -229,6 +331,7 @@ impl ElementScope {
                     && style.display != Display::None,
             ) {
                 state.trusted.insert(n);
+                frame.measurable = Some(n);
             }
             if let Some(&(inline, block)) = node.and_then(|n| state.measured.get(&n)) {
                 if frame.trusted
@@ -365,15 +468,18 @@ pub(crate) fn applies(preludes: &[String]) -> bool {
         return true;
     }
     STATE.with(|s| {
-        let s = s.borrow();
-        let Some(state) = s.as_ref() else {
+        let mut s = s.borrow_mut();
+        let Some(state) = s.as_mut() else {
             return false;
         };
-        preludes.iter().all(|p| prelude_holds(p, state))
+        // Every prelude is asked (no short circuit), so each is on record.
+        preludes
+            .iter()
+            .fold(true, |all, p| prelude_holds(p, state) && all)
     })
 }
 
-fn prelude_holds(prelude: &str, state: &State) -> bool {
+fn prelude_holds(prelude: &str, state: &mut State) -> bool {
     let frames = &state.frames;
     let prelude = prelude.trim();
     // `<container-name>? <container-query>`: a leading word that is not
@@ -386,7 +492,7 @@ fn prelude_holds(prelude: &str, state: &State) -> bool {
         }
         _ => (None, prelude),
     };
-    for frame in frames.iter().rev() {
+    for (at, frame) in frames.iter().enumerate().rev() {
         let names: &[String] = match &frame.container {
             Some(Some(c)) => &c.names,
             Some(None) => &frame.unknown_names,
@@ -395,7 +501,7 @@ fn prelude_holds(prelude: &str, state: &State) -> bool {
         if name.is_some_and(|n| !names.iter().any(|m| m == n)) {
             continue;
         }
-        return match &frame.container {
+        let answer = match &frame.container {
             Some(Some(c)) => {
                 let units = rustkit_css::media::ContainerUnits {
                     em: c.em,
@@ -407,6 +513,27 @@ fn prelude_holds(prelude: &str, state: &State) -> bool {
             }
             _ => false,
         };
+        // CQ3: on record, so that the layout's measurements can be checked
+        // against what was answered here.
+        match frame.measurable {
+            Some(node) => {
+                let asked = state.asked.entry(node).or_default();
+                if !asked.iter().any(|a| a.condition == condition) {
+                    asked.push(Asked {
+                        condition: condition.to_string(),
+                        em: frame.em,
+                        is_size: frame.is_size,
+                        answer,
+                    });
+                }
+            }
+            // An estimate (or an unknown) answered: it starts from the
+            // measurable containers above it.
+            None => state
+                .fragile
+                .extend(frames[..at].iter().filter_map(|f| f.measurable)),
+        }
+        return answer;
     }
     false
 }
@@ -442,6 +569,9 @@ fn frame_for(
         new_context: starts_context(style),
         floats: false,
         trusted: false,
+        measurable: None,
+        em: font_px(style),
+        is_size: style.container_type == ContainerType::Size,
     }
 }
 
@@ -594,8 +724,11 @@ pub(crate) fn note_width_value(style: &mut ComputedStyle, bit: u8, parsed: bool,
     if bit == 1 {
         // `width` only: which keyword it was (CB3c). A later length or `auto` clears it.
         let keyword = value.trim().to_ascii_lowercase();
-        style.width_max_content =
-            !parsed && matches!(keyword.as_str(), "max-content" | "-webkit-max-content" | "-moz-max-content");
+        style.width_max_content = !parsed
+            && matches!(
+                keyword.as_str(),
+                "max-content" | "-webkit-max-content" | "-moz-max-content"
+            );
     }
 }
 

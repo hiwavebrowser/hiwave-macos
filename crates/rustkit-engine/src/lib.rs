@@ -1604,7 +1604,7 @@ impl ViewState {
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
         self.lay.container_sizes.borrow_mut().clear();
-        self.lay.container_trusted.borrow_mut().clear();
+        *self.lay.container_facts.borrow_mut() = container_query::BuildFacts::default();
         self.lay.container_rules.set(false);
         self.lay.incremental_layout.borrow_mut().take();
         self.lay.focused_node.set(None);
@@ -11536,23 +11536,22 @@ impl layout_ctx::LayoutCtx {
         // (`ViewLayout::container_unsettled`) and logged, so an oscillation
         // shows instead of quietly tripling every relayout.
         if let Some(lay) = lay.as_ref() {
-            if let Some(trusted) = container_query::take_trusted_containers() {
-                *lay.container_trusted.borrow_mut() = trusted;
+            if let Some(facts) = container_query::take_build_facts() {
+                lay.container_facts.borrow_mut().absorb(facts);
             }
             for pass in 0..=2 {
                 if !lay.container_rules.get() {
                     break;
                 }
                 let mut sizes = container_query::MeasuredContainers::new();
-                collect_container_sizes(&root_box, &lay.container_trusted.borrow(), &mut sizes);
-                let moved = {
-                    let used = lay.container_sizes.borrow();
-                    used.len() != sizes.len()
-                        || sizes.iter().any(|(node, (i, b))| {
-                            used.get(node)
-                                .is_none_or(|(ui, ub)| (ui - i).abs() > 0.01 || (ub - b).abs() > 0.01)
-                        })
-                };
+                collect_container_sizes(&root_box, &lay.container_facts.borrow().trusted, &mut sizes);
+                // CQ3: only a size that changes an answer the build gave
+                // is worth another build and layout. The new sizes are
+                // stored either way; the next build answers with them.
+                let moved = lay
+                    .container_facts
+                    .borrow()
+                    .answers_change(&lay.container_sizes.borrow(), &sizes);
                 *lay.container_sizes.borrow_mut() = sizes;
                 if !moved {
                     break;
@@ -11575,8 +11574,8 @@ impl layout_ctx::LayoutCtx {
                     bounds,
                     false,
                 );
-                if let Some(trusted) = container_query::take_trusted_containers() {
-                    *lay.container_trusted.borrow_mut() = trusted;
+                if let Some(facts) = container_query::take_build_facts() {
+                    lay.container_facts.borrow_mut().absorb(facts);
                 }
             }
         }

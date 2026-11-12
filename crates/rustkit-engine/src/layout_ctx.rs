@@ -600,9 +600,10 @@ pub(crate) struct ViewLayout {
     pub(crate) container_rules: Cell<bool>,
     /// The extra build-and-layout passes container sizes have cost this
     /// view, and the layouts that hit the pass cap still moving (#1070 R1).
-    /// The size containers the last walk met in a trusted frame: the ones
-    /// `container_sizes` measures (`container_query::take_trusted_containers`).
-    pub(crate) container_trusted: RefCell<std::collections::HashSet<usize>>,
+    /// What the last walk left: the size containers `container_sizes`
+    /// measures, and what the build asked of them
+    /// (`container_query::take_build_facts`).
+    pub(crate) container_facts: RefCell<crate::container_query::BuildFacts>,
     pub(crate) container_passes: Cell<u32>,
     pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
