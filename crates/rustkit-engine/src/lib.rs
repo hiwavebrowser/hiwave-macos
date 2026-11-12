@@ -37421,7 +37421,9 @@ mod node_identity_tests {
 
         assert_eq!(
             js(&mut engine, id, "seen.join(',') + ' | ' + own.join(',')"),
-            format!("{:?}", rustkit_js::JsValue::String("b,i,s | b,i,s".into())),
+            // SVG2: the click on the svg lands on the rect in it, as in
+            // Chrome, and reaches the svg's own listener by bubbling.
+            format!("{:?}", rustkit_js::JsValue::String("b,i,rect | b,i,s".into())),
             "each click's target is the element under it, and that element's own listener runs"
         );
     }

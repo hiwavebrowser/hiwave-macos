@@ -660,7 +660,86 @@ fn geometry(kind: &str, spec: &str, at: f64) -> [f64; 7] {
     [x, y, w, h, measure.length, point.0, point.1]
 }
 
+/// The path as polylines, one per subpath, a curve as 24 chords: fine
+/// enough to say which shape a pointer is over.
+fn flatten(path: &Path) -> Vec<Vec<P>> {
+    let mut contours: Vec<Vec<P>> = Vec::new();
+    for seg in &path.segs {
+        let (start, end) = match *seg {
+            Seg::Line(a, b) | Seg::Quad(a, _, b) | Seg::Conic(a, _, b, _) | Seg::Cubic(a, _, _, b) => (a, b),
+        };
+        if contours.last().and_then(|c| c.last()) != Some(&start) {
+            contours.push(vec![start]);
+        }
+        let contour = contours.last_mut().expect("just pushed");
+        match seg {
+            Seg::Line(..) => contour.push(end),
+            _ => {
+                for step in 1..=24 {
+                    contour.push(eval(seg, step as f64 / 24.0));
+                }
+            }
+        }
+    }
+    contours
+}
+
+/// Whether the point is on the shape as painted: inside its fill (the
+/// nonzero rule over its subpaths, each closed) when it has one, or within
+/// half the stroke width of its outline when it has a stroke.
+fn hit(kind: &str, spec: &str, point: P, fill: bool, stroke_width: f64) -> bool {
+    let contours = flatten(&shape(kind, spec));
+    if fill {
+        let mut winding = 0i32;
+        for contour in &contours {
+            for i in 0..contour.len() {
+                let (a, b) = (contour[i], contour[(i + 1) % contour.len()]);
+                let side = (b.0 - a.0) * (point.1 - a.1) - (point.0 - a.0) * (b.1 - a.1);
+                if a.1 <= point.1 && b.1 > point.1 && side > 0.0 {
+                    winding += 1;
+                } else if a.1 > point.1 && b.1 <= point.1 && side < 0.0 {
+                    winding -= 1;
+                }
+            }
+        }
+        if winding != 0 {
+            return true;
+        }
+    }
+    if stroke_width > 0.0 {
+        let reach = stroke_width / 2.0;
+        for contour in &contours {
+            for pair in contour.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let length = dx * dx + dy * dy;
+                let t = if length > 0.0 { (((point.0 - a.0) * dx + (point.1 - a.1) * dy) / length).clamp(0.0, 1.0) } else { 0.0 };
+                if distance(point, (a.0 + t * dx, a.1 + t * dy)) <= reach {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
+    // hit(kind, spec, x, y, fill, strokeWidth): is the point on the shape.
+    runtime.register_host_function(
+        "__rustkit_svg_hit",
+        6,
+        Box::new(|args| {
+            let (Some(JsValue::String(kind)), Some(JsValue::String(spec))) = (args.first(), args.get(1)) else {
+                return JsValue::Boolean(false);
+            };
+            let number = |i: usize| match args.get(i) {
+                Some(JsValue::Number(n)) if n.is_finite() => *n,
+                _ => 0.0,
+            };
+            let fill = matches!(args.get(4), Some(JsValue::Boolean(true)));
+            JsValue::Boolean(hit(kind, spec, (number(2), number(3)), fill, number(5)))
+        }),
+    )?;
     runtime.register_host_function(
         "__rustkit_svg_geometry",
         3,
@@ -712,6 +791,22 @@ mod tests {
             let got = geometry(kind, spec, 0.0)[4];
             assert!(close(got, length), "{kind} `{spec}`: length {got}, Chrome {length}");
         }
+    }
+
+    /// Chrome for Testing 148 `elementFromPoint` over the SVG2 fixture's
+    /// shapes, in each shape's own user space.
+    #[test]
+    fn a_point_is_on_the_fill_or_the_stroke() {
+        // The circle, and the corner of its box.
+        assert!(hit("circle", "100 100 40", (110.0, 130.0), true, 0.0));
+        assert!(!hit("circle", "100 100 40", (65.0, 65.0), true, 0.0));
+        // The triangle, and the corner of its box.
+        assert!(hit("path", "M200 120 L 260 120 L 230 180 Z", (230.0, 150.0), true, 0.0));
+        assert!(!hit("path", "M200 120 L 260 120 L 230 180 Z", (202.0, 175.0), true, 0.0));
+        // A line has no fill: only its stroke is there to be on.
+        assert!(hit("line", "10 190 110 190", (40.0, 190.3), false, 1.0));
+        assert!(!hit("line", "10 190 110 190", (40.0, 192.0), false, 1.0));
+        assert!(!hit("line", "10 190 110 190", (40.0, 190.0), true, 0.0));
     }
 
     /// Chrome for Testing 148 `getBBox()`.

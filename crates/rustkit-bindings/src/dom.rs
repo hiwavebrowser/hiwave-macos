@@ -5188,6 +5188,9 @@ const WRAPPERS_JS: &str = r#"
         if (id == null) return null;
         var node = wrap(id);
         while (node && node.nodeType !== 1) node = node.parentElement || node.parentNode;
+        // An `<svg>` is one box in the layout: the shape under the point
+        // is found from its geometry (web_svg_geometry.js).
+        if (node && node.localName === 'svg' && typeof g.__rkSvgHit === 'function') node = g.__rkSvgHit(node, Number(x), Number(y));
         return node && node.nodeType === 1 ? node : null;
     };
     Document.prototype.elementsFromPoint = function (x, y) {
@@ -5414,6 +5417,11 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return true;
+            // The pointer is on a shape of an `<svg>`, which the layout
+            // sees as one box: the event's target is the shape.
+            if (target.localName === 'svg' && typeof g.__rkSvgHit === 'function' && typeof init.clientX === 'number') {
+                target = g.__rkSvgHit(target, init.clientX, init.clientY);
+            }
             // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
             var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
                 type.indexOf('pointer') === 0;

@@ -97,7 +97,7 @@
             if (kid.namespaceURI !== SVG_NS || !(kid instanceof Graphics) || kid.localName === 'defs') continue;
             var b = boxOf(kid);
             if (!b) continue;
-            var m = transformOf(kid);
+            var m = localMatrix(kid);
             var corners = [[b[0], b[1]], [b[0] + b[2], b[1]], [b[0], b[1] + b[3]], [b[0] + b[2], b[1] + b[3]]];
             corners.forEach(function (c) {
                 var x = m ? m[0] * c[0] + m[2] * c[1] + m[4] : c[0];
@@ -134,4 +134,215 @@
         var m = measure(this, at);
         return point(m ? [m[5], m[6]] : [0, 0]);
     });
+
+    // ---- SVG2: where an SVG element is on the page, for script.
+    //
+    // An SVG shape has no layout box of its own here (the `<svg>` is one
+    // replaced box), so its geometry for script is built from the same
+    // attributes: its box in its own user space (`boxOf`), carried to the
+    // page through every transform between it and the outermost `<svg>`
+    // (`transform` attributes, each `<svg>`'s viewBox, a nested `<svg>`'s
+    // x and y) and that `<svg>`'s own client rect.
+    //
+    // Not here: `transform` set from CSS, CSS `fill` / `stroke` /
+    // `pointer-events` (the attributes are read, inherited through the
+    // ancestors), `text`, `use`, clip paths and masks in hit testing.
+    var hitShape = g.__rustkit_svg_hit;
+    delete g.__rustkit_svg_hit;
+    var IDENTITY = [1, 0, 0, 1, 0, 0];
+    var elementRect = g.Element.prototype.getBoundingClientRect;
+    function isSvg(n) { return !!n && n.nodeType === 1 && n.namespaceURI === SVG_NS; }
+    function ownerSvg(el) {
+        for (var n = el.parentNode; isSvg(n); n = n.parentNode) if (n.localName === 'svg') return n;
+        return null;
+    }
+    function number(el, name, fallback) {
+        var v = parseFloat(el.getAttribute(name));
+        return isFinite(v) ? v : fallback;
+    }
+    // The size of the viewport an `<svg>` establishes: the outermost one's
+    // box on the page, a nested one's `width` and `height`.
+    function viewportSize(svg) {
+        var outer = ownerSvg(svg);
+        if (!outer) { var r = elementRect.call(svg); return [r.width, r.height]; }
+        var parent = viewportSize(outer);
+        return [number(svg, 'width', parent[0]), number(svg, 'height', parent[1])];
+    }
+    // viewBox and preserveAspectRatio as a matrix (SVG 2 §8.2).
+    function viewBoxMatrix(svg) {
+        var vb = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).filter(function (s) { return s !== ''; }).map(Number);
+        if (vb.length !== 4 || !(vb[2] > 0) || !(vb[3] > 0)) return IDENTITY;
+        var size = viewportSize(svg), w = size[0], h = size[1];
+        if (!(w > 0) || !(h > 0)) return IDENTITY;
+        var par = (svg.getAttribute('preserveAspectRatio') || 'xMidYMid meet').trim().split(/\s+/);
+        var sx = w / vb[2], sy = h / vb[3], align = par[0];
+        if (align === 'none') return [sx, 0, 0, sy, -vb[0] * sx, -vb[1] * sy];
+        var s = par[1] === 'slice' ? Math.max(sx, sy) : Math.min(sx, sy);
+        var tx = /xMid/.test(align) ? (w - vb[2] * s) / 2 : /xMax/.test(align) ? w - vb[2] * s : 0;
+        var ty = /YMid/.test(align) ? (h - vb[3] * s) / 2 : /YMax/.test(align) ? h - vb[3] * s : 0;
+        return [s, 0, 0, s, tx - vb[0] * s, ty - vb[1] * s];
+    }
+    // What an element does to the coordinates of what is in it.
+    function localMatrix(el) {
+        if (el.localName === 'svg') {
+            var m = viewBoxMatrix(el);
+            return ownerSvg(el) ? multiply([1, 0, 0, 1, number(el, 'x', 0), number(el, 'y', 0)], m) : m;
+        }
+        return transformOf(el) || IDENTITY;
+    }
+    // SVG 2 §4.6.3 getCTM: from the element's user space to its nearest
+    // viewport element's (an outermost `<svg>`: its own viewBox).
+    function ctm(el) {
+        var chain = [el];
+        if (el.localName !== 'svg' || ownerSvg(el)) {
+            for (var n = el.parentNode; isSvg(n); n = n.parentNode) {
+                chain.push(n);
+                if (n.localName === 'svg') break;
+            }
+        }
+        var m = IDENTITY;
+        for (var i = chain.length - 1; i >= 0; i--) m = multiply(m, localMatrix(chain[i]));
+        return m;
+    }
+    // getScreenCTM: to client coordinates. Null outside an `<svg>`.
+    function screenCtm(el) {
+        var chain = [];
+        for (var n = el; isSvg(n); n = n.parentNode) chain.push(n);
+        var root = chain[chain.length - 1];
+        if (!root || root.localName !== 'svg') return null;
+        var r = elementRect.call(root);
+        var m = [1, 0, 0, 1, r.left + (root.clientLeft || 0), r.top + (root.clientTop || 0)];
+        for (var i = chain.length - 1; i >= 0; i--) m = multiply(m, localMatrix(chain[i]));
+        return m;
+    }
+    function invert(m) {
+        var det = m[0] * m[3] - m[1] * m[2];
+        if (!det || !isFinite(det)) return null;
+        return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det,
+                (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
+    }
+
+    // SVGMatrix (SVG 1.1 §7.11; Chrome for Testing 148 still answers one
+    // from getCTM, not a DOMMatrix): six numbers and the operations d3 and
+    // charting code call on them.
+    function SVGMatrix() { illegal(); }
+    Object.defineProperty(SVGMatrix.prototype, Symbol.toStringTag, { value: 'SVGMatrix' });
+    if (g.SVGMatrix === undefined) Object.defineProperty(g, 'SVGMatrix', { value: SVGMatrix, writable: true, configurable: true });
+    var FIELDS = ['a', 'b', 'c', 'd', 'e', 'f'];
+    function matrix(m) {
+        var o = Object.create(SVGMatrix.prototype);
+        FIELDS.forEach(function (k, i) { o[k] = m[i]; });
+        return o;
+    }
+    function values(m) {
+        if (m === null || typeof m !== 'object') throw new TypeError("parameter 1 is not of type 'SVGMatrix'.");
+        return FIELDS.map(function (k) { return Number(m[k]); });
+    }
+    function turned(self, by) { return matrix(multiply(values(self), by)); }
+    var OPERATIONS = {
+        multiply: function (other) { return turned(this, values(other)); },
+        inverse: function () {
+            var inv = invert(values(this));
+            if (!inv) throw new g.DOMException("Failed to execute 'inverse' on 'SVGMatrix': The matrix is not invertible.", 'InvalidStateError');
+            return matrix(inv);
+        },
+        translate: function (x, y) { return turned(this, [1, 0, 0, 1, Number(x), Number(y)]); },
+        scale: function (s) { return turned(this, [Number(s), 0, 0, Number(s), 0, 0]); },
+        scaleNonUniform: function (sx, sy) { return turned(this, [Number(sx), 0, 0, Number(sy), 0, 0]); },
+        rotate: function (deg) { var r = Number(deg) * Math.PI / 180; return turned(this, [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0]); },
+        flipX: function () { return turned(this, [-1, 0, 0, 1, 0, 0]); },
+        flipY: function () { return turned(this, [1, 0, 0, -1, 0, 0]); },
+        skewX: function (deg) { return turned(this, [1, 0, Math.tan(Number(deg) * Math.PI / 180), 1, 0, 0]); },
+        skewY: function (deg) { return turned(this, [1, Math.tan(Number(deg) * Math.PI / 180), 0, 1, 0, 0]); }
+    };
+    Object.keys(OPERATIONS).forEach(function (name) { method(SVGMatrix.prototype, name, OPERATIONS[name]); });
+    method(g.SVGPoint.prototype, 'matrixTransform', function matrixTransform(m) {
+        var v = values(m), x = Number(this.x), y = Number(this.y);
+        return point([v[0] * x + v[2] * y + v[4], v[1] * x + v[3] * y + v[5]]);
+    });
+
+    method(Graphics.prototype, 'getCTM', function getCTM() {
+        own(this, Graphics);
+        return screenCtm(this) ? matrix(ctm(this)) : null;
+    });
+    method(Graphics.prototype, 'getScreenCTM', function getScreenCTM() {
+        var m = screenCtm(own(this, Graphics));
+        return m ? matrix(m) : null;
+    });
+    var SVGSVG = g.SVGSVGElement;
+    if (SVGSVG) {
+        method(SVGSVG.prototype, 'createSVGPoint', function createSVGPoint() { return point([0, 0]); });
+        method(SVGSVG.prototype, 'createSVGMatrix', function createSVGMatrix() { return matrix(IDENTITY); });
+        method(SVGSVG.prototype, 'createSVGRect', function createSVGRect() { return rect([0, 0, 0, 0]); });
+    }
+    ['ownerSVGElement', 'viewportElement'].forEach(function (name) {
+        Object.defineProperty(g.SVGElement.prototype, name, {
+            get: function () { return ownerSvg(this); }, enumerable: true, configurable: true
+        });
+    });
+
+    // getBoundingClientRect of an element inside an `<svg>`: its box,
+    // through getScreenCTM. The outermost `<svg>` keeps its layout box.
+    function clientBox(el) {
+        if (!(el instanceof Graphics) || (el.localName === 'svg' && !ownerSvg(el))) return null;
+        var m = screenCtm(el);
+        if (!m) return null;
+        var b = boxOf(el) || [0, 0, 0, 0];
+        var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        [[b[0], b[1]], [b[0] + b[2], b[1]], [b[0], b[1] + b[3]], [b[0] + b[2], b[1] + b[3]]].forEach(function (c) {
+            var x = m[0] * c[0] + m[2] * c[1] + m[4], y = m[1] * c[0] + m[3] * c[1] + m[5];
+            x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+        });
+        return typeof g.DOMRect === 'function' ? new g.DOMRect(x0, y0, x1 - x0, y1 - y0)
+            : { x: x0, y: y0, width: x1 - x0, height: y1 - y0, left: x0, top: y0, right: x1, bottom: y1 };
+    }
+    method(g.SVGElement.prototype, 'getBoundingClientRect', function getBoundingClientRect() {
+        return clientBox(this) || elementRect.call(this);
+    });
+    var elementRects = g.Element.prototype.getClientRects;
+    method(g.SVGElement.prototype, 'getClientRects', function getClientRects() {
+        var box = clientBox(this);
+        return box ? [box] : elementRects.call(this);
+    });
+
+    // The shape under a client point: the last one painted that the point
+    // is on, by its fill and its stroke, or null (the `<svg>` itself).
+    function attribute(el, name) {
+        for (var n = el; isSvg(n); n = n.parentNode) {
+            var v = n.getAttribute(name);
+            if (v !== null && v !== 'inherit') return v;
+        }
+        return null;
+    }
+    function shapeAt(container, x, y) {
+        var kids = container.children;
+        for (var i = kids.length - 1; i >= 0; i--) {
+            var kid = kids[i];
+            if (!isSvg(kid) || /^(defs|symbol|clipPath|mask|marker|pattern|linearGradient|radialGradient|filter|title|desc|metadata|style|script)$/.test(kid.localName)) continue;
+            if (SPEC[kid.localName]) {
+                if (attribute(kid, 'pointer-events') === 'none' || attribute(kid, 'visibility') === 'hidden' || attribute(kid, 'display') === 'none') continue;
+                var m = screenCtm(kid), inv = m && invert(m);
+                if (!inv) continue;
+                var stroke = attribute(kid, 'stroke'), width = 0;
+                if (stroke !== null && stroke !== 'none') {
+                    width = parseFloat(attribute(kid, 'stroke-width'));
+                    if (!isFinite(width)) width = 1;
+                }
+                if (hitShape(kid.localName, SPEC[kid.localName](kid), inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5],
+                             attribute(kid, 'fill') !== 'none', width)) return kid;
+            } else {
+                var found = shapeAt(kid, x, y);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    // For elementFromPoint and the engine's mouse events (dom.rs): the
+    // layout answers the `<svg>`; this names the shape in it.
+    if (typeof hitShape === 'function') {
+        Object.defineProperty(g, '__rkSvgHit', {
+            value: function (svg, x, y) { return shapeAt(svg, x, y) || svg; },
+            configurable: true, enumerable: false, writable: true
+        });
+    }
 })(globalThis);

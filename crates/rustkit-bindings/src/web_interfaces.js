@@ -43,7 +43,8 @@
     var EVENTS = [
         ['UIEvent', 'Event', [['view', null, 'any'], ['detail', 0, 'num']]],
         ['MouseEvent', 'UIEvent', [['screenX', 0, 'num'], ['screenY', 0, 'num'], ['clientX', 0, 'num'], ['clientY', 0, 'num'],
-            ['button', 0, 'num'], ['buttons', 0, 'num'], ['relatedTarget', null, 'any']].concat(mods())],
+            ['button', 0, 'num'], ['buttons', 0, 'num'], ['relatedTarget', null, 'any'],
+            ['movementX', 0, 'num'], ['movementY', 0, 'num']].concat(mods())],
         ['KeyboardEvent', 'UIEvent', [['key', '', 'str'], ['code', '', 'str'], ['location', 0, 'num'], ['repeat', false, 'bool'],
             ['isComposing', false, 'bool'], ['keyCode', 0, 'num'], ['charCode', 0, 'num']].concat(mods())],
         ['FocusEvent', 'UIEvent', [['relatedTarget', null, 'any']]],
@@ -96,12 +97,82 @@
         ME.prototype.getModifierState = function (key) {
             return { Control: this.ctrlKey, Shift: this.shiftKey, Alt: this.altKey, Meta: this.metaKey }[key] === true;
         };
-        ['x', 'pageX', 'offsetX'].forEach(function (k) {
+        ['x', 'pageX'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientX; }, configurable: true, enumerable: true });
         });
-        ['y', 'pageY', 'offsetY'].forEach(function (k) {
+        ['y', 'pageY'].forEach(function (k) {
             Object.defineProperty(ME.prototype, k, { get: function () { return this.clientY; }, configurable: true, enumerable: true });
         });
+        // offsetX / offsetY (CSSOM View §9): from the padding edge of the
+        // event's target, worked out when read. For a target inside an
+        // `<svg>` that is the outermost `<svg>`'s (Chrome for Testing 148);
+        // an event that has no target yet answers its client point. The
+        // engine's own events carry the numbers and do not come here.
+        function offsetFrom(e, axis) {
+            var client = axis === 'x' ? e.clientX : e.clientY, t = e.target;
+            if (!t || t.nodeType !== 1 || typeof t.getBoundingClientRect !== 'function') return client;
+            if (t.namespaceURI === 'http://www.w3.org/2000/svg') {
+                for (var n = t; n && n.nodeType === 1 && n.namespaceURI === t.namespaceURI; n = n.parentNode) {
+                    if (n.localName === 'svg') t = n;
+                }
+            }
+            var r = t.getBoundingClientRect();
+            return axis === 'x' ? client - r.left - (t.clientLeft || 0) : client - r.top - (t.clientTop || 0);
+        }
+        // layerX / layerY (legacy): from the border edge of the nearest
+        // positioned element at or above the target, in page coordinates;
+        // the page point when there is none.
+        function layerFrom(e, axis) {
+            var page = axis === 'x' ? e.pageX : e.pageY;
+            for (var n = e.target; n && n.nodeType === 1; n = n.parentNode) {
+                var position = typeof g.getComputedStyle === 'function' ? g.getComputedStyle(n).position : '';
+                if (position && position !== 'static') {
+                    var r = n.getBoundingClientRect();
+                    return axis === 'x' ? page - (r.left + (g.scrollX || 0)) : page - (r.top + (g.scrollY || 0));
+                }
+            }
+            return page;
+        }
+        [['offsetX', offsetFrom, 'x'], ['offsetY', offsetFrom, 'y'], ['layerX', layerFrom, 'x'], ['layerY', layerFrom, 'y']].forEach(function (spec) {
+            Object.defineProperty(ME.prototype, spec[0], {
+                get: function () { return spec[1](this, spec[2]); }, configurable: true, enumerable: true
+            });
+        });
+    }
+    // WheelEvent's legacy deltas and its mode constants (UI Events §5.5;
+    // Chrome for Testing 148): `wheelDeltaX` / `wheelDeltaY` are what the
+    // init gave, else the event's own deltaX / deltaY; `wheelDelta` is what
+    // the init gave, else the Y one, else the X one.
+    var WE = g.WheelEvent;
+    if (WE && !Object.prototype.hasOwnProperty.call(WE.prototype, 'wheelDelta')) {
+        var WHEEL = typeof WeakMap === 'function' ? new WeakMap() : null;
+        var WheelEventWithLegacy = function WheelEvent(type, init) {
+            var e = Reflect.construct(WE, arguments.length < 2 ? [type] : [type, init], new.target || WheelEventWithLegacy);
+            var i = init || {};
+            if (WHEEL) {
+                WHEEL.set(e, {
+                    x: i.wheelDeltaX === undefined ? e.deltaX : Number(i.wheelDeltaX),
+                    y: i.wheelDeltaY === undefined ? e.deltaY : Number(i.wheelDeltaY),
+                    both: i.wheelDelta === undefined ? null : Number(i.wheelDelta)
+                });
+            }
+            return e;
+        };
+        WheelEventWithLegacy.prototype = WE.prototype;
+        Object.defineProperty(WE.prototype, 'constructor', { value: WheelEventWithLegacy, writable: true, configurable: true });
+        Object.setPrototypeOf(WheelEventWithLegacy, Object.getPrototypeOf(WE));
+        var legacy = function (e) { return (WHEEL && WHEEL.get(e)) || { x: e.deltaX || 0, y: e.deltaY || 0, both: null }; };
+        Object.defineProperty(WE.prototype, 'wheelDeltaX', { get: function () { return legacy(this).x; }, configurable: true, enumerable: true });
+        Object.defineProperty(WE.prototype, 'wheelDeltaY', { get: function () { return legacy(this).y; }, configurable: true, enumerable: true });
+        Object.defineProperty(WE.prototype, 'wheelDelta', {
+            get: function () { var l = legacy(this); return l.both !== null ? l.both : (l.y || l.x); }, configurable: true, enumerable: true
+        });
+        [['DOM_DELTA_PIXEL', 0], ['DOM_DELTA_LINE', 1], ['DOM_DELTA_PAGE', 2]].forEach(function (pair) {
+            [WheelEventWithLegacy, WE.prototype].forEach(function (o) {
+                Object.defineProperty(o, pair[0], { value: pair[1], enumerable: true });
+            });
+        });
+        g.WheelEvent = WheelEventWithLegacy;
     }
     // UIEvent.which (UI Events §7.3, legacy): a key event's keyCode, a mouse
     // event's button + 1, else 0. Chrome for Testing 148 has it on
