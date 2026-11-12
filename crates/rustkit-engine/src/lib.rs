@@ -483,6 +483,8 @@ mod svg2_svg_geometry_events_tests;
 mod r1_stack_pins_tests;
 #[cfg(all(test, feature = "headless"))]
 mod whl1_trusted_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl2_discrete_wheel_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -4073,6 +4075,22 @@ impl Engine {
     /// becomes the held target: a box at its end hands on at once, as
     /// Chromium does.
     ///
+    /// A wheel over a viewport point; `gesture` says whether it is a step
+    /// of a gesture (a trackpad's, which the platform marks with a phase)
+    /// or a wheel on its own (a mouse's).
+    pub fn wheel_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
+        let _ = gesture;
+        self.scroll_at(id, x, y, delta_x, delta_y)
+    }
+
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
     pub fn scroll_at(
