@@ -79,6 +79,10 @@ fn rig() -> Rig {
         routes.push((json, "application/json", json_body(n)));
         routes.push((bytes, "application/octet-stream", byte_body(n)));
     }
+    rig_with(routes)
+}
+
+fn rig_with(routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> Rig {
     let server = serve_byte_routes(routes);
     let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     bindings.enable_net_bridge().unwrap();
@@ -231,4 +235,54 @@ fn text_and_base64_codecs_take_megabytes_without_a_per_byte_loop() {
     let want = format!("{n},195,169,189,{},65533,true,{},/2Ji,{},255,b", 2 * 1024 * 1024 + 5, (1024 * 1024 + 1 + 2) / 3 * 4, 1024 * 1024 + 1);
     assert_eq!(format!("{out:?}"), format!("{:?}", JsValue::String(want)));
     assert!(started.elapsed() <= Duration::from_millis(1500), "took {:?}", started.elapsed());
+}
+
+// ── The response cap (row 12) ──────────────────────────────────────────────
+//
+// `FetchLimits::max_response_bytes` was 10 MiB for everything the policy
+// fetches for script. JetStream 2.2 preloads three files of 11.9 to 12.2 MB
+// with `fetch()`, and ordinary sites ship bundles that size. Atlas,
+// 2026-11-11: 64 MiB for script-initiated fetch/XHR and module scripts.
+
+const MB12: usize = 12 * 1024 * 1024;
+const CAP: usize = 64 * 1024 * 1024;
+
+#[test]
+fn a_12_mb_body_is_under_the_response_cap() {
+    let rig = rig_with(vec![("/bytes-12m", "application/octet-stream", byte_body(MB12))]);
+    let script = format!(
+        "fetch('ORIGIN/bytes-12m').then(function (r) {{ return r.arrayBuffer(); }}).then(function (b) {{ var v = new Uint8Array(b); window.out = {BYTES_PROBE}; }}).catch(function (e) {{ window.out = 'failed: ' + e; }});"
+    );
+    check("fetch arrayBuffer()", MB12, rig.exchange(&script), bytes_seen(MB12), Duration::from_millis(3000));
+}
+
+#[test]
+fn a_body_one_byte_over_the_response_cap_is_refused_and_one_at_it_is_not() {
+    assert_eq!(rustkit_net::policy::FetchLimits::default().max_response_bytes, CAP);
+    let rig = rig_with(vec![
+        ("/at-cap", "application/octet-stream", vec![7u8; CAP]),
+        ("/over-cap", "application/octet-stream", vec![7u8; CAP + 1]),
+    ]);
+    let ask = |path: &str| {
+        format!(
+            "fetch('ORIGIN{path}').then(function (r) {{ return r.arrayBuffer(); }}).then(function (b) {{ window.out = 'bytes ' + b.byteLength; }}).catch(function (e) {{ window.out = 'failed: ' + e; }});"
+        )
+    };
+    assert_eq!(rig.exchange(&ask("/at-cap")).0, format!("bytes {CAP}"));
+    // The page learns only that it failed, as for every refusal.
+    assert_eq!(rig.exchange(&ask("/over-cap")).0, "failed: TypeError: Failed to fetch");
+}
+
+// ── Blob URLs (row 13) ─────────────────────────────────────────────────────
+
+/// `URL.createObjectURL(blob)` names bytes the page already holds: fetching
+/// it answers from them, with no request, until it is revoked. (It returned
+/// a URL nothing stood behind.) Chrome 148: the text, then a TypeError.
+#[test]
+fn fetching_a_blob_url_answers_from_the_blob_until_it_is_revoked() {
+    let rig = rig();
+    let made = "var u = URL.createObjectURL(new Blob(['from ', 'a blob'], { type: 'text/plain' }));";
+    let ask = "fetch(u).then(function (r) { return r.text().then(function (t) { window.out = r.status + ':' + r.headers.get('content-type') + ':' + t; }); }).catch(function (e) { window.out = 'failed: ' + e.name; });";
+    assert_eq!(rig.exchange(&format!("{made} {ask}")).0, "200:text/plain:from a blob");
+    assert_eq!(rig.exchange(&format!("URL.revokeObjectURL(u); {ask}")).0, "failed: TypeError");
 }
