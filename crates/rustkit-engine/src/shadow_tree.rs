@@ -824,6 +824,7 @@ impl HostScope {
     }
 
     /// The sheets the host's shadow children are matched against.
+    pub(crate) fn sheets(&self) -> Option<&[Stylesheet]> {
         self.tree.as_ref().map(|t| t.sheets.as_slice())
     }
 
