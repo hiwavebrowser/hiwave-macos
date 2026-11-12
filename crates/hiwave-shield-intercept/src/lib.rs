@@ -766,5 +766,36 @@ mod tests {
         assert_eq!(census[2].0, 1, "attempts still counted while disabled");
         assert_eq!(census[2].1, 0);
     }
-}
 
+    /// SH2: the pending floor and the compiled defaults say the same thing about the same request,
+    /// so a page does not behave differently before and after the filter lists are ready.
+    #[test]
+    fn the_pending_floor_agrees_with_the_defaults_engine() {
+        let handler = ShieldInterceptHandler::new();
+        let defaults = hiwave_shield::AdBlocker::new();
+        let page = "https://news.example/";
+        let cases = [
+            ("https://mixpanel.com/lib.js", "https://mixpanel.com/"),
+            ("https://mixpanel.com/lib.js", page),
+            ("https://connect.facebook.net/en_US/sdk.js", page),
+            ("https://www.criteo.com/ads.js", page),
+            ("https://static.criteo.com/sync", page),
+            ("https://www.googletagmanager.com/gtm.js?id=GTM-1", page),
+            ("https://doubleclick.net/pagead.js", page),
+            ("https://example.com/app.js", page),
+        ];
+        let mut differ = Vec::new();
+        for (url, source) in cases {
+            let request = test_request_with(url, RequestDestination::Script, Some(source));
+            let floor = handler.pending_floor(&request).is_some();
+            let engine = defaults
+                .check(&Url::parse(url).unwrap(), &Url::parse(source).unwrap(), hiwave_shield::ResourceType::Script)
+                .is_some();
+            if floor != engine {
+                differ.push(format!("{url} from {source}: floor {floor}, defaults engine {engine}"));
+            }
+        }
+        assert!(differ.is_empty(), "{}", differ.join("
+"));
+    }
+}

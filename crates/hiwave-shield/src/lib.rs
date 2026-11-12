@@ -825,4 +825,20 @@ mod tests {
         assert_eq!(stats.requests_blocked, 1);
         assert_eq!(stats.trackers_blocked, 1);
     }
+
+    /// SH2: the host-wide defaults are third-party rules. Browsing mixpanel.com must not block
+    /// mixpanel.com's own scripts; embedding it on another site still does.
+    #[test]
+    fn a_host_wide_default_does_not_block_the_site_s_own_subresources() {
+        let blocker = AdBlocker::new();
+        let script = |url: &str, page: &str| {
+            blocker.check(&Url::parse(url).unwrap(), &Url::parse(page).unwrap(), ResourceType::Script)
+        };
+        for host in ["mixpanel.com", "segment.com", "hotjar.com", "taboola.com", "criteo.com"] {
+            let own = format!("https://{host}/lib.js");
+            let page = format!("https://{host}/");
+            assert!(script(&own, &page).is_none(), "{host} blocked on its own site");
+            assert!(script(&own, "https://news.example/").is_some(), "{host} not blocked as a third party");
+        }
+    }
 }
