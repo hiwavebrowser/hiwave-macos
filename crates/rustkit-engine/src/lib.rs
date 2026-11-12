@@ -1610,6 +1610,7 @@ impl ViewState {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
+        self.lay.tree_styles.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
         self.lay.shown_images.borrow_mut().clear();
         *self.lay.failed_images.borrow_mut() = layout_ctx::FailedImages::default();
@@ -12122,6 +12123,7 @@ impl layout_ctx::LayoutCtx {
             &stylesheets,
             viewport,
             javascript_enabled,
+            self.building_lay().map(|lay| lay.tree_styles.clone()),
         );
         let index_started = mark();
         // CQ1: the view's last layout's container sizes answer the queries;
@@ -13754,8 +13756,11 @@ impl layout_ctx::LayoutCtx {
                     let wanted = !TREE_RULE_INDEX_OFF.with(Cell::get)
                         && !TREE_RULE_INDEXES.with(|c| c.borrow().contains_key(&source));
                     if wanted {
-                        let index = Rc::new(self.build_rule_index(sheets));
-                        TREE_RULE_INDEXES.with(|c| c.borrow_mut().insert(source, index));
+                        // Kept on the tree style: a tree the view's cache
+                        // hands to a later build brings its index.
+                        if let Some(index) = host_scope.index(|sheets| self.build_rule_index(sheets)) {
+                            TREE_RULE_INDEXES.with(|c| c.borrow_mut().insert(source, index));
+                        }
                     }
                 }
                 let slot_scope =

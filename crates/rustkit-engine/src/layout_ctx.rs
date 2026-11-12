@@ -611,6 +611,8 @@ pub(crate) struct ViewLayout {
     pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
     /// Element cascades of the view's last build that had no rule index.
     pub(crate) last_unindexed_cascades: Cell<u32>,
+    /// LAT22: the document's shadow tree styles across builds.
+    pub(crate) tree_styles: Rc<RefCell<crate::shadow_tree::ViewTreeStyles>>,
     pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds

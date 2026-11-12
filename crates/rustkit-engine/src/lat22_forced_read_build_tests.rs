@@ -330,3 +330,88 @@ fn the_shadow_rule_index_builds_the_same_boxes() {
         assert!(with == without, "the indexed build differs from the unindexed one");
     }
 }
+
+/// LAT22: the view keeps its shadow tree styles across builds. A build
+/// after a script write elsewhere reads no shadow sheet's text and parses
+/// none.
+#[test]
+fn a_later_build_reads_no_shadow_sheet_text() {
+    let (mut engine, view, _server) = load(&component_page(40, 50, "<div id=a></div><p id=t>text</p>"));
+    for i in 0..2 {
+        engine
+            .execute_script(view, &format!("document.getElementById('t').firstChild.data = 'changed {i}';"))
+            .unwrap();
+    }
+    let shadow = engine.views[&view].lay.last_shadow_build.get();
+    assert_eq!(shadow.roots, 40, "{shadow:?}");
+    assert_eq!((shadow.texts_read, shadow.parsed), (0, 0), "{shadow:?}");
+}
+
+/// Two hosts with shadow roots; `#x` in the first is what the sheets style.
+const CACHE_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</style></head><body>\
+    <div id=h1></div><div id=h2></div><p id=t>text</p><script>\
+    var S='<style id=st>#x{padding-left:3px}</style><div id=x>x</div>';\
+    var r1=document.getElementById('h1').attachShadow({mode:'open'});r1.innerHTML=S;\
+    var r2=document.getElementById('h2').attachShadow({mode:'open'});r2.innerHTML=S;\
+    function pad(r){return getComputedStyle(r.getElementById('x')).paddingLeft;}\
+    </script></body></html>";
+
+/// Every way a shadow root's sheets change is seen by the next build, with
+/// the cache as without it: the style's text, a second `<style>`, a removed
+/// one, its `media` attribute, the root's `adoptedStyleSheets` (set, then
+/// replaced), and a resize across an `@media` threshold. The other root,
+/// whose sheets did not change, keeps its style throughout.
+#[test]
+fn each_change_to_a_shadow_roots_sheets_restyles_it() {
+    let steps: &[(&str, &str)] = &[
+        ("pad(r1)+'/'+pad(r2)", "3px/3px"),
+        ("r1.getElementById('st').textContent='#x{padding-left:5px}';pad(r1)+'/'+pad(r2)", "5px/3px"),
+        ("var n=document.createElement('style');n.id='s2';n.textContent='#x{padding-left:7px}';r1.appendChild(n);pad(r1)+'/'+pad(r2)", "7px/3px"),
+        ("r1.getElementById('s2').remove();pad(r1)+'/'+pad(r2)", "5px/3px"),
+        ("r1.getElementById('st').setAttribute('media','print');pad(r1)+'/'+pad(r2)", "0px/3px"),
+        ("r1.getElementById('st').removeAttribute('media');pad(r1)+'/'+pad(r2)", "5px/3px"),
+        ("var a=new CSSStyleSheet();a.replaceSync('#x{padding-left:9px}');r1.adoptedStyleSheets=[a];pad(r1)+'/'+pad(r2)", "9px/3px"),
+        ("var b=new CSSStyleSheet();b.replaceSync('#x{padding-left:11px}');r1.adoptedStyleSheets=[b];pad(r1)+'/'+pad(r2)", "11px/3px"),
+        ("r1.adoptedStyleSheets=[];pad(r1)+'/'+pad(r2)", "5px/3px"),
+        ("r2.getElementById('st').textContent='@media (max-width:500px){#x{padding-left:13px}}';pad(r1)+'/'+pad(r2)", "5px/0px"),
+    ];
+    for cache_off in [true, false] {
+        crate::shadow_tree::set_view_cache_off_for_test(cache_off);
+        let (mut engine, view, _server) = load(CACHE_PAGE);
+        for (script, want) in steps {
+            // A build in between, so the cache holds the state before.
+            engine.execute_script(view, "document.getElementById('t').firstChild.data += '.';").unwrap();
+            assert_eq!(read(&mut engine, view, script), *want, "cache off: {cache_off}; step: {script}");
+        }
+        engine.resize_view(view, Bounds { x: 0, y: 0, width: 400, height: 768 }).expect("resize");
+        assert_eq!(read(&mut engine, view, "pad(r1)+'/'+pad(r2)"), "5px/13px", "cache off: {cache_off}; after the resize");
+        engine.resize_view(view, Bounds { x: 0, y: 0, width: 1024, height: 768 }).expect("resize");
+        assert_eq!(read(&mut engine, view, "pad(r1)+'/'+pad(r2)"), "5px/0px", "cache off: {cache_off}; resized back");
+    }
+    crate::shadow_tree::set_view_cache_off_for_test(false);
+}
+
+/// The cache changes no box: the laid-out tree after a run of builds, with
+/// and without it.
+#[test]
+fn the_view_tree_style_cache_builds_the_same_boxes() {
+    let page = indexed_selectors_page();
+    let dump = |cache_off: bool| {
+        crate::shadow_tree::set_view_cache_off_for_test(cache_off);
+        let (mut engine, view, _server) = load(&page);
+        for script in [
+            "document.getElementById('t').firstChild.data = 'one';",
+            "document.getElementById('h1').classList.add('wide');",
+            "document.getElementById('h2').shadowRoot.querySelector('style').textContent += '.row{gap:9px}';",
+            "document.getElementById('t').firstChild.data = 'two';",
+        ] {
+            engine.execute_script(view, script).unwrap();
+        }
+        let out = format!("{:?}", engine.views[&view].layout.as_ref().expect("laid out"));
+        crate::shadow_tree::set_view_cache_off_for_test(false);
+        out
+    };
+    let (without, with) = (dump(true), dump(false));
+    assert!(without.len() > 2000);
+    assert!(with == without, "the cached build differs from the uncached one");
+}

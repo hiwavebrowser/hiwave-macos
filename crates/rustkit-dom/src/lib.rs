@@ -192,6 +192,9 @@ pub struct Node {
     /// sums this count over the element and every ancestor instead of
     /// walking the subtree at every mutation.
     connection_generation: Cell<u64>,
+    /// How many times `adoptedStyleSheets` was set on this document or
+    /// shadow root: equal readings, the same adopted texts.
+    adopted_generation: Cell<u64>,
 }
 
 impl Node {
@@ -209,6 +212,7 @@ impl Node {
             adopted_styles: RefCell::new(Vec::new()),
             sheet_generation: Cell::new(0),
             connection_generation: Cell::new(0),
+            adopted_generation: Cell::new(0),
         })
     }
 
@@ -243,7 +247,13 @@ impl Node {
     /// string is a disabled sheet and is skipped by style resolution.
     pub fn set_adopted_styles(&self, texts: Vec<String>) {
         note_mutation();
+        self.adopted_generation.set(self.adopted_generation.get().wrapping_add(1));
         *self.adopted_styles.borrow_mut() = texts;
+    }
+
+    /// Changes whenever `set_adopted_styles` is called on this node.
+    pub fn adopted_generation(&self) -> u64 {
+        self.adopted_generation.get()
     }
 
     /// CSS text adopted by this document or shadow root, in array order.
@@ -909,6 +919,7 @@ impl Document {
         let new = Node::new(id, node_type);
         new.event_target.adopt_listeners(&old.event_target);
         *new.adopted_styles.borrow_mut() = old.adopted_styles.borrow().clone();
+        new.adopted_generation.set(old.adopted_generation.get());
         // An attribute change keeps a <style>'s sheet; new data in a Text
         // child ends its parent's.
         new.sheet_generation.set(old.sheet_generation.get());
