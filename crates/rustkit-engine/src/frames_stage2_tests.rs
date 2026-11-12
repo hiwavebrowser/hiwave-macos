@@ -40,7 +40,7 @@ impl Page {
         let server = serve_routes(routes);
         let mut engine = Engine::new(config(on)).expect("engine");
         let view = engine
-            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
             .expect("view");
         let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -180,4 +180,67 @@ window.loads = 0; document.getElementById('f').onload = function () { loads++; }
     page.turns_until("false", Duration::from_millis(300));
     assert_eq!(page.js("[loads, String(document.getElementById('f').contentWindow)].join()"), r#"String("0,null")"#);
     assert_eq!(page.served("/child.html"), 0);
+}
+
+// ── Stage 3: layout, paint, the frame's timers and network ─────────────────
+
+/// The iframe is a replaced box: 300x150 by default, its width/height
+/// attributes, author CSS, and a 2px inset border. Chrome 148 on this page
+/// (body margin 0): a 0,0 304x154; b 304,70 204x84; c 0,158 324x204; each
+/// frame's viewport is the content box (300x150, 200x80, 320x200), and the
+/// border is 2px inset (painted solid here: not asserted).
+#[test]
+fn a_frame_is_a_replaced_box_with_a_2px_inset_border() {
+    let page = "<!doctype html><body style='margin:0'><iframe id=a></iframe><iframe id=b width=200 height=80></iframe><br>\
+<iframe id=c style='width:320px;height:200px'></iframe><script>
+window.boxes = function () { return ['a','b','c'].map(function (id) { var e = document.getElementById(id), r = e.getBoundingClientRect(), s = getComputedStyle(e);
+  return [r.x, r.y, r.width, r.height, s.borderTopWidth, e.contentWindow ? e.contentWindow.innerWidth + 'x' + e.contentWindow.innerHeight : 'none'].join(','); }).join(' | '); };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("['a','b','c'].every(function (id) { return document.getElementById(id).contentWindow; })", Duration::from_secs(5));
+    assert_eq!(
+        page.js("boxes()"),
+        r#"String("0,0,304,154,2px,300x150 | 304,70,204,84,2px,200x80 | 0,158,324,204,2px,320x200")"#
+    );
+}
+
+/// The frame's timers and its fetch() run, and what its script writes
+/// reaches its layout and the parent's paint. Chrome 148: the child's
+/// timer and fetch both answer, and its body's height read from the parent
+/// is the new one in the same task.
+#[test]
+fn a_frames_timers_network_and_layout_run() {
+    let page = "<!doctype html><body><iframe id=f src=/live.html style='width:200px;height:100px'></iframe><script>
+window.loaded = false; document.getElementById('f').addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let routes_page = page.to_string();
+    let live = "<!doctype html><body style='margin:0'><div id=box style='height:10px;background:rgb(0,255,0)'></div><script>
+window.log = [];
+setTimeout(function () { log.push('timer'); }, 20);
+requestAnimationFrame(function () { log.push('frame'); });
+fetch('/data.txt').then(function (r) { return r.text(); }).then(function (t) { log.push('fetch:' + t); });
+</script></body>";
+    let server = serve_routes(vec![
+        ("/", "text/html", routes_page),
+        ("/live.html", "text/html", live.to_string()),
+        ("/data.txt", "text/plain", "hello".to_string()),
+    ]);
+    let mut engine = Engine::new(config(true)).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).unwrap();
+    let mut page = Page { engine, view, rt, server };
+    page.turns_until("window.loaded && document.getElementById('f').contentWindow.log.length >= 3", Duration::from_secs(8));
+    assert_eq!(page.js("document.getElementById('f').contentWindow.log.slice().sort().join()"), r#"String("fetch:hello,frame,timer")"#);
+    // A write in the frame, read across the boundary at once.
+    assert_eq!(
+        page.js("var d = document.getElementById('f').contentDocument; d.getElementById('box').style.height = '40px'; d.body.getBoundingClientRect().height"),
+        "Number(40.0)"
+    );
+    // The frame's green box is in the parent's paint, inside the iframe.
+    page.turns_until("false", Duration::from_millis(100));
+    let list = page.engine.views[&page.view].doc.display_list.clone().expect("a display list");
+    let green = list.commands.iter().any(|c| matches!(c,
+        rustkit_layout::DisplayCommand::SolidColor(color, _) if color.r == 0 && color.g == 255 && color.b == 0));
+    assert!(green, "the frame's paint is not in the parent's display list");
 }
