@@ -33,7 +33,11 @@ const GAPS: &[&str] = &[
     "matrix@1:m3:box",
     "matrix@2:m3:box",
     // An `<img>` flex item's height does not follow its flexed or
-    // stretched width through the image's ratio.
+    // stretched width through the image's ratio. a7 is the column case
+    // with `width="300"` and `height: auto`: 300x200, the natural height,
+    // where Chrome has 300x150.
+    "attrs@1:a7:box",
+    "attrs@2:a7:box",
     "matrix@1:m24:box",
     "matrix@2:m24:box",
     "matrix@1:m25:box",
