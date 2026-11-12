@@ -23,7 +23,15 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // A header across `fit-content(300px) auto`: Chromium gives the auto
+    // column the header's 360 and the fit-content one 0. The engine grows
+    // neither: a spanning item's max-content does not reach an `auto`
+    // column's size, with or without a fit-content column beside it, so
+    // the header wraps at 60. Not a fit-content bug; the page is here for
+    // the day spanning items size intrinsic columns.
+    "a-header-spanning-a-fit-content-and-an-auto-column",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]

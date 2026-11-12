@@ -1879,8 +1879,7 @@ pub fn layout_grid_container(
     // limit, and a header across two `fit-content(300px)` columns wrapped
     // to its min-content (Chromium 148: the two columns add up to the
     // header's 360; with a 120px item of its own in the first, 240 and
-    // 120). Only spans made of fit-content columns alone: a flexible or
-    // `auto` column in the span takes the item instead.
+    // 120).
     for item in &items {
         let span = item.column_span.max(1) as usize;
         if span < 2 {
@@ -1888,7 +1887,18 @@ pub fn layout_grid_container(
         }
         let start = (item.column_start - 1).max(0) as usize;
         let end = (start + span).min(grid.columns.len());
-        if start >= end || !grid.columns[start..end].iter().all(|t| t.fit_content_measured) {
+        // A flexible, `auto`, `min-content`, `max-content` or percentage
+        // column in the span takes the item itself (Chromium 148: across
+        // `fit-content(300px) auto` the auto column is the header's 360 and
+        // the fit-content one 0). Fixed columns stay in: they cover their
+        // own length and the fit-content columns share the rest (across
+        // `fit-content(300px) 100px`, 260 and 100).
+        if start >= end
+            || !grid.columns[start..end].iter().any(|t| t.fit_content_measured)
+            || grid.columns[start..end]
+                .iter()
+                .any(|t| !t.fit_content_measured && !track_is_fixed(t))
+        {
             continue;
         }
         let wanted = (estimate_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style))
@@ -1896,7 +1906,7 @@ pub fn layout_grid_container(
         let mut extra = wanted
             - grid.columns[start..end].iter().map(|t| t.growth_limit).sum::<f32>()
             - column_gap * (end - start - 1) as f32;
-        let mut open: Vec<usize> = (start..end).collect();
+        let mut open: Vec<usize> = (start..end).filter(|&i| grid.columns[i].fit_content_measured).collect();
         while extra > 0.01 && !open.is_empty() {
             let share = extra / open.len() as f32;
             let mut still_open = Vec::new();
