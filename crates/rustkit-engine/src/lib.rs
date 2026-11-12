@@ -1915,7 +1915,9 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
-            nested_contexts: false,
+            // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
+            // frames in a built app or parity-capture before the flip.
+            nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
