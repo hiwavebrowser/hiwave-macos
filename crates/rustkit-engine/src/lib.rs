@@ -1582,7 +1582,8 @@ impl ViewState {
         let reasons = std::mem::take(&mut *self.lay.forced_build_reasons.borrow_mut());
         if !reasons.is_empty() {
             let field = reasons.iter().map(|(why, n)| format!("{why:?}:{n}")).collect::<Vec<_>>().join(",");
-            info!("forced read builds url={} reasons={{{}}}", url, field);
+            // No URL: the relayout summary just above names the document.
+            info!("forced read builds reasons={{{}}}", field);
         }
     }
 
@@ -45874,68 +45875,6 @@ impl AnimationBaseline {
 /// frame still finds what moved and paints it. `Err` when the frame needs
 /// a build (a layout property moved, a box does not show the last frame,
 /// script's pause/play is pending, ...).
-/// LAT22 probe: one info line for a read that builds the tree, and the
-/// view's count of the reason. Shapes only: the reason, the read and write
-/// kinds, the names of the properties Web Animations' layer holds (custom
-/// properties as `--custom`), and whether the animated elements and the
-/// element read are inside shadow trees. No text, no URLs, no values.
-fn forced_read_probe(
-    id: EngineViewId,
-    lay: &layout_ctx::ViewLayout,
-    document: &Document,
-    probe: &rustkit_bindings::ForcedReadProbe,
-    why: &str,
-) {
-    let in_shadow = |raw: usize| {
-        document
-            .get_node(rustkit_dom::NodeId::new(raw))
-            .is_some_and(|node| node.containing_shadow_root().is_some())
-    };
-    let (props, animated, animated_in_shadow) = {
-        let layer = lay.animated.borrow();
-        let mut props: Vec<String> = layer
-            .script
-            .values()
-            .flatten()
-            .map(|(prop, _, _)| match prop.starts_with("--") {
-                true => "--custom".to_string(),
-                false => prop.to_ascii_lowercase(),
-            })
-            .collect();
-        props.sort();
-        props.dedup();
-        props.truncate(12);
-        let animated = layer.script.len();
-        let animated_in_shadow = layer.script.keys().filter(|raw| in_shadow(**raw)).count();
-        (props.join(","), animated, animated_in_shadow)
-    };
-    let read_in_shadow = match probe.read_node {
-        Some(raw) => match in_shadow(raw) {
-            true => "yes",
-            false => "no",
-        },
-        None => "unknown",
-    };
-    info!(
-        ?id,
-        why = %why,
-        read = probe.read,
-        cause = probe.cause,
-        other_write_pending = probe.other_write_pending,
-        layout_write_pending = probe.layout_write_pending,
-        animated_props = %props,
-        animated_elements = animated,
-        animated_in_shadow,
-        read_in_shadow,
-        "Forced read builds the tree"
-    );
-    let mut counts = lay.forced_build_reasons.borrow_mut();
-    // Bounded: reasons that name an element or a property are many.
-    if counts.len() < 64 || counts.contains_key(why) {
-        *counts.entry(why.to_string()).or_insert(0) += 1;
-    }
-}
-
 fn forced_animation_frame(
     lctx: &layout_ctx::LayoutCtx,
     lay: &Rc<layout_ctx::ViewLayout>,
@@ -45987,6 +45926,72 @@ fn forced_animation_frame(
         max_scroll,
         framed: true,
     })
+}
+
+/// LAT22 probe: one info line for a read that builds the tree, and the
+/// view's count of the reason. Shapes only: the reason, the read and write
+/// kinds, the names of the properties Web Animations' layer holds (those of
+/// the engine's animation property table; custom properties as `--custom`,
+/// any other key as `other`), and whether the animated elements and the
+/// element read are inside shadow trees. No text, no URLs, no values.
+fn forced_read_probe(
+    id: EngineViewId,
+    lay: &layout_ctx::ViewLayout,
+    document: &Document,
+    probe: &rustkit_bindings::ForcedReadProbe,
+    why: &str,
+) {
+    let in_shadow = |raw: usize| {
+        document
+            .get_node(rustkit_dom::NodeId::new(raw))
+            .is_some_and(|node| node.containing_shadow_root().is_some())
+    };
+    let (props, animated, animated_in_shadow) = {
+        let layer = lay.animated.borrow();
+        let mut props: Vec<String> = layer
+            .script
+            .values()
+            .flatten()
+            // Keyframe keys are the page's: only names of the engine's own
+            // animation property table are logged; any other is `other`.
+            .map(|(prop, _, _)| match prop {
+                p if p.starts_with("--") => "--custom".to_string(),
+                p if !animations::prop_indices(p).is_empty() => p.to_ascii_lowercase(),
+                _ => "other".to_string(),
+            })
+            .collect();
+        props.sort();
+        props.dedup();
+        props.truncate(12);
+        let animated = layer.script.len();
+        let animated_in_shadow = layer.script.keys().filter(|raw| in_shadow(**raw)).count();
+        (props.join(","), animated, animated_in_shadow)
+    };
+    let read_in_shadow = match probe.read_node {
+        Some(raw) => match in_shadow(raw) {
+            true => "yes",
+            false => "no",
+        },
+        None => "unknown",
+    };
+    info!(
+        ?id,
+        why = %why,
+        read = probe.read,
+        cause = probe.cause,
+        other_write_pending = probe.other_write_pending,
+        layout_write_pending = probe.layout_write_pending,
+        animated_props = %props,
+        animated_elements = animated,
+        animated_in_shadow,
+        read_in_shadow,
+        "Forced read builds the tree"
+    );
+    let mut counts = lay.forced_build_reasons.borrow_mut();
+    // Bounded: reasons that name an element or a property are many.
+    if counts.len() < 64 || counts.contains_key(why) {
+        *counts.entry(why.to_string()).or_insert(0) += 1;
+    }
 }
 
 fn check_animation_frame(
