@@ -6264,6 +6264,24 @@ impl Engine {
                 continue;
             };
             child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            // What a top-level page's bindings are given at load, for the
+            // frame's: the engine's selector matcher (without it script's
+            // `querySelector` fell back to the bindings' own, which does not
+            // look inside a shadow tree), the microtask cap, and the view's
+            // interrupt word, so a stop reaches a script running in a frame.
+            child.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
+            let lay = self.views.get(&fid).map(|view| view.lay.clone());
+            child.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                let _focus = lay
+                    .as_ref()
+                    .filter(|_| selector.contains(":focus"))
+                    .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
+                SelectorMatcher.node_matches(node, selector, checked)
+            }));
+            if let Some(control) = self.views.get(&id).map(|view| view.control.clone()) {
+                child.set_view_control(Some(control));
+            }
+            self.attach_editing(fid, &child);
             if let Some(frame) = self.views.get_mut(&fid) {
                 frame.canvases = Some(child.canvas_source());
                 frame.doc.url = Some(target.clone());
