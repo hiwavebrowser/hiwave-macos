@@ -470,25 +470,33 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     normal
                 };
-                let pad = if style.padding_v_declared || author_pad_v > 0.0 { author_pad_v } else { 2.0 };
-                let border = if style.border_v_declared || author_border_v > 0.0 { author_border_v } else { 4.0 };
                 // SET4: the width composes the same way. Chrome for Testing
                 // 148 at the UA font: content 145, the UA's 2px padding and
                 // 2px border each side, 153 (docs/diagnostics/2026-11-11/
                 // set4_input_widths*). The 149 built here before was Chrome's
                 // `padding: 0` width. The content width is still the UA-font
                 // calibration scaled by the font size (SET5).
+                // A percentage padding counts as 0 here: it resolves against
+                // the containing block's width, which this intrinsic size
+                // does not have (a border width cannot be a percentage).
                 let px_h = |l: &Length| match l {
                     Length::Percent(_) | Length::Auto => 0.0,
                     other => other.to_px(font_size, 16.0, 0.0),
                 };
                 // Sides are [top, right, bottom, left]; a side nobody
-                // declared keeps the UA's 2px.
-                let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 2.0 };
-                let pad_h = side(style.padding_declared[3], px_h(&style.padding_left))
-                    + side(style.padding_declared[1], px_h(&style.padding_right));
-                let border_h = side(style.border_declared[3], px_h(&style.border_left_width))
-                    + side(style.border_declared[1], px_h(&style.border_right_width));
+                // declared keeps the UA's value, each on its own: with
+                // `padding-top: 4px` alone the bottom is still the UA's 1px
+                // (Chrome for Testing 148: 24 tall, and 24 with
+                // `border-top-width: 5px` alone).
+                let side = |declared: bool, value: f32, ua: f32| if declared || value > 0.0 { value } else { ua };
+                let pad = side(style.padding_declared[0], px_h(&style.padding_top), 1.0)
+                    + side(style.padding_declared[2], px_h(&style.padding_bottom), 1.0);
+                let border = side(style.border_declared[0], px_h(&style.border_top_width), 2.0)
+                    + side(style.border_declared[2], px_h(&style.border_bottom_width), 2.0);
+                let pad_h = side(style.padding_declared[3], px_h(&style.padding_left), 2.0)
+                    + side(style.padding_declared[1], px_h(&style.padding_right), 2.0);
+                let border_h = side(style.border_declared[3], px_h(&style.border_left_width), 2.0)
+                    + side(style.border_declared[1], px_h(&style.border_right_width), 2.0);
                 (145.0 * ua_scale + pad_h + border_h, line + pad + border)
             }
         },
@@ -612,11 +620,16 @@ pub(crate) fn form_control_intrinsic_size(
                         style.font_style,
                     );
                     let content = m.ascent.round() + m.descent.round() + 2.0;
-                    let border_v = if style.border_v_declared || author_border_v > 0.0 {
-                        author_border_v
-                    } else {
-                        2.0
+                    // Each side on its own, as for a text input: one the
+                    // author did not declare keeps the UA's 1px (Chrome for
+                    // Testing 148: 23 with `border-top-width: 5px` alone).
+                    let px = |l: &Length| match l {
+                        Length::Percent(_) | Length::Auto => 0.0,
+                        other => other.to_px(font_size, 16.0, 0.0),
                     };
+                    let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 1.0 };
+                    let border_v = side(style.border_declared[0], px(&style.border_top_width))
+                        + side(style.border_declared[2], px(&style.border_bottom_width));
                     content + author_pad_v + border_v
                 };
                 (widest.ceil() + well + pb_h, height)
@@ -3128,11 +3141,6 @@ impl LayoutBox {
         self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
-    /// A non-atomic inline child whose text wrapped onto several line boxes:
-    /// `(line count, end x of the last line relative to the container's
-    /// content left, that text's line height)`. `None` when every
-    /// descendant sits on one line. The last wrapped text descendant wins
-    /// (it is the one the flow continues after).
     /// SET2: give every wrapped text run in `b` (the run itself, or the
     /// text inside an inline) the pitch of a line box that unites the
     /// block's `strut` with the run's own box on the baseline, when that is
@@ -3145,13 +3153,21 @@ impl LayoutBox {
         if let (BoxType::Text(_), Some(n)) = (&b.box_type, b.text_lines.as_ref().map(|l| l.len())) {
             if n > 1 {
                 let own = Self::text_line_box_extents(&b.style);
-                let lh = b.dimensions.content.height / n as f32;
+                // The run's own line height, from its height. This may be
+                // the second visit to a run that was not laid out again
+                // (a parent's inline loop over a kept child, a second
+                // measure pass): its height then already holds the pitch,
+                // which is taken back out, so the same answer is written
+                // every time and the run does not grow on each pass.
+                let lines = n as f32;
+                let lh = match b.text_line_pitch {
+                    Some(pitch) => b.dimensions.content.height - (lines - 1.0) * pitch,
+                    None => b.dimensions.content.height / lines,
+                };
                 let union = own.0.max(strut.0) + own.1.max(strut.1);
                 let pitch = if union > lh + 0.01 { union } else { lh };
-                if pitch > lh {
-                    b.text_line_pitch = Some(pitch);
-                    b.dimensions.content.height = lh + (n as f32 - 1.0) * pitch;
-                }
+                b.text_line_pitch = (pitch > lh).then_some(pitch);
+                b.dimensions.content.height = lh + (lines - 1.0) * pitch;
                 out = Some((own, lh, pitch));
             }
         }
@@ -3163,6 +3179,11 @@ impl LayoutBox {
         out
     }
 
+    /// A non-atomic inline child whose text wrapped onto several line boxes:
+    /// `(line count, end x of the last line relative to the container's
+    /// content left, that text's line height)`. `None` when every
+    /// descendant sits on one line. The last wrapped text descendant wins
+    /// (it is the one the flow continues after).
     fn inline_wrapped_tail(inline: &LayoutBox, container_left: f32) -> Option<(usize, f32, f32)> {
         fn walk(b: &LayoutBox, left: f32, out: &mut Option<(usize, f32, f32)>) {
             if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
@@ -17727,6 +17748,38 @@ mod tests {
             "line = textarea + strut descent ({expected}; Chrome 38), got {}",
             block.dimensions.content.height
         );
+    }
+
+    /// R1 on #1090 (MED): `set_wrapped_pitch` writes the pitch into the
+    /// run's height, so a second visit to the same run (a parent's inline
+    /// loop over a child that was not laid out again) must read the run's
+    /// own line height back out of it, not divide the grown height again.
+    /// A two-line 16px run in a line whose strut is taller: 20 + 30 the
+    /// first time, and the same every time after.
+    #[test]
+    fn set_wrapped_pitch_gives_the_same_height_on_every_visit() {
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        let mut run = LayoutBox::new(BoxType::Text("aaa bbb".to_string()), style);
+        let line = |text: &str| TextLine { text: text.to_string(), width: 30.0, x_offset: 0.0, justify_space: 0.0 };
+        run.text_lines = Some(vec![line("aaa"), line("bbb")]);
+        run.dimensions.content.height = 40.0;
+        // A strut of 22 above and 8 below the baseline: a 30px line box.
+        let strut = (22.0, 8.0);
+        let first = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+        let height = run.dimensions.content.height;
+        assert_eq!((first.1, first.2), (20.0, 30.0), "line height 20, pitch 30");
+        assert_eq!(height, 50.0, "one line of its own height and one pitch");
+        for visit in 2..5 {
+            let again = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+            assert_eq!((again.1, again.2), (20.0, 30.0), "visit {visit}: the same line height and pitch");
+            assert_eq!(run.dimensions.content.height, height, "visit {visit}: the same height");
+        }
+        // A smaller strut later takes the pitch back off.
+        LayoutBox::set_wrapped_pitch(&mut run, (0.0, 0.0));
+        assert_eq!(run.text_line_pitch, None);
+        assert_eq!(run.dimensions.content.height, 40.0);
     }
 
     #[test]
