@@ -271,3 +271,34 @@ f.src = '/child.html';
     }
     assert_eq!(page.js("[loads, f.contentDocument.title].join()"), r#"String("2,other-title")"#, "after {turns} turns");
 }
+
+/// A frame's module scripts run, after its classic ones, with their
+/// imports (Speedometer 3.1: the WebComponents and Angular workloads are
+/// `<script type="module">`; without this the first found no elements and
+/// the second waited for ever). Chrome 148: `classic,dep,dep-value,main` and the
+/// custom element is upgraded.
+#[test]
+fn a_frames_module_scripts_run_with_their_imports() {
+    let page = "<!doctype html><body><iframe id=f src=/mod.html></iframe><script>
+window.loaded = false; document.getElementById('f').addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let child = "<!doctype html><body><x-hello id=x></x-hello><script type=module src=/main.mjs></script>\
+<script>window.order = ['classic'];</script></body>";
+    let server = serve_routes(vec![
+        ("/", "text/html", page.to_string()),
+        ("/mod.html", "text/html", child.to_string()),
+        ("/main.mjs", "text/javascript", "import { dep } from './dep.mjs'; order.push(dep, 'main'); \
+            customElements.define('x-hello', class extends HTMLElement { connectedCallback() { this.textContent = 'upgraded'; } });".to_string()),
+        ("/dep.mjs", "text/javascript", "order.push('dep'); export const dep = 'dep-value';".to_string()),
+    ]);
+    let mut engine = Engine::new(config(true)).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).unwrap();
+    let mut page = Page { engine, view, rt, server };
+    page.turns_until("window.loaded", Duration::from_secs(8));
+    assert_eq!(
+        page.js("var w = document.getElementById('f').contentWindow; w.order.join() + '|' + w.document.getElementById('x').textContent"),
+        r#"String("classic,dep,dep-value,main|upgraded")"#
+    );
+}
