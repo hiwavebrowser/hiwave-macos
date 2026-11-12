@@ -354,6 +354,56 @@ pub(crate) fn button_border_box_width(
 /// Chrome for Testing 148.0.7778.216 at 16px Arial (Linux, macOS and Windows agree): bare 24 tall,
 /// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
 /// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
+/// Families whose average character width Chrome does not trust: a field
+/// in one is `size` advances of "0" wide, with nothing added. Matched as
+/// written, against the first family of `font-family`.
+const NO_AVERAGE_WIDTH: &[&str] = &[
+    "American Typewriter", "Arial Hebrew", "Chalkboard", "Cochin", "Corsiva Hebrew", "Courier", "Euphemia UCAS",
+    "Geneva", "Gill Sans", "Hei", "Helvetica", "Hoefler Text", "InaiMathi", "Kai", "Lucida Grande", "Marker Felt",
+    "Monaco", "Mshtakan", "New Peninim MT", "Osaka", "Raanana", "STHeiti", "Symbol", "Times", "Apple Braille",
+    "Apple LiGothic", "Apple LiSung", "Apple Symbols", "AppleGothic", "AppleMyungjo", "#GungSeo", "#HeadLineA",
+    "#PCMyungjo", "#PilGi",
+];
+
+/// The content width of a single-line text field `size` characters wide
+/// (SET5; Chrome for Testing 148 on macOS, 15 families at 13 sizes in
+/// docs/diagnostics/2026-11-12/set5_input_content_width*).
+///
+/// A character is as wide as the font's "x" advances (which is what the
+/// font's average character width is on macOS), taken up to the next whole
+/// pixel from a half. The field is `size` of them, plus the room the
+/// widest character needs over an average one, where the widest is taken
+/// to be as wide as the font's rounded ascent; the sum is rounded up.
+///
+/// When the average is not to be trusted (no family, one of
+/// `NO_AVERAGE_WIDTH`, or an average over 1.7 advances of "0", as a CJK
+/// font's full-width average is), a character is the advance of "0" and
+/// nothing is added.
+fn text_input_content_width(style: &ComputedStyle, font_size: f32, size: u32) -> f32 {
+    // The font size on the 1/64 px grid Chrome keeps lengths in, rounded
+    // down: at 13.3333px (the UA's size for a field) Courier New's "x" is
+    // 8.0013 wide by the font's numbers and under 8 in Chrome, which is the
+    // difference between a field of 163 and one of 164.
+    let size_px = (font_size * 64.0).floor() / 64.0;
+    let measure =
+        |text: &str| measure_text_advanced(text, &style.font_family, size_px, style.font_weight, style.font_style);
+    let family = style.font_family.split(',').next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'');
+    let advance = |text: &str| measure(text).width;
+    let (x, zero) = (advance("x"), advance("0"));
+    let trusted =
+        !family.is_empty() && !NO_AVERAGE_WIDTH.contains(&family) && x > 0.0 && !(zero > 0.0 && x > zero * 1.7);
+    let size = if size == 0 { 20.0 } else { size as f32 };
+    let width = if trusted {
+        let character = x.max(x.round());
+        let widest = measure("x").ascent.round();
+        character * size + (widest - character).max(0.0)
+    } else {
+        zero * size
+    };
+    // Up to the next whole pixel; a sum a float's width over one stays.
+    (width - 0.001).ceil()
+}
+
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -447,7 +497,7 @@ pub(crate) fn form_control_intrinsic_size(
 
     // Calculate intrinsic dimensions based on control type
     match control {
-        FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
+        FormControlType::TextInput { input_type, size, .. } => match input_type.as_str() {
             "range" => (129.0 * ua_scale, 16.0 * ua_scale),
             "color" => (50.0 * ua_scale, 27.0 * ua_scale),
             // Default text input: size=20 at the UA control font builds
@@ -475,8 +525,8 @@ pub(crate) fn form_control_intrinsic_size(
                 // 148 at the UA font: content 145, the UA's 2px padding and
                 // 2px border each side, 153 (docs/diagnostics/2026-11-11/
                 // set4_input_widths*). The 149 built here before was Chrome's
-                // `padding: 0` width. The content width is still the UA-font
-                // calibration scaled by the font size (SET5).
+                // `padding: 0` width. The content width is built from the
+                // font and `size` (SET5, `text_input_content_width`).
                 // A percentage padding counts as 0 here: it resolves against
                 // the containing block's width, which this intrinsic size
                 // does not have (a border width cannot be a percentage).
@@ -498,7 +548,7 @@ pub(crate) fn form_control_intrinsic_size(
                     + side(style.padding_declared[1], px_h(&style.padding_right), 2.0);
                 let border_h = side(style.border_declared[3], px_h(&style.border_left_width), 2.0)
                     + side(style.border_declared[1], px_h(&style.border_right_width), 2.0);
-                (145.0 * ua_scale + pad_h + border_h, line + pad + border)
+                (text_input_content_width(style, font_size, *size) + pad_h + border_h, line + pad + border)
             }
         },
         FormControlType::TextArea { rows, cols, .. } => {
@@ -1626,6 +1676,10 @@ pub enum FormControlType {
         value: String,
         placeholder: String,
         input_type: String, // "text", "password", "email", etc.
+        /// The `size` attribute: how many characters wide the field is
+        /// built (HTML §4.10.5.3.2); 20 when absent or not a positive
+        /// number.
+        size: u32,
     },
     /// Multi-line text area.
     TextArea {
@@ -13512,6 +13566,7 @@ impl DisplayList {
                 value,
                 placeholder,
                 input_type,
+                ..
             } => {
                 // A password paints one bullet per character. Masked HERE,
                 // so the value is in no display command, dump or frame.
@@ -14368,6 +14423,7 @@ mod tests {
             value: String::new(),
             placeholder: String::new(),
             input_type: "text".to_string(),
+            size: 20,
         };
         assert_eq!(form_control_intrinsic_size(&style, &input).1, 15.0);
     }
@@ -17469,6 +17525,7 @@ mod tests {
             value: "pässword".to_string(),
             placeholder: "Password".to_string(),
             input_type: "password".to_string(),
+            size: 20,
         });
         field.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
         field.focused_caret = Some(3);
@@ -17557,6 +17614,7 @@ mod tests {
             value: String::new(),
             placeholder: "Default size".to_string(),
             input_type: "text".to_string(),
+            size: 20,
         })
     }
 
@@ -18968,6 +19026,7 @@ mod tests {
         let controls = [
             FormControlType::TextInput {
                 input_type: "text".to_string(),
+                size: 20,
                 value: String::new(),
                 placeholder: String::new(),
             },
@@ -21882,6 +21941,7 @@ mod w3_zero_width_wrap_tests {
                     value: String::new(),
                     placeholder: String::new(),
                     input_type: "text".to_string(),
+                    size: 20,
                 }),
                 s,
             )

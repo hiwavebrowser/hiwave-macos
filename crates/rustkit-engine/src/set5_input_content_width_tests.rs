@@ -20,7 +20,12 @@ const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/set5_inp
 
 /// Lines that still differ, by their start: each must still differ (the
 /// test fails when one starts matching, so the entry goes with its fix).
-const KNOWN: &[&str] = &[];
+const KNOWN: &[&str] = &[
+    // `system-ui` resolves to a face whose "x" advance and ascent differ
+    // from Chrome's San Francisco at most sizes (its optical sizes and
+    // tracking): a font-resolution row, not this rule.
+    "system-ui:",
+];
 
 #[test]
 fn a_text_inputs_content_width_is_built_from_its_font_and_size() {

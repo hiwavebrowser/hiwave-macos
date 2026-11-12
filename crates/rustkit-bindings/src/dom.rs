@@ -3299,6 +3299,18 @@ const WRAPPERS_JS: &str = r#"
             }, function (v) { this.setAttribute(p[1], String(v)); });
         });
     });
+    // HTML §4.10.5.3.2: how many characters wide the field is; 20 unless
+    // the attribute is a number above zero.
+    accessor(HTMLInputElement.prototype, 'size', function () {
+        var n = parseInt(this.getAttribute('size'), 10);
+        return n > 0 ? n : 20;
+    }, function (v) {
+        v = v >>> 0;
+        if (v === 0) {
+            throw new g.DOMException("Failed to set the 'size' property on 'HTMLInputElement': The value provided is 0, which is an invalid size.", 'IndexSizeError');
+        }
+        this.setAttribute('size', String(v));
+    });
     [['rows', 2], ['cols', 20]].forEach(function (p) {
         accessor(HTMLTextAreaElement.prototype, p[0], function () {
             var n = parseInt(this.getAttribute(p[0]), 10);

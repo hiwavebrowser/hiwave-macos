@@ -13392,6 +13392,12 @@ impl layout_ctx::LayoutCtx {
                             value,
                             placeholder,
                             input_type,
+                            // SET5: how many characters wide the field is.
+                            size: attributes
+                                .get("size")
+                                .and_then(|s| s.trim().parse::<u32>().ok())
+                                .filter(|n| *n > 0)
+                                .unwrap_or(20),
                         },
                     };
 
