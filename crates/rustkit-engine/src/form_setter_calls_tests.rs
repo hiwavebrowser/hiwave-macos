@@ -9,6 +9,11 @@
 //! (Speedometer's TodoMVC-React CompletingAllItems: 1 of 101 completed).
 //! A browser keeps that state in its own slots.
 //!
+//! The same holds for the methods the page can reach: a label's activation
+//! is not the control's `click` property, a reset button's is not the
+//! form's `reset` property (which a control named `reset` shadows), and
+//! the events the engine fires are not built with `window.Event`.
+//!
 //! The page wraps the `checked` and `value` setters and counts the calls
 //! across the user's steps and script's own. Expected lines:
 //! docs/diagnostics/2026-11-12/form_setter_calls_cft148.txt, the same steps
@@ -80,6 +85,16 @@ fn report() -> String {
     click(e, id, "rst");
     step(e, id, "user clicks the reset button");
     js(e, id, "window.scripted()");
+    // The page replaces what it can reach; the user's steps go on.
+    js(e, id, "window.hostile()");
+    click(e, id, "lab");
+    step(e, id, "user clicks lab");
+    click(e, id, "nfb");
+    step(e, id, "user clicks the reset button of the form whose reset is an input");
+    click(e, id, "rst");
+    step(e, id, "user clicks the reset button");
+    click(e, id, "box");
+    step(e, id, "user clicks box");
     js(e, id, "window.report()")
 }
 

@@ -742,6 +742,20 @@ mod focus_pseudo_tests;
 mod form_setter_calls_tests;
 #[cfg(all(test, feature = "headless"))]
 mod document_title_tests;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's engines read a document for its title
+    /// after a script turn (`Engine::follow_script_title`).
+    static TITLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`TITLE_READS`], for the test that a page pays nothing for the title
+/// unless a write touched one.
+#[cfg(test)]
+pub(crate) fn title_reads() -> u64 {
+    TITLE_READS.with(|reads| reads.get())
+}
 #[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -24526,6 +24540,8 @@ impl Engine {
         if !std::mem::take(&mut view.title_stale) {
             return;
         }
+        #[cfg(test)]
+        TITLE_READS.with(|reads| reads.set(reads.get() + 1));
         let Some(title) = view.document.as_ref().map(|document| document.title()) else {
             return;
         };
