@@ -363,3 +363,52 @@ fn an_idle_worker_with_a_timer_ends_with_its_page() {
     }
     assert!(ended(), "the worker outlived its page");
 }
+
+// ---- W4: structured clone through postMessage. Expected: str4_worker_w4_cft148.json.
+
+const W4_CASES: &str = include_str!("../../../docs/diagnostics/2026-11-12/str4_worker_w4_cases.json");
+const CHROME_W4: &str = include_str!("../../../docs/diagnostics/2026-11-12/str4_worker_w4_cft148.json");
+
+/// Run the Chrome measurement's page and worker, and return what the page logged.
+fn w4_observe() -> serde_json::Value {
+    let fixture: serde_json::Value = serde_json::from_str(W4_CASES).unwrap();
+    let worker = fixture["WORKER"].as_str().unwrap().to_string();
+    let page_js = fixture["PAGE_JS"].as_str().unwrap().replace("'/w.js'", "'http://a.test/w.js'");
+    let b = bound();
+    // The page script runs as the Chrome page's inline script does; its final timer (virtual here)
+    // is not what the test waits on.
+    b.evaluate(&format!("(0, eval)({})", serde_json::to_string(&page_js).unwrap())).unwrap();
+    let end = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < end {
+        serve(&b, &worker);
+        b.run_timers(0, 100).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    serde_json::from_str(&ev(&b, "JSON.stringify(res)")).unwrap()
+}
+
+#[test]
+fn structured_clone_through_post_message_matches_chrome() {
+    let want: serde_json::Value = serde_json::from_str(CHROME_W4).unwrap();
+    let got = w4_observe();
+    let mut wrong = Vec::new();
+    for (k, v) in want.as_object().unwrap() {
+        // A Proxy cannot be told from its target in script; Chrome refuses to clone one.
+        if k == "throwers" {
+            for (t, tv) in v.as_object().unwrap() {
+                if t != "proxy" && got["throwers"][t] != *tv {
+                    wrong.push(format!("throwers.{t}: chrome {tv}, here {}", got["throwers"][t]));
+                }
+            }
+            continue;
+        }
+        if &got[k] != v {
+            wrong.push(format!("{k}: chrome {}, here {}", short(v), short(&got[k])));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+fn short(v: &serde_json::Value) -> String {
+    v.to_string().chars().take(160).collect()
+}

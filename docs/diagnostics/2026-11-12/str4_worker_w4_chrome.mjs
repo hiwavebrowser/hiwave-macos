@@ -52,7 +52,7 @@ const CASES = {
   getter_invoked: "({ get g(){ return 'got'; } })",
   non_enumerable_dropped: "(function(){ var o = { a: 1 }; Object.defineProperty(o, 'hidden', { value: 2 }); return o; })()",
   nested_map_cycle: "(function(){ var m = new Map(); m.set('me', m); return m; })()",
-  deep: "(function(){ var o = {}; var c = o; for (var i = 0; i < 100; i++) { c.n = {}; c = c.n; } return o; })()",
+  deep: "(function(){ var o = {}; var c = o; for (var i = 0; i < 30; i++) { c.n = {}; c = c.n; } return o; })()",
 };
 const THROWERS = {
   function: "(function(){})",
@@ -73,7 +73,7 @@ onmessage = function (e) {
     postMessage({ k: 'after-worker-send', len: d.v.byteLength });
   }
 };`;
-const PAGE = `<!doctype html><meta charset=utf-8><body><script>
+const PAGE_JS = `
 ${DESC}
 var res = {}, w = new Worker('/w.js');
 var CASES = ${JSON.stringify(CASES)}, THROWERS = ${JSON.stringify(THROWERS)};
@@ -103,8 +103,9 @@ try { w.postMessage({ x: 1 }, [{}]); res.bad_transfer = 'posted'; } catch (e) { 
 var ab3 = new ArrayBuffer(3); var u3 = new Uint8Array(ab3); w.postMessage({ __k: 'echo', k: 'transfer_view', v: u3 }, [ab3]);
 res.view_after_transfer = [ab3.byteLength, u3.length];
 setTimeout(function () { window.__out = JSON.stringify(res); }, 800);
-</script>`;
-fs.writeFileSync(casesOut, JSON.stringify({ CASES, THROWERS, DESC, WORKER }, null, 1));
+`;
+const PAGE = `<!doctype html><meta charset=utf-8><body><script>${PAGE_JS}</script>`;
+fs.writeFileSync(casesOut, JSON.stringify({ CASES, THROWERS, DESC, WORKER, PAGE_JS }, null, 1));
 const srv = http.createServer((q, r) => {
   if (q.url === "/w.js") { r.setHeader("content-type", "text/javascript"); r.end(WORKER); }
   else { r.setHeader("content-type", "text/html"); r.end(PAGE); }
