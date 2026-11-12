@@ -716,6 +716,7 @@ impl JsRuntime {
         }
         #[cfg(feature = "boa")]
         if let Some(slot) = self.realms.get_mut(realm.0) {
+            self.blobs.borrow_mut().drop_realm(realm.0);
             return slot.take().is_some();
         }
         false
@@ -950,7 +951,7 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let wrapped = format!("(function (__rk, __a) {{\n{source}\n}})");
+            let wrapped = format!("(function (__rk, __a, __realm) {{\n{source}\n}})");
             let function = self
                 .context
                 .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
@@ -967,7 +968,10 @@ impl JsRuntime {
             if turn {
                 self.context.reset_recursion_max();
             }
-            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into()], &mut self.context);
+            // `__realm`: the realm the script is installed in, for the
+            // natives that act for one document (the blob store).
+            let realm = boa_engine::JsValue::from(self.current_realm.0 as f64);
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into(), realm], &mut self.context);
             if turn {
                 self.consume_interrupt();
             }
@@ -1467,20 +1471,42 @@ impl JsRuntime {
         }
     }
 
-    /// The bytes behind a blob URL of this runtime's pages (its fragment,
-    /// if any, is not part of the name), or `None` when nothing stands
-    /// behind it. Reads the host's store: no script runs.
-    pub fn blob_bytes(&self, url: &str) -> Option<Vec<u8>> {
+    /// The bytes behind a blob URL (its fragment, if any, is not part of
+    /// the name), for the document in `realm`: `None` when nothing stands
+    /// behind it or it belongs to another origin. Reads the host's store:
+    /// no script runs.
+    pub fn blob_bytes(&self, realm: RealmId, url: &str) -> Option<Vec<u8>> {
         #[cfg(feature = "boa")]
         {
             let name = url.split('#').next().unwrap_or(url);
-            self.blobs.borrow().get(name).map(|(bytes, _)| bytes.clone())
+            self.blobs.borrow().get(realm.0, name).map(|record| record.bytes.clone())
         }
         #[cfg(not(feature = "boa"))]
         {
-            let _ = url;
+            let _ = (realm, url);
             None
         }
+    }
+
+    /// The origin of the document in `realm` (`null` for an opaque one),
+    /// as the embedder knows it. Blob URLs made there carry it, and only
+    /// documents of it reach them. A realm never told is opaque.
+    pub fn set_realm_origin(&mut self, realm: RealmId, origin: &str) {
+        #[cfg(feature = "boa")]
+        self.blobs.borrow_mut().set_origin(realm.0, origin);
+        #[cfg(not(feature = "boa"))]
+        let _ = (realm, origin);
+    }
+
+    /// Where the random part of a blob URL comes from: `n` bytes of the
+    /// OS random source. Without one, nothing is kept behind a blob URL.
+    pub fn set_blob_random(&mut self, random: fn(usize) -> Option<Vec<u8>>) {
+        #[cfg(feature = "boa")]
+        {
+            self.blobs.borrow_mut().random = Some(random);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = random;
     }
 
     /// Bound what this runtime's blob URLs keep alive, in bytes (the

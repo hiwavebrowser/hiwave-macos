@@ -480,7 +480,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
     ("Element", "animate(pseudoElement)"),
     ("CSSAnimation", "currentTime"),
     ("CSSAnimation", "playbackRate"),
@@ -491,6 +491,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("ReadableStream", "getReader(byob)"),
     ("DOMParser", "parseFromString(XML)"),
     ("Window", "named access (iframe name)"),
+    ("URL", "createObjectURL (blob store full)"),
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
@@ -1603,7 +1604,7 @@ impl DomBindings {
     pub fn blob_url_text(&self, url: &str) -> Option<String> {
         // The host's store, read in Rust: no script runs, so nothing of
         // the page's can be on this path.
-        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        let bytes = self.runtime.borrow().blob_bytes(self.runtime.realm, url)?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -2419,6 +2420,9 @@ impl DomBindings {
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
+        // The origin the blob store keeps for this document: the engine's,
+        // not what script can read or write on `location`.
+        runtime.set_realm_origin(self.runtime.realm, &location.origin);
         runtime.evaluate_script(&format!(
             r#"
             if (window.__rustkit_location_sync) window.__rustkit_location_sync({:?});
@@ -3907,6 +3911,7 @@ mod tests {
     fn the_unsupported_list_matches_the_reporting_scripts() {
         let sources = [
             include_str!("web_xhr.js"),
+            include_str!("web_url.js"),
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
             include_str!("web_named_access.js"),
