@@ -272,6 +272,28 @@ fn the_engines_blob_lookup_runs_no_page_script() {
     assert_eq!(b.blob_url_text(&url).as_deref(), Some("window.fromBlob = 7;"));
     assert_eq!(b.blob_url_text(&format!("{url}#frag")).as_deref(), Some("window.fromBlob = 7;"), "a fragment names the same blob");
     assert_eq!(ev(&b, "window.hijacked"), "0", "the lookup ran page script");
+    // A page cannot put a record of its own making behind a name: an object
+    // that passes `instanceof Blob` with a trap for every read (R1 delta on
+    // #1088). There is no store on the window to hand it to, and what
+    // createObjectURL keeps is a copy of the bytes, made in the page's turn.
+    ev(
+        &b,
+        "var trap = new Proxy(Object.create(Blob.prototype), { get: function () { hit(); return new Uint8Array(0); } }); \
+         try { __rustkit_blob_urls.add('blob:x', trap); } catch (e) {} \
+         var made; try { made = URL.createObjectURL(trap); } catch (e) { made = 'threw'; } \
+         window.hijacked = 0; 'set'",
+    );
+    assert_eq!(b.blob_url_text("blob:x"), None);
+    let made = ev(&b, "String(made)");
+    if made != "threw" {
+        let _ = b.blob_url_text(&made);
+    }
+    assert_eq!(ev(&b, "window.hijacked"), "0", "a trap ran outside the page's own turn");
+    assert_eq!(ev(&b, "typeof __rustkit_blob_urls"), "undefined", "the store is not on the window");
+    // ... and a global of that name the page declares is just the page's.
+    let _ = b.evaluate("let __rustkit_blob_urls = { text: hit, get: hit, bytes: hit }; 0");
+    assert_eq!(b.blob_url_text(&url).as_deref(), Some("window.fromBlob = 7;"));
+    assert_eq!(ev(&b, "window.hijacked"), "0");
 }
 
 /// A blob URL names a Blob of the document that made it: revoked, it names
