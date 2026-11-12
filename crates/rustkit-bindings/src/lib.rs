@@ -2667,7 +2667,7 @@ impl DomBindings {
         let (data, text) = data.map_or(("null", ""), |d| ("__a[0]", d));
         self.runtime
             .borrow_mut()
-            .evaluate_host_turn(&format!("document.__rkFireInput({node}, {data});"), &[text])?;
+            .evaluate_host_turn(&format!("return __rk.fireInput({node}, {data});"), &[text])?;
         Ok(())
     }
 
@@ -2680,7 +2680,7 @@ impl DomBindings {
         let picked = self
             .runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+            .evaluate_host_turn(&format!("return __rk.pickOption({node}, {index});"), &[])?;
         Ok(matches!(picked, JsValue::Boolean(true)))
     }
 
@@ -2689,7 +2689,7 @@ impl DomBindings {
     pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkImplicitSubmit({node});"))?;
+            .evaluate_host_turn(&format!("return __rk.implicitSubmit({node});"), &[])?;
         Ok(())
     }
 

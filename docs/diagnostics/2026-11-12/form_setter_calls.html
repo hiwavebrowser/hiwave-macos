@@ -80,7 +80,7 @@ window.hostile = function () {
   $('form').reset = hit; $('form').dispatchEvent = hit; HTMLFormElement.prototype.reset = hit;
   window.Event = function () { hit(); };
   $('ft').value = 'edited again'; $('nft').value = 'typed';
-  step('the page replaces click, reset, dispatchEvent and Event; form.reset is ' + (typeof $('nf').reset === 'function' ? 'a function' : $('nf').reset.id));
+  step('the page replaces click, reset, dispatchEvent and Event');
 };
 window.report = function () { return lines.join('\n'); };
 </script></body></html>

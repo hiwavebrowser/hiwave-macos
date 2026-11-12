@@ -61,10 +61,12 @@
     // script or the user sets it (the dirty checkedness flag).
     var checks = new WeakMap();
     function radioGroup(el) {
+        // With no form owner the group is the radio's tree (HTML
+        // §4.10.5.1.16): the document, a shadow tree, or a detached one.
         var name = el.getAttribute('name'), form = el.form;
-        var scope = form || (el.isConnected ? el.ownerDocument : null);
-        if (!name || !scope) return [];
-        return Array.prototype.filter.call(scope.getElementsByTagName('input'), function (o) {
+        var scope = form || el.getRootNode();
+        if (!name || !scope || scope === el) return [];
+        return Array.prototype.filter.call(scope.querySelectorAll('input'), function (o) {
             return o !== el && o.type === 'radio' && o.getAttribute('name') === name && o.form === form;
         });
     }
@@ -105,10 +107,19 @@
         }
         return null;
     }
-    function fire(el, type) {
-        el.dispatchEvent(new g.Event(type, { bubbles: true }));
+    // The engine's own events, click and reset. `Event` is taken now:
+    // a page that replaces `window.Event` later does not build them, and a
+    // page that replaces `click`, `reset` or `dispatchEvent` on a control,
+    // a form or a prototype does not stand in for the engine's.
+    var EventCtor = g.Event, dispatch = internals.dispatch, clickNow = internals.click, resetText = internals.reset;
+    // `input` and `change` after a click's activation: trusted, whoever
+    // made the click (Chrome 148: also after script's `click()`).
+    function fire(el, type, init) {
+        var e = new EventCtor(type, init || { bubbles: true });
+        __rk.trust(e);
+        dispatch(el, e);
     }
-    if (internals.setActivation) internals.setActivation(function (target) {
+    if (internals.setActivation) internals.setActivation(function (target, event) {
         var el = activationTarget(target);
         if (!el) return null;
         if (el.localName === 'label') {
@@ -116,9 +127,10 @@
                 var c = ok ? el.control : null;
                 // The labeled control is focused, then clicked (Chrome for
                 // Testing 148: `focus` at the control before its `click`).
+                // The click is the engine's, trusted when the label's was.
                 if (c && !c.hasAttribute('disabled')) {
                     if (typeof c.focus === 'function') c.focus();
-                    c.click();
+                    clickNow(c, !!(event && event.isTrusted));
                 }
             };
         }
@@ -134,7 +146,7 @@
             return function (ok) {
                 var form = ok ? el.closest('form') : null;
                 if (!form) return;
-                if (isSubmitButton(el)) submit(form, el); else form.reset();
+                if (isSubmitButton(el)) submit(form, el); else resetAll(form);
             };
         }
         // Legacy-pre-activation: the control is already in its new state
@@ -223,12 +235,8 @@
         if (!o || o.disabled || (group && group.hasAttribute('disabled'))) return false;
         if (sel.multiple || sel.selectedIndex === index) return false;
         pick(sel, function (x) { return x === o; });
-        var input = new g.Event('input', { bubbles: true, composed: true });
-        __rk.trust(input);
-        sel.dispatchEvent(input);
-        var change = new g.Event('change', { bubbles: true });
-        __rk.trust(change);
-        sel.dispatchEvent(change);
+        fire(sel, 'input', { bubbles: true, composed: true });
+        fire(sel, 'change');
         return true;
     });
     getter(Select, 'options', function () { return collection(optionsOf(this)); });
@@ -371,7 +379,7 @@
         if (!form.isConnected) return;
         var noValidate = form.noValidate || (submitter !== null && submitter.hasAttribute('formnovalidate'));
         if (!noValidate && !validate(form)) return;
-        var e = new g.Event('submit', { bubbles: true, cancelable: true });
+        var e = new EventCtor('submit', { bubbles: true, cancelable: true });
         Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
         if (form.dispatchEvent(e)) noteSubmit(form, submitter);
     }
@@ -407,20 +415,19 @@
     };
     // Reset also restores checkedness and selectedness. The dom.rs reset
     // fires the cancelable `reset` event; its answer decides.
-    var textReset = Form.reset;
-    Form.reset = function () {
-        var form = this, ok = true, dispatch = this.dispatchEvent;
-        this.dispatchEvent = function (e) { ok = dispatch.call(form, e); return ok; };
-        try { textReset.call(this); } finally { delete this.dispatchEvent; }
-        if (!ok) return;
-        descendants(this, /^(input|select)$/).forEach(function (el) {
+    // `resetAll` is the reset itself: `form.reset()` calls it, and so does
+    // a reset button's activation (not through the form's `reset` property).
+    function resetAll(form) {
+        if (!resetText(form)) return;
+        descendants(form, /^(input|select)$/).forEach(function (el) {
             if (el.localName === 'input') {
                 if (checks.delete(el)) noteChecked(el, null);
                 return;
             }
             optionsOf(el).forEach(function (o) { if (picked.delete(o)) noteChecked(o, null); });
         });
-    };
+    }
+    Form.reset = function reset() { resetAll(this); };
 
     // ---- details (HTML §4.11.1, §4.11.2): `open` is the attribute; the
     // engine renders a closed details as its summary alone. Only its first
@@ -439,7 +446,7 @@
         if (was === open) return;
         details.toggleAttribute('open', open);
         Promise.resolve().then(function () {
-            var e = new g.Event('toggle');
+            var e = new EventCtor('toggle');
             e.oldState = was ? 'open' : 'closed';
             e.newState = open ? 'open' : 'closed';
             details.dispatchEvent(e);

@@ -283,6 +283,7 @@
         return el.hasAttribute('tabindex') && !isNaN(parseInt(el.getAttribute('tabindex'), 10));
     }
     function current() { return focused && inDocument(focused) ? focused : null; }
+    var EventCtor = g.Event, dispatchNow = g.EventTarget.prototype.dispatchEvent;
     function fire(el, type, related) {
         var FE = g.FocusEvent || g.Event;
         el.dispatchEvent(new FE(type, { bubbles: type === 'focusin' || type === 'focusout',
@@ -293,7 +294,11 @@
     function commit(el) {
         if (!el.__rkEdited) return;
         el.__rkEdited = false;
-        el.dispatchEvent(new g.Event('change', { bubbles: true }));
+        // The engine's event: trusted, built with the Event of install
+        // time and dispatched as the engine dispatches.
+        var e = new EventCtor('change', { bubbles: true });
+        __rk.trust(e);
+        dispatchNow.call(el, e);
     }
     // A composition in the element losing the focus ends first (CH2.E3).
     function finishComposing(el) {

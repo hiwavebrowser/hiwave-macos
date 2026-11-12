@@ -305,6 +305,17 @@ impl Node {
         }
     }
 
+    /// Is this an HTML `<title>` element (not an SVG one).
+    pub fn is_title_element(&self) -> bool {
+        matches!(&self.node_type, NodeType::Element { tag_name, namespace, .. }
+            if tag_name.eq_ignore_ascii_case("title") && namespace != svg_names::SVG_NAMESPACE)
+    }
+
+    /// Is this, or anything under it, an HTML `<title>` element.
+    pub fn holds_title_element(&self) -> bool {
+        self.is_title_element() || self.children.borrow().iter().any(|child| child.holds_title_element())
+    }
+
     /// Get parent node.
     pub fn parent(&self) -> Option<Rc<Node>> {
         self.parent.borrow().as_ref().and_then(|w| w.upgrade())
@@ -1081,10 +1092,8 @@ impl Document {
     /// has no such element.
     pub fn title(&self) -> Option<String> {
         fn first_title(node: &Rc<Node>) -> Option<Rc<Node>> {
-            if let NodeType::Element { tag_name, namespace, .. } = &node.node_type {
-                if tag_name.eq_ignore_ascii_case("title") && namespace != svg_names::SVG_NAMESPACE {
-                    return Some(Rc::clone(node));
-                }
+            if node.is_title_element() {
+                return Some(Rc::clone(node));
             }
             let mut i = 0;
             while let Some(child) = node.children.borrow().get(i).cloned() {

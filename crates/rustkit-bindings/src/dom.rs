@@ -3515,15 +3515,25 @@ const WRAPPERS_JS: &str = r#"
             return tags.test(el.localName);
         });
     }
-    HTMLFormElement.prototype.reset = function () {
-        if (!this.dispatchEvent(new Event('reset', { bubbles: true, cancelable: true }))) return;
-        controls(this, /^(input|textarea)$/).forEach(function (el) {
+    // The form's reset (HTML: "reset" a form): the cancelable `reset`
+    // event, then the text controls. Whether it went ahead. The engine's
+    // own resets (a reset button) call this, not the form's `reset`
+    // property, which a control named `reset` shadows and a page can
+    // replace.
+    function resetForm(form) {
+        // Trusted, also when script called reset() (Chrome 148).
+        var e = new Event('reset', { bubbles: true, cancelable: true });
+        trust(e);
+        if (!dispatchTo(form, e)) return false;
+        controls(form, /^(input|textarea)$/).forEach(function (el) {
             var s = slotOf(el);
             if (s.gen === gen && (el.localName === 'textarea' || inputMode(el) === 'value')) {
                 N.value(s.gen, s.id, null);
             }
         });
-    };
+        return true;
+    }
+    HTMLFormElement.prototype.reset = function reset() { resetForm(this); };
     // Navigation from script is not wired; submission stays engine-side.
     HTMLFormElement.prototype.submit = function () {};
     // `action` is web_reflect.js's: the attribute resolved against the
@@ -4943,7 +4953,7 @@ const WRAPPERS_JS: &str = r#"
         Promise.resolve().then(function () {
             SELN.pending = false;
             if (!g.Event) return;
-            g.document.dispatchEvent(new g.Event('selectionchange', { bubbles: false, cancelable: false }));
+            dispatchTo(g.document, new Event('selectionchange', { bubbles: false, cancelable: false }));
         });
     }
     function setSel(anchor, focus) {
@@ -5427,7 +5437,7 @@ const WRAPPERS_JS: &str = r#"
     Object.defineProperty(Document.prototype, '__rkFireOn', {
         value: function (id, type) {
             var target = typeof id === 'number' ? wrap(id) : null;
-            if (target) target.dispatchEvent(new Event(type));
+            if (target) dispatchTo(target, new Event(type));
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5720,8 +5730,9 @@ const WRAPPERS_JS: &str = r#"
     // What the user typed changed the control's value: `input`, which
     // bubbles and cannot be cancelled (Input Events §5.1). `data` is the
     // inserted text, null for a deletion.
-    Object.defineProperty(Document.prototype, '__rkFireInput', {
-        value: function (id, data) {
+    // These three are the engine's alone: on the host object (`__rk`),
+    // which page script cannot reach, not on `document`.
+    __rk.fireInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
             // The user edited it: `change` when it loses the focus
@@ -5735,29 +5746,21 @@ const WRAPPERS_JS: &str = r#"
             });
             trust(ev);
             dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    };
     // The user picked an option of a select in its drop-down or with a
     // key (web_forms.js's pick: selectedness, `input`, `change`). Returns
     // whether the selection changed.
     var pickOption = null;
-    Object.defineProperty(Document.prototype, '__rkPickOption', {
-        value: function (id, index) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            return !!(target && pickOption && pickOption(target, index));
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.pickOption = function (id, index) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        return !!(target && pickOption && pickOption(target, index));
+    };
     // Enter in a field (web_forms.js's implicit submission).
     var implicitSubmit = null;
-    Object.defineProperty(Document.prototype, '__rkImplicitSubmit', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (target && implicitSubmit) implicitSubmit(target);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.implicitSubmit = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (target && implicitSubmit) implicitSubmit(target);
+    };
 
     // EventTarget (DOM §2.7) for node wrappers, document and window: a
     // JS-side listener registry, and dispatch through capture, target and
@@ -6051,7 +6054,7 @@ const WRAPPERS_JS: &str = r#"
     function activationFor(t, event) {
         if (!activation || event.type !== 'click' || !t[SLOT]) return null;
         if (!event[SYNTHETIC_CLICK] && !(typeof g.MouseEvent === 'function' && event instanceof g.MouseEvent)) return null;
-        return activation(t);
+        return activation(t, event);
     }
     EventTarget.prototype.dispatchEvent = function (event) {
         if (event == null || typeof event !== 'object' || event.type === undefined) {
@@ -6084,7 +6087,6 @@ const WRAPPERS_JS: &str = r#"
         if (activated) activated(!event.defaultPrevented);
         return !event.defaultPrevented;
     };
-
     // The engine's own dispatches go through this, whatever a page has put
     // in place of `dispatchEvent` since.
     var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
@@ -6178,17 +6180,21 @@ const WRAPPERS_JS: &str = r#"
     // synthetic pointer event, which in Chrome for Testing 148 is an
     // untrusted, composed PointerEvent with detail 0, button 0, pointerId -1
     // and an empty pointerType, at 0,0, with the window as its view.
-    HTMLElement.prototype.click = function () {
-        if (this.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(this.localName)) return;
+    // `clickElement` is that click: script's `click()`, and the click a
+    // label's activation gives its control (trusted when the label's was).
+    function clickElement(el, trusted) {
+        if (el.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(el.localName)) return;
         var C = typeof g.PointerEvent === 'function' ? g.PointerEvent : g.MouseEvent;
         var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
                      pointerId: -1, pointerType: '' };
         var e = typeof C === 'function' ? new C('click', init) : new Event('click', init);
         e[SYNTHETIC_CLICK] = true;
+        if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
-        if (this.dispatchEvent(e) && g.__rustkit_follow_link) g.__rustkit_follow_link(this);
-    };
+        if (dispatchTo(el, e) && g.__rustkit_follow_link) g.__rustkit_follow_link(el);
+    }
+    HTMLElement.prototype.click = function click() { clickElement(this, false); };
 
     // The global `document` becomes the Document wrapper.
     var doc = g.document;
@@ -6216,6 +6222,11 @@ const WRAPPERS_JS: &str = r#"
             if (s && s.gen === gen) N.submit(s.gen, s.id, b && b.gen === gen ? b.id : null);
         },
         setActivation: function (f) { activation = f; },
+        // The engine's own click, reset and dispatch, for the activation
+        // behaviours: never the page-visible methods of those names.
+        click: clickElement,
+        reset: resetForm,
+        dispatch: function (target, event) { return dispatchTo(target, event); },
         setImplicitSubmit: function (f) { implicitSubmit = f; },
         setPickOption: function (f) { pickOption = f; }
     };

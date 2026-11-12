@@ -24528,6 +24528,37 @@ impl Engine {
         Ok(laid)
     }
 
+    /// Could this write have changed the document's title: it is to a
+    /// `<title>` or its text, or it inserted, removed or replaced nodes
+    /// with a `<title>` among them. A write that replaced an element's
+    /// children says nothing of what was there, so with a title on record
+    /// (`had_title`) it counts: finding that title again is a short walk.
+    /// A page with no `<title>` is never walked for one.
+    fn touches_title(document: Option<&Document>, had_title: bool, record: &rustkit_bindings::MutationRecord) -> bool {
+        use rustkit_bindings::MutationKind;
+        let Some(document) = document else {
+            return false;
+        };
+        let node = |raw: usize| document.get_node(rustkit_dom::NodeId::new(raw));
+        match record.kind {
+            MutationKind::Text => node(record.node)
+                .is_some_and(|n| n.is_title_element() || n.parent().is_some_and(|p| p.is_title_element())),
+            MutationKind::ChildList => {
+                let Some(parent) = node(record.node) else {
+                    return had_title;
+                };
+                if parent.is_title_element() {
+                    return true;
+                }
+                match record.child {
+                    Some(child) => node(child).map_or(had_title, |child| child.holds_title_element()),
+                    None => had_title || parent.holds_title_element(),
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// The tab's title follows the document's: when the script that just
     /// settled wrote to the DOM and the document's title is no longer the
     /// one last reported, report it (`EngineEvent::TitleChanged`, the empty
@@ -24570,7 +24601,8 @@ impl Engine {
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        if dirty != DomDirty::Clean || log.full || !log.records.is_empty() {
+        let had_title = view.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.document.as_deref(), had_title, record)) {
             view.title_stale = true;
         }
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
