@@ -544,6 +544,9 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        // STR-10: running out of frames is a RangeError the page can catch, as in Chrome.
+        #[cfg(feature = "boa")]
+        context.runtime_limits_mut().set_catchable_stack_overflow(true);
         // A stop runs the `finally` blocks it unwinds through, for the stop
         // grace: a scheduler that posts its next task from a `finally` (as
         // React's does) is otherwise left believing a task is still running,
