@@ -163,3 +163,125 @@ fn a_worker_cannot_reach_the_page() {
     assert!(pump_until(&b, "got.length >= 1"));
     assert_eq!(ev(&b, "got[0]"), "undefined,undefined,undefined,undefined,undefined");
 }
+
+// ---- W2: timers, importScripts, uncaught errors, load failure.
+// Expected values: str4_worker_w2_cft148.json (docs/diagnostics/2026-11-12/).
+
+const CHROME_W2: &str = include_str!("../../../docs/diagnostics/2026-11-12/str4_worker_w2_cft148.json");
+
+fn w2_file(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "/timers.js" => {
+            "var order = [];
+             setTimeout(function () { order.push('t20'); }, 20);
+             setTimeout(function () { order.push('t0'); }, 0);
+             var n = 0, iv = setInterval(function () { order.push('i' + (++n)); if (n === 2) clearInterval(iv); }, 5);
+             var c = setTimeout(function () { order.push('cancelled'); }, 1); clearTimeout(c);
+             Promise.resolve().then(function () { order.push('micro'); });
+             setTimeout(function (a, b) { order.push('args:' + a + b); postMessage(order); }, 60, 'x', 'y');"
+        }
+        "/lib.js" => "var fromLib = 'lib-ran'; function libFn() { return 42; }",
+        "/lib2.js" => "var fromLib2 = 'lib2-ran';",
+        "/imp.js" => {
+            "var r = [];
+             importScripts('/lib.js');
+             r.push(fromLib, libFn());
+             importScripts('/lib.js', '/lib2.js');
+             r.push(typeof fromLib2, importScripts());
+             try { importScripts('/missing.js'); } catch (e) { r.push('missing:' + e.name); }
+             postMessage(r);"
+        }
+        "/throws.js" => "onmessage = function () { throw new Error('boom'); }; postMessage('up');",
+        "/throwsnow.js" => "postMessage('before'); throw new TypeError('top-level');",
+        "/syntax.js" => "var = ;",
+        "/err.js" => "self.onerror = function () { postMessage('self.onerror'); }; postMessage('ok');",
+        _ => return None,
+    })
+}
+
+/// Run the Chrome measurement's page for `key` and return what it logged.
+fn observe(key: &str, file: &str, post: Option<&str>) -> serde_json::Value {
+    let b = bound();
+    let post = post.map(|p| format!("w.postMessage('{p}');")).unwrap_or_default();
+    b.evaluate(&format!(
+        "var log = [], w = new Worker('http://a.test{file}'); \
+         w.onmessage = function (e) {{ log.push(['m', e.data]); }}; \
+         w.onerror = function (e) {{ log.push(['e', e.message === undefined ? null : e.message, typeof e.filename, \
+           typeof e.lineno, e instanceof ErrorEvent, e.defaultPrevented]); e.preventDefault(); }}; {post}"
+    ))
+    .unwrap();
+    let end = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < end {
+        for r in b.take_net_requests() {
+            let path = r.url.trim_start_matches("http://a.test").to_string();
+            let (status, body) = match w2_file(&path) {
+                Some(s) => (200, s),
+                None => (404, "no"),
+            };
+            b.deliver_net_response(
+                r.id,
+                NetDelivery::Response {
+                    url: r.url,
+                    status,
+                    status_text: "".into(),
+                    headers: vec![],
+                    body_b64: b64(body.as_bytes()),
+                    kind: "basic".into(),
+                    redirected: false,
+                },
+            )
+            .unwrap();
+        }
+        b.run_timers(0, 100).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let got: serde_json::Value = serde_json::from_str(&ev(&b, "JSON.stringify(log)")).unwrap();
+    let _ = key;
+    got
+}
+
+fn chrome(key: &str) -> serde_json::Value {
+    let all: serde_json::Value = serde_json::from_str(CHROME_W2).unwrap();
+    all[key].clone()
+}
+
+#[test]
+fn worker_timers_fire_in_chromes_order() {
+    assert_eq!(observe("timers", "/timers.js", None), chrome("timers"));
+}
+
+#[test]
+fn import_scripts_runs_scripts_in_the_worker_scope_and_fails_with_network_error() {
+    assert_eq!(observe("imp", "/imp.js", None), chrome("imp"));
+}
+
+#[test]
+fn an_uncaught_error_in_a_handler_reaches_the_worker_object_and_the_worker_lives_on() {
+    assert_eq!(observe("throws", "/throws.js", Some("go")), chrome("throws"));
+}
+
+#[test]
+fn an_uncaught_error_at_the_top_level_reaches_the_worker_object() {
+    assert_eq!(observe("throwsnow", "/throwsnow.js", None), chrome("throwsnow"));
+}
+
+#[test]
+fn a_syntax_error_in_the_worker_script_is_an_error_event() {
+    let got = observe("syntax", "/syntax.js", None);
+    let want = chrome("syntax");
+    // Chrome's message names its own parser's token; the shape is what is pinned.
+    assert_eq!(got.as_array().unwrap().len(), 1);
+    let (g, w) = (&got[0], &want[0]);
+    assert!(g[1].as_str().unwrap().starts_with("Uncaught SyntaxError"), "{g}");
+    assert_eq!(g.as_array().unwrap()[2..], w.as_array().unwrap()[2..]);
+}
+
+#[test]
+fn a_script_that_fails_to_load_is_a_plain_error_event() {
+    assert_eq!(observe("nofile", "/nofile.js", None), chrome("nofile"));
+}
+
+#[test]
+fn the_worker_scope_error_handler_sees_nothing_when_nothing_throws() {
+    assert_eq!(observe("selferr", "/err.js", None), chrome("selferr"));
+}
