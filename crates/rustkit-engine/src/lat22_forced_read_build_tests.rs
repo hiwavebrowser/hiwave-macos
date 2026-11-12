@@ -271,3 +271,62 @@ fn a_rect_read_answered_from_a_frame_sees_the_animated_transform() {
     assert_eq!(read(&mut engine, view, "window.__r"), "150/50", "Chrome 148: 150/50");
     assert_eq!(s.forced_layouts - s0.forced_layouts, 0, "answered from a frame, no build");
 }
+
+/// A page whose shadow trees use the selector kinds the index files rules
+/// under (tag, class, id, attribute, universal, `:host`, `::slotted`,
+/// `:not`, descendant and child combinators, pseudo-elements), in several
+/// trees with different sheets, one nested in another.
+fn indexed_selectors_page() -> String {
+    let card = "<style>:host{display:block;padding:3px} :host(.wide){padding:9px} .row{display:flex;gap:4px} \
+                .row > span{padding:1px} span.t:not(.off){color:rgb(10,20,30)} #x{margin:2px} [data-k]{border:1px solid red} \
+                *{box-sizing:border-box} ::slotted(p){margin:5px} .row span::before{content:'b'} div .deep{padding-left:7px} \
+                .unused .never{color:red}</style>\
+                <div class=row><span class=t>a</span><span class='t off'>b</span><span id=x data-k=1>c</span></div>\
+                <div><div><b class=deep>deep</b></div></div><slot></slot>";
+    let inner = "<style>:host{display:inline-block} i{padding:2px} .n{margin:1px}</style><i class=n>inner</i>";
+    let mut page = String::from("<!doctype html><html><head><style>body{margin:0} .card{margin:4px} p{color:blue}</style></head><body>");
+    for i in 0..6 {
+        let wide = if i % 2 == 0 { " wide" } else { "" };
+        page.push_str(&format!("<div class='card{wide}' id=h{i}><p>light {i}</p></div>"));
+    }
+    page.push_str(&format!(
+        "<p id=t>text</p><script>var C={card:?};var I={inner:?};var hs=document.querySelectorAll('.card');\
+         for(var i=0;i<hs.length;i++){{var r=hs[i].attachShadow({{mode:'open'}});r.innerHTML=C;\
+         if(i%3==0){{var d=document.createElement('div');r.appendChild(d);d.attachShadow({{mode:'open'}}).innerHTML=I;}}}}</script></body></html>"
+    ));
+    page
+}
+
+fn built_dump(page: &str) -> (String, u32) {
+    let (mut engine, view, _server) = load(page);
+    engine
+        .execute_script(view, "document.getElementById('t').firstChild.data = 'changed';")
+        .unwrap();
+    let lay = &engine.views[&view].lay;
+    let unindexed = lay.last_unindexed_cascades.get();
+    (format!("{:?}", engine.views[&view].layout.as_ref().expect("laid out")), unindexed)
+}
+
+/// LAT22 (3): every element of a shadow tree is matched through a rule
+/// index of its tree's sheets, as the document's elements are: no cascade
+/// of the build visits every rule.
+#[test]
+fn shadow_tree_elements_cascade_through_a_rule_index() {
+    let (_, unindexed) = built_dump(&component_page(40, 50, "<div id=a></div><p id=t>text</p>"));
+    assert_eq!(unindexed, 0, "cascades that visited every rule of their sheets");
+}
+
+/// The index changes no style: the laid-out tree of a page of shadow
+/// trees, with and without it, is the same box for box.
+#[test]
+fn the_shadow_rule_index_builds_the_same_boxes() {
+    for page in [indexed_selectors_page(), component_page(12, 30, "<div id=a></div><p id=t>text</p>")] {
+        set_tree_rule_index_off_for_test(true);
+        let (without, unindexed) = built_dump(&page);
+        set_tree_rule_index_off_for_test(false);
+        assert!(unindexed > 0, "the switch turns the index off");
+        let (with, _) = built_dump(&page);
+        assert!(without.len() > 2000, "a real tree: {}", without.len());
+        assert!(with == without, "the indexed build differs from the unindexed one");
+    }
+}
