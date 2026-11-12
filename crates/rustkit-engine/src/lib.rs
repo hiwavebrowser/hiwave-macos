@@ -481,6 +481,8 @@ mod spd3_range_rects_tests;
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
 mod r1_stack_pins_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl1_trusted_wheel_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
