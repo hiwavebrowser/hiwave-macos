@@ -74,7 +74,9 @@ to come under `--max-load` (default 3; up to 6 for a run that only looks for
 where a suite stops) for `--load-wait` seconds, then gives up with exit code
 2. Every record carries `load_avg_before`; `report.py` leaves out any run
 that started at 3 or more and counts it in its `disc` column. One suite run
-at a time, and none beside a cargo job.
+at a time, and none beside a cargo job. Do not `nice` a suite run: a niced
+run measures the scheduler, not the browser (builds are niced; benchmarks
+are not).
 
 ## The run record
 
