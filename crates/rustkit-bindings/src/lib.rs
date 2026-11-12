@@ -1145,8 +1145,20 @@ impl Drop for InRealm<'_> {
     }
 }
 
+/// What a page asked of its frames (web_frames.js): show `url` in the
+/// iframe element `node` (`Some`), or that element left the document
+/// (`None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameRequest {
+    pub node: usize,
+    pub url: Option<String>,
+}
+
 pub struct DomBindings {
     runtime: PageRuntime,
+    /// Frame requests not yet taken (`take_frame_requests`); filled only
+    /// once `enable_frames` ran.
+    frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
     window: RefCell<WindowState>,
     event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
@@ -1217,6 +1229,102 @@ impl DomBindings {
             .borrow_mut()
             .expose_realm_global(self.runtime.realm, name, other.runtime.realm)
             .map_err(Into::into)
+    }
+
+    /// Turn on the page half of `<iframe>` (web_frames.js): frame requests
+    /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
+    /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
+    /// Off, nothing of it exists (`EngineConfig::nested_contexts`).
+    pub fn enable_frames(&self) -> Result<(), BindingError> {
+        let queue = self.frame_requests.clone();
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function(
+            "__rustkit_frame_request",
+            2,
+            Box::new(move |args| {
+                if let Some(JsValue::Number(node)) = args.first() {
+                    let url = match args.get(1) {
+                        Some(JsValue::String(url)) => Some(url.clone()),
+                        _ => None,
+                    };
+                    let mut queue = queue.borrow_mut();
+                    // Bounds what a page can park between two drains.
+                    if queue.len() < 256 {
+                        queue.push(FrameRequest { node: *node as usize, url });
+                    }
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_with_host(include_str!("web_frames.js"))?;
+        Ok(())
+    }
+
+    /// The frame requests since the last call, in the order made.
+    pub fn take_frame_requests(&self) -> Vec<FrameRequest> {
+        std::mem::take(&mut *self.frame_requests.borrow_mut())
+    }
+
+    /// Ask this document for its parser's iframes (after the document is
+    /// bound): each becomes a frame request.
+    pub fn scan_frames(&self) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_bookkeeping("window.__rustkit_frames ? window.__rustkit_frames.scan() : null")?;
+        Ok(())
+    }
+
+    /// The viewport `node`'s frame gets until layout sizes frames:
+    /// (width, height) in CSS px.
+    pub fn frame_size(&self, node: usize) -> (f64, f64) {
+        let answer = self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping(&format!("window.__rustkit_frames ? window.__rustkit_frames.size({node}) : ''"));
+        if let Ok(JsValue::String(size)) = answer {
+            if let Some((w, h)) = size.split_once('x') {
+                if let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) {
+                    return (w, h);
+                }
+            }
+        }
+        (300.0, 150.0)
+    }
+
+    /// Make `child` (a page of this runtime, from [`Self::new_child`]) the
+    /// window of this document's iframe `node`: its `contentWindow` and
+    /// `contentDocument`, and in the child `parent`, `top` and
+    /// `frameElement`. `false` when `node` is no longer a frame here.
+    pub fn attach_frame(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
+        const TMP: &str = "__rustkit_frame_window";
+        self.expose_window(TMP, child)?;
+        let attached = self.runtime.borrow_mut().evaluate_bookkeeping(&format!(
+            "(function () {{ var w = window.{TMP}; delete window.{TMP}; \
+               return window.__rustkit_frames ? window.__rustkit_frames.attach({node}, w) : false; }})()"
+        ))?;
+        if !matches!(attached, JsValue::Boolean(true)) {
+            return Ok(false);
+        }
+        child.expose_window(TMP, self)?;
+        child.runtime.borrow_mut().evaluate_bookkeeping(&format!(
+            "(function () {{ var up = window.{TMP}; delete window.{TMP}; \
+               var el = null; try {{ el = Array.prototype.find.call(up.document.querySelectorAll('iframe'), \
+                 function (f) {{ return up.__rkDomHooks.nodeId(f) === {node}; }}) || null; }} catch (e) {{}} \
+               Object.defineProperty(window, 'parent', {{ value: up, writable: true, configurable: true, enumerable: true }}); \
+               Object.defineProperty(window, 'top', {{ value: up.top, writable: false, configurable: true, enumerable: true }}); \
+               Object.defineProperty(window, 'frameElement', {{ value: el, writable: false, configurable: true, enumerable: true }}); }})()"
+        ))?;
+        Ok(true)
+    }
+
+    /// Fire `load` at this document's iframe `node` (the child's load is
+    /// done, or a cross-origin frame was left blank).
+    pub fn frame_loaded(&self, node: usize) -> Result<bool, BindingError> {
+        let fired = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("window.__rustkit_frames ? window.__rustkit_frames.loaded({node}) : false"))?;
+        Ok(matches!(fired, JsValue::Boolean(true)))
     }
 
     /// End a child made with [`Self::new_child`]: its realm can no longer be
@@ -1341,6 +1449,7 @@ impl DomBindings {
         drop(entered);
         Ok(Self {
             runtime: page,
+            frame_requests: Rc::new(RefCell::new(Vec::new())),
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
             dom_host,

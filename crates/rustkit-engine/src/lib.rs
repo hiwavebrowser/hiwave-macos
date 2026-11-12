@@ -1469,9 +1469,24 @@ struct DocState {
     lay: Rc<layout_ctx::ViewLayout>,
 }
 
+/// A same-origin `<iframe>`'s document, loaded into a child realm of its
+/// view's runtime (nested browsing contexts, Stage 2; only with
+/// `EngineConfig::nested_contexts`).
+struct FrameState {
+    bindings: DomBindings,
+    #[allow(dead_code)]
+    url: Url,
+    #[allow(dead_code)]
+    document: Rc<Document>,
+}
+
 struct ViewState {
     /// The top-level document's state (see [`DocState`]).
     doc: DocState,
+    /// The view's frames by the parent document's iframe node id
+    /// (`EngineConfig::nested_contexts`), and the navigation they belong to.
+    frames: HashMap<usize, FrameState>,
+    frames_nav: u64,
     /// What the last wheel moved, while a run of wheels holds to it.
     wheel_gesture: Option<WheelGesture>,
     /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
@@ -3475,6 +3490,8 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
+            frames: HashMap::new(),
+            frames_nav: 0,
             doc: DocState {
                 lay: Rc::default(),
                 url: None,
@@ -3599,6 +3616,8 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            frames: HashMap::new(),
+            frames_nav: 0,
             doc: DocState {
                 lay: Rc::default(),
                 url: None,
@@ -3740,6 +3759,8 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            frames: HashMap::new(),
+            frames_nav: 0,
             doc: DocState {
                 lay: Rc::default(),
                 url: None,
@@ -6132,6 +6153,115 @@ impl Engine {
         Ok(())
     }
 
+    /// Nested browsing contexts, Stage 2: take what this view's document
+    /// asked of its iframes and do it. A same-origin `src` (or none:
+    /// about:blank) is fetched, parsed and bound in a new realm of the
+    /// view's runtime; its classic scripts run in document order, then its
+    /// `DOMContentLoaded` and `load`, then `load` at the iframe element.
+    /// A cross-origin `src` is not fetched: the frame stays blank and the
+    /// element hears `load`. A frame whose element left, or that is
+    /// navigated again, is dropped first. Not here yet (later stages):
+    /// layout and paint of the frame, the child's timers and network
+    /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
+    /// waiting for its frames.
+    async fn drive_frames(&mut self, id: EngineViewId) {
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let Some(view) = self.views.get_mut(&id) else { return };
+        let Some(parent) = view.doc.bindings.as_ref() else { return };
+        if view.frames_nav != view.nav_id {
+            // A new document: the old one's frames went with its runtime.
+            view.frames.clear();
+            view.frames_nav = view.nav_id;
+            if let Err(e) = parent.scan_frames() {
+                debug!(error = %e, "frames: the scan for the parser's iframes failed");
+            }
+        }
+        let requests = parent.take_frame_requests();
+        let page_url = view.doc.url.clone();
+        for request in requests {
+            if let Some(old) = view.frames.remove(&request.node) {
+                parent.drop_child(old.bindings);
+            }
+            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let blank = target.scheme() == "about";
+            let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
+            if !blank && !same_origin {
+                // The cross-origin floor: no request, no document, one `load`.
+                let _ = parent.frame_loaded(request.node);
+                continue;
+            }
+            let html = if blank {
+                "<html><head></head><body></body></html>".to_string()
+            } else {
+                let fetched = loader.fetch(referrer.get_for(target.clone(), RequestDestination::Other)).await;
+                match fetched {
+                    Ok(response) if response.ok() => response.text().await.unwrap_or_default(),
+                    _ => String::new(),
+                }
+            };
+            let Ok(document) = Document::parse_html(&html) else {
+                let _ = parent.frame_loaded(request.node);
+                continue;
+            };
+            let document = Rc::new(document);
+            let child = match parent.new_child() {
+                Ok(child) => child,
+                Err(e) => {
+                    warn!(error = %e, "frames: no child realm");
+                    continue;
+                }
+            };
+            let (width, height) = parent.frame_size(request.node);
+            let bound = child
+                .set_document(document.clone())
+                .and_then(|_| child.set_location(&target))
+                .and_then(|_| child.set_dimensions(width, height));
+            if bound.is_err() || !matches!(parent.attach_frame(request.node, &child), Ok(true)) {
+                parent.drop_child(child);
+                continue;
+            }
+            // The child's classic scripts, in document order.
+            let listed = child.evaluate_named(
+                "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
+                   var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
+                   return [s.getAttribute('src'), s.textContent, t === '' || /javascript|ecmascript/.test(t)]; }))",
+                "rustkit#frames",
+            );
+            let scripts: Vec<(Option<String>, String, bool)> = match listed {
+                Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for (index, (src, text, classic)) in scripts.into_iter().enumerate() {
+                if !classic {
+                    continue;
+                }
+                let (source, name) = match src {
+                    Some(src) => {
+                        let Ok(url) = target.join(&src) else { continue };
+                        if url.origin() != target.origin() {
+                            continue;
+                        }
+                        let fetched = loader.fetch(referrer.get_for(url.clone(), RequestDestination::Script)).await;
+                        match fetched {
+                            Ok(response) if response.ok() => (response.text().await.unwrap_or_default(), url.to_string()),
+                            _ => continue,
+                        }
+                    }
+                    None => (text, format!("frame-inline#{}", index + 1)),
+                };
+                if let Err(e) = child.evaluate_named(&source, &name) {
+                    debug!(error = %e, "frames: a child script threw");
+                }
+            }
+            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded");
+            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded");
+            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load");
+            let _ = parent.frame_loaded(request.node);
+            view.frames.insert(request.node, FrameState { bindings: child, url: target, document });
+        }
+    }
+
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
         let _hold = wgate::hold("live_turn");
@@ -6161,6 +6291,9 @@ impl Engine {
                 .views
                 .get(&id)
                 .is_some_and(|view| view.doc.load_tail.is_none());
+        if self.config.nested_contexts {
+            self.drive_frames(id).await;
+        }
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
@@ -9455,6 +9588,11 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -9921,6 +10059,11 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }

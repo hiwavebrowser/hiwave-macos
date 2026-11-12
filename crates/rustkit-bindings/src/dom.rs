@@ -2779,6 +2779,12 @@ const WRAPPERS_JS: &str = r#"
     var HOOKS = {};
     Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
     var gen = 0;
+    // For web_frames.js (installed only with nested browsing contexts on):
+    // the node id of a wrapper of this document, or -1.
+    HOOKS.nodeId = function (el) {
+        var s = el != null ? el[SLOT] : undefined;
+        return s && s.gen === gen ? s.id : -1;
+    };
     var cache = new Map();
 
     function illegal() { throw new TypeError('Illegal constructor'); }
@@ -2974,6 +2980,7 @@ const WRAPPERS_JS: &str = r#"
         if (m) m();
         if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+        if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
         return r;
     }
     function create(kind, data, method) {
@@ -3033,6 +3040,7 @@ const WRAPPERS_JS: &str = r#"
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
+        if (HOOKS.frames) HOOKS.frames.tree(op, node);
         return node;
     }
     Node.prototype.appendChild = function (node) {
