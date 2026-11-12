@@ -575,3 +575,16 @@ shapes, plus typed arrays) with Chrome's sorted result AND its comparator call l
 stability and totality with a seeded generator. Not pinned: comparators with side effects other
 than logging, arrays over ~500 elements, and proxies or array-likes with getters (the algorithm does
 not depend on them, but they were not measured).
+
+## Patch: cyclic ToPrimitive and Array join (cyclic to-primitive)
+
+`JsObject::ordinary_to_primitive` carried upstream's `RecursionLimiter`: an object already being
+converted answered the hint's default (`0` / `""`). So a user `toString() { return String(o); }` returned
+`""` after one level where Chrome recurses to a `RangeError`. The limiter is removed. What it was
+protecting, cyclic arrays, is V8's join stack now: `Array.prototype.join` and `toLocaleString` keep a
+thread-local list of the arrays they are running on, and one reached again contributes `""` (`a=[1];
+a[1]=a; String(a)` is `"1,"`). `join` no longer treats "the receiver itself as an element" as empty (a
+plain object that is its own element prints `[object Object]`, as in Chrome). `toLocaleString` joins
+with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
+(19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
+cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
