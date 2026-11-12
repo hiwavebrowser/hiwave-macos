@@ -437,6 +437,8 @@ impl JsObject {
         // NOTE(HalidOdat): For object's that are not callable we implement a special __call__ internal method
         //                  that throws on call.
 
+        let _native_entry = crate::native_stack::Entry::new(context.vm.runtime_limits.native_stack_budget()); // HIWAVE PATCH (native recursion)
+        crate::native_stack::check(context.vm.runtime_limits.native_stack_budget())?;
         let stack_len = context.vm.stack.len(); // HIWAVE PATCH (interrupt)
         context.vm.stack.push(this.clone()); // this
         context.vm.stack.push(self.clone()); // func

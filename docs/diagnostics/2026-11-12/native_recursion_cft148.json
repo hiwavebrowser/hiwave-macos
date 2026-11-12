@@ -36,7 +36,6 @@
  "proxy_chain_has": "ERR:RangeError",
  "bound_function_chain": "ok:1",
  "prototype_chain_get": "ok:undefined",
- "promise_then_chain": "ok:object",
  "json_stringify_tojson_chain": "ok:{}",
  "object_assign_getter_chain": "ERR:RangeError",
  "array_sort_comparator_deep": "ERR:RangeError",

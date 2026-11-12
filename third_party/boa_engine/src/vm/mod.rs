@@ -1142,6 +1142,7 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        let _native_entry = crate::native_stack::Entry::new(self.vm.runtime_limits.native_stack_budget()); // HIWAVE PATCH (native recursion)
         // HIWAVE PATCH (interrupt): no bytecode runs in a stopped turn, even
         // when an engine reaction let in by `new_promise_reaction_job`
         // resumes a body or runs a module: it fails as its first opcode

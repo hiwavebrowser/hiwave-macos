@@ -15,9 +15,25 @@ use std::time::{Duration, Instant};
 const CASES: &str = include_str!("../../../docs/diagnostics/2026-11-12/native_recursion_cases.json");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/native_recursion_cft148.json");
 
-/// Cases where Chrome answers and this engine throws a RangeError instead: safe (no abort), and
-/// a divergence only in how deep a structure may be.
-const SAFE_DIVERGENCES: &[&str] = &[];
+/// (case, what this engine answers) where it differs from Chrome and does not abort. Each is a
+/// documented limit, not a crash.
+const SAFE_DIVERGENCES: &[(&str, &str)] = &[
+    // V8 stringifies and walks these 200 000 levels; here the native stack budget ends it with the
+    // same RangeError a deeper-than-V8-allows structure gets.
+    ("json_stringify_array", "ERR:RangeError"),
+    ("json_stringify_object", "ERR:RangeError"),
+    ("prototype_chain_get", "ERR:RangeError"),
+    // The parser caps a left-nested chain (`1+1+...`) at MAX_CHAIN links; V8 answers at 200 000.
+    ("parse_long_binary_chain", "ERR:RangeError"),
+    // JSON.parse already refused nesting past a small depth with a SyntaxError ("recursion limit
+    // exceeded"); V8 parses it. Not a crash, and not changed here.
+    ("json_parse_array", "ERR:SyntaxError"),
+    ("json_parse_object", "ERR:SyntaxError"),
+    ("json_parse_reviver", "ERR:SyntaxError"),
+    // A cyclic toString that calls String(itself) returns "" after one level here (a cycle guard
+    // of Boa's); Chrome overflows its stack. Not a crash.
+    ("object_to_primitive_chain", "ok:0"),
+];
 
 fn child_run(body: &str) -> String {
     let mut rt = JsRuntime::new().unwrap();
@@ -87,7 +103,7 @@ fn no_deep_structure_kills_the_process_and_the_answers_are_chromes() {
         let got = isolated(name);
         if got.starts_with("CRASH") || got == "TIMEOUT" {
             crashed.push(format!("{name}: {got} (chrome {expected})"));
-        } else if &got != expected && !(SAFE_DIVERGENCES.contains(&name.as_str()) && got == "ERR:RangeError") {
+        } else if &got != expected && !SAFE_DIVERGENCES.contains(&(name.as_str(), got.as_str())) {
             differ.push(format!("{name}: chrome {expected:?}, here {got:?}"));
         }
     }

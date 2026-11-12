@@ -88,7 +88,12 @@ macro_rules! expression {
                     return Ok(lhs);
                 };
 
+                let mut chain = 0usize;
                 while let Some(tok) = cursor.peek(0, interner)? {
+                    chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+                    if chain > crate::parser::MAX_CHAIN {
+                        return Err(crate::Error::stack_overflow());
+                    }
                     match *tok.kind() {
                         TokenKind::Punctuator(op) if $( op == $op )||* => {
                             cursor.advance(interner);
@@ -148,7 +153,12 @@ where
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
         let mut lhs = AssignmentExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(crate::Error::stack_overflow());
+            }
             match *tok.kind() {
                 TokenKind::Punctuator(Punctuator::Comma) => {
                     if cursor.peek(1, interner).or_abrupt()?.kind()
@@ -262,7 +272,12 @@ where
 
         let mut previous = self.previous;
 
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(crate::Error::stack_overflow());
+            }
             match tok.kind() {
                 TokenKind::Punctuator(Punctuator::BoolAnd) => {
                     if previous == PreviousExpr::Coalesce {
@@ -568,7 +583,12 @@ where
             return Ok(lhs);
         };
 
+        let mut chain = 0usize;
         while let Some(tok) = cursor.peek(0, interner)? {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(crate::Error::stack_overflow());
+            }
             match *tok.kind() {
                 TokenKind::Punctuator(op)
                     if op == Punctuator::LessThan
