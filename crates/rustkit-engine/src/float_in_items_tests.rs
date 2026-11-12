@@ -38,9 +38,9 @@ fn rects(ids: &str) -> String {
 #[test]
 fn a_flex_item_encloses_its_floats() {
     assert_eq!(
-        rects("r1i r2i r3i r4i c1i c2i"),
-        "10x30 35.8x30 35.8x18 10x30 400x30 400x30",
-        "Chromium 148 (width x height): float only, float + text, short float + text, stretched, column ×2"
+        rects("r1i r2i r3i r4i r4j c1i c2i"),
+        "10x30 35.8x30 35.8x18 10x30 8x30 400x30 400x30",
+        "Chromium 148 (width x height): float only, float + text, short float + text, stretched and the item beside it (stretched to the float's line), column ×2"
     );
 }
 

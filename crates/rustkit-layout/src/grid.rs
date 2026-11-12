@@ -4092,8 +4092,18 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         return content + padding_border;
     }
 
+    // One line of max-content: the inline content laid end to end, plus the
+    // floats beside it. Floats are summed per side, and a float with `clear`
+    // starts a new line of floats on the side it clears (Chrome for Testing
+    // 148, docs/diagnostics/2026-11-11/cleared_floats_max_content*: two
+    // `float: left; clear: left` 100px boxes are 100 wide, not 200; a left
+    // 100 and a right 60 with `clear: right` are 160; a float, "text" and a
+    // cleared float are the text beside the wider line of floats).
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
+    let (mut floats_left, mut floats_right) = (0.0f32, 0.0f32);
+    // The widest line of floats closed by a `clear` since the run began.
+    let mut floats_widest = 0.0f32;
     for child in &layout_box.children {
         if child.style.display == Display::None {
             continue;
@@ -4107,20 +4117,42 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
         let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
-        // A float sits on the line beside the inline content around it, so
-        // in max-content it adds to that line rather than breaking it
-        // (Chrome for Testing 148: a 10px float + "text" is 35.8 wide, the
-        // two side by side; the float was a block-level break here, which
-        // left the text no room beside the float).
-        if inline_level || child.float != crate::Float::None {
+        if child.float != crate::Float::None {
+            // A float sits on the line beside the inline content around it
+            // (a 10px float + "text" is 35.8 wide in Chrome, side by side).
+            let (clears_left, clears_right) = match child.clear {
+                crate::Clear::Left => (true, false),
+                crate::Clear::Right => (false, true),
+                crate::Clear::Both => (true, true),
+                _ => (false, false),
+            };
+            if clears_left || clears_right {
+                floats_widest = floats_widest.max(floats_left + floats_right);
+                if clears_left {
+                    floats_left = 0.0;
+                }
+                if clears_right {
+                    floats_right = 0.0;
+                }
+            }
+            if child.float == crate::Float::Right {
+                floats_right += outer;
+            } else {
+                floats_left += outer;
+            }
+        } else if inline_level {
             inline_run += outer;
         } else {
-            max_contribution = max_contribution.max(inline_run);
+            max_contribution =
+                max_contribution.max(inline_run + floats_widest.max(floats_left + floats_right));
             inline_run = 0.0;
+            floats_left = 0.0;
+            floats_right = 0.0;
+            floats_widest = 0.0;
             max_contribution = max_contribution.max(outer);
         }
     }
-    max_contribution = max_contribution.max(inline_run);
+    max_contribution = max_contribution.max(inline_run + floats_widest.max(floats_left + floats_right));
 
     max_contribution + padding_border
 }

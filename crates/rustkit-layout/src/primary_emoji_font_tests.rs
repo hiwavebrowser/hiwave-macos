@@ -26,8 +26,7 @@ fn the_emoji_face_as_primary_advances_as_chrome_places_it() {
 /// In the emoji face as the primary, the keycap bases, `#`, `*`, `©` and the
 /// space take the same uniform advance as an emoji (Prometheus R1 LOW on
 /// #1072, checked against Chrome for Testing 148: `1`, ` `, `#` and `©` are
-/// each 18 at 14px; `"1 #"` and `"🔍 🔍"` are 54; `"*a"` is 24.22, the `*` 18 in
-/// the emoji face and the `a` 6.22 in the default face, Times).
+/// each 18 at 14px; `"1 #"` and `"🔍 🔍"` are 54).
 #[cfg(target_os = "macos")]
 #[test]
 fn characters_the_emoji_face_maps_take_its_uniform_advance() {
