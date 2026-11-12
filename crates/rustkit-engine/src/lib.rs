@@ -1473,11 +1473,22 @@ struct DocState {
 /// view's runtime (nested browsing contexts, Stage 2; only with
 /// `EngineConfig::nested_contexts`).
 struct FrameState {
-    bindings: DomBindings,
+    /// The frame's document as an offscreen view of this engine: its own
+    /// style, layout, display list, timers and script network, with the
+    /// child realm's bindings (Stage 3). Its display list is painted into
+    /// the parent's at the iframe's content box.
+    view: EngineViewId,
     #[allow(dead_code)]
     url: Url,
-    #[allow(dead_code)]
-    document: Rc<Document>,
+}
+
+/// The display-list key of the iframe element `node`'s replaced box.
+fn frame_key(node: usize) -> String {
+    format!("rustkit-frame:{node}")
+}
+
+fn frame_node(key: &str) -> Option<usize> {
+    key.strip_prefix("rustkit-frame:").and_then(|n| n.parse().ok())
 }
 
 struct ViewState {
@@ -3415,6 +3426,7 @@ impl Engine {
 
         console_log::install_console_diag();
         let system_clipboard = config.system_clipboard;
+        let nested_contexts = config.nested_contexts;
         Ok(Self {
             config,
             presenter,
@@ -3431,7 +3443,11 @@ impl Engine {
             views: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
-            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+            lctx: Rc::new({
+                let lctx = layout_ctx::LayoutCtx::default();
+                lctx.nested_contexts.set(nested_contexts);
+                lctx
+            }),
         })
     }
 
@@ -6167,28 +6183,39 @@ impl Engine {
     async fn drive_frames(&mut self, id: EngineViewId) {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
-        let Some(view) = self.views.get_mut(&id) else { return };
-        let Some(parent) = view.doc.bindings.as_ref() else { return };
-        if view.frames_nav != view.nav_id {
-            // A new document: the old one's frames went with its runtime.
-            view.frames.clear();
-            view.frames_nav = view.nav_id;
-            if let Err(e) = parent.scan_frames() {
-                debug!(error = %e, "frames: the scan for the parser's iframes failed");
+        let (requests, page_url, policy) = {
+            let Some(view) = self.views.get_mut(&id) else { return };
+            let Some(parent) = view.doc.bindings.as_ref() else { return };
+            let mut stale = Vec::new();
+            if view.frames_nav != view.nav_id {
+                // A new document: the old one's frames went with its runtime.
+                stale.extend(view.frames.drain().map(|(_, f)| f.view));
+                view.frames_nav = view.nav_id;
+                if let Err(e) = parent.scan_frames() {
+                    debug!(error = %e, "frames: the scan for the parser's iframes failed");
+                }
             }
-        }
-        let requests = parent.take_frame_requests();
-        let page_url = view.doc.url.clone();
+            let requests = parent.take_frame_requests();
+            let out = (requests, view.doc.url.clone(), view.doc.script_policy.clone());
+            for fid in stale {
+                self.views.remove(&fid);
+            }
+            out
+        };
+        let mut changed = false;
         for request in requests {
-            if let Some(old) = view.frames.remove(&request.node) {
-                parent.drop_child(old.bindings);
-            }
+            changed |= self.drop_frame(id, request.node);
             let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
             let blank = target.scheme() == "about";
             let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
+            fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+                engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+            }
             if !blank && !same_origin {
                 // The cross-origin floor: no request, no document, one `load`.
-                let _ = parent.frame_loaded(request.node);
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node);
+                }
                 continue;
             }
             let html = if blank {
@@ -6201,25 +6228,46 @@ impl Engine {
                 }
             };
             let Ok(document) = Document::parse_html(&html) else {
-                let _ = parent.frame_loaded(request.node);
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node);
+                }
                 continue;
             };
             let document = Rc::new(document);
-            let child = match parent.new_child() {
-                Ok(child) => child,
-                Err(e) => {
-                    warn!(error = %e, "frames: no child realm");
-                    continue;
-                }
+            let Some((child, (width, height))) = parent_of(self, id).and_then(|parent| {
+                let child = parent.new_child().ok()?;
+                Some((child, parent.frame_size(request.node)))
+            }) else {
+                continue;
             };
-            let (width, height) = parent.frame_size(request.node);
             let bound = child
                 .set_document(document.clone())
                 .and_then(|_| child.set_location(&target))
-                .and_then(|_| child.set_dimensions(width, height));
-            if bound.is_err() || !matches!(parent.attach_frame(request.node, &child), Ok(true)) {
-                parent.drop_child(child);
+                .and_then(|_| child.set_dimensions(width, height))
+                .and_then(|_| child.enable_net_bridge());
+            let attached = bound.is_ok()
+                && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
+            if !attached {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
                 continue;
+            }
+            // The frame's own page state, offscreen, at its viewport.
+            let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
+            let Ok(fid) = self.insert_offscreen_view(bounds) else {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
+                continue;
+            };
+            child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(frame) = self.views.get_mut(&fid) {
+                frame.canvases = Some(child.canvas_source());
+                frame.doc.url = Some(target.clone());
+                frame.doc.document = Some(document.clone());
+                frame.doc.script_policy = policy.clone();
+                frame.announced_viewport = Some((bounds.width, bounds.height));
             }
             // The child's classic scripts, in document order.
             let listed = child.evaluate_named(
@@ -6254,12 +6302,64 @@ impl Engine {
                     debug!(error = %e, "frames: a child script threw");
                 }
             }
-            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded");
-            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded");
-            let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load");
-            let _ = parent.frame_loaded(request.node);
-            view.frames.insert(request.node, FrameState { bindings: child, url: target, document });
+            if let Some(frame) = self.views.get_mut(&fid) {
+                frame.doc.bindings = Some(child);
+            }
+            if let Err(e) = self.relayout_for(fid, RelayoutCause::InitialLoad) {
+                debug!(error = %e, "frames: the frame's first layout failed");
+            }
+            if let Some(child) = self.views.get(&fid).and_then(|v| v.doc.bindings.as_ref()) {
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load");
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                view.frames.insert(request.node, FrameState { view: fid, url: target });
+            }
+            if let Some(parent) = parent_of(self, id) {
+                let _ = parent.frame_loaded(request.node);
+            }
+            changed = true;
         }
+        if changed {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame change failed");
+            }
+        }
+    }
+
+    /// Drop the frame of iframe `node` of view `id`, if it has one: its
+    /// offscreen view goes, and its realm with it.
+    fn drop_frame(&mut self, id: EngineViewId, node: usize) -> bool {
+        let Some(frame) = self.views.get_mut(&id).and_then(|v| v.frames.remove(&node)) else { return false };
+        let child = self.views.remove(&frame.view).and_then(|mut v| v.doc.bindings.take());
+        if let (Some(child), Some(parent)) = (child, self.views.get(&id).and_then(|v| v.doc.bindings.as_ref())) {
+            parent.drop_child(child);
+        }
+        true
+    }
+
+    /// The frames' own live turns, after the parent's frame requests: each
+    /// frame's timers, animation frames, script network and relayouts. The
+    /// parent is laid out again when a frame was (its paint includes the
+    /// frame's).
+    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64) -> bool {
+        let frames: Vec<EngineViewId> = self
+            .views
+            .get(&id)
+            .map(|v| v.frames.values().map(|f| f.view).collect())
+            .unwrap_or_default();
+        let mut relaid = false;
+        for fid in frames {
+            let turn = Box::pin(self.pump_live(fid, elapsed_ms)).await;
+            relaid |= turn.relaid_out;
+        }
+        if relaid {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame's failed");
+            }
+        }
+        relaid
     }
 
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
@@ -6293,6 +6393,9 @@ impl Engine {
                 .is_some_and(|view| view.doc.load_tail.is_none());
         if self.config.nested_contexts {
             self.drive_frames(id).await;
+            if self.pump_frames(id, elapsed_ms).await {
+                out.relaid_out = true;
+            }
         }
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
@@ -10745,6 +10848,29 @@ impl Engine {
         for mut cmd in dl.commands.drain(..) {
             // A canvas paints what script drew on it (canvas_paint), again
             // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, content_box: dest_rect, .. } = &cmd {
+                if let Some(node) = frame_node(url) {
+                    // A frame paints its own display list, clipped to the
+                    // iframe's content box and moved to it.
+                    let frame_list = self
+                        .views
+                        .get(&id)
+                        .and_then(|v| v.frames.get(&node))
+                        .and_then(|f| self.views.get(&f.view))
+                        .and_then(|frame| frame.doc.display_list.clone());
+                    if let Some(list) = frame_list {
+                        expanded.push(rustkit_layout::DisplayCommand::PushClip(*dest_rect));
+                        expanded.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, dest_rect.x, dest_rect.y],
+                            origin: (0.0, 0.0),
+                        });
+                        expanded.extend(list.commands.iter().cloned());
+                        expanded.push(rustkit_layout::DisplayCommand::PopTransform);
+                        expanded.push(rustkit_layout::DisplayCommand::PopClip);
+                    }
+                    continue;
+                }
+            }
             if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
@@ -13475,6 +13601,31 @@ impl layout_ctx::LayoutCtx {
                 // axis gives the other through the bitmap's ratio. What
                 // script draws on its 2D context replaces the image command
                 // in the display list (canvas_paint).
+                // <iframe> (nested browsing contexts, Stage 3): a replaced
+                // element, 300x150 without width/height (which are
+                // presentational hints here), whose paint is its frame's
+                // display list (`frame_key`).
+                if tag_lower == "iframe" && self.nested_contexts.get() {
+                    let attr = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                            .filter(|v| *v >= 0.0)
+                    };
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: frame_key(node.id.raw()),
+                            natural_width: attr("width").unwrap_or(300.0),
+                            natural_height: attr("height").unwrap_or(150.0),
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
                 if tag_lower == "canvas" {
                     let (natural_width, natural_height) =
                         canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
@@ -15677,6 +15828,24 @@ impl layout_ctx::LayoutCtx {
             }
             "iframe" => {
                 style.display = rustkit_css::Display::Inline;
+                // `iframe { border: 2px inset }` (Chrome 148: 2px inset,
+                // currentColor), with nested browsing contexts on only.
+                // The paint styles have no `inset` (rustkit-css
+                // BorderStyle): it paints solid until they do.
+                if self.nested_contexts.get() {
+                    style.border_top_width = rustkit_css::Length::Px(2.0);
+                    style.border_right_width = rustkit_css::Length::Px(2.0);
+                    style.border_bottom_width = rustkit_css::Length::Px(2.0);
+                    style.border_left_width = rustkit_css::Length::Px(2.0);
+                    style.border_top_style = rustkit_css::BorderStyle::Solid;
+                    style.border_right_style = rustkit_css::BorderStyle::Solid;
+                    style.border_bottom_style = rustkit_css::BorderStyle::Solid;
+                    style.border_left_style = rustkit_css::BorderStyle::Solid;
+                    style.border_top_color = style.color;
+                    style.border_right_color = style.color;
+                    style.border_bottom_color = style.color;
+                    style.border_left_color = style.color;
+                }
             }
             // Misc
             "br" => {

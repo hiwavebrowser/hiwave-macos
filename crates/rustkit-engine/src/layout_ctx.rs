@@ -61,6 +61,9 @@ pub(crate) struct LayoutCtx {
     /// What the inline svg pre-pass keeps between builds: the id index,
     /// each svg's markup key and the paint maps (`svg_prepass`, LAT4b).
     pub(crate) svg_prepass: RefCell<crate::svg_prepass::SvgPrepass>,
+    /// `EngineConfig::nested_contexts`, for the build: an `<iframe>` is a
+    /// replaced box with a 2px border only with it on.
+    pub(crate) nested_contexts: std::cell::Cell<bool>,
 }
 
 impl Default for LayoutCtx {
@@ -73,6 +76,7 @@ impl Default for LayoutCtx {
             svg_cache: RefCell::default(),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
+            nested_contexts: std::cell::Cell::new(false),
         }
     }
 }
