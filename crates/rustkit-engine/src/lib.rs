@@ -474,6 +474,8 @@ mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod svg2_svg_geometry_events_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod stretched_row_height_tests;
