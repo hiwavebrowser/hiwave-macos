@@ -3276,6 +3276,26 @@ mod tests {
         }
     }
 
+    /// STR-9: `performance.now()` ticks every 0.1 ms, as Chrome for Testing 148.0.7778.216 does
+    /// (measured 2026-11-12: over 50 ms of a busy loop every step between distinct readings is 0.1,
+    /// 500 distinct values). It stepped by a whole millisecond, so the stress suites' short timings
+    /// read 0.
+    #[test]
+    fn performance_now_ticks_every_tenth_of_a_millisecond() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let out = eval_string(
+            &bindings,
+            "var d = [], last = performance.now(), end = last + 5;              while (last < end) { var n = performance.now(); if (n !== last) { d.push(n - last); last = n; } }              d.sort(function (a, b) { return a - b; }); String(d.length + ',' + d[0].toFixed(3))",
+        );
+        let (count, min) = out.split_once(',').unwrap();
+        let (count, min): (u32, f64) = (count.parse().unwrap(), min.parse().unwrap());
+        // 5 ms at 0.1 ms is about 50 distinct readings; whole-millisecond steps give at most 5.
+        assert!(count >= 20, "distinct readings in 5 ms: {count}");
+        assert!(min < 0.5, "the smallest step is {min} ms");
+        // Not finer than a tenth of a millisecond: a high-resolution timer is a fingerprinting aid.
+        assert!(min >= 0.0999, "the smallest step is {min} ms");
+    }
+
     /// Pages read these without feature-testing; each used to throw a
     /// ReferenceError or TypeError and end the rest of the script.
     #[test]
