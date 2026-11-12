@@ -453,7 +453,27 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
+            _ => {
+                // SET3, Chrome for Testing 148 over 107 inputs
+                // (docs/diagnostics/2026-11-11/set3_input_heights*): the
+                // content line is the larger of the font's `normal` line and
+                // a `line-height` declared on the input, then the vertical
+                // padding (the author's, else the UA's 1px each side) and
+                // border (the author's, else the UA's 2px each side). Before,
+                // the UA border was dropped once the author set a padding
+                // (31 for 35 at 13.6px with `padding: 8px 12px`),
+                // `line-height` was ignored and a bare input at another font
+                // size was a scaled blob.
+                let normal = normal_line_height(style, font_size);
+                let line = if style.line_height_declared {
+                    content_line(font_size).max(normal)
+                } else {
+                    normal
+                };
+                let pad = if style.padding_v_declared || author_pad_v > 0.0 { author_pad_v } else { 2.0 };
+                let border = if style.border_v_declared || author_border_v > 0.0 { author_border_v } else { 4.0 };
+                (149.0 * ua_scale, line + pad + border)
+            }
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px

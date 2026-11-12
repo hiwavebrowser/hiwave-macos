@@ -32506,7 +32506,10 @@ mod tests {
         assert_eq!(heights.len(), 5, "five control boxes expected: {:?}", heights);
 
         let expect = [
-            ("bare text input", 19.0, 1.0),
+            // SET3: Chrome for Testing 148.0.7778.216 builds a bare text input 21 tall
+            // (15 px line + 1 px padding and 2 px border each side), with or without a
+            // placeholder or a value. The 19 pinned here before was not Chrome's.
+            ("bare text input", 21.0, 0.0),
             ("bare button", 21.0, 0.0),
             ("checkbox", 13.0, 1.0),
             ("default textarea (2 rows)", 32.0, 1.0),
