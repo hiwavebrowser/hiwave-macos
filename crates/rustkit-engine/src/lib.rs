@@ -741,6 +741,8 @@ mod focus_pseudo_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_setter_calls_tests;
 #[cfg(all(test, feature = "headless"))]
+mod document_title_tests;
+#[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
