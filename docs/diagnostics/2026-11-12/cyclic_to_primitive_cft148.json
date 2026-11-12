@@ -1,0 +1,21 @@
+{
+ "array_self_string": "1,",
+ "array_self_join": "\"\"",
+ "array_nested_cycle": "1,2,",
+ "array_self_concat": "1,",
+ "array_self_tolocale": "1,",
+ "array_self_join_sep": "x-",
+ "array_like_join": "p,[object Object]",
+ "array_mutual": "1,2,|2,1,",
+ "array_not_cyclic_repeat": "1,1",
+ "array_ok": "1,2,3,,4",
+ "array_cycle_then_reuse": "1,|1,;1,",
+ "user_to_string_self": "ERR:RangeError",
+ "user_to_string_template": "ERR:RangeError",
+ "user_to_string_concat": "ERR:RangeError",
+ "user_mutual": "ERR:RangeError",
+ "user_value_of_self": "ERR:RangeError",
+ "user_to_primitive_self": "ERR:RangeError",
+ "user_to_string_counts_calls": "deep:6",
+ "user_inner_once": "ERR:RangeError"
+}
