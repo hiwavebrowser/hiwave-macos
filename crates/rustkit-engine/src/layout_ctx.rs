@@ -606,6 +606,9 @@ pub(crate) struct ViewLayout {
     pub(crate) container_facts: RefCell<crate::container_query::BuildFacts>,
     pub(crate) container_passes: Cell<u32>,
     pub(crate) container_unsettled: Cell<u32>,
+    /// Builds of this view that told the walk they replay memoized styles
+    /// (`container_query::note_replaying`); read by the wiring test.
+    pub(crate) container_replays: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
     /// ran them. Read by tests to pin that a relayout takes one pass.

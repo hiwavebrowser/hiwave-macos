@@ -11537,6 +11537,9 @@ impl layout_ctx::LayoutCtx {
         // shows instead of quietly tripling every relayout.
         if let Some(lay) = lay.as_ref() {
             if let Some(facts) = container_query::take_build_facts() {
+                if facts.replayed() {
+                    lay.container_replays.set(lay.container_replays.get() + 1);
+                }
                 lay.container_facts.borrow_mut().absorb(facts);
             }
             for pass in 0..=2 {
@@ -11575,7 +11578,10 @@ impl layout_ctx::LayoutCtx {
                     false,
                 );
                 if let Some(facts) = container_query::take_build_facts() {
-                    lay.container_facts.borrow_mut().absorb(facts);
+                    if facts.replayed() {
+                    lay.container_replays.set(lay.container_replays.get() + 1);
+                }
+                lay.container_facts.borrow_mut().absorb(facts);
                 }
             }
         }

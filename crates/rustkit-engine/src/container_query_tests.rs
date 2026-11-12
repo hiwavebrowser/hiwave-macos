@@ -646,6 +646,8 @@ const INLINE_AND_TABLE_PAGE: &str =
 /// - a `<span style="container-type: inline-size">` around a 100px box
 ///   leaves its inline-block, float, flex-item and grid-item wrapper 100
 ///   wide (w1..w4); containing the span collapsed each wrapper to 0;
+/// - the span as a direct flex item (w5) or grid item (w6) is blockified,
+///   so it IS contained: 0 wide around the same 100px box;
 /// - `(min-width: 1px)` is false in a span (k1), a `display: table` box
 ///   with or without a width (k2, k3), an `inline-table` (k6) and a
 ///   table cell (k7), and true in a 300px inline-block (k4) and a block
@@ -671,12 +673,66 @@ fn an_inline_or_table_container_is_not_contained_and_answers_no_query() {
     let got = engine
         .execute_script(
             view,
-            "['w1','w2','w3','w4','k1','k2','k3','k4','k5','k6','k7'].map(function (id) { \
-             return Math.round(document.getElementById(id).getBoundingClientRect().width); }).join(',')",
+            "['w1','w2','w3','w4','w5','w6','k1','k2','k3','k4','k5','k6','k7'].map(function (id) { \
+             return id + '=' + Math.round(document.getElementById(id).getBoundingClientRect().width); }).join(' ')",
         )
         .unwrap();
-    assert!(
-        got.contains("\"100,100,100,100,10,10,10,30,30,10,10\""),
-        "w1..w4 then k1..k7, Chrome 100,100,100,100,10,10,10,30,30,10,10: {got}"
+    // The second line of the recorded Chrome output
+    // (`css_container_query_inline_and_table_probe.cjs`).
+    let chrome = include_str!(
+        "../../../docs/diagnostics/2026-11-11/css_container_query_inline_and_table.chrome148.txt"
+    )
+    .lines()
+    .nth(1)
+    .expect("the recorded widths");
+    assert_eq!(
+        got.strip_prefix("String(\"")
+            .and_then(|v| v.strip_suffix("\")"))
+            .unwrap_or(&got),
+        chrome
     );
+}
+
+/// #1081 delta R1: the wiring that tells the walk a build replays memoized
+/// styles (`container_query::note_replaying`, called from the build with
+/// `StyleMemoBuild::replays`). With the style memo armed, the first
+/// relayout records and the second, with the same key, replays: the view
+/// counts the replaying build (`ViewLayout::container_replays`), and the
+/// query's answer is unchanged by it.
+#[test]
+fn a_build_that_replays_memoized_styles_is_flagged_to_the_walk() {
+    let page = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .c { container-type: inline-size; width: 400px }
+@container (min-width: 300px) { #k1 { height: 11px } }
+</style></head><body><div class="c"><div id="k1"></div></div></body></html>"#;
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("view");
+    engine.load_html(view, page).expect("load_html");
+    let before = engine.views[&view].lay.container_replays.get();
+    {
+        let _memo = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        engine.relayout(view).expect("recording relayout");
+        assert_eq!(
+            engine.views[&view].lay.container_replays.get(),
+            before,
+            "the recording build is not a replay"
+        );
+        engine.relayout(view).expect("replaying relayout");
+    }
+    assert_eq!(
+        engine.views[&view].lay.container_replays.get(),
+        before + 1,
+        "the replaying build was flagged to the walk"
+    );
+    let k = engine
+        .execute_script(view, "String(document.getElementById('k1').offsetHeight)")
+        .unwrap();
+    assert!(k.contains("11"), "the query still holds: {k}");
 }

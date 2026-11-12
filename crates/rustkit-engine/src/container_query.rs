@@ -252,6 +252,11 @@ pub(crate) struct BuildFacts {
 }
 
 impl BuildFacts {
+    /// The build these facts came from replayed memoized styles.
+    pub(crate) fn replayed(&self) -> bool {
+        self.replayed
+    }
+
     /// Take a later build's facts. A recording build asked everything its
     /// styles depend on: its record replaces the old one. A build that
     /// replayed memoized styles asked only where the memo missed (often
