@@ -64,7 +64,44 @@ pub fn take_memo_counters() -> MemoCounters {
 }
 
 fn count(f: impl FnOnce(&mut MemoCounters)) {
-    COUNTERS.with(|c| f(&mut c.borrow_mut()));
+    let mut d = MemoCounters::default();
+    f(&mut d);
+    COUNTERS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.hits += d.hits;
+        c.verified += d.verified;
+        c.misses += d.misses;
+        c.stored += d.stored;
+        c.refused += d.refused;
+        c.restored_boxes += d.restored_boxes;
+    });
+    // Process-wide totals count only runs whose mode came from the environment (a corpus run),
+    // not the tests that set a mode on their thread.
+    if MODE_OVERRIDE.with(|m| m.get()).is_none() {
+        use std::sync::atomic::Ordering::Relaxed;
+        TOTALS[0].fetch_add(d.hits, Relaxed);
+        TOTALS[1].fetch_add(d.verified, Relaxed);
+        TOTALS[2].fetch_add(d.misses, Relaxed);
+        TOTALS[3].fetch_add(d.stored, Relaxed);
+        TOTALS[4].fetch_add(d.refused, Relaxed);
+        TOTALS[5].fetch_add(d.restored_boxes, Relaxed);
+    }
+}
+
+static TOTALS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// What the memo did in this process over every layout whose mode came from `RUSTKIT_LAYOUT_MEMO`
+/// (not a per-thread override): the corpus run's evidence that it was exercised.
+pub fn memo_totals() -> MemoCounters {
+    use std::sync::atomic::Ordering::Relaxed;
+    MemoCounters {
+        hits: TOTALS[0].load(Relaxed),
+        verified: TOTALS[1].load(Relaxed),
+        misses: TOTALS[2].load(Relaxed),
+        stored: TOTALS[3].load(Relaxed),
+        refused: TOTALS[4].load(Relaxed),
+        restored_boxes: TOTALS[5].load(Relaxed),
+    }
 }
 
 fn env_mode() -> MemoMode {

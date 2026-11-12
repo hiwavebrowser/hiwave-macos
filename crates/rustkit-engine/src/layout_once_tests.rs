@@ -125,13 +125,17 @@ fn with_the_memo_off_nesting_doubles_the_work_per_container() {
 
 /// The pin for the fix. With the memo on, nesting depth costs a LINEAR number of visits (off: it
 /// doubles per flex container). A box is still laid out about once per distinct constraint it is
-/// given (~5 for these pages), so visits per box do not reach 1: the bound is on growth.
+/// given (the memo's misses: 3.9 per box at depth 8 growing to 13.0 at depth 32 for flex/block), so
+/// visits per box do not reach 1 and grow ~0.5 per level; memo hits are not visits. flex/float
+/// stays higher because the float path (`layout_block_children`) is not memoised. The counts are
+/// deterministic (no timing), so the bounds sit ~10% above what was measured.
 #[test]
 fn with_the_memo_on_nested_flex_containers_cost_visits_linear_in_depth() {
-    for (name, parts) in [
-        ("flex/block", &[FLEX, BLOCK][..]),
-        ("flex/inline-block", &[FLEX, INLINE_BLOCK][..]),
-        ("flex/float", &[FLEX, FLOAT][..]),
+    // (name, parts, visits per box allowed at depth 12; measured 7.1 / 10.9 / 11.4)
+    for (name, parts, per_box_12) in [
+        ("flex/block", &[FLEX, BLOCK][..], 8.0),
+        ("flex/inline-block", &[FLEX, INLINE_BLOCK][..], 12.0),
+        ("flex/float", &[FLEX, FLOAT][..], 12.5),
     ] {
         let at = |d: usize| {
             let html = nest(parts, d);
@@ -139,12 +143,15 @@ fn with_the_memo_on_nested_flex_containers_cost_visits_linear_in_depth() {
             (v, boxes(&html))
         };
         let (v12, b12) = at(12);
-        assert!(v12 <= 14 * b12, "{name}: {v12} visits for {b12} boxes at depth 12");
+        assert!(
+            (v12 as f64) <= per_box_12 * b12 as f64,
+            "{name}: {v12} visits for {b12} boxes at depth 12 ({:.1} per box, allowed {per_box_12})",
+            v12 as f64 / b12 as f64
+        );
         let ((v16, _), (v32, _)) = (at(16), at(32));
-        // Linear growth doubles the visits when the depth doubles (measured 3.5-3.9x: the box
-        // count doubles too, and each box is laid out for a number of constraints that grows with
-        // its depth). Exponential growth would multiply them by 2^8 here.
-        assert!(v32 * 10 <= v16 * 45, "{name}: depth 16 -> 32 grew {v16} -> {v32} visits");
+        // Linear growth: doubling the depth ~doubles the boxes and each box's constraints
+        // (measured 3.5-3.9x). Exponential growth would multiply the visits by 2^8 here.
+        assert!(v32 * 10 <= v16 * 42, "{name}: depth 16 -> 32 grew {v16} -> {v32} visits");
     }
 }
 
@@ -249,4 +256,15 @@ fn percent_height_marks_in_nested_flex_columns_lay_out_identically() {
         inner = format!("<div style=\"display:flex;flex-direction:column;{height}\"><div style=\"height:100%\">{inner}</div><span>w</span></div>");
     }
     assert_same_in_every_mode("percent", &format!("<html><body style=\"height:600px\">{inner}</body></html>"));
+}
+
+/// Not a test of behaviour: with `RUSTKIT_LAYOUT_MEMO_REPORT=<file>` set, writes what the memo did
+/// over the whole run to that file. The name sorts last, so on a serial run every other test has
+/// already laid out its pages. Used to report how many memo hits a corpus run exercised.
+#[test]
+fn zzz_report_memo_totals_for_the_corpus_run() {
+    if let Ok(path) = std::env::var("RUSTKIT_LAYOUT_MEMO_REPORT") {
+        let totals = rustkit_layout::layout_memo::memo_totals();
+        std::fs::write(path, format!("{totals:?}\n")).expect("write report");
+    }
 }
