@@ -196,18 +196,19 @@ fn frames(engine: &mut Engine, view: EngineViewId, n: usize) {
     }
 }
 
-/// The hand-test signature: Web Animations writes a property outside the
-/// paint list every frame, with values that compute to the same thing (a
-/// width that moves by a millionth of a pixel), and script reads a rect.
-/// Nothing a layout places changed, so no read builds the tree: each is
-/// answered from a frame over the painted boxes, as the settle frame is.
+/// The hand-test signature (full build per read, then a paint-only frame,
+/// no relayout): one animation holds a paint property that moves and a
+/// property outside the paint list that does not (a constant `width`
+/// beside a `transform`), and script reads a rect every frame. Nothing a
+/// layout places changed, so no read builds the tree: each is answered
+/// from a frame over the painted boxes, as the settle frame is.
 #[test]
 fn a_rect_read_after_an_unchanging_non_paint_animation_write_builds_no_tree() {
     let (mut engine, view, _server) = load(&component_page(40, 20, "<div id=a></div>"));
     engine
         .execute_script(
             view,
-            "var a=document.getElementById('a');a.animate([{width:'50px'},{width:'50.000001px'}],{duration:4000,iterations:Infinity});\
+            "var a=document.getElementById('a');a.animate([{transform:'translateX(0px)',width:'50px'},{transform:'translateX(300px)',width:'50px'}],{duration:4000,iterations:Infinity});\
              window.__n=0;(function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().width;window.__n++;f();});})()",
         )
         .unwrap();
@@ -225,6 +226,7 @@ fn a_rect_read_after_an_unchanging_non_paint_animation_write_builds_no_tree() {
         "no read built the tree and no frame laid the page out ({} reads answered from a frame)",
         s.forced_frames - s0.forced_frames
     );
+    assert!(s.forced_frames - s0.forced_frames >= 6, "the reads were answered from frames");
 }
 
 /// A width that really animates still lays the page out for the read: the
