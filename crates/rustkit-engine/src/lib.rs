@@ -6345,26 +6345,63 @@ impl Engine {
     /// frame's timers, animation frames, script network and relayouts. The
     /// parent is laid out again when a frame was (its paint includes the
     /// frame's).
-    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64) -> bool {
+    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let frames: Vec<EngineViewId> = self
             .views
             .get(&id)
             .map(|v| v.frames.values().map(|f| f.view).collect())
             .unwrap_or_default();
-        let mut relaid = false;
+        let mut all = LivePump::default();
         for fid in frames {
             let turn = Box::pin(self.pump_live(fid, elapsed_ms)).await;
-            relaid |= turn.relaid_out;
+            all.relaid_out |= turn.relaid_out;
+            all.in_flight += turn.in_flight;
+            all.next_timer_ms = match (all.next_timer_ms, turn.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
         }
-        if relaid {
+        if all.relaid_out {
             if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
                 debug!(error = %e, "frames: the parent's layout after a frame's failed");
             }
         }
-        relaid
+        all
     }
 
+    /// One live turn of view `id` and, with nested browsing contexts on,
+    /// of its frames first: what the page asked of its iframes is done,
+    /// each frame takes its own turn, then the page takes its. What the
+    /// frames still need joins the answer, because nothing else wakes the
+    /// loop for them: a frame's next timer, its requests that are out, and a
+    /// frame request the page made during this turn (a `load` handler that
+    /// sets `src` again: Speedometer's runner between workloads) ask for the
+    /// next turn at once.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        if !self.config.nested_contexts {
+            return self.pump_live_turn(id, elapsed_ms).await;
+        }
+        self.drive_frames(id).await;
+        let frames = self.pump_frames(id, elapsed_ms).await;
+        let mut out = self.pump_live_turn(id, elapsed_ms).await;
+        out.relaid_out |= frames.relaid_out;
+        out.in_flight += frames.in_flight;
+        out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let asked = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .is_some_and(|bindings| bindings.has_frame_requests());
+        if asked {
+            out.next_timer_ms = Some(0);
+        }
+        out
+    }
+
+    async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
@@ -6393,12 +6430,6 @@ impl Engine {
                 .views
                 .get(&id)
                 .is_some_and(|view| view.doc.load_tail.is_none());
-        if self.config.nested_contexts {
-            self.drive_frames(id).await;
-            if self.pump_frames(id, elapsed_ms).await {
-                out.relaid_out = true;
-            }
-        }
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {

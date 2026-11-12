@@ -1260,6 +1260,12 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Whether the page has asked something of its frames that
+    /// [`Self::take_frame_requests`] has not taken yet.
+    pub fn has_frame_requests(&self) -> bool {
+        !self.frame_requests.borrow().is_empty()
+    }
+
     /// The frame requests since the last call, in the order made.
     pub fn take_frame_requests(&self) -> Vec<FrameRequest> {
         std::mem::take(&mut *self.frame_requests.borrow_mut())
