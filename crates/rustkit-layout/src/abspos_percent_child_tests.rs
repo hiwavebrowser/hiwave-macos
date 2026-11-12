@@ -211,3 +211,43 @@ fn nested_inset_layers_lay_out_in_time_linear_in_their_depth() {
         "five nested layers visited {five} boxes, one layer {one}: not linear in depth"
     );
 }
+
+/// #1043 R1 MED (review 5860844422): the re-anchor can change the layer's
+/// WIDTH while its height stays, and the children must follow. A `relative;
+/// width: 400px; height: 100px; padding: 0 20px` box: the flow pass sees its
+/// 400px content box, the `inset: 0` layer is stretched to the 440px padding
+/// box (Chrome for Testing 148.0.7778.216: layer, `height: 100%` child and
+/// its `width: 100%` child all 440x100). Returns (layer, child, grandchild)
+/// as (width, height).
+fn padded_layer() -> [(f32, f32); 3] {
+    let mut outer_style = ComputedStyle::new();
+    outer_style.width = Length::Px(400.0);
+    outer_style.height = Length::Px(100.0);
+    outer_style.padding_left = Length::Px(20.0);
+    outer_style.padding_right = Length::Px(20.0);
+    let mut outer = LayoutBox::with_position(BoxType::Block, outer_style, Position::Relative);
+    let mut hf_style = ComputedStyle::new();
+    hf_style.width = Length::Percent(100.0);
+    hf_style.height = Length::Percent(100.0);
+    let hf = LayoutBox::new(BoxType::Block, hf_style);
+    let mut pl = block(Length::Percent(100.0));
+    pl.children.push(hf);
+    let mut l = layer(ComputedStyle::new(), [Some(0.0); 4]);
+    l.children.push(pl);
+    outer.children.push(l);
+    let viewport = Dimensions {
+        content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+        ..Default::default()
+    };
+    outer.layout(&viewport);
+    let ab = &outer.children[0];
+    let pl = &ab.children[0];
+    let hf = &pl.children[0];
+    let r = |b: &LayoutBox| (b.dimensions.content.width, b.dimensions.content.height);
+    [r(ab), r(pl), r(hf)]
+}
+
+#[test]
+fn a_layer_stretched_wider_at_the_re_anchor_lays_its_children_out_at_the_new_width() {
+    assert_eq!(padded_layer(), [(440.0, 100.0), (440.0, 100.0), (440.0, 100.0)]);
+}
