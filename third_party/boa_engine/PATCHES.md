@@ -466,3 +466,23 @@ The vendored crate's own parser tests are not run by the workspace, and `cargo t
 on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
+
+## Patch: global lexical scope across scripts
+
+**Why.** ES2024 GlobalDeclarationInstantiation: every classic script of a realm shares one global
+declarative environment, so a function compiled in an earlier script sees a top-level
+`const`/`let`/`class` a LATER script declares. Boa resolves a name no enclosing scope declares to the
+global OBJECT at compile time, so the earlier function threw `ReferenceError` for it forever
+(Speedometer 3's Perf-Dashboard: a function from one `<script>` reads `RemoteAPI`, a class declared by
+the next).
+
+**What.** Marked `HIWAVE PATCH (global-lexical-scope)`:
+`src/environments/runtime/mod.rs` (`find_runtime_binding` re-points a global-object locator at the
+realm's lexical binding of that name, in `resolve_late_global_lexical`), `src/realm.rs`
+(`late_global_lexical`, a per-realm name cache that is dropped when the global scope gains bindings, so
+a read of `Math` or `document` costs one hash lookup), and `src/vm/opcode/set/name.rs`
+(`verify_initialized` throws TypeError when such a late-resolved binding is a `const`, which the
+compiler could not know). Pins: `crates/rustkit-js/tests/global_lexical_scope.rs` (runtime) and
+`crates/rustkit-engine/src/script_global_lexical_tests.rs` (page scripts). Cost: one cached hash lookup
+per global-object name read once any script has a top-level lexical declaration; a 1M-iteration loop
+of three global reads with 300 top-level consts went 1.41 s to 1.6 s (release, Linux).
