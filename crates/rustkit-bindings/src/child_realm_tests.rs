@@ -6,8 +6,13 @@
 //! the bindings can be shared at all, or the place the plan stops.
 //!
 //! The expected answers are a browser's for a page and a same-origin frame
-//! (`parent.child` standing for `iframe.contentWindow`). Checked against
-//! Chrome for Testing 148 with a reduced page where a comment says so.
+//! (`parent.child` standing for `iframe.contentWindow`). Where a comment
+//! says "Chrome 148", the value was recorded from Chrome for Testing
+//! 148.0.7778.216 (headless, 2026-11-11) on a page with a same-origin
+//! `<iframe>` running the same expressions against `iframe.contentWindow`:
+//!   node:     true,false,true,true,false,child text
+//!   dispatch: true, and the child heard `ping:true:true:false,bubbled`
+//!   error:    child broke:true:false
 
 use super::*;
 
@@ -139,6 +144,7 @@ fn a_runaway_loop_in_the_child_is_stopped_whoever_called_it() {
 fn an_uncaught_error_in_the_child_is_the_childs_and_leaves_both_pages_running() {
     let t = tree();
     ev(&t.child, "function boom() { throw new RangeError('child broke'); }");
+    // Chrome 148: child broke:true:false
     assert_eq!(ev(&t.parent, "var seen; try { child.boom(); } catch (e) { seen = e.message + ':' + (e instanceof child.RangeError) + ':' + (e instanceof RangeError); } seen"), "child broke:true:false");
     assert_eq!(ev(&t.child, "typeof boom"), "function");
 }
