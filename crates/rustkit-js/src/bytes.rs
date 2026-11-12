@@ -56,6 +56,8 @@ pub(crate) struct BlobStore {
     records: HashMap<String, (Vec<u8>, String)>,
     /// The bytes of all records together.
     held: usize,
+    /// The bound on `held`, when not [`MAX_BLOB_STORE_BYTES`].
+    pub(crate) limit: Option<usize>,
     /// The last number handed out for a URL: one sequence for the whole
     /// runtime, so two documents sharing the store never make the same URL.
     last: u64,
@@ -67,7 +69,7 @@ impl BlobStore {
     }
     fn put(&mut self, url: String, bytes: Vec<u8>, kind: String) {
         self.remove(&url);
-        if bytes.len() > MAX_BLOB_STORE_BYTES - self.held {
+        if bytes.len() > self.limit.unwrap_or(MAX_BLOB_STORE_BYTES).saturating_sub(self.held) {
             return;
         }
         self.held += bytes.len();

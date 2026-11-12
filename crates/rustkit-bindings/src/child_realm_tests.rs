@@ -203,3 +203,70 @@ fn a_childs_lazily_installed_interfaces_answer_as_the_parents_do() {
     assert_eq!(ev(&fresh, "(1234.5).toLocaleString()"), "1,234.5");
     assert_eq!(ev(&fresh, "typeof Object.getOwnPropertyDescriptor(globalThis, 'ReadableStream').get"), "function");
 }
+
+/// A blob URL belongs to the origin of the document that made it. The
+/// documents of a frame tree share one runtime, and so one store: a frame
+/// of the maker's origin reads and revokes the URL (File API §8.3.2: the
+/// blob URL store is shared by same-origin documents), a document of
+/// another origin does neither, and the name is not one it could count its
+/// way to (Chrome 148: `blob:<origin>/<uuid>`).
+#[test]
+fn a_blob_url_belongs_to_the_origin_that_made_it() {
+    let page = |parent: Option<&DomBindings>, url: &str| {
+        let b = match parent {
+            Some(parent) => parent.new_child().unwrap(),
+            None => DomBindings::new(JsRuntime::new().unwrap()).unwrap(),
+        };
+        b.set_document(Rc::new(Document::parse_html(CHILD).unwrap())).unwrap();
+        b.set_location(&Url::parse(url).unwrap()).unwrap();
+        b.enable_net_bridge().unwrap();
+        b
+    };
+    let parent = page(None, "https://a.test/");
+    let same = page(Some(&parent), "https://a.test/frame");
+    let other = page(Some(&parent), "https://b.test/frame");
+    let url = ev(&parent, "var u = URL.createObjectURL(new Blob(['secret'], { type: 'text/plain' })); u");
+    let read = |b: &DomBindings| {
+        ev(b, &format!("var out = 'pending'; fetch({url:?}).then(function (r) {{ return r.text(); }}).then(function (t) {{ out = t; }}, function (e) {{ out = e.name; }}); 0"));
+        ev(b, "out")
+    };
+
+    assert_eq!(other.blob_url_text(&url), None, "another origin's document read the blob through the engine");
+    assert_eq!(read(&other), "TypeError", "another origin's document fetched the blob");
+    assert_eq!(same.blob_url_text(&url).as_deref(), Some("secret"));
+    assert_eq!(read(&same), "secret");
+
+    ev(&other, &format!("URL.revokeObjectURL({url:?}); 0"));
+    assert_eq!(parent.blob_url_text(&url).as_deref(), Some("secret"), "another origin's document revoked the blob");
+    ev(&same, &format!("URL.revokeObjectURL({url:?}); 0"));
+    assert_eq!(parent.blob_url_text(&url), None, "a same-origin frame revokes it");
+
+    // The name: the maker's origin and a version 4 UUID.
+    let shape = "/^blob:https:\\/\\/a\\.test\\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/";
+    assert_eq!(ev(&parent, &format!("{shape}.test(u) + '|' + (URL.createObjectURL(new Blob([])) !== URL.createObjectURL(new Blob([])))")), "true|true", "{url}");
+    // What the page says its origin is does not move it.
+    ev(&other, "try { window.location.origin = 'https://a.test'; } catch (e) {} 0");
+    let second = ev(&parent, "URL.createObjectURL(new Blob(['again']))");
+    assert_eq!(other.blob_url_text(&second), None);
+    assert_eq!(ev(&other, &format!("{shape}.test(URL.createObjectURL(new Blob([])))")), "false", "the name carries the origin the engine knows");
+}
+
+/// Past the store's bound a blob URL has nothing behind it, and the page's
+/// developer is told: the miss is reported as an unsupported feature.
+#[test]
+fn a_full_blob_store_is_reported() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(CHILD).unwrap())).unwrap();
+    b.runtime.borrow_mut().set_blob_store_limit(8);
+    let kept = ev(&b, "URL.createObjectURL(new Blob(['12345678']))");
+    assert_eq!(b.blob_url_text(&kept).as_deref(), Some("12345678"));
+    assert!(b.take_unsupported_apis().is_empty());
+    let dropped = ev(&b, "URL.createObjectURL(new Blob(['x']))");
+    assert_eq!(b.blob_url_text(&dropped), None);
+    let apis = b.take_unsupported_apis();
+    assert_eq!(apis.len(), 1, "{apis:?}");
+    assert_eq!((apis[0].0.as_str(), apis[0].1.as_str()), ("URL", "createObjectURL (blob store full)"));
+    ev(&b, &format!("URL.revokeObjectURL({kept:?}); 0"));
+    let after = ev(&b, "URL.createObjectURL(new Blob(['x']))");
+    assert_eq!(b.blob_url_text(&after).as_deref(), Some("x"), "revoking makes room");
+}

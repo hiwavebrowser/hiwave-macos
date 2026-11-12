@@ -1483,6 +1483,17 @@ impl JsRuntime {
         }
     }
 
+    /// Bound what this runtime's blob URLs keep alive, in bytes (the
+    /// default is 256 MiB).
+    pub fn set_blob_store_limit(&mut self, bytes: usize) {
+        #[cfg(feature = "boa")]
+        {
+            self.blobs.borrow_mut().limit = Some(bytes);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = bytes;
+    }
+
     /// Forget the bytes stashed under `key`, if script did not take them.
     pub fn drop_stashed_bytes(&mut self, key: u64) {
         #[cfg(feature = "boa")]
