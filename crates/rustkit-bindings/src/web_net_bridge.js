@@ -15,7 +15,9 @@
     // Bounds what a page can park before the engine drains: past it a
     // request is refused (0) and the surface reports a network error. The
     // per-page request budgets live in the policy; this bounds memory.
-    var MAX_QUEUED = 64;
+    // 1024: a page may start a few hundred requests in one turn (JetStream
+    // 2.2's preload starts 315); at 64 the rest failed at once.
+    var MAX_QUEUED = 1024;
 
     var queue = [];
     var pending = {};
