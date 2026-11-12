@@ -333,6 +333,8 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         table_span,
         table_caption_shift,
         context_floats,
+        // A record of the last child layouts, never read by layout.
+        layout_memo: _,
         // Outputs the engine stamps after layout; layout never reads them.
         element_scroll: _,
         sticky_rule: _,

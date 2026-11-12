@@ -22,6 +22,7 @@ pub mod grid;
 pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
+pub mod layout_memo;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod path_data;
@@ -1279,7 +1280,7 @@ pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32
 }
 
 /// Margin collapse context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarginCollapseContext {
     /// Pending positive margin.
     pub positive_margin: f32,
@@ -1342,7 +1343,7 @@ impl MarginCollapseContext {
 }
 
 /// A 2D rectangle.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -1378,7 +1379,7 @@ impl Rect {
 }
 
 /// Edge sizes (margin, padding, border).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EdgeSizes {
     pub top: f32,
     pub right: f32,
@@ -1397,7 +1398,7 @@ impl EdgeSizes {
 }
 
 /// Box dimensions including content, padding, border, and margin.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dimensions {
     /// Content area.
     pub content: Rect,
@@ -1927,6 +1928,9 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// Recorded results of this box's child layout for the current root layout (LAT21,
+    /// `layout_memo`). Never an input to layout.
+    pub(crate) layout_memo: Option<Box<layout_memo::BoxMemo>>,
     /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
     /// when it is an element scroller. Set through a shared tree by the
     /// engine, from its per-view table, when script scrolls. Layout never
@@ -2002,6 +2006,7 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            layout_memo: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
@@ -4400,6 +4405,7 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        layout_memo::bump_epoch();
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
     }
@@ -6899,7 +6905,7 @@ impl LayoutBox {
     }
 
     /// Layout block children with margin collapse.
-    fn layout_block_children_with_collapse(
+    pub(crate) fn layout_block_children_with_collapse_run(
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
