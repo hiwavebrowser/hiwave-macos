@@ -143,6 +143,15 @@ impl ShieldInterceptHandler {
         self.floor_domain(host).is_some()
     }
 
+    /// What the interim floor says about `request` while the filter lists are still building.
+    fn pending_floor(&self, request: &Request) -> Option<BlockReason> {
+        request
+            .url
+            .host_str()
+            .and_then(|host| self.floor_domain(host))
+            .map(|domain| BlockReason { list: "domain-floor".into(), rule: Some(domain.to_string()) })
+    }
+
     /// The interim list's domain that `host` is, or is under.
     fn floor_domain(&self, host: &str) -> Option<&str> {
         let host_lower = host.to_lowercase();
@@ -268,11 +277,7 @@ impl InterceptHandler for ShieldInterceptHandler {
                 // not mean permanent allow). The census still counts the
                 // window so the upgrade's coverage delta stays a number.
                 self.census.engine_pending.fetch_add(1, Ordering::Relaxed);
-                request
-                    .url
-                    .host_str()
-                    .and_then(|host| self.floor_domain(host))
-                    .map(|domain| BlockReason { list: "domain-floor".into(), rule: Some(domain.to_string()) })
+                self.pending_floor(request)
             }
         };
 
