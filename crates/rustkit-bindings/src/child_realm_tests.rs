@@ -181,3 +181,25 @@ fn ten_children_in_one_runtime() {
     assert_eq!(ev(&parent, "[frame0.me, frame4.me, frame9.me, frame9.document.title].join()"), "0,4,9,child-title");
     assert_eq!(ev(&children[3], "me"), "3");
 }
+
+/// A child realm installs Intl, Streams, Web Animations and the canvas 2D
+/// context on first use (web_lazy.js); script sees the same answers as in
+/// a page that installed them eagerly.
+#[test]
+fn a_childs_lazily_installed_interfaces_answer_as_the_parents_do() {
+    let t = tree();
+    let probe = "[typeof Intl, typeof Intl.NumberFormat, (1234.5).toLocaleString(), new Date(0).toLocaleDateString('en-US', { timeZone: 'UTC' }), \
+                 'a'.localeCompare('b'), typeof ReadableStream, typeof new ReadableStream().getReader, typeof TransformStream, \
+                 typeof Animation, typeof document.timeline, typeof document.body.animate, typeof document.getAnimations, \
+                 typeof CanvasRenderingContext2D, document.createElement('canvas').width, \
+                 typeof document.createElement('canvas').getContext('2d').fillRect].join()";
+    let parent = ev(&t.parent, probe);
+    assert!(!parent.starts_with("ERROR"), "{parent}");
+    assert_eq!(ev(&t.child, probe), parent);
+    // Touching one installs that one only: the others are still stand-ins
+    // until asked (a fresh child).
+    let fresh = t.parent.new_child().unwrap();
+    fresh.set_document(Rc::new(Document::parse_html(CHILD).unwrap())).unwrap();
+    assert_eq!(ev(&fresh, "(1234.5).toLocaleString()"), "1,234.5");
+    assert_eq!(ev(&fresh, "typeof Object.getOwnPropertyDescriptor(globalThis, 'ReadableStream').get"), "function");
+}

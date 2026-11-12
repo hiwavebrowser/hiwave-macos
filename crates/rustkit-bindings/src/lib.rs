@@ -1203,7 +1203,7 @@ impl DomBindings {
     }
 
     fn build(runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
-        Self::build_in(PageRuntime::main(runtime), app_bridge)
+        Self::build_in(PageRuntime::main(runtime), app_bridge, false)
     }
 
     /// Bindings for a document nested in this one's frame tree and of its
@@ -1214,7 +1214,7 @@ impl DomBindings {
     /// [`Self::drop_child`].
     pub fn new_child(&self) -> Result<Self, BindingError> {
         let realm = self.runtime.shared.borrow_mut().create_realm()?;
-        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false)
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, true)
     }
 
     /// Give this page's global a property `name` that is `other`'s global
@@ -1335,7 +1335,9 @@ impl DomBindings {
         self.runtime.shared.borrow_mut().drop_realm(realm)
     }
 
-    fn build_in(page: PageRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+    /// `lazy` (a child realm): Intl, Streams, Web Animations and the canvas
+    /// 2D context are installed on first use (web_lazy.js), not now.
+    fn build_in(page: PageRuntime, app_bridge: bool, lazy: bool) -> Result<Self, BindingError> {
         let mut entered = page.borrow_mut();
         let runtime: &mut JsRuntime = &mut entered;
         debug!(app_bridge, "Initializing DOM bindings");
@@ -1362,7 +1364,7 @@ impl DomBindings {
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut *runtime, app_bridge)?;
+        Self::inject_globals(&mut *runtime, app_bridge, lazy)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
@@ -1421,7 +1423,7 @@ impl DomBindings {
         // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
         // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
         let canvases = web_canvas::SharedCanvases::default();
-        web_canvas::install(&mut *runtime, &canvases, &dom_host)?;
+        web_canvas::install(&mut *runtime, &canvases, &dom_host, !lazy)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -1434,7 +1436,21 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
-        runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        if lazy {
+            // The four lazily installed interfaces' sources, for web_lazy.js.
+            let sources = serde_json::json!({
+                "intl": include_str!("web_intl.js"),
+                "streams": include_str!("web_streams.js"),
+                "animations": include_str!("web_animations.js"),
+                "canvas": web_canvas::SCRIPT,
+            });
+            runtime.evaluate_script(&format!(
+                "Object.defineProperty(globalThis, '__rustkit_lazy_sources', {{ value: {sources}, configurable: true }});"
+            ))?;
+            runtime.evaluate_with_host(include_str!("web_lazy.js"))?;
+        } else {
+            runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        }
         // CH3.A7: the engine's own globals (`__rustkit_*`, `__rk*`) stay
         // out of `Object.keys(window)` and for-in, which list none of them
         // in Chromium. They stay configurable: setup scripts redefine some.
@@ -1741,7 +1757,7 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool) -> Result<(), BindingError> {
+    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool, lazy: bool) -> Result<(), BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -1851,11 +1867,14 @@ impl DomBindings {
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
-        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
-
-        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
-        runtime.evaluate_script(include_str!("web_intl.js"))?;
+        // ReadableStream, WritableStream, TransformStream and strategies
+        // (web_streams.js), and Intl (en-US only) with the toLocale*String
+        // methods over it (web_intl.js): a child realm installs them on
+        // first use (web_lazy.js).
+        if !lazy {
+            runtime.evaluate_with_host(include_str!("web_streams.js"))?;
+            runtime.evaluate_script(include_str!("web_intl.js"))?;
+        }
 
         // IPC bridge for communication with Rust: the app's own documents
         // only (CH3.A7). A web page gets none of it, as in Chromium.
