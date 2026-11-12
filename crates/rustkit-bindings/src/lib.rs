@@ -136,7 +136,7 @@ mod web_scroll;
 mod web_url;
 
 pub use dom::{
-    AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, CssAnimationInfo, ElementScrolls,
+    AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, ForcedReadProbe, CssAnimationInfo, ElementScrolls,
     ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
     SharedElementScrolls,
 };

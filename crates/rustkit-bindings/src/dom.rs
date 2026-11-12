@@ -230,6 +230,27 @@ pub struct ControlWrites {
     /// box moved, so an animation frame over the published boxes answers
     /// the read without a build when it can.
     pub layer_only: bool,
+    /// LAT22 probe: what the read was and what was pending, for the
+    /// engine's log line when the read builds the tree.
+    pub probe: ForcedReadProbe,
+}
+
+/// LAT22 probe (diagnostics only; shapes, never page content): the read
+/// that asked for a forced layout and the writes pending at it.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ForcedReadProbe {
+    /// The read's kind (`rect`, `offset`, `computed_style`, ...).
+    pub read: &'static str,
+    /// The kind of the first write since the last published layout.
+    pub cause: &'static str,
+    /// The element read, when the read is of one element.
+    pub read_node: Option<usize>,
+    /// A write other than Web Animations' layer is pending (a style,
+    /// attribute, child-list, text or form write, logged or not).
+    pub other_write_pending: bool,
+    /// A write a layout can see is pending (false: only paint-layer
+    /// writes, which is what `layer_only` says).
+    pub layout_write_pending: bool,
 }
 
 /// A layout of the DOM as it is now: what a forced layout publishes.
@@ -287,6 +308,8 @@ pub(crate) struct DomHost {
     pub(crate) geometry_builds: u64,
     /// Lays out the document the engine last published a layout of.
     pub(crate) forced_layout: Option<ForcedLayout>,
+    /// LAT22 probe: the element of the geometry read in progress.
+    pub(crate) forced_read_node: Option<usize>,
     /// Forced layouts since the engine last took the count
     /// (`DomBindings::take_forced_layouts`).
     pub(crate) forced_layouts: u64,
@@ -535,6 +558,13 @@ impl DomHost {
                 values: std::mem::take(&mut h.value_writes),
                 checked: std::mem::take(&mut h.checked_writes),
                 layer_only: !dirty.written_since_layout(),
+                probe: ForcedReadProbe {
+                    read,
+                    cause,
+                    read_node: h.forced_read_node.take(),
+                    other_write_pending: dirty.beyond_animation_layer(),
+                    layout_write_pending: dirty.written_since_layout(),
+                },
             }
         };
         let laid = forced(&mut writes);
@@ -2000,7 +2030,13 @@ pub(crate) fn install(
                 _ => None,
             };
             if let Some(read) = read {
+                // LAT22 probe: which element the read is of.
+                {
+                    let mut host = h.borrow_mut();
+                    host.forced_read_node = host.node(args).map(|n| n.id.raw());
+                }
                 DomHost::ensure_fresh_geometry(&h, &d, read);
+                h.borrow_mut().forced_read_node = None;
             }
             let host = h.borrow();
             match (host.node(args), field) {
