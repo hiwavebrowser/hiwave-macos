@@ -331,35 +331,49 @@ fn the_shadow_rule_index_builds_the_same_boxes() {
     }
 }
 
-/// Roots whose sheets differ but have the same shape (one sheet, one rule)
-/// and the same ids, under hosts of one style. Each `#x` takes its own
-/// sheets' style, with or without the view cache. Until 2026-11-12 style
-/// sharing keyed rule numbers without saying whose index numbered them, so
-/// every `#x` after the first took the first's style (`5px` everywhere).
-const TWO_SHEETS_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</style></head><body>\
-    <div id=h1></div><div id=h2></div><div id=h3></div><div id=h4></div><p id=t>text</p><script>\
-    ['h1','h2','h3','h4'].forEach(function(h,i){\
-    var r=document.getElementById(h).attachShadow({mode:'open'});\
-    r.innerHTML='<style id=st>#x{padding-left:'+(i%2?3:5)+'px}</style><div id=x>x</div>';});\
+/// Many roots whose sheets differ but have one shape (the same selectors,
+/// other values) and the same ids; each holds a nested tree of the same
+/// kind. Odd roots' `:host` rules size their hosts; the even roots' hosts
+/// share one style, which is where sharing went wrong (a host with `:host`
+/// rules is never shared, nor its children). Every element takes its own tree's style, with or without the
+/// rule index and the view cache. Until 2026-11-12 style sharing keyed rule
+/// numbers without saying whose index numbered them, so every `#x` after
+/// the first took the first's style (`5px` everywhere).
+const SAME_SHAPE_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</style></head><body>\
+    <div id=hosts></div><p id=t>text</p><script>\
+    function css(a,b){return '<style id=st>#x{padding-left:'+a+'px}'+(b?':host{padding-top:'+b+'px}':'')+'</style>';}\
+    for(var i=0;i<8;i++){var h=document.createElement('div');h.className='h';\
+    document.getElementById('hosts').appendChild(h);\
+    var r=h.attachShadow({mode:'open'});r.innerHTML=css(1+i%3,i%2*2)+'<div id=x>x</div><div id=n></div>';\
+    r.querySelector('#n').attachShadow({mode:'open'}).innerHTML=css(4+i%3,i%2)+'<div id=x>x</div>';}\
+    function each(f){return Array.prototype.map.call(document.querySelectorAll('.h'),f).join('/');}\
     </script></body></html>";
+
+fn same_shape_expected() -> String {
+    (0..8)
+        .map(|i| format!("{}px {}px {}px {}px", 1 + i % 3, i % 2 * 2, 4 + i % 3, i % 2))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+const SAME_SHAPE_READ: &str = "each(function(h){var r=h.shadowRoot,n=r.querySelector('#n');\
+    return [getComputedStyle(r.querySelector('#x')).paddingLeft,getComputedStyle(h).paddingTop,\
+    getComputedStyle(n.shadowRoot.querySelector('#x')).paddingLeft,getComputedStyle(n).paddingTop].join(' ');})";
 
 #[test]
 fn roots_with_differing_sheets_of_one_shape_match_their_own() {
+    let want = same_shape_expected();
     for cache_off in [true, false] {
         crate::shadow_tree::set_view_cache_off_for_test(cache_off);
         set_tree_rule_index_off_for_test(true);
-        let (without, _) = built_dump(TWO_SHEETS_PAGE);
+        let (without, _) = built_dump(SAME_SHAPE_PAGE);
         set_tree_rule_index_off_for_test(false);
-        let (with, _) = built_dump(TWO_SHEETS_PAGE);
-        let (mut engine, view, _server) = load(TWO_SHEETS_PAGE);
-        let pads = read(
-            &mut engine,
-            view,
-            "['h1','h2','h3','h4'].map(function(h){return getComputedStyle(document.getElementById(h).shadowRoot.querySelector('#x')).paddingLeft;}).join('/')",
-        );
+        let (with, _) = built_dump(SAME_SHAPE_PAGE);
+        let (mut engine, view, _server) = load(SAME_SHAPE_PAGE);
+        let got = read(&mut engine, view, SAME_SHAPE_READ);
         crate::shadow_tree::set_view_cache_off_for_test(false);
+        assert_eq!(got, want, "cache off: {cache_off}");
         assert!(with == without, "cache off: {cache_off}; the indexed build differs from the unindexed one");
-        assert_eq!(pads, "5px/3px/5px/3px", "cache off: {cache_off}");
     }
 }
 
