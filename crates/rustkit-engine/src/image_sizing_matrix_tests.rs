@@ -28,7 +28,14 @@ const READ: &str = "Array.prototype.map.call(document.querySelectorAll('img'), f
 /// Cells that do not match Chrome yet, as `page@dpr:id:part` (`part` is
 /// `box` or `nat`). A listed cell that starts to match fails the test, so
 /// the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // `sizes="auto"` on a lazy image with `width="300"`: Chrome's source
+    // size is the image's own 300px width, so `naturalWidth` is 300. The
+    // engine does not know `auto` and uses 100vw (800). The box and the
+    // pick are right; only script sees it.
+    "matrix@1:m22:nat",
+    "matrix@2:m22:nat",
+];
 
 fn cells(page: &'static [u8], dpr: f32) -> Vec<String> {
     let server = serve_byte_routes(vec![

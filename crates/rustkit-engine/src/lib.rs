@@ -20479,6 +20479,21 @@ impl Engine {
             } else if loaded.heard.get(&node) == Some(&layout_ctx::LoadedImages::key(&name)) {
                 still_loaded.insert(node);
             } else if let Some((width, height)) = self.loaded_image_size(&url) {
+                // IMG1: `naturalWidth`/`naturalHeight` are the density-
+                // corrected size (HTML §4.8.4.4): a 400px image picked for
+                // a 150px slot is 150 wide, a `2x` one half its pixels.
+                let density = view
+                    .lay
+                    .shown_images
+                    .borrow()
+                    .get(&node)
+                    .filter(|image| image.wanted == name)
+                    .map_or(1.0, |image| image.wanted_density)
+                    .max(f32::MIN_POSITIVE);
+                let (width, height) = (
+                    (width as f32 / density).round() as u32,
+                    (height as f32 / density).round() as u32,
+                );
                 still_loaded.insert(node);
                 loaded.heard.insert(node, layout_ctx::LoadedImages::key(&name));
                 // A `data:` URL is the element's own `src`: script reads
