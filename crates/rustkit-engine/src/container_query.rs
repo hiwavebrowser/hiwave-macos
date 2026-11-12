@@ -189,6 +189,7 @@ impl Drop for DocumentScope {
                     fragile: state.fragile,
                     rem: state.root_em.unwrap_or(16.0),
                     viewport: state.viewport,
+                    replayed: false,
                 })
             });
         }
@@ -231,6 +232,9 @@ pub(crate) struct BuildFacts {
     fragile: HashSet<usize>,
     rem: f32,
     viewport: (f32, f32),
+    /// The build replayed memoized styles: it asked only where the memo
+    /// missed, so its record is partial.
+    replayed: bool,
 }
 
 impl BuildFacts {
@@ -829,4 +833,51 @@ fn definite_height(style: &ComputedStyle, vp: (f32, f32)) -> Option<f32> {
     let min = limit(&style.min_height)?;
     let height = max.map_or(height, |m| height.min(m));
     Some(min.map_or(height, |m| height.max(m)))
+}
+
+#[cfg(test)]
+mod build_facts_tests {
+    use super::*;
+
+    fn facts(node: usize, condition: &str, answer: bool, replayed: bool) -> BuildFacts {
+        BuildFacts {
+            trusted: HashSet::from([node]),
+            asked: HashMap::from([(
+                node,
+                vec![Asked {
+                    condition: condition.to_string(),
+                    em: 16.0,
+                    is_size: false,
+                    answer,
+                }],
+            )]),
+            fragile: HashSet::new(),
+            rem: 16.0,
+            viewport: (800.0, 600.0),
+            replayed,
+        }
+    }
+
+    /// #1081 R1 MED: a build that replays memoized styles asks only where
+    /// the memo misses, so its record is partial. Replacing the recording
+    /// build's record with it forgot `(min-width: 500px)`, and a later
+    /// move across 500 was taken for a move that changes no answer.
+    #[test]
+    fn a_replayed_builds_partial_record_is_merged_not_swapped_in() {
+        let mut kept = facts(7, "(min-width: 500px)", false, false);
+        kept.absorb(facts(7, "(min-width: 100px)", true, true));
+        let used = MeasuredContainers::from([(7, (400.0, 0.0))]);
+        let wider = MeasuredContainers::from([(7, (600.0, 0.0))]);
+        assert!(
+            kept.answers_change(&used, &wider),
+            "400 -> 600 crosses the recorded (min-width: 500px)"
+        );
+        // A recording build's record replaces the old one.
+        let mut swapped = facts(7, "(min-width: 500px)", false, false);
+        swapped.absorb(facts(7, "(min-width: 100px)", true, false));
+        assert!(
+            !swapped.answers_change(&used, &wider),
+            "only (min-width: 100px) is on record"
+        );
+    }
 }

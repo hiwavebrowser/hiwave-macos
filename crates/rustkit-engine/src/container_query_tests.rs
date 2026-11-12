@@ -635,3 +635,48 @@ body {{ margin: 0 }} .row {{ display: flex; width: 800px }} .pad {{ width: 100px
         "an answer that flips: one re-pass"
     );
 }
+
+const INLINE_AND_TABLE_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-11/css_container_query_inline_and_table.html");
+
+/// #1081 R1 HIGH and MED: size containment does not apply to a non-atomic
+/// inline box or to a table box (css-contain-2 §3.1), so such a container
+/// is sized by its contents and answers no size query. Chrome for Testing
+/// 148.0.7778.216:
+/// - a `<span style="container-type: inline-size">` around a 100px box
+///   leaves its inline-block, float, flex-item and grid-item wrapper 100
+///   wide (w1..w4); containing the span collapsed each wrapper to 0;
+/// - `(min-width: 1px)` is false in a span (k1), a `display: table` box
+///   with or without a width (k2, k3), an `inline-table` (k6) and a
+///   table cell (k7), and true in a 300px inline-block (k4) and a block
+///   (k5).
+#[test]
+fn an_inline_or_table_container_is_not_contained_and_answers_no_query() {
+    let server = serve_routes(vec![("/", "text/html", INLINE_AND_TABLE_PAGE.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let got = engine
+        .execute_script(
+            view,
+            "['w1','w2','w3','w4','k1','k2','k3','k4','k5','k6','k7'].map(function (id) { \
+             return Math.round(document.getElementById(id).getBoundingClientRect().width); }).join(',')",
+        )
+        .unwrap();
+    assert!(
+        got.contains("\"100,100,100,100,10,10,10,30,30,10,10\""),
+        "w1..w4 then k1..k7, Chrome 100,100,100,100,10,10,10,30,30,10,10: {got}"
+    );
+}
