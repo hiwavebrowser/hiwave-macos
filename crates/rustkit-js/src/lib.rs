@@ -498,6 +498,8 @@ pub struct JsRuntime {
     /// Page script text, only while an embedder has asked to quote it in
     /// an error log. See [`JsRuntime::set_capture_script_sources`].
     sources: source_context::ScriptSources,
+    /// A test's view of every source handed to the engine (`tap_sources`).
+    source_tap: Option<std::rc::Rc<dyn Fn(&str)>>,
 }
 
 /// M2: dropping a runtime lets its realm go. The realm's natives (console,
@@ -577,6 +579,7 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             host,
             sources: source_context::ScriptSources::default(),
+            source_tap: None,
         };
 
         // Set up built-in APIs
@@ -794,6 +797,9 @@ impl JsRuntime {
     /// object is reachable only from the closures such a script builds, so
     /// page script cannot report, forge or read through it.
     pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
@@ -901,8 +907,20 @@ impl JsRuntime {
         self.evaluate(source, Some(path))
     }
 
+    /// Hand every source this runtime evaluates from now on to `tap`, the
+    /// embedder's own scripts included (`None` stops). For tests that pin
+    /// what may never be written into script source, such as text the user
+    /// typed; nothing else should hold on to what it is shown.
+    #[doc(hidden)]
+    pub fn tap_sources(&mut self, tap: Option<std::rc::Rc<dyn Fn(&str)>>) {
+        self.source_tap = tap;
+    }
+
     fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
         trace!(len = source.len(), "Evaluating script");
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
 
         #[cfg(feature = "boa")]
         {

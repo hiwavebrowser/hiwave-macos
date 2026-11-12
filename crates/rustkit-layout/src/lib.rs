@@ -22799,6 +22799,28 @@ mod overlay_hit_tests {
         assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
     }
 
+    /// R1 MED 3: a copy of a layout must not inherit its hit marks. The
+    /// engine answers a forced read from a clone of the painted tree and
+    /// then moves boxes on it (an animation frame); a mark that said
+    /// "nothing under this box reaches outside it" before the move would
+    /// stop the walk at the parent.
+    #[test]
+    fn a_copy_of_a_layout_makes_its_own_hit_marks() {
+        let mut root = page();
+        let mut parent = boxed(2, 0.0, 0.0, 100.0, 100.0);
+        parent.children.push(boxed(3, 10.0, 10.0, 50.0, 50.0));
+        root.children.push(parent);
+        // Marks the painted tree: nothing reaches outside the parent.
+        assert_eq!(root.hit_test(20.0, 20.0).and_then(|h| h.node_id), Some(3));
+        let mut copy = root.clone();
+        copy.children[0].children[0].dimensions.content.x += 300.0;
+        assert_eq!(
+            copy.hit_test(320.0, 20.0).and_then(|h| h.node_id),
+            Some(3),
+            "the moved box is hit where the copy has it"
+        );
+    }
+
     #[test]
     fn a_box_scaled_to_nothing_is_not_hit() {
         let mut root = page();

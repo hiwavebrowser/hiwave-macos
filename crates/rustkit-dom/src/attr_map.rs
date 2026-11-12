@@ -165,6 +165,26 @@ impl std::ops::Index<&str> for AttrMap {
 mod tests {
     use super::AttrMap;
 
+    /// R1 LOW: building a long list must not be quadratic. 100,000 distinct
+    /// names are a 1.5 MB start tag, which a generated or hostile page can
+    /// send; scanning the list for each one was 10^10 comparisons.
+    #[test]
+    fn a_hundred_thousand_attributes_build_in_linear_time() {
+        let started = std::time::Instant::now();
+        let mut map = AttrMap::new();
+        for i in 0..100_000 {
+            map.insert(format!("data-a{i}"), String::new());
+        }
+        assert_eq!(map.len(), 100_000);
+        assert_eq!(map.get("data-a99999").map(String::as_str), Some(""));
+        assert!(map.get("data-missing").is_none());
+        assert_eq!(map.remove("data-a5").as_deref(), Some(""));
+        assert!(!map.contains_key("data-a5"));
+        assert_eq!(map.keys().next().map(String::as_str), Some("data-a0"));
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "100,000 inserts took {took:?}");
+    }
+
     fn names(map: &AttrMap) -> String {
         map.keys().cloned().collect::<Vec<_>>().join(",")
     }

@@ -65,6 +65,16 @@ MouseEvent defaults: 0 0 0 0 0 0 0
 WheelEvent fields: 3 -10 1 1 -10 3 -10 0 200 100 200 true
 WheelEvent defaults and constants: 0 0 0 0 0 0 0 0 1 2 2 truetruetrue
 wheelDelta from init: 100 -120 240 -120
+legacy deltas {"deltaX":3,"deltaY":-10}: 3 -10 -10 3 -10
+legacy deltas {"deltaY":100}: 0 100 100 0 100
+legacy deltas {"deltaX":40}: 40 0 40 40 0
+legacy deltas {"deltaX":3,"deltaY":-10,"deltaMode":1}: 3 -10 -10 3 -10
+legacy deltas {"deltaY":100,"wheelDeltaY":55}: 0 100 55 0 55
+legacy deltas {"deltaY":100,"wheelDelta":7}: 0 100 100 0 100
+legacy deltas {"deltaX":5,"wheelDeltaX":-9}: 5 0 -9 -9 0
+legacy deltas {"deltaY":0.5}: 0 0.5 0 0 0
+legacy deltas {"deltaY":100.7}: 0 100.7 100 0 100
+legacy deltas {"deltaY":-100.7}: 0 -100.7 -100 0 -100
 offset in a padded box: 35 35 540 60 40 20 pad pad
 offset in its child, heard on the box: 9 21 540 60 40 20 inner inner
 offset in an svg rect: 130 90 150 100 150 100 r r

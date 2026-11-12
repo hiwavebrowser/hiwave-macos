@@ -34,6 +34,10 @@ top zindex: a=180,450 f=20,30 s=187,469
 top inline_transform: a=335,435 f=20,30 s=320,454
 top ct_inline_size: a=490,450 f=20,30 s=497,469
 top ct_size: a=645,450 f=20,30 s=652,469
+top preserve_3d: a=25,520 f=47,552 s=32,539
+top cv_auto: a=180,520 f=202,552 s=187,539
+top cv_hidden: a=335,520 f=357,552 s=342,539
+top wc_transform_style: a=490,520 f=512,552 s=497,539
 scrolled abs: a=25,-70 f=20,30 s=32,49
 scrolled rel: a=180,-70 f=20,30 s=187,49
 scrolled static: a=335,-70 f=20,30 s=342,49
@@ -69,4 +73,8 @@ scrolled zindex: a=180,350 f=20,30 s=187,469
 scrolled inline_transform: a=335,335 f=20,30 s=320,454
 scrolled ct_inline_size: a=490,350 f=20,30 s=497,469
 scrolled ct_size: a=645,350 f=20,30 s=652,469
+scrolled preserve_3d: a=25,420 f=47,452 s=32,439
+scrolled cv_auto: a=180,420 f=202,452 s=187,439
+scrolled cv_hidden: a=335,420 f=357,452 s=342,439
+scrolled wc_transform_style: a=490,420 f=512,452 s=497,439
 scrollY 100

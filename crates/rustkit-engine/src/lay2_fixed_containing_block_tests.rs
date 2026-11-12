@@ -38,7 +38,7 @@ fn a_fixed_box_is_positioned_against_the_viewport_or_its_fixed_containing_block(
     let got: String = serde_json::from_str(&got).expect("a JSON string");
     let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
     let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
-    assert_eq!(expected.len(), 71, "the Chrome report has 71 lines");
+    assert_eq!(expected.len(), 79, "the Chrome report has 79 lines");
     // Still off, for a reason outside this row: the ancestor in
     // `inline_transform` is an inline box with margins, padding and a
     // border. Its own rect is 5px low here (335,440 for Chrome's 335,435)

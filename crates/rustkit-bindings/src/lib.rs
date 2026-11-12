@@ -54,6 +54,8 @@ pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
 mod net_bridge_tests;
 #[cfg(test)]
+mod typed_text_source_tests;
+#[cfg(test)]
 mod web_xhr_tests;
 #[cfg(test)]
 mod web_fetch_tests;

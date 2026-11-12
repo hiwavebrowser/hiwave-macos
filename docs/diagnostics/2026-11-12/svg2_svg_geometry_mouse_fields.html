@@ -74,6 +74,14 @@ window.report = function () {
         var e = new WheelEvent('wheel', { deltaY: 100, wheelDeltaY: -120, wheelDeltaX: 240, wheelDelta: -120 });
         return [e.deltaY, e.wheelDelta, e.wheelDeltaX, e.wheelDeltaY].join(' ');
     });
+    // R1 MED 4: the legacy deltas of a constructed wheel, one init per line.
+    [{ deltaX: 3, deltaY: -10 }, { deltaY: 100 }, { deltaX: 40 }, { deltaX: 3, deltaY: -10, deltaMode: 1 }, { deltaY: 100, wheelDeltaY: 55 },
+     { deltaY: 100, wheelDelta: 7 }, { deltaX: 5, wheelDeltaX: -9 }, { deltaY: 0.5 }, { deltaY: 100.7 }, { deltaY: -100.7 }].forEach(function (init) {
+        line('legacy deltas ' + JSON.stringify(init), function () {
+            var e = new WheelEvent('wheel', init);
+            return [e.deltaX, e.deltaY, e.wheelDelta, e.wheelDeltaX, e.wheelDeltaY].join(' ');
+        });
+    });
     function dispatched(label, target, Ctor, type, init) {
         line(label, function () {
             var got = 'not heard';

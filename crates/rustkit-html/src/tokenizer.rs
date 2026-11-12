@@ -1214,6 +1214,26 @@ pub fn tokenize_scripted(input: &str, scripting: bool) -> ParseResult<Vec<Token>
 mod tests {
     use super::*;
 
+    /// R1 LOW: a start tag with 100,000 attributes (a 1.5 MB tag) is read
+    /// in linear time, source order kept, the first value of a duplicate
+    /// kept.
+    #[test]
+    fn a_start_tag_with_a_hundred_thousand_attributes_is_linear() {
+        let mut html = String::from("<div");
+        for i in 0..100_000 {
+            html.push_str(&format!(" data-a{i}=v"));
+        }
+        html.push_str(" data-a7=later>");
+        let started = std::time::Instant::now();
+        let tokens = tokenize(&html).unwrap();
+        let took = started.elapsed();
+        let Token::StartTag { attrs, .. } = &tokens[0] else { panic!("a start tag") };
+        assert_eq!(attrs.len(), 100_000);
+        assert_eq!(attrs.get("data-a7").map(String::as_str), Some("v"));
+        assert_eq!(attrs.iter().next().map(|(n, _)| n.as_str()), Some("data-a0"));
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
+
     #[test]
     fn test_simple_tag() {
         let tokens = tokenize("<div></div>").unwrap();

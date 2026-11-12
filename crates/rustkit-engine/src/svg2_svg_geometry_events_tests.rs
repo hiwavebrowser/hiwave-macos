@@ -48,7 +48,7 @@ fn svg_elements_have_geometry_and_pointer_events_their_fields() {
     let got: String = serde_json::from_str(&got).expect("a JSON string");
     let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
     let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
-    assert_eq!(expected.len(), 78, "the Chrome report has 78 lines");
+    assert_eq!(expected.len(), 88, "the Chrome report has 88 lines");
     let mut wrong = Vec::new();
     for (i, want) in expected.iter().enumerate() {
         let listed = KNOWN.iter().any(|k| want.starts_with(k));
