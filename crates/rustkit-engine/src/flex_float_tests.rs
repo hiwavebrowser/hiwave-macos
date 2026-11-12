@@ -23,18 +23,7 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[
-    // The item is a block holding only a 150px block (or, below, only a
-    // float): the engine makes it 18 tall, a line box it does not have
-    // (Chromium 10). The same in a flex container that is not floated
-    // (`display: flex; gap: 10px; width: 210px` around the same items), so
-    // it is not this row's; the placement and widths already match.
-    "a-float-flex-shrinks-to-an-auto-items-content",
-    // The flex item `#i` holds only the floated flex container: 18 tall in
-    // the engine, 10 in Chromium, as for a flex item holding only a plain
-    // float (`#i` around `float: left; width: 300px; height: 10px`).
-    "a-float-flex-inside-a-flex-item",
-];
+const GAPS: &[&str] = &[];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
