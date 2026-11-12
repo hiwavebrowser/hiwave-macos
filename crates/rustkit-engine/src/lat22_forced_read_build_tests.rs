@@ -1,0 +1,271 @@
+//! LAT22: a component page (hundreds of shadow roots sharing a large sheet)
+//! that runs a Web Animation and reads a rect every frame. Pete's hand test
+//! of 2026-11-11 on such a page: 429 forced layouts in one visit, 418 of
+//! them `animation:rect`, each a full build of about 0.5 s, 224 s in all.
+
+use super::*;
+use crate::script_net_tests::serve_routes;
+
+fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+/// `cards` hosts, each with a shadow root holding the same large sheet
+/// (`rules` rules) and a dozen elements; `extra` is light-DOM markup.
+pub(crate) fn component_page(cards: usize, rules: usize, extra: &str) -> String {
+    let mut sheet = String::from(":host{display:block;padding:2px} .row{display:flex;gap:4px} .c{padding:1px}");
+    for i in 0..rules {
+        sheet.push_str(&format!(
+            ".k{i} .v{i} > span.t{i}:not(.off){{color:rgb({},{},{});margin:{}px;border-radius:{}px}}",
+            i % 255,
+            (i * 7) % 255,
+            (i * 13) % 255,
+            i % 5,
+            i % 9
+        ));
+    }
+    let shadow = format!(
+        "<style>{sheet}</style><div class=row><div class=c><span>name</span></div><div class=c><span>score</span></div>\
+         <div class=c><slot></slot></div></div><div class=row><span>reply</span><span>share</span><span>more</span></div>"
+    );
+    let mut page = String::from(
+        "<!doctype html><html><head><style>body{margin:0;font:12px sans-serif} #a{width:50px;height:50px;background:green}\
+         #hid{display:none}</style></head><body>",
+    );
+    page.push_str(extra);
+    for i in 0..cards {
+        page.push_str(&format!("<div class=card id=h{i}><p>comment {i}</p></div>"));
+    }
+    page.push_str(&format!(
+        "<script>var SH={shadow:?};var hs=document.querySelectorAll('.card');\
+         for(var i=0;i<hs.length;i++){{hs[i].attachShadow({{mode:'open'}}).innerHTML=SH;}}</script></body></html>"
+    ));
+    page
+}
+
+fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
+    let server = serve_routes(vec![("/", "text/html", page.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 1024, height: 768 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt().block_on(engine.load_url(view, url)).expect("load_url");
+    (engine, view, server)
+}
+
+/// The loops a page might run each frame; which of them build the tree.
+const SHAPES: &[(&str, &str)] = &[
+    (
+        "transform, light element",
+        "var a=document.getElementById('a');a.animate([{transform:'translateX(0px)'},{transform:'translateX(300px)'}],{duration:4000,iterations:Infinity});\
+         (function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "transform inside a shadow tree",
+        "var s=document.getElementById('h3').shadowRoot.querySelector('.row');s.animate([{transform:'translateX(0px)'},{transform:'translateX(30px)'}],{duration:4000,iterations:Infinity});\
+         (function f(){requestAnimationFrame(function(){window.__r=s.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "opacity on a host, rect of another",
+        "var h=document.getElementById('h5');h.animate([{opacity:1},{opacity:0.3}],{duration:4000,iterations:Infinity});\
+         var o=document.getElementById('h9');(function f(){requestAnimationFrame(function(){window.__r=o.getBoundingClientRect().top;f();});})()",
+    ),
+    (
+        "animation of an unpainted element",
+        "var d=document.getElementById('hid');d.animate([{opacity:0},{opacity:1}],{duration:4000,iterations:Infinity});\
+         var a=document.getElementById('a');(function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "a new animation every frame",
+        "var a=document.getElementById('a');(function f(){requestAnimationFrame(function(){\
+         a.animate([{opacity:1},{opacity:0.9}],{duration:200});window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "a control every frame",
+        "var a=document.getElementById('a');var an=a.animate([{transform:'translateX(0px)'},{transform:'translateX(300px)'}],{duration:4000,iterations:Infinity});\
+         (function f(){requestAnimationFrame(function(){an.pause();an.play();window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "transform on an unpainted element",
+        "var d=document.getElementById('hid');d.animate([{transform:'translateX(0px)'},{transform:'translateX(30px)'}],{duration:4000,iterations:Infinity});\
+         var a=document.getElementById('a');(function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "a property the engine does not interpolate",
+        "var a=document.getElementById('a');a.animate([{'--p':'0'},{'--p':'1'}],{duration:4000,iterations:Infinity});\
+         (function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "a finished fill-forwards transform",
+        "var a=document.getElementById('a');a.animate([{transform:'translateX(0px)'},{transform:'translateX(30px)'}],{duration:20,fill:'forwards'});\
+         (function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "a transform loop, then a style write and read once",
+        "var a=document.getElementById('a');a.animate([{transform:'translateX(0px)'},{transform:'translateX(0px)'}],{duration:4000,iterations:Infinity});\
+         var n=0;(function f(){requestAnimationFrame(function(){if(n++==5){a.animate([{transform:'scale(1)'},{transform:'scale(1)'}],{duration:4000,iterations:Infinity});}\
+         window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+    (
+        "scroll-driven: a transform written from a scroll position",
+        "var a=document.getElementById('a');var an=a.animate([{transform:'translateY(0px)'},{transform:'translateY(100px)'}],{duration:1000});an.pause();\
+         (function f(){requestAnimationFrame(function(){an.currentTime=(window.scrollY%1000);window.__r=a.getBoundingClientRect().top;f();});})()",
+    ),
+    (
+        "unchanging animation after a forced build",
+        "var a=document.getElementById('a');a.animate([{transform:'none'},{transform:'none'}],{duration:4000,iterations:Infinity});\
+         (function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().left;f();});})()",
+    ),
+];
+
+/// LAT22 exploration (run explicitly: `--ignored --nocapture`): for each
+/// loop shape, over 10 frames after warm-up: forced builds, reads answered
+/// from a frame, relayouts, the reasons a read built, and the last build's
+/// cost with the shadow sheets' share.
+#[test]
+#[ignore]
+fn lat22_shapes() {
+    for (name, script) in SHAPES {
+        let (mut engine, view, _server) = load(&component_page(300, 300, "<div id=a></div><div id=hid>hidden</div>"));
+        engine.execute_script(view, script).unwrap();
+        for _ in 0..4 {
+            rt().block_on(engine.pump_live(view, 16));
+        }
+        let s0 = engine.relayout_stats(view).expect("view").clone();
+        engine.views[&view].lay.forced_build_reasons.borrow_mut().clear();
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            rt().block_on(engine.pump_live(view, 16));
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let s = engine.relayout_stats(view).expect("view").clone();
+        let lay = &engine.views[&view].lay;
+        eprintln!(
+            "LAT22 {name:<42} 10 frames {ms:>8.1} ms: forced builds {} ({:.1} ms), framed reads {}, relayouts {}, \
+             paint-only frames {}, last build {:.1} ms, shadow {:?}, refusals {:?}",
+            s.forced_layouts - s0.forced_layouts,
+            s.forced_ms - s0.forced_ms,
+            s.forced_frames - s0.forced_frames,
+            s.relayouts - s0.relayouts,
+            s.animation_frames_painted - s0.animation_frames_painted,
+            s.last_build_ms,
+            lay.last_shadow_build.get(),
+            lay.forced_build_reasons.borrow()
+        );
+    }
+}
+
+/// LAT22: what a build of the component page costs by the size of the
+/// sheet its shadow trees share (run explicitly: `--ignored`, parity
+/// profile): the median build stage of 10 script relayouts.
+#[test]
+#[ignore]
+fn lat22_build_by_shadow_sheet_size() {
+    for rules in [0usize, 300, 1500] {
+        let (mut engine, view, _server) = load(&component_page(300, rules, "<div id=a></div><p id=t>text</p>"));
+        let mut builds = Vec::new();
+        for i in 0..10 {
+            engine
+                .execute_script(view, &format!("document.getElementById('t').firstChild.data = 'text {i}';"))
+                .unwrap();
+            builds.push(engine.relayout_stats(view).expect("view").last_build_ms);
+        }
+        builds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "LAT22BUILD 300 hosts, {rules:>4} shared rules: build {:.1} ms (median of 10), shadow sheets {:?}",
+            builds[5],
+            engine.views[&view].lay.last_shadow_build.get()
+        );
+    }
+}
+
+
+fn read(engine: &mut Engine, view: EngineViewId, expr: &str) -> String {
+    let value = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    value
+        .strip_prefix("String(\"")
+        .and_then(|v| v.strip_suffix("\")"))
+        .unwrap_or(&value)
+        .to_string()
+}
+
+fn frames(engine: &mut Engine, view: EngineViewId, n: usize) {
+    for _ in 0..n {
+        rt().block_on(engine.pump_live(view, 16));
+    }
+}
+
+/// The hand-test signature: Web Animations writes a property outside the
+/// paint list every frame, with values that compute to the same thing (a
+/// width that moves by a millionth of a pixel), and script reads a rect.
+/// Nothing a layout places changed, so no read builds the tree: each is
+/// answered from a frame over the painted boxes, as the settle frame is.
+#[test]
+fn a_rect_read_after_an_unchanging_non_paint_animation_write_builds_no_tree() {
+    let (mut engine, view, _server) = load(&component_page(40, 20, "<div id=a></div>"));
+    engine
+        .execute_script(
+            view,
+            "var a=document.getElementById('a');a.animate([{width:'50px'},{width:'50.000001px'}],{duration:4000,iterations:Infinity});\
+             window.__n=0;(function f(){requestAnimationFrame(function(){window.__r=a.getBoundingClientRect().width;window.__n++;f();});})()",
+        )
+        .unwrap();
+    frames(&mut engine, view, 4);
+    let s0 = engine.relayout_stats(view).expect("view").clone();
+    let n0: f64 = read(&mut engine, view, "window.__n").parse().unwrap();
+    frames(&mut engine, view, 8);
+    let s = engine.relayout_stats(view).expect("view").clone();
+    let n: f64 = read(&mut engine, view, "window.__n").parse().unwrap();
+    assert!(n - n0 >= 6.0, "the loop ran: {n0} to {n}");
+    assert_eq!(read(&mut engine, view, "window.__r"), "50", "the read sees the box");
+    assert_eq!(
+        (s.forced_layouts - s0.forced_layouts, s.relayouts - s0.relayouts),
+        (0, 0),
+        "no read built the tree and no frame laid the page out ({} reads answered from a frame)",
+        s.forced_frames - s0.forced_frames
+    );
+}
+
+/// A width that really animates still lays the page out for the read: the
+/// rect is this frame's, the one a clean read finds.
+#[test]
+fn a_rect_read_after_a_moving_width_animation_sees_the_new_width() {
+    let (mut engine, view, _server) = load(&component_page(10, 5, "<div id=a></div>"));
+    engine
+        .execute_script(
+            view,
+            "var a=document.getElementById('a');var an=a.animate([{width:'50px'},{width:'250px'}],{duration:1000});an.pause();",
+        )
+        .unwrap();
+    frames(&mut engine, view, 2);
+    engine
+        .execute_script(view, "an.currentTime=500;window.__r=a.getBoundingClientRect().width;")
+        .unwrap();
+    assert_eq!(read(&mut engine, view, "window.__r"), "150", "Chrome 148: 150");
+}
+
+/// A read whose answer depends on the animated value: a transform (paint)
+/// animated together with the unchanging width (not paint). The rect is the
+/// transformed one, not the painted frame's stale one. Chrome for Testing
+/// 148.0.7778.216 (docs/diagnostics/2026-11-12/lat22_rect_probe.js): left
+/// 150, width 50 at half of a 0 to 300px translateX.
+#[test]
+fn a_rect_read_answered_from_a_frame_sees_the_animated_transform() {
+    let (mut engine, view, _server) = load(&component_page(10, 5, "<div id=a></div>"));
+    engine
+        .execute_script(
+            view,
+            "var a=document.getElementById('a');\
+             var an=a.animate([{transform:'translateX(0px)',width:'50px'},{transform:'translateX(300px)',width:'50.000001px'}],{duration:1000});an.pause();",
+        )
+        .unwrap();
+    frames(&mut engine, view, 2);
+    let s0 = engine.relayout_stats(view).expect("view").clone();
+    engine
+        .execute_script(view, "an.currentTime=500;var r=a.getBoundingClientRect();window.__r=r.left+'/'+r.width;")
+        .unwrap();
+    let s = engine.relayout_stats(view).expect("view").clone();
+    assert_eq!(read(&mut engine, view, "window.__r"), "150/50", "Chrome 148: 150/50");
+    assert_eq!(s.forced_layouts - s0.forced_layouts, 0, "answered from a frame, no build");
+}

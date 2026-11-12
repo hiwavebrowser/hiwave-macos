@@ -610,6 +610,8 @@ mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lat22_forced_read_build_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
@@ -12398,6 +12400,7 @@ impl layout_ctx::LayoutCtx {
                 "Shadow tree styles"
             );
         }
+        self.with_building_lay(|lay| lay.last_shadow_build.set(shadow));
         if let (Some((parse, started)), Some(vars), Some(index), Some(walk)) =
             (cascade_started, vars_started, index_started, walk_started)
         {

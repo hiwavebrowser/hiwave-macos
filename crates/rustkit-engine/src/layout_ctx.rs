@@ -607,6 +607,8 @@ pub(crate) struct ViewLayout {
     /// LAT22 probe: why reads built the tree instead of being answered
     /// from an animation frame, by reason.
     pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
+    /// LAT22 probe: the shadow trees' sheet cost in the view's last build.
+    pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
     pub(crate) container_unsettled: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
