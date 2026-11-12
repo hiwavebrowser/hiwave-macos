@@ -127,6 +127,9 @@ pub struct Tokenizer {
     return_state: Option<State>,
     /// The name of the last emitted start tag (for RAWTEXT/RCDATA/ScriptData end tag matching)
     last_start_tag_name: String,
+    /// The scripting flag (HTML §13.2.3.5): with it on, `<noscript>` holds
+    /// raw text, as `<style>` does.
+    scripting: bool,
     current_tag_name: String,
     current_attrs: TagAttrs,
     current_attr_name: String,
@@ -147,6 +150,7 @@ impl Tokenizer {
             state: State::Data,
             return_state: None,
             last_start_tag_name: String::new(),
+            scripting: false,
             current_tag_name: String::new(),
             current_attrs: TagAttrs::default(),
             current_attr_name: String::new(),
@@ -369,6 +373,7 @@ impl Tokenizer {
             "style" | "xmp" | "iframe" | "noembed" | "noframes" => {
                 self.return_state = Some(State::RawText)
             }
+            "noscript" if self.scripting => self.return_state = Some(State::RawText),
             "textarea" | "title" => self.return_state = Some(State::RcData),
             _ => self.return_state = None,
         }
@@ -1194,6 +1199,14 @@ impl Tokenizer {
 /// Tokenize HTML input.
 pub fn tokenize(input: &str) -> ParseResult<Vec<Token>> {
     let tokenizer = Tokenizer::new(input);
+    tokenizer.tokenize()
+}
+
+/// `tokenize` with the scripting flag: when it is on, the contents of
+/// `<noscript>` are raw text (HTML §13.2.6.4.4, §13.2.6.4.7).
+pub fn tokenize_scripted(input: &str, scripting: bool) -> ParseResult<Vec<Token>> {
+    let mut tokenizer = Tokenizer::new(input);
+    tokenizer.scripting = scripting;
     tokenizer.tokenize()
 }
 

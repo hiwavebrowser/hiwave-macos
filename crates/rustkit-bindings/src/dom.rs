@@ -1129,8 +1129,25 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         // A template's innerHTML is its content's (HTML §4.12.3).
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
+            // The fragment's scripting flag is its context element's
+            // document's (HTML §13.4): off in a template's contents and in
+            // a document `DOMParser` or `createHTMLDocument` made, whose
+            // nodes live in this Document under a Document node of their
+            // own, so `<noscript>` content there is elements.
+            let mut top = node.clone();
+            while let Some(parent) = top.parent() {
+                top = parent;
+            }
+            let inert = tag_name.eq_ignore_ascii_case("template")
+                || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
-                .parse_fragment_in(html, tag_name, is_in_html_content(&node), node.holds_svg_content())
+                .parse_fragment_scripted(
+                    html,
+                    tag_name,
+                    is_in_html_content(&node),
+                    node.holds_svg_content(),
+                    document.scripting() && !inert,
+                )
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -1663,9 +1680,10 @@ const VOID_ELEMENTS: &[&str] = &[
     "keygen", "link", "meta", "param", "source", "track", "wbr",
 ];
 
-/// Elements whose Text children serialize unescaped.
+/// Elements whose Text children serialize unescaped. `noscript` is one
+/// when scripting is on, which is where its children are text.
 const RAW_TEXT_ELEMENTS: &[&str] = &[
-    "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext",
+    "style", "script", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext",
 ];
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).

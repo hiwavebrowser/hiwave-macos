@@ -9312,7 +9312,8 @@ impl Engine {
         }
         let parsing = wgate::bucket(wgate::HoldBucket::Parse);
         let document =
-            Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
+            Document::parse_html_scripted(&html, self.config.javascript_enabled)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
         drop(parsing);
         let document = Rc::new(document);
         load_phase("parse");
@@ -9797,8 +9798,8 @@ impl Engine {
         });
 
         // Parse HTML
-        let document =
-            Document::parse_html(html).map_err(|e| EngineError::RenderError(e.to_string()))?;
+        let document = Document::parse_html_scripted(html, self.config.javascript_enabled)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
         let document = Rc::new(document);
 
         // Get title

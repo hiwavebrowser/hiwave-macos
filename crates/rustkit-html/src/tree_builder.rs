@@ -178,6 +178,9 @@ pub struct TreeBuilder<S: TreeSink> {
     /// Currently unused but needed when form control elements track their owner form.
     #[allow(dead_code)]
     form_element: Option<S::NodeId>,
+    /// The scripting flag (HTML §13.2.3.5). On for a page that runs script:
+    /// `<noscript>` then holds text and builds no elements.
+    scripting: bool,
 }
 
 impl<S: TreeSink> TreeBuilder<S> {
@@ -198,6 +201,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             fragment_context: None,
             head_element: None,
             html_element: None,
+            scripting: false,
             body_element: None,
             form_element: None,
         }
@@ -248,6 +252,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             fragment_context: Some(context),
             head_element: None,
             html_element: None,
+            scripting: false,
             body_element: None,
             form_element: None,
         }
@@ -965,6 +970,26 @@ impl<S: TreeSink> TreeBuilder<S> {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
                 self.open_elements.push((name, node_id));
                 // Note: In a full implementation, we'd switch to RCDATA/RAWTEXT mode here
+            }
+            // §13.2.6.4.4 "noscript": with scripting on, a raw text element
+            // (the tokenizer hands its contents over as characters); with it
+            // off, an element whose few allowed children are parsed "in
+            // head noscript".
+            Token::StartTag {
+                name, attrs, self_closing: _
+            } if name == "noscript" => {
+                self.flush_text();
+                let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.open_elements.push((name, node_id));
+                if !self.scripting {
+                    self.mode = InsertionMode::InHeadNoscript;
+                }
+            }
+            Token::EndTag { name } if name == "noscript" && self.scripting => {
+                self.flush_text();
+                if let Some((tag_name, _)) = self.open_elements.pop() {
+                    self.sink.end_element(tag_name);
+                }
             }
             Token::EndTag { name } if matches!(name.as_str(), "title" | "style" | "script") => {
                 self.flush_text();
@@ -2268,6 +2293,12 @@ impl<S: TreeSink> TreeBuilder<S> {
     // ==================== IN HEAD NOSCRIPT HANDLER ====================
 
     fn handle_in_head_noscript(&mut self, token: Token) -> ParseResult<()> {
+        // Inside a `<style>` this mode handed to "in head": its text and
+        // its end tag are that element's (the "text" insertion mode), not
+        // a reason to close the noscript.
+        if self.open_elements.last().is_some_and(|(tag, _)| tag != "noscript") {
+            return self.handle_in_head(token);
+        }
         match &token {
             // §13.2.6.4.5: start tag "html" is processed using "in body".
             Token::StartTag { name, .. } if name == "html" => {
@@ -2370,6 +2401,25 @@ impl<S: TreeSink> TreeBuilder<S> {
 /// Build a DOM tree from tokens (full document parsing).
 pub fn build_tree<S: TreeSink>(tokens: Vec<Token>, sink: S) -> ParseResult<S> {
     let builder = TreeBuilder::new(sink);
+    builder.build(tokens)
+}
+
+/// `build_tree` with the scripting flag of the tokens' tokenizer.
+pub fn build_tree_scripted<S: TreeSink>(tokens: Vec<Token>, sink: S, scripting: bool) -> ParseResult<S> {
+    let mut builder = TreeBuilder::new(sink);
+    builder.scripting = scripting;
+    builder.build(tokens)
+}
+
+/// `build_tree_fragment` with the scripting flag of the tokens' tokenizer.
+pub fn build_tree_fragment_scripted<S: TreeSink>(
+    tokens: Vec<Token>,
+    sink: S,
+    context: FragmentContext,
+    scripting: bool,
+) -> ParseResult<S> {
+    let mut builder = TreeBuilder::new_fragment(sink, context);
+    builder.scripting = scripting;
     builder.build(tokens)
 }
 

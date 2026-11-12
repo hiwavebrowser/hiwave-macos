@@ -20,10 +20,12 @@ use crate::script_net_tests::serve_routes;
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_noscript_raw_text.html");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_noscript_raw_text_cft148.txt");
 
-/// Lines still off, each for a reason outside this row; filled in from the
-/// first run with the fix. They must still DIFFER: one that matches comes
-/// off the list.
-const KNOWN: &[&str] = &[];
+/// Still off, for a reason outside this row: Chrome's computed `display`
+/// of a `<noscript>` reads `inline` although it has no box (its rect is
+/// 0x0 and `offsetParent` null, as here); the UA sheet here says `none`,
+/// which is what `getComputedStyle` answers. The line must still DIFFER:
+/// when it matches it comes off the list.
+const KNOWN: &[&str] = &["does not render: "];
 
 fn load(config: EngineConfig) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
     let server = serve_routes(vec![
