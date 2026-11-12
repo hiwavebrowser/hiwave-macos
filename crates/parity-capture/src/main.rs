@@ -103,10 +103,12 @@ struct Args {
     #[arg(long)]
     interrupt_scripts: bool,
 
-    /// After a URL load, turn the live loop as the app does for this many
-    /// milliseconds of real time (timers, script requests, relayouts) and
-    /// report what the turns did as `live_stats`. Off by default; a frame
-    /// taken with it is not comparable with the board.
+    /// After the load, turn the live loop as the app does for this many
+    /// milliseconds of real time (timers, animation frames, observers,
+    /// script requests, relayouts) and report what the turns did as
+    /// `live_stats`. With `--html-file` it also runs the file's scripts, as
+    /// `--run-inline-scripts` does. Off by default; a frame taken with it
+    /// is not comparable with the board.
     #[arg(long)]
     live_ms: Option<u64>,
 
@@ -704,7 +706,9 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     let mut builder = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts);
+        .javascript_enabled(
+            url.is_some() || args.actions.is_some() || args.run_inline_scripts || args.live_ms.is_some(),
+        );
     if let Some(interceptor) = shield_interceptor(args) {
         builder = builder.request_interceptor(interceptor);
     }
@@ -788,11 +792,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
+        let load_began = Instant::now();
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
         }
-        // With script on, `load_html` ran the inline scripts.
-        if args.run_inline_scripts {
+        // `--run-inline-scripts` and `--live-ms` both turn script on for a
+        // file (T21). A script that threw is a failed capture either way,
+        // the same check the inline-scripts flag already made.
+        if args.run_inline_scripts || args.live_ms.is_some() {
             let log = engine.script_log(view_id).unwrap_or_default();
             if let Some(failed) = inline_script_failure(&log) {
                 return result.failed(
@@ -800,6 +807,21 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                     format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
                 );
             }
+        }
+        // `load_html` runs no timer horizon: what a file page does after its
+        // inline scripts (a `setTimeout`, an animation frame, a
+        // ResizeObserver callback) runs only in the live loop, the one a URL
+        // capture turns (T21).
+        if let Some(live_ms) = args.live_ms {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
+            };
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -2016,6 +2038,123 @@ mod tests {
         assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
         assert!(!capture_config(&parsed(&[]), None).post_load_requests_live);
         assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
+    }
+
+    /// The heights of every box in a `--dump-layout` file, rounded.
+    fn layout_heights(layout: &str) -> Vec<i64> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<i64>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        if k == "height" {
+                            if let Some(h) = v.as_f64() {
+                                out.push(h.round() as i64);
+                            }
+                        }
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&serde_json::from_str(layout).expect("layout JSON"), &mut out);
+        out
+    }
+
+    /// T21 (board 11-04, 11-05): a `--html-file` page that finishes on a
+    /// timer, an animation frame or a ResizeObserver callback (Chart.js,
+    /// the Inspector) captured without them. With `--live-ms` the file is
+    /// turned through the same live loop as `--url`; each box below gets
+    /// its height only from its own kind of callback.
+    const LATE_CALLBACK_PAGE: &str = "<!doctype html><html><head><style>\
+        body{margin:0} div{width:50px;height:10px}\
+        .t{height:137px} .f{height:149px} .r{height:163px}\
+        </style></head><body><div id=t></div><div id=f></div><div id=r></div><script>\
+        setTimeout(function(){ document.getElementById('t').className='t'; }, 0);\
+        requestAnimationFrame(function(){ document.getElementById('f').className='f'; });\
+        new ResizeObserver(function(){ document.getElementById('r').className='r'; })\
+            .observe(document.getElementById('r'));\
+        </script></body></html>";
+
+    fn capture_file_page(name: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (page, layout) = (dir.join("page.html"), dir.join("layout.json"));
+        fs::write(&page, LATE_CALLBACK_PAGE).unwrap();
+        let mut argv = vec![
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(extra);
+        let result = run_capture(&Args::try_parse_from(argv).unwrap());
+        let heights = fs::read_to_string(&layout).map(|l| layout_heights(&l)).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        (result, heights)
+    }
+
+    #[test]
+    fn a_file_capture_with_live_ms_runs_timers_frames_and_resize_observers() {
+        let (result, heights) = capture_file_page("t21-live", &["--live-ms", "600"]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        for (what, h) in [("setTimeout(0)", 137), ("requestAnimationFrame", 149), ("ResizeObserver", 163)] {
+            assert!(heights.contains(&h), "{what} callback did not run: heights {heights:?}");
+        }
+        let live = result.live_stats.as_ref().expect("a file capture with --live-ms reports live_stats");
+        assert!(live.timer_callbacks >= 2, "timer + frame callbacks: {}", live.timer_callbacks);
+        assert!(result.capture_ms.is_some_and(|ms| ms > 0.0), "{:?}", result.capture_ms);
+    }
+
+    /// `--live-ms` turns script on by itself. A file whose inline script
+    /// throws fails the capture, the same as `--run-inline-scripts`.
+    #[test]
+    fn a_file_capture_with_live_ms_fails_when_an_inline_script_throws() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-t21-throw-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, "<!doctype html><script>throw new Error('nope')</script>").unwrap();
+        let result = run_capture(&Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--live-ms",
+            "200",
+        ]).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(result.status, "error", "{:?}", result.error);
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("Inline script failed"), "{err}");
+    }
+
+    /// The board's fixture capture is unchanged: without `--live-ms` a file
+    /// runs no script and turns no loop.
+    #[test]
+    fn a_file_capture_without_live_ms_is_the_boards_static_capture() {
+        let (result, heights) = capture_file_page("t21-static", &[]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(result.live_stats.is_none());
+        for h in [137, 149, 163] {
+            assert!(!heights.contains(&h), "no script ran, but a box is {h}px: {heights:?}");
+        }
+    }
+
+    /// With `--run-inline-scripts` (the board's script pages) and no
+    /// `--live-ms`, the inline scripts run but nothing after the load does:
+    /// what the board captured before T21.
+    #[test]
+    fn a_file_capture_with_inline_scripts_only_is_unchanged() {
+        let (result, heights) = capture_file_page("t21-inline", &["--run-inline-scripts"]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(result.live_stats.is_none());
+        assert!(!heights.contains(&137), "{heights:?}");
     }
 
     // The board is measured at the engine's 5 s script budget, and the live

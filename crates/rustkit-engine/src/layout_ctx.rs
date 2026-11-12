@@ -600,14 +600,24 @@ pub(crate) struct ViewLayout {
     pub(crate) container_rules: Cell<bool>,
     /// The extra build-and-layout passes container sizes have cost this
     /// view, and the layouts that hit the pass cap still moving (#1070 R1).
-    /// The size containers the last walk met in a trusted frame: the ones
-    /// `container_sizes` measures (`container_query::take_trusted_containers`).
-    pub(crate) container_trusted: RefCell<std::collections::HashSet<usize>>,
+    /// What the last walk left: the size containers `container_sizes`
+    /// measures, and what the build asked of them
+    /// (`container_query::take_build_facts`).
+    pub(crate) container_facts: RefCell<crate::container_query::BuildFacts>,
     pub(crate) container_passes: Cell<u32>,
     /// LAT22 probe: why reads built the tree instead of being answered
     /// from an animation frame, by reason.
     pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
+    /// LAT22 probe: the shadow trees' sheet cost in the view's last build.
+    pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
+    /// Element cascades of the view's last build that had no rule index.
+    pub(crate) last_unindexed_cascades: Cell<u32>,
+    /// LAT22: the document's shadow tree styles across builds.
+    pub(crate) tree_styles: Rc<RefCell<crate::shadow_tree::ViewTreeStyles>>,
     pub(crate) container_unsettled: Cell<u32>,
+    /// Builds of this view that told the walk they replay memoized styles
+    /// (`container_query::note_replaying`); read by the wiring test.
+    pub(crate) container_replays: Cell<u32>,
     /// How many layout passes this view's builds have run in all (one per
     /// build, or more while styled bars appear or go), and how many builds
     /// ran them. Read by tests to pin that a relayout takes one pass.

@@ -52,6 +52,10 @@ pub struct GridTrack {
     pub is_max_content: bool,
     /// For fit-content(length), the maximum length constraint.
     pub fit_content_limit: Option<f32>,
+    /// A `fit-content()` column whose growth limit was set from its items'
+    /// max-content (`layout_grid_container`): it takes part in maximize
+    /// tracks before the `fr` tracks like any finite track.
+    pub fit_content_measured: bool,
     /// Whether this track is from auto-fit (should collapse if empty).
     pub is_auto_fit: bool,
     /// An empty auto-fit track, collapsed (css-grid-1 §7.2.3.2): 0 wide, and
@@ -168,6 +172,7 @@ impl GridTrack {
             is_min_content,
             is_max_content,
             fit_content_limit,
+            fit_content_measured: false,
             is_auto_fit: false,
             collapsed: false,
             flexible_with_fixed_min: flex_factor > 0.0
@@ -463,7 +468,13 @@ impl<'a> GridItem<'a> {
         // unbreakable content inside the item widens intrinsic and flexible
         // tracks. Scroll containers may shrink below their content and keep
         // the explicit-only contribution.
-        let auto_min = if style.overflow_x == Overflow::Visible {
+        // A size container's content does not size it (inline-size
+        // containment): its automatic minimum is its padding and border
+        // (Chromium 148: a `1fr 1fr` grid of 200 keeps a container holding
+        // 300px at 100).
+        let auto_min = if style.has_inline_size_containment() {
+            horizontal_padding_border(style)
+        } else if style.overflow_x == Overflow::Visible {
             grid_item_min_content_width(self.layout_box)
         } else {
             0.0
@@ -1853,6 +1864,80 @@ pub fn layout_grid_container(
         column_gap,
         max_col_span,
     );
+    // A `fit-content(L)` column grows to min(L, its items' max-content),
+    // never below its base size (css-grid-1 §7.2.4, §12.5). Its growth
+    // limit was L itself, so maximize tracks took it to L (300 around a
+    // 100px box beside a 100px track; Chromium 148 100), and it had to be
+    // kept out of the pass before the `fr` tracks, where it then stayed at
+    // its min-content (60 of a 240px max-content beside `1fr`; Chromium 240).
+    for (column, track) in grid.columns.iter_mut().enumerate() {
+        let Some(limit) = track.fit_content_limit else { continue };
+        let max_content = items
+            .iter()
+            .filter(|item| item.column_span.max(1) == 1 && (item.column_start - 1).max(0) as usize == column)
+            .map(|item| {
+                (estimate_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style))
+                    .max(item.get_width_contribution(container_width))
+            })
+            .fold(0.0f32, f32::max);
+        track.growth_limit = max_content.min(limit).max(track.base_size);
+        track.fit_content_measured = true;
+    }
+    // An item spanning several fit-content columns shares its max-content
+    // among them (css-grid-1 §12.5, the max-content maximums): what the
+    // spanned columns' growth limits do not cover yet is handed out in
+    // equal shares, each column stopping at its own argument. Without it a
+    // column covered only by a spanning item kept its base size as its
+    // limit, and a header across two `fit-content(300px)` columns wrapped
+    // to its min-content (Chromium 148: the two columns add up to the
+    // header's 360; with a 120px item of its own in the first, 240 and
+    // 120).
+    for item in &items {
+        let span = item.column_span.max(1) as usize;
+        if span < 2 {
+            continue;
+        }
+        let start = (item.column_start - 1).max(0) as usize;
+        let end = (start + span).min(grid.columns.len());
+        // A flexible, `auto`, `min-content`, `max-content` or percentage
+        // column in the span takes the item itself (Chromium 148: across
+        // `fit-content(300px) auto` the auto column is the header's 360 and
+        // the fit-content one 0). Fixed columns stay in: they cover their
+        // own length and the fit-content columns share the rest (across
+        // `fit-content(300px) 100px`, 260 and 100).
+        if start >= end
+            || !grid.columns[start..end].iter().any(|t| t.fit_content_measured)
+            || grid.columns[start..end]
+                .iter()
+                .any(|t| !t.fit_content_measured && !track_is_fixed(t))
+        {
+            continue;
+        }
+        let wanted = (estimate_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style))
+            .max(item.get_width_contribution(container_width));
+        let mut extra = wanted
+            - grid.columns[start..end].iter().map(|t| t.growth_limit).sum::<f32>()
+            - column_gap * (end - start - 1) as f32;
+        let mut open: Vec<usize> = (start..end).filter(|&i| grid.columns[i].fit_content_measured).collect();
+        while extra > 0.01 && !open.is_empty() {
+            let share = extra / open.len() as f32;
+            let mut still_open = Vec::new();
+            for &i in &open {
+                let track = &mut grid.columns[i];
+                let cap = track.fit_content_limit.unwrap_or(f32::INFINITY).max(track.base_size);
+                let give = share.min((cap - track.growth_limit).max(0.0));
+                track.growth_limit += give;
+                extra -= give;
+                if cap - track.growth_limit > 0.01 {
+                    still_open.push(i);
+                }
+            }
+            if still_open.len() == open.len() && share <= 0.01 {
+                break;
+            }
+            open = still_open;
+        }
+    }
     // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     // Apply content alignment (justify-content for columns)
@@ -3420,17 +3505,13 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
         return None;
     }
 
-    // Two track shapes keep the generic walk's answer for now: a
-    // `fit-content()` track (its minimum is its items' minimum contribution,
-    // not their min-content) and a flexible track with a factor below 1
-    // (the items of a track the section 12.7.1 restart makes inflexible ask
-    // for nothing). On both the estimate below was further from Chromium
-    // than the walk: two `fit-content(80px)` columns of 150px words in
-    // `overflow: hidden` items were 300 in a 100px float (Chromium 100, the
-    // walk 150), and `0fr 2fr` around a 60px word with `min-width: 20px`
-    // was 100 (Chromium and the walk 60).
+    // One track shape keeps the generic walk's answer for now: a flexible
+    // track with a factor below 1 (the items of a track the section 12.7.1
+    // restart makes inflexible ask for nothing): `0fr 2fr` around a 60px
+    // word with `min-width: 20px` was 100 in the estimate (Chromium and the
+    // walk 60). A `fit-content()` track was the other until GR2 sized it
+    // from its items' minimum contribution (see `sized` below).
     let outside_the_estimate = |size: &TrackSize| match size {
-        TrackSize::FitContent(_) => true,
         TrackSize::Fr(fr) => *fr < 1.0,
         TrackSize::MinMax(_, high) => matches!(high.as_ref(), TrackSize::Fr(fr) if *fr < 1.0),
         _ => false,
@@ -3495,7 +3576,20 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
                 TrackSize::Auto | TrackSize::Percent(_) => {
                     Some(if min { floor(column) } else { content(column, false) })
                 }
-                TrackSize::FitContent(limit) => Some(content(column, min).min(limit.max(content(column, true)))),
+                // `fit-content(L)` is `minmax(auto, max-content)` clamped at
+                // L (css-grid-1 §7.2.4): under a min-content constraint its
+                // base, the items' minimum contribution (`floor`); under a
+                // max-content constraint min(L, max-content), never below
+                // that base (GR2). Two `fit-content(80px)` columns of 150px
+                // words in `overflow: hidden` items are 80 each, so 160 in
+                // a wide float and the float's 100 in a narrow one
+                // (Chromium 143); `fit-content(300px)` around a 240px row of
+                // boxes is 240 (Chromium 148).
+                TrackSize::FitContent(limit) => Some(if min {
+                    floor(column)
+                } else {
+                    floor(column).max(content(column, false).min(*limit))
+                }),
                 _ => None,
             }
         };
@@ -3662,6 +3756,15 @@ fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
         };
+    }
+    // CQ2: a size container (`container-type: inline-size` or `size`) has
+    // inline-size containment, so its content does not size it: its min-
+    // and max-content widths are those of an empty box, its padding and
+    // border (and a length `min-width`) (css-contain-2 §3.2; Chromium 148:
+    // a `padding: 0 5px` container around a 300px child is 10 wide as a
+    // `flex: 0 0 auto` item, an inline-block, `fit-content` or in a float).
+    if style.has_inline_size_containment() {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
     }
 
     // A replaced box has no children to walk: its contribution is its own
@@ -3999,6 +4102,10 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
         };
+    }
+    // CQ2: inline-size containment, as in `own_min_content_width`.
+    if style.has_inline_size_containment() {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
     }
 
     // A replaced box has no children to walk: its contribution is its own
@@ -4673,7 +4780,7 @@ fn maximize_tracks(tracks: &mut [GridTrack], available_space: f32, fit_content: 
             .enumerate()
             .filter(|(_, t)| {
                 !t.is_flexible
-                    && (fit_content || t.fit_content_limit.is_none())
+                    && (fit_content || t.fit_content_limit.is_none() || t.fit_content_measured)
                     && t.growth_limit > t.size
                     && t.growth_limit < f32::INFINITY
             })

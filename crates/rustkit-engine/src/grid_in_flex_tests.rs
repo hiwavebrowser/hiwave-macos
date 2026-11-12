@@ -81,15 +81,19 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// The `auto-tracks-*-in-a-narrow-row` and `-inline-block` four are the
 /// same `auto` columns in two more hosts.
 ///
-/// The rest are the two track shapes the shrink-to-fit estimate leaves to
-/// the generic walk (`grid_columns_content_width` returns `None`): a
-/// `fit-content()` column, and a flexible column with a factor below 1.
-/// The grid is then as wide as before the estimate existed, which is wrong
-/// in its own way but was nearer Chromium than the estimate on these: two
-/// `fit-content(80px)` columns of 150px words in `overflow: hidden` items
-/// are 150 in a 100px float (Chromium 100; the estimate gave 300). Each of
-/// these pages has `engine_boxes` in the case file, the walk's answer, and
-/// the tests hold the engine to it until the estimate covers the shape.
+/// The rest are the track shape the shrink-to-fit estimate leaves to the
+/// generic walk (`grid_columns_content_width` returns `None`): a flexible
+/// column with a factor below 1. The grid is then as wide as before the
+/// estimate existed. Each of these pages has `engine_boxes` in the case
+/// file, the walk's answer, and the tests hold the engine to it until the
+/// estimate covers the shape.
+///
+/// `fit-content()` columns were the other shape until GR2: the estimate
+/// sizes them now, and five of their seven pages match Chromium. The two
+/// `min-width-20px` pages have the float's width right (100 and 160) but
+/// still size each column 150 where Chromium has 50 and 80: track sizing
+/// floors a `min-width: 20px` item's column at its content. Their
+/// `engine_boxes` carry the new float width.
 ///
 /// The last is the header over two of three flexible columns in a 100px
 /// inline-block: with a spanning item over a flexible column the whole
@@ -115,13 +119,8 @@ const GAPS: &[&str] = &[
     "auto-tracks-min-width-20px-items-in-a-narrow-inline-block",
     "half-and-quarter-fr-tracks-in-a-row",
     "tenth-fr-tracks-in-a-float",
-    "fit-content-tracks-overflow-hidden-items-in-a-narrow-float",
-    "fit-content-tracks-overflow-hidden-items-in-a-wide-float",
     "fit-content-tracks-min-width-20px-items-in-a-narrow-float",
     "fit-content-tracks-min-width-20px-items-in-a-wide-float",
-    "fit-content-tracks-overflow-hidden-items-with-a-gap-in-a-narrow-row",
-    "fit-content-tracks-two-word-items-in-a-narrow-float",
-    "fit-content-tracks-two-word-items-in-a-wide-float",
     "zero-fr-and-2fr-tracks-min-width-20px-item-in-a-narrow-float",
     "zero-fr-and-2fr-tracks-min-width-20px-item-in-a-wide-float",
     "zero-fr-and-2fr-tracks-overflow-hidden-item-in-a-wide-float",
