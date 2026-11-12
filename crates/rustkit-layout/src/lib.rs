@@ -4961,6 +4961,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
+        let laid_out_at = (self.dimensions.content.x, self.dimensions.content.y);
         // Calculate dimensions
         self.calculate_block_width(containing_block);
         self.calculate_block_vertical_box_model(containing_block);
@@ -4999,6 +5000,26 @@ impl LayoutBox {
             + self.dimensions.margin.top
             + self.dimensions.border.top
             + self.dimensions.padding.top;
+
+        // A flex container was laid out as one by the pass that called this
+        // (at the same width: `calculate_block_width` is the same call);
+        // only its place changed. Re-flowing its items with the block pass
+        // below stacked them at the float's start edge, one under the other
+        // (`float: left; display: flex` with 100px and 300px items; Chromium
+        // 148 puts them side by side). Carry the laid-out items to the
+        // float's place instead.
+        if self.style.display.is_flex() {
+            let (dx, dy) = (
+                self.dimensions.content.x - laid_out_at.0,
+                self.dimensions.content.y - laid_out_at.1,
+            );
+            if dx != 0.0 || dy != 0.0 {
+                for child in &mut self.children {
+                    crate::flex::translate_subtree(child, dx, dy);
+                }
+            }
+            return;
+        }
 
         // Layout children. A percentage height resolves against the
         // containing block's definite height (`percent_height_base`), exactly

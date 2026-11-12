@@ -3575,6 +3575,24 @@ impl ComputedStyle {
     }
 
     /// Create style with inheritance from parent.
+    /// Whether this box has inline-size containment from its
+    /// `container-type` (`inline-size` or `size`), so that its contents do
+    /// not size it. Containment does not apply to a non-atomic inline box
+    /// or to a table or internal table box (css-contain-2 §3.1): those
+    /// are sized by their contents and answer no size query (Chrome 148).
+    /// A box with no principal box (`none`, `contents`) has none either.
+    /// Horizontal writing mode only, where the inline size is the width.
+    /// `display` is the used one: a flex item, a float or an absolutely
+    /// positioned `<span>` is blockified before this is asked.
+    pub fn has_inline_size_containment(&self) -> bool {
+        self.container_type != ContainerType::Normal
+            && !self.display_contents_declared
+            && !matches!(self.display, Display::Inline | Display::None | Display::Contents)
+            && !self.display.is_table()
+            && !self.display.is_table_internal()
+            && self.writing_mode == WritingMode::HorizontalTb
+    }
+
     pub fn inherit_from(parent: &ComputedStyle) -> Self {
         Self {
             // Inherited properties
