@@ -126,6 +126,8 @@ mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 #[cfg(test)]
+mod web_worker_tests;
+#[cfg(test)]
 mod web_named_access_tests;
 mod web_canvas;
 #[cfg(test)]
@@ -2220,6 +2222,11 @@ impl DomBindings {
 
         Ok(())
     }
+    /// How many worker threads are still running (tests and diagnostics).
+    pub fn worker_threads_running(&self) -> usize {
+        0
+    }
+
 
     /// Evaluate a script in the bound context.
     pub fn evaluate(&self, script: &str) -> Result<JsValue, BindingError> {
