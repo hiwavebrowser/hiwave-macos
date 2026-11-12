@@ -154,7 +154,8 @@ pub(crate) struct MemoKey {
 
 /// The fields layout writes on a descendant, positions relative to the memoised box's content
 /// origin. (`incremental.rs`'s `own_inputs_equal` destructure is the full field list; the others
-/// are style-derived, set by the engine after layout, or set before it.)
+/// are style-derived, set by the engine after layout, or set before it.) `formatting_root` is
+/// structural (flex/grid set it on their children) and deliberately not memoised.
 #[derive(Clone)]
 struct BoxOutputs {
     dimensions: Dimensions,
@@ -591,5 +592,29 @@ impl LayoutBox {
             }
         }
         self.layout_memo = Some(memo);
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use crate::BoxType;
+
+    /// A memo hit writes the recorded (width, base) back, both components: LAY1's re-anchor skip
+    /// compares the width, so a restore that dropped it would leave a stale one.
+    #[test]
+    fn a_restore_writes_back_the_width_and_the_base_of_children_laid_at() {
+        let style = rustkit_css::ComputedStyle::default();
+        let mut parent = LayoutBox::new(BoxType::Block, style.clone());
+        let mut child = LayoutBox::new(BoxType::Block, style.clone());
+        child.children_laid_at = Some((321.0, 45.0));
+        parent.children.push(child);
+        let outputs = snapshot(&parent).expect("snapshot");
+        parent.children[0].children_laid_at = Some((7.0, 45.0));
+        assert!(restore(&mut parent, &outputs));
+        assert_eq!(parent.children[0].children_laid_at, Some((321.0, 45.0)));
+        parent.children[0].children_laid_at = None;
+        assert!(restore(&mut parent, &outputs));
+        assert_eq!(parent.children[0].children_laid_at, Some((321.0, 45.0)));
     }
 }
