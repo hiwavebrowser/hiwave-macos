@@ -28,33 +28,7 @@ const READ: &str = "Array.prototype.map.call(document.querySelectorAll('img'), f
 /// Cells that do not match Chrome yet, as `page@dpr:id:part` (`part` is
 /// `box` or `nat`). A listed cell that starts to match fails the test, so
 /// the list cannot go stale.
-const GAPS: &[&str] = &[
-    // `naturalWidth`/`naturalHeight` are the decoded pixels, not the
-    // density-corrected size.
-    "matrix@1:m2:nat",
-    "matrix@2:m2:nat",
-    "matrix@1:m3:nat",
-    "matrix@2:m3:nat",
-    "matrix@1:m4:nat",
-    "matrix@2:m4:nat",
-    "matrix@1:m5:nat",
-    "matrix@2:m5:nat",
-    "matrix@1:m7:nat",
-    "matrix@2:m7:nat",
-    "matrix@1:m22:nat",
-    "matrix@2:m22:nat",
-    "matrix@1:m29:nat",
-    "matrix@2:m29:nat",
-    "matrix@1:m30:nat",
-    "matrix@2:m30:nat",
-    "matrix@2:m6:nat",
-    "matrix@2:m8:nat",
-    "matrix@2:m9:nat",
-    "matrix@2:m20:nat",
-    "matrix@2:m21:nat",
-    "attrs@1:a21:nat",
-    "attrs@2:a21:nat",
-];
+const GAPS: &[&str] = &[];
 
 fn cells(page: &'static [u8], dpr: f32) -> Vec<String> {
     let server = serve_byte_routes(vec![
