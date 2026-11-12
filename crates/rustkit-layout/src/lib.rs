@@ -472,7 +472,24 @@ pub(crate) fn form_control_intrinsic_size(
                 };
                 let pad = if style.padding_v_declared || author_pad_v > 0.0 { author_pad_v } else { 2.0 };
                 let border = if style.border_v_declared || author_border_v > 0.0 { author_border_v } else { 4.0 };
-                (149.0 * ua_scale, line + pad + border)
+                // SET4: the width composes the same way. Chrome for Testing
+                // 148 at the UA font: content 145, the UA's 2px padding and
+                // 2px border each side, 153 (docs/diagnostics/2026-11-11/
+                // set4_input_widths*). The 149 built here before was Chrome's
+                // `padding: 0` width. The content width is still the UA-font
+                // calibration scaled by the font size (SET5).
+                let px_h = |l: &Length| match l {
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
+                };
+                // Sides are [top, right, bottom, left]; a side nobody
+                // declared keeps the UA's 2px.
+                let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 2.0 };
+                let pad_h = side(style.padding_declared[3], px_h(&style.padding_left))
+                    + side(style.padding_declared[1], px_h(&style.padding_right));
+                let border_h = side(style.border_declared[3], px_h(&style.border_left_width))
+                    + side(style.border_declared[1], px_h(&style.border_right_width));
+                (145.0 * ua_scale + pad_h + border_h, line + pad + border)
             }
         },
         FormControlType::TextArea { rows, cols, .. } => {
@@ -17715,7 +17732,9 @@ mod tests {
     #[test]
     fn bare_control_widths_match_chrome() {
         // n53 form-controls y-table vs Chrome 148 at the UA control font:
-        // text input 149 (was the 12em blob, 160); textarea cols=20 178 and
+        // text input 153 (SET4: content 145 + 2px UA padding + 2px UA
+        // border each side; CfT 148, was 149, before that the 12em blob,
+        // 160); textarea cols=20 178 and
         // cols=40 338 (0.6em per col + 18 border/scrollbar gutter; was 160 /
         // 320); a listbox is its widest option + 2 (39 for "Item 4"; was
         // 133), a dropdown its widest option + 24 (137 for "A longer option
@@ -17728,8 +17747,8 @@ mod tests {
         };
         let w = width(n53_text_input());
         assert!(
-            (w - 149.0).abs() <= 0.5,
-            "bare text input width: Chrome 149, got {w}"
+            (w - 153.0).abs() <= 0.5,
+            "bare text input width: Chrome 153, got {w}"
         );
 
         let ta = |cols: u32| {

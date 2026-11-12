@@ -8,7 +8,7 @@
 //! font's average and maximum character widths; a row of its own, SET5):
 //! every case is compared to the `padding: 0; border: none` input of the
 //! same font size, and the absolute widths are pinned only at the UA font
-//! size, where the content model is calibrated (145).
+//! size (13.333px), where the content model is calibrated (145).
 //!
 //! Expected widths: docs/diagnostics/2026-11-11/set4_input_widths_cft148.txt
 //! for set4_input_widths.html beside it (Chrome for Testing 148.0.7778.216).
@@ -60,7 +60,9 @@ fn a_text_input_adds_its_padding_and_border_to_its_content_width() {
             if (want_extra - got_extra).abs() > 0.5 {
                 wrong.push(format!("{id}: +{got_extra} over its content width (Chromium +{want_extra})"));
             }
-            let ua_size = id.starts_with("t13_333_") || id.starts_with("t13_6_");
+            // 13.6px is not pinned absolutely: the content width there is
+            // 145 in Chrome and 147.9 here, the scaled calibration (SET5).
+            let ua_size = id.starts_with("t13_333_");
             if ua_size && (got - want).abs() > 0.5 {
                 wrong.push(format!("{id}: {got} wide (Chromium {want})"));
             }
