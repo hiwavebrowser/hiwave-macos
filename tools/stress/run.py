@@ -203,6 +203,16 @@ def make_handler(root, record, inject_page, inject_html):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    """The loopback server. An engine that drops a connection mid-body (a
+    cancelled or refused request) is its business, not a traceback here."""
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class Sink:
     """A proxy that refuses everything and records who asked. Chrome sends
     its non-loopback requests here (loopback bypasses a proxy), so an empty
@@ -686,7 +696,7 @@ def main():
     pages = {SUITE[args.suite]["page"], "/MotionMark/developer.html", "/MotionMark/", "/"} if args.suite == "motionmark" \
         else {SUITE[args.suite]["page"], "/"}
     pages = {p for p in pages if (root / p.lstrip("/")).is_file()}
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root, record, pages, inject))
+    httpd = Server(("127.0.0.1", 0), make_handler(root, record, pages, inject))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % httpd.server_address[1]
     url = runner_url(base, args.suite, args)
