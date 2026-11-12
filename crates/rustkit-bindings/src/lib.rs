@@ -131,6 +131,8 @@ mod mutation_observer_tests;
 mod web_messaging_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod internal_names_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
