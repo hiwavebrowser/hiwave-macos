@@ -254,6 +254,25 @@ fn pop_tree() {
     });
 }
 
+/// LAT22 probe: what the shadow trees' sheets cost the build in progress
+/// (or the last one): roots whose sheets were looked up, sheets parsed,
+/// and the time in both, text collection included.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ShadowBuildStats {
+    pub(crate) roots: u32,
+    pub(crate) parsed: u32,
+    pub(crate) ms: f64,
+}
+
+thread_local! {
+    static STATS: Cell<ShadowBuildStats> = const { Cell::new(ShadowBuildStats { roots: 0, parsed: 0, ms: 0.0 }) };
+}
+
+/// The probe's counts since the last take.
+pub(crate) fn take_build_stats() -> ShadowBuildStats {
+    STATS.with(|s| s.replace(ShadowBuildStats::default()))
+}
+
 /// The sheets of the shadow tree under `root`, parsed once per build.
 fn tree_style(root: &Rc<Node>) -> Option<Rc<TreeStyle>> {
     let (viewport, javascript_enabled) = BUILD.with(|b| {
@@ -264,13 +283,22 @@ fn tree_style(root: &Rc<Node>) -> Option<Rc<TreeStyle>> {
     if let Some(hit) = BUILD.with(|b| b.borrow().as_ref()?.by_root.get(&root.id.raw()).cloned()) {
         return Some(hit);
     }
+    let started = std::time::Instant::now();
     let texts = style_texts(root, javascript_enabled);
     let key = texts.join("\u{0}");
     let cached = BUILD.with(|b| b.borrow().as_ref()?.by_text.get(&key).cloned());
+    let parsed = cached.is_none();
     let tree = match cached {
         Some(tree) => tree,
         None => Rc::new(parse_tree_style(&texts, viewport)),
     };
+    STATS.with(|s| {
+        let mut stats = s.get();
+        stats.roots += 1;
+        stats.parsed += u32::from(parsed);
+        stats.ms += started.elapsed().as_secs_f64() * 1000.0;
+        s.set(stats);
+    });
     BUILD.with(|b| {
         if let Some(s) = b.borrow_mut().as_mut() {
             s.by_root.insert(root.id.raw(), tree.clone());
