@@ -231,13 +231,13 @@ fn the_queue_is_bounded() {
         ev(
             &b,
             "var ids = []; \
-             for (var i = 0; i < 70; i++) ids.push(window.__rustkit_net.request({ url: 'http://a/' + i }, function () {})); \
+             for (var i = 0; i < 1030; i++) ids.push(window.__rustkit_net.request({ url: 'http://a/' + i }, function () {})); \
              ids.filter(function (n) { return n === 0; }).length"
         ),
         "6",
-        "the 65th request onward is refused with id 0"
+        "the 1025th request onward is refused with id 0"
     );
-    assert_eq!(b.take_net_requests().len(), 64);
+    assert_eq!(b.take_net_requests().len(), 1024);
 }
 
 #[test]
