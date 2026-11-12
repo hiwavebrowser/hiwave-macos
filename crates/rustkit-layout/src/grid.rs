@@ -8537,6 +8537,77 @@ mod tests {
         assert!(tracks[0].size <= 200.0, "Should not exceed growth_limit");
     }
 
+    /// GR1 (#1075): css-grid-1 §12.6 maximize runs before §12.7 expand
+    /// flexible tracks. An empty `minmax(0, 300px)` beside `minmax(0, 1fr)`
+    /// in 500 grows to 300 first; the fr takes the remaining 200. Expanding
+    /// fr first left the sidebar at 0 (real-site `minmax(0, 340px)`).
+    #[test]
+    fn maximize_tracks_grows_minmax_before_the_fr_track() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (300.0, 200.0),
+            "minmax(0,300px) + minmax(0,1fr) in 500; Chromium 300/200 (bug was 0/500)"
+        );
+    }
+
+    /// GR1: two finite growth limits share free space equally and each
+    /// freezes at its limit. In 500 with `minmax(0, 200px)` and
+    /// `minmax(0, 300px)`, both maximize before any leftover is handed to
+    /// a later fr (here none): 200 and 300.
+    #[test]
+    fn maximize_tracks_shares_free_space_up_to_each_growth_limit() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(200.0)),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (200.0, 300.0),
+            "two finite growth limits in 500 freeze at 200 and 300"
+        );
+    }
+
+    /// GR1: an `auto` maximum is max-content for sizing and stretches like
+    /// `auto`. Empty `minmax(0, auto)` beside `minmax(0, 300px)` in 1000
+    /// takes the remaining 700 (Chromium 148), not 0.
+    #[test]
+    fn maximize_tracks_treats_auto_maximum_like_max_content_stretch() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Auto),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 1000.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (700.0, 300.0),
+            "minmax(0,auto) + minmax(0,300px) in 1000; Chromium 700/300"
+        );
+    }
+
     // ==================== Phase 7 Tests (Edge Cases) ====================
 
     #[test]
