@@ -462,6 +462,8 @@ mod float_in_items_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod cleared_float_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod grid_item_final_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod stretched_row_height_tests;
