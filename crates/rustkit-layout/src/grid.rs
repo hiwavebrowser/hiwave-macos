@@ -1871,6 +1871,51 @@ pub fn layout_grid_container(
         track.growth_limit = max_content.min(limit).max(track.base_size);
         track.fit_content_measured = true;
     }
+    // An item spanning several fit-content columns shares its max-content
+    // among them (css-grid-1 §12.5, the max-content maximums): what the
+    // spanned columns' growth limits do not cover yet is handed out in
+    // equal shares, each column stopping at its own argument. Without it a
+    // column covered only by a spanning item kept its base size as its
+    // limit, and a header across two `fit-content(300px)` columns wrapped
+    // to its min-content (Chromium 148: the two columns add up to the
+    // header's 360; with a 120px item of its own in the first, 240 and
+    // 120). Only spans made of fit-content columns alone: a flexible or
+    // `auto` column in the span takes the item instead.
+    for item in &items {
+        let span = item.column_span.max(1) as usize;
+        if span < 2 {
+            continue;
+        }
+        let start = (item.column_start - 1).max(0) as usize;
+        let end = (start + span).min(grid.columns.len());
+        if start >= end || !grid.columns[start..end].iter().all(|t| t.fit_content_measured) {
+            continue;
+        }
+        let wanted = (estimate_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style))
+            .max(item.get_width_contribution(container_width));
+        let mut extra = wanted
+            - grid.columns[start..end].iter().map(|t| t.growth_limit).sum::<f32>()
+            - column_gap * (end - start - 1) as f32;
+        let mut open: Vec<usize> = (start..end).collect();
+        while extra > 0.01 && !open.is_empty() {
+            let share = extra / open.len() as f32;
+            let mut still_open = Vec::new();
+            for &i in &open {
+                let track = &mut grid.columns[i];
+                let cap = track.fit_content_limit.unwrap_or(f32::INFINITY).max(track.base_size);
+                let give = share.min((cap - track.growth_limit).max(0.0));
+                track.growth_limit += give;
+                extra -= give;
+                if cap - track.growth_limit > 0.01 {
+                    still_open.push(i);
+                }
+            }
+            if still_open.len() == open.len() && share <= 0.01 {
+                break;
+            }
+            open = still_open;
+        }
+    }
     // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     // Apply content alignment (justify-content for columns)
