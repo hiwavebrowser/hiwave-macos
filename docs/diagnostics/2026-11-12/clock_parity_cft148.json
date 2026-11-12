@@ -1,0 +1,47 @@
+{
+ "raf": [
+  {
+   "nonneg": true,
+   "small": true,
+   "tIsNumber": true,
+   "aboveStart": true,
+   "tFraction": true
+  },
+  {
+   "nonneg": true,
+   "small": true,
+   "increases": true
+  }
+ ],
+ "ev": {
+  "newEvent": {
+   "nonneg": true,
+   "small": true,
+   "notEpoch": true,
+   "type": "number"
+  },
+  "kinds": [
+   true,
+   true,
+   true
+  ],
+  "click": {
+   "nonneg": true,
+   "small": true,
+   "notEpoch": true,
+   "trusted": false
+  },
+  "dispatchedClick": true
+ },
+ "order": [],
+ "dateNowVsOrigin": true,
+ "nowSteps": true,
+ "timelineVsRaf": [
+  true,
+  true,
+  "number"
+ ],
+ "timeout": {
+  "ok": true
+ }
+}

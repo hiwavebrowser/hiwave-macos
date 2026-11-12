@@ -126,6 +126,8 @@ mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 #[cfg(test)]
+mod clock_parity_tests;
+#[cfg(test)]
 mod web_named_access_tests;
 mod web_canvas;
 #[cfg(test)]
