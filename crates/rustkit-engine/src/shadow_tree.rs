@@ -260,8 +260,7 @@ impl BuildScope {
             javascript_enabled,
             by_root: HashMap::new(),
             by_text: HashMap::new(),
-            // RED STUB
-            view: view.filter(|_| false && !VIEW_CACHE_OFF.with(Cell::get)),
+            view: view.filter(|_| !VIEW_CACHE_OFF.with(Cell::get)),
         };
         let previous = BUILD.with(|b| b.borrow_mut().replace(state));
         let was_active = ACTIVE.replace(true);
@@ -826,6 +825,11 @@ impl HostScope {
     /// The sheets the host's shadow children are matched against.
     pub(crate) fn sheets(&self) -> Option<&[Stylesheet]> {
         self.tree.as_ref().map(|t| t.sheets.as_slice())
+    }
+
+    /// The owner of `sheets()`, for a cache keyed by their address.
+    pub(crate) fn sheets_owner(&self) -> Option<Rc<Vec<Stylesheet>>> {
+        self.tree.as_ref().map(|t| t.sheets.clone())
     }
 
     /// The chain the host's shadow children start from.

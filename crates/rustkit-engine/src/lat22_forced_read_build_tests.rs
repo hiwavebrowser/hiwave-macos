@@ -331,6 +331,38 @@ fn the_shadow_rule_index_builds_the_same_boxes() {
     }
 }
 
+/// Roots whose sheets differ but have the same shape (one sheet, one rule)
+/// and the same ids, under hosts of one style. Each `#x` takes its own
+/// sheets' style, with or without the view cache. Until 2026-11-12 style
+/// sharing keyed rule numbers without saying whose index numbered them, so
+/// every `#x` after the first took the first's style (`5px` everywhere).
+const TWO_SHEETS_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</style></head><body>\
+    <div id=h1></div><div id=h2></div><div id=h3></div><div id=h4></div><p id=t>text</p><script>\
+    ['h1','h2','h3','h4'].forEach(function(h,i){\
+    var r=document.getElementById(h).attachShadow({mode:'open'});\
+    r.innerHTML='<style id=st>#x{padding-left:'+(i%2?3:5)+'px}</style><div id=x>x</div>';});\
+    </script></body></html>";
+
+#[test]
+fn roots_with_differing_sheets_of_one_shape_match_their_own() {
+    for cache_off in [true, false] {
+        crate::shadow_tree::set_view_cache_off_for_test(cache_off);
+        set_tree_rule_index_off_for_test(true);
+        let (without, _) = built_dump(TWO_SHEETS_PAGE);
+        set_tree_rule_index_off_for_test(false);
+        let (with, _) = built_dump(TWO_SHEETS_PAGE);
+        let (mut engine, view, _server) = load(TWO_SHEETS_PAGE);
+        let pads = read(
+            &mut engine,
+            view,
+            "['h1','h2','h3','h4'].map(function(h){return getComputedStyle(document.getElementById(h).shadowRoot.querySelector('#x')).paddingLeft;}).join('/')",
+        );
+        crate::shadow_tree::set_view_cache_off_for_test(false);
+        assert!(with == without, "cache off: {cache_off}; the indexed build differs from the unindexed one");
+        assert_eq!(pads, "5px/3px/5px/3px", "cache off: {cache_off}");
+    }
+}
+
 /// LAT22: the view keeps its shadow tree styles across builds. A build
 /// after a script write elsewhere reads no shadow sheet's text and parses
 /// none.
@@ -347,13 +379,13 @@ fn a_later_build_reads_no_shadow_sheet_text() {
     assert_eq!((shadow.texts_read, shadow.parsed), (0, 0), "{shadow:?}");
 }
 
-/// Two hosts with shadow roots; `#x` in the first is what the sheets style.
+/// Two hosts with shadow roots; `#x` in each is what its sheets style.
 const CACHE_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</style></head><body>\
     <div id=h1></div><div id=h2></div><p id=t>text</p><script>\
     var S='<style id=st>#x{padding-left:3px}</style><div id=x>x</div>';\
     var r1=document.getElementById('h1').attachShadow({mode:'open'});r1.innerHTML=S;\
     var r2=document.getElementById('h2').attachShadow({mode:'open'});r2.innerHTML=S;\
-    function pad(r){return getComputedStyle(r.getElementById('x')).paddingLeft;}\
+    function pad(r){return getComputedStyle(r.querySelector('#x')).paddingLeft;}\
     </script></body></html>";
 
 /// Every way a shadow root's sheets change is seen by the next build, with
@@ -364,16 +396,16 @@ const CACHE_PAGE: &str = "<!doctype html><html><head><style>body{margin:0}</styl
 #[test]
 fn each_change_to_a_shadow_roots_sheets_restyles_it() {
     let steps: &[(&str, &str)] = &[
-        ("pad(r1)+'/'+pad(r2)", "3px/3px"),
-        ("r1.getElementById('st').textContent='#x{padding-left:5px}';pad(r1)+'/'+pad(r2)", "5px/3px"),
-        ("var n=document.createElement('style');n.id='s2';n.textContent='#x{padding-left:7px}';r1.appendChild(n);pad(r1)+'/'+pad(r2)", "7px/3px"),
-        ("r1.getElementById('s2').remove();pad(r1)+'/'+pad(r2)", "5px/3px"),
-        ("r1.getElementById('st').setAttribute('media','print');pad(r1)+'/'+pad(r2)", "0px/3px"),
-        ("r1.getElementById('st').removeAttribute('media');pad(r1)+'/'+pad(r2)", "5px/3px"),
-        ("var a=new CSSStyleSheet();a.replaceSync('#x{padding-left:9px}');r1.adoptedStyleSheets=[a];pad(r1)+'/'+pad(r2)", "9px/3px"),
-        ("var b=new CSSStyleSheet();b.replaceSync('#x{padding-left:11px}');r1.adoptedStyleSheets=[b];pad(r1)+'/'+pad(r2)", "11px/3px"),
-        ("r1.adoptedStyleSheets=[];pad(r1)+'/'+pad(r2)", "5px/3px"),
-        ("r2.getElementById('st').textContent='@media (max-width:500px){#x{padding-left:13px}}';pad(r1)+'/'+pad(r2)", "5px/0px"),
+        ("", "3px/3px"),
+        ("r1.querySelector('#st').textContent='#x{padding-left:5px}';", "5px/3px"),
+        ("var n=document.createElement('style');n.id='s2';n.textContent='#x{padding-left:7px}';r1.appendChild(n);", "7px/3px"),
+        ("r1.querySelector('#s2').remove();", "5px/3px"),
+        ("r1.querySelector('#st').setAttribute('media','print');", "0px/3px"),
+        ("r1.querySelector('#st').removeAttribute('media');", "5px/3px"),
+        ("var a=new CSSStyleSheet();a.replaceSync('#x{padding-left:9px}');r1.adoptedStyleSheets=[a];", "9px/3px"),
+        ("var b=new CSSStyleSheet();b.replaceSync('#x{padding-left:11px}');r1.adoptedStyleSheets=[b];", "11px/3px"),
+        ("r1.adoptedStyleSheets=[];", "5px/3px"),
+        ("r2.querySelector('#st').textContent='@media (max-width:500px){#x{padding-left:13px}}';", "5px/0px"),
     ];
     for cache_off in [true, false] {
         crate::shadow_tree::set_view_cache_off_for_test(cache_off);
@@ -381,7 +413,8 @@ fn each_change_to_a_shadow_roots_sheets_restyles_it() {
         for (script, want) in steps {
             // A build in between, so the cache holds the state before.
             engine.execute_script(view, "document.getElementById('t').firstChild.data += '.';").unwrap();
-            assert_eq!(read(&mut engine, view, script), *want, "cache off: {cache_off}; step: {script}");
+            engine.execute_script(view, script).unwrap();
+            assert_eq!(read(&mut engine, view, "pad(r1)+'/'+pad(r2)"), *want, "cache off: {cache_off}; step: {script}");
         }
         engine.resize_view(view, Bounds { x: 0, y: 0, width: 400, height: 768 }).expect("resize");
         assert_eq!(read(&mut engine, view, "pad(r1)+'/'+pad(r2)"), "5px/13px", "cache off: {cache_off}; after the resize");
@@ -415,3 +448,4 @@ fn the_view_tree_style_cache_builds_the_same_boxes() {
     assert!(without.len() > 2000);
     assert!(with == without, "the cached build differs from the uncached one");
 }
+

@@ -13758,8 +13758,14 @@ impl layout_ctx::LayoutCtx {
                     if wanted {
                         // Kept on the tree style: a tree the view's cache
                         // hands to a later build brings its index.
-                        if let Some(index) = host_scope.index(|sheets| self.build_rule_index(sheets)) {
-                            TREE_RULE_INDEXES.with(|c| c.borrow_mut().insert(source, index));
+                        // The entry holds the sheets: the key is their
+                        // address, which a dropped tree would free for the
+                        // next tree's sheets of the same shape to reuse.
+                        if let (Some(index), Some(owner)) = (
+                            host_scope.index(|sheets| self.build_rule_index(sheets)),
+                            host_scope.sheets_owner(),
+                        ) {
+                            TREE_RULE_INDEXES.with(|c| c.borrow_mut().insert(source, (owner, index)));
                         }
                     }
                 }
@@ -15679,11 +15685,13 @@ impl layout_ctx::LayoutCtx {
         // tag, the matched rules in this order, the inline style, the
         // presentational hints and whether a UA rule hid the element. An
         // earlier element with the same six already has this style. Only
-        // under the build's own rule index, whose rule numbers the key holds.
-        // Rules from other trees are not in the key: no sharing with them.
+        // under a rule index, whose rule numbers the key holds with the
+        // index's source. Rules from other trees are not in the key (extras):
+        // no sharing with them.
         let share = match (index.is_some() && extras.is_empty(), parent_style) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
+                source: index.as_ref().map_or((0, 0, 0), |ix| ix.source),
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
@@ -44413,7 +44421,7 @@ thread_local! {
     /// (`RuleIndex::source_of`). Until 2026-11-12 an element in a shadow
     /// tree was matched against every rule of its tree's sheets: a build of
     /// 300 hosts sharing 1500 rules took 595 ms, 11.5 ms with none.
-    static TREE_RULE_INDEXES: std::cell::RefCell<HashMap<(usize, usize, usize), Rc<RuleIndex>>> =
+    static TREE_RULE_INDEXES: std::cell::RefCell<HashMap<(usize, usize, usize), TreeRuleIndexEntry>> =
         std::cell::RefCell::new(HashMap::new());
     /// Test switch: build without the shadow trees' indexes.
     static TREE_RULE_INDEX_OFF: Cell<bool> = const { Cell::new(false) };
@@ -44423,7 +44431,7 @@ thread_local! {
 }
 
 fn tree_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
-    TREE_RULE_INDEXES.with(|c| c.borrow().get(&RuleIndex::source_of(stylesheets)).cloned())
+    TREE_RULE_INDEXES.with(|c| c.borrow().get(&RuleIndex::source_of(stylesheets)).map(|(_, index)| index.clone()))
 }
 
 #[cfg(test)]
@@ -44434,7 +44442,11 @@ pub(crate) fn set_tree_rule_index_off_for_test(off: bool) {
 /// Alive for one build: the shadow trees' indexes it registers are dropped
 /// with it (they name sheet slices the build's trees own), and an outer
 /// build's come back.
-struct TreeRuleIndexScope(HashMap<(usize, usize, usize), Rc<RuleIndex>>);
+/// The sheets an index was built from (kept alive so their address, the
+/// key, names them until the build ends) and the index.
+type TreeRuleIndexEntry = (Rc<Vec<Stylesheet>>, Rc<RuleIndex>);
+
+struct TreeRuleIndexScope(HashMap<(usize, usize, usize), TreeRuleIndexEntry>);
 
 impl TreeRuleIndexScope {
     fn install() -> Self {
@@ -44550,6 +44562,9 @@ fn style_share_mode() -> StyleShareMode {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct StyleShareKey {
     parent: u64,
+    /// The index whose numbers `rules` holds: the document's or a shadow
+    /// tree's (LAT22). Two trees' rule 0 are different rules.
+    source: (usize, usize, usize),
     tag: String,
     rules: Vec<(usize, (usize, usize, usize))>,
     inline: Option<String>,
@@ -47318,6 +47333,7 @@ mod style_share_tests {
         let named = ComputedStyle::new();
         let other = ComputedStyle::new();
         let key = || StyleShareKey {
+            source: (0, 0, 0),
             parent: 0,
             tag: "p".to_string(),
             rules: Vec::new(),
@@ -47352,6 +47368,7 @@ mod style_share_tests {
         let named = ComputedStyle::new();
         let key = |tag: &'static str| {
             move || StyleShareKey {
+                source: (0, 0, 0),
                 parent: 0,
                 tag: tag.to_string(),
                 rules: Vec::new(),
