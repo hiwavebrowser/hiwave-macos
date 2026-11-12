@@ -123,8 +123,12 @@ how. How each engine is observed:
   Limits: the sandbox holds the engine's process and what it forks, not
   another service's process. The app's WebKit views
   (`HIWAVE_RUSTKIT_CHROME=0`) fetch through `com.apple.WebKit.Networking`,
-  so `run.py` refuses that setting. The request log costs a log line per
-  request, on both arms alike.
+  so `run.py` forces the RustKit chrome on and applies the request-log
+  settings last, after `--env` and whatever the shell had (it also drops
+  `HIWAVE_CONTENT_THREAD`, which the chrome depends on). A run whose own
+  log has no `net start` line for the runner page, or whose app did not
+  start with `Chrome: RustKit`, is `invalid` (`unobserved`). The request
+  log costs a log line per request, on both arms alike.
 - **positive control**: `--suite control` serves a page that tries one
   off-machine fetch (TEST-NET-3) and then reports a score. It must end
   `invalid` on every engine; run it when the harness or the app's logging

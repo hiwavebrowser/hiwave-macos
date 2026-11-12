@@ -258,7 +258,8 @@ class Sink:
 # tries. It covers the process and what it forks. It does not cover
 # another service's process: the app's WebKit views (the
 # HIWAVE_RUSTKIT_CHROME=0 escape hatch) fetch through
-# com.apple.WebKit.Networking, so that setting is refused for a run.
+# com.apple.WebKit.Networking, so the RustKit chrome is forced on
+# (`engine_env`) and a run whose app did not start with it is invalid.
 SANDBOX_PROFILE = """(version 1)
 (allow default)
 (deny network-outbound)
@@ -270,7 +271,44 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # The engine's own request log (`net start GET <url>` per request, script
 # fetch()/XHR included), which `log_off_machine` reads: the sandbox refuses
 # an off-machine request, this is what says one was tried.
-NET_LOG_ENV = {"HIWAVE_CONSOLE_LOG": "1", "RUST_LOG": "warn,hiwave::console=info,rustkit_engine=info"}
+NET_LOG_ENV = {"HIWAVE_CONSOLE_LOG": "1", "RUST_LOG": "warn,hiwave=info,rustkit_engine=info"}
+# Variables that would move the app's own pages onto WebKit views, whose
+# requests leave through com.apple.WebKit.Networking (outside the sandbox
+# and the socket watch): the RustKit chrome needs HIWAVE_RUSTKIT_CHROME on
+# and the content thread, which the app turns on itself when the variable
+# is unset (hiwave-app main.rs).
+FORCED_ENV = {"HIWAVE_RUSTKIT_CHROME": "1"}
+DROPPED_ENV = ("HIWAVE_CONTENT_THREAD",)
+
+
+def engine_env(extra_env, inherited=None):
+    """The engine process's environment: the caller's `--env` first, then
+    what the offline checks rest on, applied last so that neither `--env`
+    nor the shell this was started from can switch them off. Returns
+    (overrides, names to remove from what is inherited)."""
+    env = dict(extra_env)
+    for name in DROPPED_ENV:
+        env.pop(name, None)
+    env.update(FORCED_ENV)
+    env.update(NET_LOG_ENV)
+    inherited = os.environ if inherited is None else inherited
+    return env, [name for name in DROPPED_ENV if name in inherited or name in extra_env]
+
+
+def unobserved(engine, log_text, runner):
+    """Why this run's own log does not show that it was observed, as a
+    list (empty: it does). The request log must be on (a `net start` line
+    for the runner page), and the app must have started with the RustKit
+    chrome."""
+    why = []
+    page = runner.split("?")[0]
+    if not re.search(r"net start GET " + re.escape(page) + r"(\?|\s)", log_text):
+        why.append("no request-log line for the runner page: the engine's request log is off")
+    if engine == "hiwave":
+        line = re.search(r"Chrome: [^\n]*", log_text)
+        if not line or not line.group(0).startswith("Chrome: RustKit"):
+            why.append("the app did not start with the RustKit chrome (%s)" % (line.group(0)[:80] if line else "no start-up line"))
+    return why
 
 
 def sandboxed(binary, work):
@@ -550,9 +588,11 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     if seed_filter_lists(profile) == 0:
         raise NotOffline("no cached filter lists under %s: the app's first launch would download them. "
                          "Start HiWave once on this machine, or point STRESS_FILTER_LISTS at a copy" % FILTER_LISTS)
+    forced, dropped = engine_env(extra_env)
     env = {"HIWAVE_TEST_HOOKS": "0"}
-    env.update(NET_LOG_ENV)
-    env.update(extra_env)
+    env.update(forced)
+    for name in dropped:
+        os.environ.pop(name, None)  # the driver's App starts from os.environ
     binary = sandboxed(binary, work)
     seed = rw.App(binary, profile, work / "seed.log", env).start()
     on_pid(seed.proc.pid)
@@ -588,8 +628,11 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
 
 
 def start_headless(binary, url, work, limit_s, extra_env):
-    env = dict(os.environ, **NET_LOG_ENV)
-    env.update(extra_env)
+    forced, dropped = engine_env(extra_env)
+    env = dict(os.environ)
+    for name in dropped:
+        env.pop(name, None)
+    env.update(forced)
     argv = [str(sandboxed(binary, work)), "--url", url, "--width", "1280", "--height", "800",
             "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
             "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
@@ -736,11 +779,6 @@ def main():
     args = ap.parse_args()
 
     extra_env = dict(kv.split("=", 1) for kv in args.env)
-    if extra_env.get("HIWAVE_RUSTKIT_CHROME") == "0":
-        # WebKit views fetch through com.apple.WebKit.Networking, a process
-        # the sandbox on the app does not hold and the socket watch does
-        # not see.
-        sys.exit("HIWAVE_RUSTKIT_CHROME=0 is not allowed here: its WebKit views' requests cannot be kept on this machine")
     binary = pathlib.Path(args.binary).resolve()
     if not binary.is_file():
         sys.exit("no binary at %s" % binary)
@@ -866,10 +904,18 @@ def main():
     log_hosts = sorted(set(log_off_machine(work / "app.log") + log_off_machine(work / "seed.log"))) \
         if args.engine != "chrome" else []
     left = off_machine(args.engine, sink, watch_peers, log_hosts, events)
+    if args.engine != "chrome" and handle is not None:
+        try:
+            text = re.sub(r"\x1b\[[0-9;]*m", "", (work / "app.log").read_text(errors="replace"))
+        except OSError:
+            text = ""
+        why = unobserved(args.engine, text, url)
+        if why:
+            left["unobserved"] = why
     if watch is not None and handle is not None and watch.samples == 0:
         # No socket sample ever answered: the run was not observed, and an
         # unobserved run is not an offline one.
-        left["unobserved"] = ["0 of %d socket samples answered" % watch.failed]
+        left.setdefault("unobserved", []).append("0 of %d socket samples answered" % watch.failed)
     discarded_score = None
     if left:
         status, discarded_score, score = "invalid", score, None

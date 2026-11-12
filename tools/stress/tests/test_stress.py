@@ -227,6 +227,7 @@ FAKE_ENGINE = '''#!/usr/bin/env python3
 import sys, json, time, urllib.request
 url = sys.argv[sys.argv.index("--url") + 1]
 base = url.split("/index.html")[0]
+NETLOG
 urllib.request.urlopen(url).read()
 EXTRA
 urllib.request.urlopen(urllib.request.Request(base + "/__stress/result", data=json.dumps({"score": 42.0, "metrics": {}}).encode(), method="POST")).read()
@@ -234,12 +235,13 @@ time.sleep(30)
 '''
 
 
-def run_with_fake_engine(monkeypatch, tmp_path, extra):
+def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True):
     suite = tmp_path / "suite"
     suite.mkdir(parents=True)
     (suite / "index.html").write_text("<!doctype html><html><head></head><body></body></html>")
     engine = tmp_path / "engine.py"
-    engine.write_text(FAKE_ENGINE.replace("EXTRA", extra))
+    netlog = 'print("INFO hiwave::console: net start GET " + url + " status=- issued nav=1", flush=True)' if request_log else ""
+    engine.write_text(FAKE_ENGINE.replace("EXTRA", extra).replace("NETLOG", netlog))
     engine.chmod(0o755)
     monkeypatch.setattr(run, "check_pin", lambda s: (suite, {"version": "t", "sha": "0" * 40}))
     monkeypatch.setattr(run, "wait_for_load", lambda limit, wait: True)
@@ -377,15 +379,23 @@ def test_the_filter_list_copy_takes_only_the_two_real_files(monkeypatch, tmp_pat
     assert sorted(f.name for f in dest.iterdir()) == ["easylist.txt"]
 
 
-def test_the_webkit_chrome_escape_hatch_is_refused(monkeypatch, tmp_path):
-    engine = tmp_path / "engine"
-    engine.write_text("#!/bin/sh\n")
-    engine.chmod(0o755)
-    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "control", "--engine", "hiwave", "--binary", str(engine),
-                                      "--env", "HIWAVE_RUSTKIT_CHROME=0", "--out", str(tmp_path / "out")])
-    try:
-        run.main()
-        refused = ""
-    except SystemExit as e:
-        refused = str(e.code)
-    assert "HIWAVE_RUSTKIT_CHROME=0 is not allowed" in refused
+def test_the_checks_environment_is_applied_last_and_cannot_be_switched_off():
+    asked = {"HIWAVE_RUSTKIT_CHROME": "off", "HIWAVE_CONTENT_THREAD": "0", "HIWAVE_CONSOLE_LOG": "0", "RUST_LOG": "error", "KEEP": "me"}
+    env, dropped = run.engine_env(asked, inherited={"HIWAVE_CONTENT_THREAD": "0"})
+    assert env["HIWAVE_RUSTKIT_CHROME"] == "1" and env["HIWAVE_CONSOLE_LOG"] == "1" and "hiwave=info" in env["RUST_LOG"]
+    assert "HIWAVE_CONTENT_THREAD" not in env and dropped == ["HIWAVE_CONTENT_THREAD"] and env["KEEP"] == "me"
+    # ... and a variable only the shell had is dropped too
+    assert run.engine_env({}, inherited={"HIWAVE_CONTENT_THREAD": "false"})[1] == ["HIWAVE_CONTENT_THREAD"]
+
+
+def test_a_run_is_unobserved_without_its_request_log_or_on_the_webkit_chrome(monkeypatch, tmp_path):
+    runner = "http://127.0.0.1:5000/index.html?startAutomatically=true"
+    seen = "INFO hiwave: Chrome: RustKit (default; ...)\nINFO hiwave::console: net start GET http://127.0.0.1:5000/index.html status=- issued nav=1\n"
+    assert run.unobserved("hiwave", seen, runner) == []
+    assert len(run.unobserved("hiwave", seen.replace("RustKit (default; ...)", "WebKit (HIWAVE_RUSTKIT_CHROME=0)"), runner)) == 1
+    assert len(run.unobserved("hiwave", "INFO hiwave: Chrome: RustKit (default)\n", runner)) == 1  # the request log is off
+    assert len(run.unobserved("hiwave", "", runner)) == 2
+    assert run.unobserved("hiwave-headless", seen.split("\n", 1)[1], runner) == []  # no chrome to ask about
+    # End to end: an engine whose request log says nothing is not an offline run.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "quiet", "", request_log=False)
+    assert code == 1 and rec["status"] == "invalid" and rec["score"] is None and "unobserved" in rec["off_machine"], rec
