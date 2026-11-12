@@ -49,11 +49,17 @@
             this.error = 'error' in init ? init.error : null;
         }
     }
+    var CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+        NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+        InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15,
+        TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+        QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
     class DOMException extends Error {
         constructor(message, name) {
             super(message === undefined ? '' : String(message));
             Object.defineProperty(this, 'name', { value: name === undefined ? 'Error' : String(name), configurable: true });
         }
+        get code() { return CODES[this.name] || 0; }
     }
     hide('Event', Event);
     hide('ErrorEvent', ErrorEvent);
@@ -174,11 +180,10 @@
 
     hide('self', g);
     hide('name', '');
-    hide('postMessage', function postMessage(message) {
+    hide('postMessage', function postMessage(message, transfer) {
         if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'DedicatedWorkerGlobalScope': 1 argument required, but only 0 present.");
         if (closing) return;
-        var json = JSON.stringify(message);
-        out(json === undefined ? 'null' : json);
+        out(g.__rk_sc.serialize(message, transfer, 'DedicatedWorkerGlobalScope'));
     });
     hide('close', function close() { closing = true; closeHost(); });
     // Synchronous: the worker thread waits while the page fetches the
@@ -204,6 +209,8 @@
     });
     hide('__rk_worker_dispatch', function (json) {
         if (closing) return;
-        dispatchEvent(new MessageEvent('message', { data: JSON.parse(json) }));
+        var data;
+        try { data = g.__rk_sc.deserialize(json); } catch (_) { dispatchEvent(new MessageEvent('messageerror', {})); return; }
+        dispatchEvent(new MessageEvent('message', { data: data }));
     });
 })(globalThis);

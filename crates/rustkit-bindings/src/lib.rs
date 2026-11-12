@@ -1222,6 +1222,8 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
         // Dedicated workers: a thread and a runtime each (worker_host.rs, web_worker.js).
         let workers = worker_host::install(&mut runtime)?;
+        // The structured clone algorithm postMessage uses (structured_clone.js).
+        runtime.evaluate_script(include_str!("structured_clone.js"))?;
         runtime.evaluate_with_host(include_str!("web_worker.js"))?;
         // Script elements script inserts are prepared and run (web_scripts.js).
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;

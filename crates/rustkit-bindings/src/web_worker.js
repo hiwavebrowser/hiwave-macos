@@ -3,7 +3,7 @@
 // the shield decide whether it loads, then hands the source to the host,
 // which runs it on a thread of its own (worker_host.rs, worker_prelude.js).
 //
-// Messages are JSON strings for now. The worker's replies are drained by
+// Messages are structured clones (structured_clone.js), as strings between the threads. The worker's replies are drained by
 // `__rustkit_workers_pump`, which the timer pump calls, so every handler
 // runs on the page's own thread and turn.
 (function () {
@@ -45,12 +45,8 @@
             return g.decodeURIComponent(body);
         } catch (_) { return null; }
     }
-    function encode(message) {
-        if (typeof message === 'function' || typeof message === 'symbol') {
-            throw dom("Failed to execute 'postMessage' on 'Worker': " + String(message) + ' could not be cloned.', 'DataCloneError');
-        }
-        var json = JSON.stringify(message);
-        return json === undefined ? 'null' : json;
+    function encode(message, transfer) {
+        return g.__rk_sc.serialize(message, transfer, 'Worker');
     }
 
     // importScripts: fetch the scripts under the page's fetch policy and
@@ -86,7 +82,9 @@
                 var it = items[i];
                 ran++;
                 if (it.k === 'm') {
-                    fire(st.w, new g.MessageEvent('message', { data: JSON.parse(it.d), origin: '' }));
+                    var data;
+                    try { data = g.__rk_sc.deserialize(it.d); } catch (_) { fire(st.w, new g.MessageEvent('messageerror', { origin: '' })); continue; }
+                    fire(st.w, new g.MessageEvent('message', { data: data, origin: '' }));
                 } else if (it.k === 'e') {
                     var info = JSON.parse(it.m), ev;
                     if (typeof g.ErrorEvent === 'function') {
@@ -184,13 +182,13 @@
             });
             if (!st.net) failLoad(this, st);
         }
-        postMessage(message) {
+        postMessage(message, transfer) {
             if (arguments.length < 1) {
                 throw new TypeError("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present.");
             }
             var st = states.get(this);
             if (!st) throw new TypeError('Illegal invocation');
-            var json = encode(message);
+            var json = encode(message, transfer);
             if (st.dead) return;
             if (st.id) post(st.id, json);
             else if (st.queue.length < MAX_QUEUED) st.queue.push(json);

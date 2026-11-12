@@ -22,6 +22,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const PRELUDE: &str = include_str!("worker_prelude.js");
+const STRUCTURED_CLONE: &str = include_str!("structured_clone.js");
 
 /// A worker's turn is bounded by the interrupt word, not by a budget.
 const TURN_BUDGET: Duration = Duration::from_secs(60 * 60 * 24);
@@ -301,7 +302,8 @@ fn worker_main(
     };
 
     rt.begin_turn(&stamp, TURN_BUDGET);
-    let started = rt.evaluate_script(PRELUDE).is_ok()
+    let started = rt.evaluate_script(STRUCTURED_CLONE).is_ok()
+        && rt.evaluate_script(PRELUDE).is_ok()
         && rt
             .evaluate_script(&format!("__rk_worker_setup({}, {})", quoted(&name), quoted(&location)))
             .is_ok();
