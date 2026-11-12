@@ -468,7 +468,13 @@ impl<'a> GridItem<'a> {
         // unbreakable content inside the item widens intrinsic and flexible
         // tracks. Scroll containers may shrink below their content and keep
         // the explicit-only contribution.
-        let auto_min = if style.overflow_x == Overflow::Visible {
+        // A size container's content does not size it (inline-size
+        // containment): its automatic minimum is its padding and border
+        // (Chromium 148: a `1fr 1fr` grid of 200 keeps a container holding
+        // 300px at 100).
+        let auto_min = if style.has_inline_size_containment() {
+            horizontal_padding_border(style)
+        } else if style.overflow_x == Overflow::Visible {
             grid_item_min_content_width(self.layout_box)
         } else {
             0.0
@@ -1519,6 +1525,12 @@ pub fn layout_grid_container(
     if !style.display.is_grid() {
         return;
     }
+    // A grid item is a formatting root (css-grid-1 §6): it encloses its
+    // floats. Marked before anything lays an item out.
+    for child in &mut container.children {
+        child.formatting_root = true;
+    }
+    let style = &container.style;
 
     debug!(
         "Grid layout: container {}x{}, {} children",
@@ -3745,6 +3757,15 @@ fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
             BoxSizing::ContentBox => w + padding_border,
         };
     }
+    // CQ2: a size container (`container-type: inline-size` or `size`) has
+    // inline-size containment, so its content does not size it: its min-
+    // and max-content widths are those of an empty box, its padding and
+    // border (and a length `min-width`) (css-contain-2 §3.2; Chromium 148:
+    // a `padding: 0 5px` container around a 300px child is 10 wide as a
+    // `flex: 0 0 auto` item, an inline-block, `fit-content` or in a float).
+    if style.has_inline_size_containment() {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
+    }
 
     // A replaced box has no children to walk: its contribution is its own
     // width, which the walk below read as 0.
@@ -4082,6 +4103,10 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
             BoxSizing::ContentBox => w + padding_border,
         };
     }
+    // CQ2: inline-size containment, as in `own_min_content_width`.
+    if style.has_inline_size_containment() {
+        return length_min_width_border_box(layout_box).unwrap_or(0.0).max(padding_border);
+    }
 
     // A replaced box has no children to walk: its contribution is its own
     // width, which the walk below read as 0.
@@ -4174,8 +4199,18 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         return content + padding_border;
     }
 
+    // One line of max-content: the inline content laid end to end, plus the
+    // floats beside it. Floats are summed per side, and a float with `clear`
+    // starts a new line of floats on the side it clears (Chrome for Testing
+    // 148, docs/diagnostics/2026-11-11/cleared_floats_max_content*: two
+    // `float: left; clear: left` 100px boxes are 100 wide, not 200; a left
+    // 100 and a right 60 with `clear: right` are 160; a float, "text" and a
+    // cleared float are the text beside the wider line of floats).
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
+    let (mut floats_left, mut floats_right) = (0.0f32, 0.0f32);
+    // The widest line of floats closed by a `clear` since the run began.
+    let mut floats_widest = 0.0f32;
     for child in &layout_box.children {
         if child.style.display == Display::None {
             continue;
@@ -4189,15 +4224,42 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
         let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
-        if inline_level {
+        if child.float != crate::Float::None {
+            // A float sits on the line beside the inline content around it
+            // (a 10px float + "text" is 35.8 wide in Chrome, side by side).
+            let (clears_left, clears_right) = match child.clear {
+                crate::Clear::Left => (true, false),
+                crate::Clear::Right => (false, true),
+                crate::Clear::Both => (true, true),
+                _ => (false, false),
+            };
+            if clears_left || clears_right {
+                floats_widest = floats_widest.max(floats_left + floats_right);
+                if clears_left {
+                    floats_left = 0.0;
+                }
+                if clears_right {
+                    floats_right = 0.0;
+                }
+            }
+            if child.float == crate::Float::Right {
+                floats_right += outer;
+            } else {
+                floats_left += outer;
+            }
+        } else if inline_level {
             inline_run += outer;
         } else {
-            max_contribution = max_contribution.max(inline_run);
+            max_contribution =
+                max_contribution.max(inline_run + floats_widest.max(floats_left + floats_right));
             inline_run = 0.0;
+            floats_left = 0.0;
+            floats_right = 0.0;
+            floats_widest = 0.0;
             max_contribution = max_contribution.max(outer);
         }
     }
-    max_contribution = max_contribution.max(inline_run);
+    max_contribution = max_contribution.max(inline_run + floats_widest.max(floats_left + floats_right));
 
     max_contribution + padding_border
 }

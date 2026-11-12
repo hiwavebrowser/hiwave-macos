@@ -460,6 +460,11 @@ fn layout_flex_container_at(
     used_inner_height: Option<f32>,
     resolved_percent_inner_height: Option<f32>,
 ) {
+    // A flex item is a formatting root (css-flexbox-1 §3): it encloses its
+    // floats. Marked before anything lays an item out.
+    for child in &mut container.children {
+        child.formatting_root = true;
+    }
     // Resolved once, up front, and read by both the main-size choice below
     // and step 11d's redistribution: these take `&LayoutBox`, and from the
     // moment the item list borrows `container.children` mutably no whole-box
@@ -1193,12 +1198,30 @@ fn layout_flex_container_at(
                 // holding a 12px line or a 5px block kept the 18px guess as
                 // the line's height (Chrome for Testing 148: the line is the
                 // laid-out 14 / 5; CB6b, HiWave's `.shelf-item-header`).
-                // A stretched item keeps its size: it is the line's.
+                //
+                // So does a STRETCHED item while the line itself is still
+                // that guess (the container's height is auto, so nothing
+                // fixed it): the line is then re-derived from the laid-out
+                // items below and the re-stretch grows every stretched item
+                // to it (Chrome for Testing 148: one item holding a 5px block
+                // is 5; 5px and 9px items are both 9). A definite line keeps
+                // its stretched items. An item whose content flows to 0 is 0
+                // (a `height: 0` child; CB6c).
                 let laid_out = children_height + item.cross_pb();
                 if cross_axis == Axis::Vertical
-                    && children_height > 0.0
                     && laid_out < item.cross_size
-                    && !item.stretches(style.align_items)
+                    && (!item.stretches(style.align_items)
+                        || (definite_inner_cross.is_none()
+                            // A stretched item with a preferred aspect ratio
+                            // takes its cross size from the ratio, not from
+                            // the one-line guess: it keeps it (Chrome for
+                            // Testing 148, flex_aspect_ratio_tests: 294 and
+                            // 40 tall around a 30px picture). Keyed on
+                            // the declared ratio, not on whether the ratio
+                            // sized this item (`ratio_cross`): conservative,
+                            // an item with an unused ratio keeps the guess
+                            // as it did before CB6c.
+                            && item.layout_box.style.aspect_ratio.is_none()))
                 {
                     // Only an AUTHORED minimum floors it: without one,
                     // `min_cross_size` is that same one-line content floor.
@@ -1291,19 +1314,28 @@ fn layout_flex_container_at(
                 // `align-items: flex-start`, Chromium 32). Only an authored
                 // minimum counts here: without one `min_cross_size` is the
                 // one-line content floor, which is not a size to grow to.
-                let target = if item.stretches(style.align_items) {
-                    line.cross_size - item.cross_margin_start - item.cross_margin_end
-                } else if resolve_length(
+                let authored_min = resolve_length(
                     item.layout_box,
                     &item.layout_box.style.min_height,
                     definite_inner_cross.unwrap_or(0.0),
-                ) > 0.0
-                {
+                ) > 0.0;
+                let target = if item.stretches(style.align_items) {
+                    line.cross_size - item.cross_margin_start - item.cross_margin_end
+                } else if authored_min {
                     item.min_cross_size
                 } else {
                     continue;
                 };
-                let target = target.max(item.min_cross_size).min(item.max_cross_size);
+                // Only an authored `min-height` floors the stretch: without
+                // one `min_cross_size` is the one-line content guess, and a
+                // stretched item in a 5px line is 5 (CB6c; Chrome for
+                // Testing 148), not that guess.
+                let floor = if authored_min || item.layout_box.style.aspect_ratio.is_some() {
+                    item.min_cross_size
+                } else {
+                    0.0
+                };
+                let target = target.max(floor).min(item.max_cross_size);
                 let content_height = (target - item.cross_pb()).max(0.0);
                 if content_height > item.layout_box.dimensions.content.height {
                     item.cross_size = target;
@@ -2075,6 +2107,16 @@ fn create_flex_item<'a>(
         spec_main_to_border_box(css_min_main)
     } else if specified_min_is_auto && main_overflow_is_visible {
         let content_min = match main_axis {
+            // A size container (`container-type: inline-size` or `size`)
+            // has inline-size containment: its content does not size it,
+            // so its automatic minimum is its padding and border alone
+            // (css-contain-2 §3.2; Chromium 148: two `flex: 1` containers
+            // in a 200px row are 100 each though one holds 300px).
+            Axis::Horizontal
+                if layout_box.style.has_inline_size_containment() =>
+            {
+                crate::grid::horizontal_padding_border(&layout_box.style)
+            }
             Axis::Horizontal => {
                 crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
                     .unwrap_or_else(|| crate::grid::content_min_content_width(layout_box))
@@ -3592,6 +3634,15 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, defin
                 // Nothing to measure is a 0 max-content width, not a line
                 // height: an empty `<div>` row item is 0 wide in Chrome 148.
                 Axis::Horizontal if layout_box.children.is_empty() => 0.0,
+                // CQ2: a size container's content does not size it
+                // (inline-size containment): its content size is 0, not the
+                // line-height fallback below (Chromium 148: a `flex: 0 0
+                // auto` container around 300px with `padding: 0 5px` is 10).
+                Axis::Horizontal
+                    if style.has_inline_size_containment() =>
+                {
+                    0.0
+                }
                 Axis::Horizontal => {
                     let border_box = crate::grid::estimate_max_content_width(layout_box);
                     let content =

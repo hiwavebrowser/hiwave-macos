@@ -6290,6 +6290,8 @@ impl Renderer {
             // TX3: whole-pixel origin and quarter phase (`glyph::skia_glyph_origin`).
             let (origin_x, phase) = crate::glyph::skia_glyph_origin(cursor_x);
             let key = GlyphKey {
+                // EM1: an emoji sequence layout folded into this character.
+                cluster: Self::emoji_cluster_at(&chars, faces, char_idx),
                 // The quarter phase Skia rounds this glyph to (TX3).
                 subpixel_phase: phase,
                 codepoint: ch,
@@ -6370,6 +6372,51 @@ impl Renderer {
 
                 cursor_x += layout_advance.unwrap_or(entry.advance);
             }
+        }
+    }
+
+    /// The emoji sequence starting at `chars[i]` that layout folded into it
+    /// (EM1): the head is recorded as an emoji fallback and the characters
+    /// it covers, which follow it in its grapheme cluster, as `Ignorable`.
+    /// `None` otherwise, and for a command without layout's face record.
+    fn emoji_cluster_at(
+        chars: &[char],
+        faces: Option<&[rustkit_text::GlyphFace]>,
+        i: usize,
+    ) -> Option<std::sync::Arc<str>> {
+        #[cfg(target_os = "macos")]
+        {
+            let faces = faces?;
+            // An emoji-fallback head, or a head in the run's own face (an
+            // Apple emoji primary; the glyph cache draws a cluster in the
+            // primary face only when that face is a colour face).
+            if !matches!(
+                faces.get(i),
+                Some(rustkit_text::GlyphFace::Fallback { emoji: true }) | Some(rustkit_text::GlyphFace::Primary)
+            ) {
+                return None;
+            }
+            // Nothing folded into this character: the common case, decided
+            // without segmenting graphemes (Prometheus R1 MED 1 on #1076).
+            if faces.get(i + 1) != Some(&rustkit_text::GlyphFace::Ignorable) {
+                return None;
+            }
+            // The head and the characters layout folded into it: the
+            // `Ignorable` ones that follow, within its grapheme cluster.
+            let n = rustkit_text::macos::emoji_cluster_len(&chars[i..]).min(chars.len() - i);
+            let folded = faces[i + 1..i + n]
+                .iter()
+                .take_while(|f| **f == rustkit_text::GlyphFace::Ignorable)
+                .count();
+            if folded == 0 {
+                return None;
+            }
+            Some(chars[i..i + 1 + folded].iter().collect::<String>().into())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (chars, faces, i);
+            None
         }
     }
 
@@ -6633,6 +6680,8 @@ impl Renderer {
             // TX3: whole-pixel origin and quarter phase (`glyph::skia_glyph_origin`).
             let (origin_x, phase) = crate::glyph::skia_glyph_origin(cursor_x);
             let key = GlyphKey {
+                // EM1: an emoji sequence layout folded into this character.
+                cluster: Self::emoji_cluster_at(&chars, faces, char_idx),
                 // The quarter phase Skia rounds this glyph to (TX3).
                 subpixel_phase: phase,
                 codepoint: ch,
@@ -11364,5 +11413,43 @@ mod clip_mask_coverage_tests {
         assert_eq!(clip_mask_coverage(&flat, false, 0, 0, 4, 8), vec![0; 32]);
         let tri = vec![vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]];
         assert!(clip_mask_coverage(&tri, false, 0, 0, 0, 0).is_empty());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod emoji_cluster_at_tests {
+    use super::*;
+
+    /// Paint keys a glyph by its emoji sequence only where layout folded
+    /// characters into it, and finds that out without segmenting graphemes
+    /// for every ordinary character every frame (Prometheus R1 MED 1 on
+    /// #1076): a plain primary-face run segments nothing.
+    #[test]
+    fn a_plain_run_segments_no_graphemes() {
+        let chars: Vec<char> = "Downloads and Tabs".chars().collect();
+        let faces = vec![rustkit_text::GlyphFace::Primary; chars.len()];
+        let before = rustkit_text::macos::emoji_cluster_segmentations();
+        for i in 0..chars.len() {
+            assert!(Renderer::emoji_cluster_at(&chars, Some(&faces), i).is_none());
+        }
+        assert_eq!(rustkit_text::macos::emoji_cluster_segmentations(), before);
+    }
+
+    /// A folded sequence is still found: the family's head carries it.
+    #[test]
+    fn a_folded_sequence_is_keyed_at_its_head() {
+        use rustkit_text::GlyphFace::{Fallback, Ignorable};
+        let chars: Vec<char> = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}!".chars().collect();
+        let faces = [
+            Fallback { emoji: true },
+            Ignorable,
+            Ignorable,
+            Ignorable,
+            Ignorable,
+            rustkit_text::GlyphFace::Primary,
+        ];
+        let got = Renderer::emoji_cluster_at(&chars, Some(&faces), 0);
+        assert_eq!(got.as_deref(), Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"));
+        assert!(Renderer::emoji_cluster_at(&chars, Some(&faces), 5).is_none());
     }
 }

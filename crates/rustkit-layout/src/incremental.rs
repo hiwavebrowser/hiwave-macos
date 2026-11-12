@@ -589,9 +589,9 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         text_flow_first_offset,
         percent_height_is_auto,
         // LAY1: layout's own bookkeeping, reset or set by every layout of
-        // the box (`children_percent_base`) or by its parent just before it
+        // the box (`children_laid_at`) or by its parent just before it
         // (`abspos_cb_hint`); never an input from the tree.
-        children_percent_base: _,
+        children_laid_at: _,
         abspos_cb_hint: _,
         root_element_height,
         table_span,
@@ -605,6 +605,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         scrollbar_thumb_hovered: _,
         scrollbar_overflows,
         pseudo_animation_key,
+        formatting_root,
     } = a;
     box_type_eq(box_type, &b.box_type)
         && *position == b.position
@@ -625,6 +626,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         && *table_span == b.table_span
         && *table_caption_shift == b.table_caption_shift
         && *pseudo_animation_key == b.pseudo_animation_key
+        && *formatting_root == b.formatting_root
         && scrollbar_overflows.get() == b.scrollbar_overflows.get()
         && dims_eq(dimensions, &b.dimensions)
         && offsets_eq(offsets, &b.offsets)
