@@ -118,6 +118,48 @@ fn a_box_a_web_animation_moves_out_of_its_parent_is_hit_where_the_frame_puts_it(
     }
 }
 
+/// An element that had more than 32 attributes, lost some and gained one
+/// (script's, or the inline-SVG serializer's own when an author paint rule
+/// applies: it takes the presentation attributes the rule beats away and
+/// adds `style`). The attribute store's name set went stale there: the new
+/// attribute was not found, and the SVG serializer, which indexed each name
+/// it listed, panicked the page thread on a live page.
+#[test]
+fn an_svg_shape_with_many_attributes_and_an_author_paint_rule_serializes() {
+    let mut attrs = String::new();
+    for i in 0..33 {
+        attrs.push_str(&format!(" data-a{i}=\"{i}\""));
+    }
+    let (mut engine, view) = page(&format!(
+        "<!doctype html><style>#r {{ fill: green; stroke: blue }}</style><body style=\"margin:0\">\
+         <svg id=s width=200 height=100 style=\"display:block\">\
+         <rect id=r width=200 height=100 fill=red stroke=red{attrs}></rect></svg>\
+         <div id=d></div>"
+    ));
+    // Script's own shrink-then-add, on an HTML element.
+    assert_eq!(
+        js(
+            &mut engine,
+            view,
+            "var d = document.getElementById('d'); \
+             for (var i = 0; i < 34; i++) d.setAttribute('data-b' + i, i); \
+             for (var i = 0; i < 4; i++) d.removeAttribute('data-b' + i); \
+             d.setAttribute('title', 'added'); \
+             [d.getAttribute('title'), d.hasAttribute('title'), d.attributes.length, /title=\"added\"/.test(d.outerHTML)].join(' ')"
+        ),
+        "added true 31 true"
+    );
+    // The same on the shape, then a frame: the serializer runs again.
+    js(
+        &mut engine,
+        view,
+        "var r = document.getElementById('r'); for (var i = 0; i < 4; i++) r.removeAttribute('data-a' + i); \
+         r.setAttribute('data-new', '1'); String(r.getBoundingClientRect().width)",
+    );
+    engine.mouse_move_at_point(view, 50.0, 50.0);
+    assert_eq!(js(&mut engine, view, "document.getElementById('r').getAttribute('data-new')"), "1");
+}
+
 /// The trusted key and text events go to script through the host object
 /// (`JsRuntime::evaluate_host_turn`), and the page's listeners run inside
 /// that call: a listener that never returns is stopped by the turn's

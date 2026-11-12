@@ -217,6 +217,114 @@ mod tests {
         assert!(took < std::time::Duration::from_secs(5), "100,000 inserts took {took:?}");
     }
 
+    /// What every lookup rests on: the name set, once there is one, holds
+    /// exactly the names of the pairs, and no name is there twice.
+    fn assert_consistent(map: &AttrMap, model: &[(String, String)], step: &str) {
+        let pairs: Vec<(String, String)> = map.iter().map(|(n, v)| (n.clone(), v.clone())).collect();
+        assert_eq!(pairs, model, "{step}: the pairs, in order");
+        let mut seen = std::collections::HashSet::new();
+        for (name, value) in map.iter() {
+            assert!(seen.insert(name.clone()), "{step}: {name} is there twice");
+            assert_eq!(map.get(name), Some(value), "{step}: get({name}) finds what keys() lists");
+            assert!(map.contains_key(name), "{step}: contains_key({name})");
+            assert_eq!(&map[name.as_str()], value, "{step}: index {name}");
+        }
+        if let Some(names) = &map.names {
+            assert_eq!(names, &seen, "{step}: the name set is the pairs' names");
+        }
+        assert!(map.get("never-set").is_none(), "{step}");
+    }
+
+    /// An element that had more than 32 attributes, lost some and gained
+    /// one: the new one is found. (Live: an `<svg>` shape of a page with
+    /// many attributes, serialized after a paint rule took two of them
+    /// away and added `style`; the serializer's index panicked.)
+    #[test]
+    fn a_name_added_after_the_map_shrank_below_the_set_size_is_found() {
+        let mut map = AttrMap::new();
+        for i in 0..34 {
+            map.insert(format!("data-a{i}"), i.to_string());
+        }
+        for i in 0..4 {
+            assert!(map.remove(&format!("data-a{i}")).is_some());
+        }
+        assert!(map.insert("style".to_string(), "fill:red".to_string()).is_none());
+        assert_eq!(map.get("style").map(String::as_str), Some("fill:red"));
+        assert_eq!(&map["style"], "fill:red");
+        assert!(map.insert("style".to_string(), "again".to_string()).is_some(), "set again, not added twice");
+        assert_eq!(map.len(), 31);
+    }
+
+    /// Every way a map changes, in random order, against a plain list:
+    /// insert, remove, retain, extend, collect, clone, clear, get_mut.
+    #[test]
+    fn the_name_set_agrees_with_the_pairs_through_any_sequence_of_changes() {
+        // A fixed-seed generator: the same sequences every run.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |below: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % below
+        };
+        fn set(model: &mut Vec<(String, String)>, name: &str, value: &str) {
+            match model.iter_mut().find(|(n, _)| n == name) {
+                Some(pair) => pair.1 = value.to_string(),
+                None => model.push((name.to_string(), value.to_string())),
+            }
+        }
+        for round in 0..200 {
+            let mut map = AttrMap::new();
+            let mut model: Vec<(String, String)> = Vec::new();
+            for op in 0..400 {
+                let name = format!("a{}", next(48));
+                let value = format!("v{op}");
+                let step = format!("round {round} op {op}");
+                match next(100) {
+                    0..=44 => {
+                        let before = model.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone());
+                        assert_eq!(map.insert(name.clone(), value.clone()), before, "{step}: insert");
+                        set(&mut model, &name, &value);
+                    }
+                    45..=79 => {
+                        let at = model.iter().position(|(n, _)| *n == name);
+                        assert_eq!(map.remove(&name), at.map(|at| model.remove(at).1), "{step}: remove");
+                    }
+                    80..=84 => {
+                        let cut = next(10);
+                        map.retain(|n, _| n.as_bytes().last().is_some_and(|b| u64::from(*b - b'0') != cut));
+                        model.retain(|(n, _)| n.as_bytes().last().is_some_and(|b| u64::from(*b - b'0') != cut));
+                    }
+                    85..=89 => {
+                        let more: Vec<(String, String)> =
+                            (0..next(40)).map(|i| (format!("a{}", next(48)), format!("e{i}"))).collect();
+                        for (n, v) in &more {
+                            set(&mut model, n, v);
+                        }
+                        map.extend(more);
+                    }
+                    90..=93 => {
+                        map = map.iter().map(|(n, v)| (n.clone(), v.clone())).collect();
+                    }
+                    94..=96 => {
+                        map = map.clone();
+                    }
+                    97 => {
+                        map.clear();
+                        model.clear();
+                    }
+                    _ => {
+                        if let Some(v) = map.get_mut(&name) {
+                            v.push('!');
+                        }
+                        if let Some(pair) = model.iter_mut().find(|(n, _)| *n == name) {
+                            pair.1.push('!');
+                        }
+                    }
+                }
+                assert_consistent(&map, &model, &step);
+            }
+        }
+    }
+
     fn names(map: &AttrMap) -> String {
         map.keys().cloned().collect::<Vec<_>>().join(",")
     }
