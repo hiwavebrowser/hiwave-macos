@@ -1426,6 +1426,9 @@ struct ViewState {
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// Script wrote to the DOM since the title was last compared with the
+    /// document's (`Engine::follow_script_title`).
+    title_stale: bool,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
@@ -3481,6 +3484,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3603,6 +3607,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3742,6 +3747,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -24504,7 +24510,33 @@ impl Engine {
         if self.follow_script_selection(id) {
             self.repaint_selection(id);
         }
+        self.follow_script_title(id);
         Ok(laid)
+    }
+
+    /// The tab's title follows the document's: when the script that just
+    /// settled wrote to the DOM and the document's title is no longer the
+    /// one last reported, report it (`EngineEvent::TitleChanged`, the empty
+    /// string when the document has none now). Once per settle, however
+    /// many writes there were.
+    fn follow_script_title(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if !std::mem::take(&mut view.title_stale) {
+            return;
+        }
+        let Some(title) = view.document.as_ref().map(|document| document.title()) else {
+            return;
+        };
+        if title == view.title {
+            return;
+        }
+        view.title = title.clone();
+        let _ = self.event_tx.send(EngineEvent::TitleChanged {
+            view_id: id,
+            title: title.unwrap_or_default(),
+        });
     }
 
     fn flush_script_dom_writes_once(
@@ -24522,6 +24554,9 @@ impl Engine {
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
+        if dirty != DomDirty::Clean || log.full || !log.records.is_empty() {
+            view.title_stale = true;
+        }
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);

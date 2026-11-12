@@ -1931,8 +1931,16 @@ mod tests {
         let page = page();
         let mut loaded = page.load_html("<title>  base \n title </title><p id=\"t\">x</p>");
         assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
-        let events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
-        assert_eq!(titles(&events), ["base title"], "the title at load, as document.title reads it");
+        let mut events = poll_until(&page, Duration::from_secs(10), |events| !titles(events).is_empty());
+        // (The load reports its title with the commit and again when it
+        // finishes: let both arrive.)
+        std::thread::sleep(Duration::from_millis(200));
+        events.extend(page.poll());
+        let at_load = titles(&events);
+        assert!(
+            !at_load.is_empty() && at_load.iter().all(|t| t == "base title"),
+            "the title at load, as document.title reads it: {at_load:?}"
+        );
 
         // Three writes in one turn: one report, of the last.
         let mut done = page.eval("document.title = 'one'; document.title = 'two'; document.title = '  three \\n four '; 0");

@@ -1075,14 +1075,35 @@ impl Document {
         copy
     }
 
-    /// Get the title of the document.
+    /// The document's title as `document.title` reads it (HTML §3.1.3):
+    /// the text children of the first HTML `<title>` in tree order, with
+    /// ASCII whitespace stripped and collapsed. `None` when the document
+    /// has no such element.
     pub fn title(&self) -> Option<String> {
-        let head = self.head()?;
-        let title_elem = head
-            .children()
-            .into_iter()
-            .find(|n| n.tag_name() == Some("title"))?;
-        Some(title_elem.text_content())
+        fn first_title(node: &Rc<Node>) -> Option<Rc<Node>> {
+            if let NodeType::Element { tag_name, namespace, .. } = &node.node_type {
+                if tag_name.eq_ignore_ascii_case("title") && namespace != svg_names::SVG_NAMESPACE {
+                    return Some(Rc::clone(node));
+                }
+            }
+            let mut i = 0;
+            while let Some(child) = node.children.borrow().get(i).cloned() {
+                if let Some(found) = first_title(&child) {
+                    return Some(found);
+                }
+                i += 1;
+            }
+            None
+        }
+        let title = first_title(&self.root)?;
+        let mut text = String::new();
+        for child in title.children.borrow().iter() {
+            if let NodeType::Text(data) = &child.node_type {
+                text.push_str(data);
+            }
+        }
+        const ASCII_WHITESPACE: [char; 5] = ['\t', '\n', '\u{c}', '\r', ' '];
+        Some(text.split(ASCII_WHITESPACE).filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" "))
     }
 
     /// Traverse all nodes depth-first.
