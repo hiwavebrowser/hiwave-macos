@@ -18,7 +18,7 @@ fn a_const_list_continues_after_a_newline_and_a_leading_comma() {
 }
 
 #[test]
-fn let_and_var_lists_continue_the_same_way() {
+fn let_lists_continue_and_var_is_the_control_that_always_did() {
     assert_eq!(eval("let a = 1\n, b = 2; a + b"), Ok("3".to_string()));
     assert_eq!(eval("var a = 1\n, b = 2; a + b"), Ok("3".to_string()));
 }
@@ -28,3 +28,28 @@ fn an_initialiser_that_ends_a_line_still_continues() {
     assert_eq!(eval("const f = () => 1\n, g = () => 2; f() + g()"), Ok("3".to_string()));
     assert_eq!(eval("const o = {x: 1}\n, p = [2]; o.x + p[0]"), Ok("3".to_string()));
 }
+
+#[test]
+fn a_leading_comma_continues_a_for_loop_head() {
+    assert_eq!(eval("var s = 0; for (let i = 0
+, n = 3; i < n; i++) { s += i } s"), Ok("3".to_string()));
+    assert_eq!(eval("var k = 0; for (const a = 1
+, b = 2;;) { k = a + b; break } k"), Ok("3".to_string()));
+}
+
+#[test]
+fn a_newline_without_a_comma_still_ends_the_declaration() {
+    // ASI is intact: two statements, not a list.
+    assert_eq!(eval("var b; let a = 1
+b = 2; a + b"), Ok("3".to_string()));
+    assert_eq!(eval("let a = 1
+; a"), Ok("1".to_string()));
+}
+
+#[test]
+fn a_let_list_continues_across_crlf() {
+    assert_eq!(eval("let a = 1
+  , b = 2
+  , c = 3; a + b + c"), Ok("6".to_string()));
+}
+

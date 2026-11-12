@@ -462,3 +462,7 @@ comma even when a line terminator precedes it. Upstream asked `peek_semicolon` f
 "found" for any token after a newline, so `const a = 1` then a line starting `, b = 2` threw
 `unexpected token ','` (Speedometer 3's Lit bundles are written that way). Pin:
 `crates/rustkit-js/tests/const_comma_newline.rs`.
+The vendored crate's own parser tests are not run by the workspace, and `cargo test --manifest-path`
+on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
+of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
+1 ignored, with the STR-5 patch).
