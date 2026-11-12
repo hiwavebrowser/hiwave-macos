@@ -56,6 +56,9 @@ mod flex_item_min_height_tests;
 mod fit_content_width_tests;
 
 #[cfg(test)]
+mod emoji_cluster_tests;
+
+#[cfg(test)]
 mod zero_width_column_stretch_tests;
 #[cfg(test)]
 mod flex_item_specified_width_min_tests;
@@ -63,6 +66,7 @@ mod flex_item_specified_width_min_tests;
 mod flex_item_cross_guess_tests;
 #[cfg(test)]
 mod primary_emoji_font_tests;
+
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]

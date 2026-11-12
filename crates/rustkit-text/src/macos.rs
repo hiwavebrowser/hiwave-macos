@@ -671,7 +671,42 @@ pub fn is_color_face(font: &CTFont) -> bool {
 /// font scaled up. Every glyph of the face takes the same advance, as in
 /// Chrome (a flag, whose own image is narrower, is 18 at 14px too).
 pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
-    if !is_color_face(font) || !font.family_name().contains("Apple Color Emoji") {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    // The symbolic-traits read is the only cost every other face pays.
+    if !is_color_face(font) {
+        return None;
+    }
+    // One Core Text query per (face, size): it is on the shaping hot path,
+    // once per emoji per `shape` (Prometheus R1 on #1072).
+    type Key = (String, u32);
+    thread_local! {
+        static ADVANCE: RefCell<HashMap<Key, Option<f32>>> = RefCell::new(HashMap::new());
+    }
+    const MAX_ENTRIES: usize = 1024;
+    let name = postscript_name_or_empty(font);
+    // A face without a PostScript name is not cached by it (see
+    // `shaped_cache_key`).
+    if name.is_empty() {
+        return apple_emoji_advance_uncached(font);
+    }
+    let key = (name, (font.pt_size() as f32).to_bits());
+    if let Some(hit) = ADVANCE.with(|m| m.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let advance = apple_emoji_advance_uncached(font);
+    ADVANCE.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_ENTRIES {
+            m.clear();
+        }
+        m.insert(key, advance);
+    });
+    advance
+}
+
+fn apple_emoji_advance_uncached(font: &CTFont) -> Option<f32> {
+    if !font.family_name().contains("Apple Color Emoji") {
         return None;
     }
     let reference = color_glyph_id(font, '\u{1F600}')?;
@@ -694,6 +729,133 @@ pub fn apple_emoji_advance(font: &CTFont) -> Option<f32> {
     // f64::round rounds a half away from zero, as Chrome does here
     // (17.5 at 14px is 18, 22.5 at 21px is 23).
     (width > 0.0).then(|| width.round() as f32)
+}
+
+/// The characters of the emoji sequence that starts `chars` (one extended
+/// grapheme cluster: a ZWJ sequence, a base with a skin-tone modifier, a
+/// regional-indicator pair, a keycap, a tag sequence, selectors). 1 for a
+/// lone character.
+pub fn emoji_cluster_len(chars: &[char]) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    CLUSTER_SEGMENTATIONS.with(|c| c.set(c.get() + 1));
+    // A cluster is short; the longest RGI sequences are ten code points.
+    let head: String = chars.iter().take(16).collect();
+    head.graphemes(true).next().map_or(1, |g| g.chars().count().max(1))
+}
+
+thread_local! {
+    static CLUSTER_SEGMENTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CLUSTER_LINES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many grapheme segmentations (`emoji_cluster_len`) this thread made:
+/// paint must not segment a run that has no folded emoji sequence.
+pub fn emoji_cluster_segmentations() -> u64 {
+    CLUSTER_SEGMENTATIONS.with(|c| c.get())
+}
+
+/// How many CTLines this thread built to shape emoji sequences
+/// (`emoji_cluster_glyph`): one per distinct (face, size, sequence).
+pub fn emoji_cluster_lines() -> u64 {
+    CLUSTER_LINES.with(|c| c.get())
+}
+
+/// The first glyph `face` shapes the emoji sequence `cluster` into, and how
+/// many characters of `cluster` it covers; `None` when that glyph covers
+/// only the first character (nothing to fold).
+///
+/// Chrome shapes an emoji sequence as clusters, one advance per glyph the
+/// emoji face forms: a ZWJ family, a skin-toned thumbs-up, a flag and a
+/// keycap are each ONE glyph, 18 wide at 14px in Chrome for Testing 148
+/// (EM1); `👨‍🦲‍🙈`, which the face forms as `👨‍🦲` and `🙈`, is two (36).
+/// Layout folds the covered characters into the head's advance, and paint
+/// draws this glyph for them.
+pub fn emoji_cluster_glyph(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    if cluster.chars().count() < 2 {
+        return None;
+    }
+    // One CTLine per (face, size, sequence): `shape` reruns on every
+    // relayout (Prometheus R1 MED 2 on #1076).
+    type Key = (String, u32, String);
+    thread_local! {
+        static SHAPED: RefCell<HashMap<Key, Option<(u16, usize)>>> = RefCell::new(HashMap::new());
+    }
+    const MAX_ENTRIES: usize = 4096;
+    let Some(key) = shaped_cache_key(&postscript_name_or_empty(face), face.pt_size(), cluster) else {
+        return emoji_cluster_glyph_uncached(face, cluster);
+    };
+    if let Some(hit) = SHAPED.with(|m| m.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let shaped = emoji_cluster_glyph_uncached(face, cluster);
+    SHAPED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MAX_ENTRIES {
+            m.clear();
+        }
+        m.insert(key, shaped);
+    });
+    shaped
+}
+
+/// The shaped-sequence cache key for a face named `ps_name` at `size`, or
+/// `None` for a face without a PostScript name (a downloaded face can lack
+/// one): two such faces would share an entry, so they are shaped uncached.
+fn shaped_cache_key(ps_name: &str, size: f64, cluster: &str) -> Option<(String, u32, String)> {
+    (!ps_name.is_empty()).then(|| (ps_name.to_string(), (size as f32).to_bits(), cluster.to_string()))
+}
+
+fn emoji_cluster_glyph_uncached(face: &CTFont, cluster: &str) -> Option<(u16, usize)> {
+    use core_foundation::attributed_string::CFMutableAttributedString;
+    use core_foundation::base::CFRange;
+    use core_foundation::string::CFString;
+    use core_text::line::CTLine;
+    use core_text::string_attributes::kCTFontAttributeName;
+
+    if cluster.chars().count() < 2 {
+        return None;
+    }
+    let mut astr = CFMutableAttributedString::new();
+    astr.replace_str(&CFString::new(cluster), CFRange::init(0, 0));
+    let range = CFRange::init(0, astr.char_len());
+    // SAFETY: `face` is a live CTFont; the attribute is set over the
+    // string's own range.
+    unsafe {
+        astr.set_attribute(range, kCTFontAttributeName, face);
+    }
+    CLUSTER_LINES.with(|c| c.set(c.get() + 1));
+    let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef());
+    // (glyph, UTF-16 index of its first character), inked glyphs only:
+    // selectors and joiners shape to none or to deleted (0xFFFF) ones.
+    let mut inked: Vec<(u16, isize)> = Vec::new();
+    for run in line.glyph_runs().iter() {
+        // A run in another face: the emoji face does not draw this.
+        let glyphs = run.glyphs();
+        let indices = run.string_indices();
+        for (g, i) in glyphs.iter().zip(indices.iter()) {
+            if *g != 0 && *g != 0xFFFF {
+                inked.push((*g, *i));
+            }
+        }
+    }
+    let (glyph, start) = *inked.first()?;
+    if start != 0 {
+        return None;
+    }
+    let end_utf16 = inked.get(1).map_or(astr.char_len(), |(_, i)| *i) as usize;
+    // UTF-16 offset to a character count.
+    let mut units = 0usize;
+    let mut covered = 0usize;
+    for ch in cluster.chars() {
+        if units >= end_utf16 {
+            break;
+        }
+        units += ch.len_utf16();
+        covered += 1;
+    }
+    (covered > 1).then_some((glyph, covered))
 }
 
 /// The horizontal advance of `glyph` in `font`, in CSS px at the font's
@@ -1758,6 +1920,31 @@ impl GlyphRasterizer {
         // surrogate pair — `ch as u16` truncates them, which is why emoji glyph
         // lookup silently failed. color_glyph_id encodes UTF-16 correctly.
         let glyph = color_glyph_id(font, ch)?;
+        self.rasterize_glyph_color_with_font(font, glyph)
+    }
+
+    /// The emoji sequence `cluster` (EM1) as the ONE glyph its emoji face
+    /// forms it with ([`emoji_cluster_glyph`]), from the face layout measured
+    /// its head character in. `None` when the face does not form it; the
+    /// caller then draws the head alone, as layout measured it.
+    pub fn rasterize_emoji_cluster(&self, cluster: &str, face: GlyphFace) -> Option<GlyphRaster> {
+        let head = cluster.chars().next()?;
+        let font = match face {
+            GlyphFace::Fallback { emoji: true } => fallback_face_for_presentation(&self.font, head, true)?.0,
+            // The run's own face draws its sequences only when it is an
+            // Apple emoji face; any other primary draws the head alone.
+            GlyphFace::Primary if apple_emoji_advance(&self.font).is_some() => self.font.clone(),
+            _ => return None,
+        };
+        let (glyph, _) = emoji_cluster_glyph(&font, cluster)?;
+        self.rasterize_glyph_color_with_font(&font, glyph).map(GlyphRaster::Color)
+    }
+
+    fn rasterize_glyph_color_with_font(
+        &self,
+        font: &CTFont,
+        glyph: u16,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
         let glyphs: [u16; 1] = [glyph];
 
         unsafe {
@@ -2500,6 +2687,30 @@ mod tests {
         let shaped = shaper.shape("\u{1F50D}\u{1F50D}").expect("shapes");
         let total: f32 = shaped.advances.iter().sum();
         assert_eq!(total, 40.0, "two emoji in the emoji face at 16px");
+    }
+
+    /// An emoji sequence is shaped once per (face, size, sequence), not per
+    /// call: `shape` reruns on every relayout (Prometheus R1 MED 2 on #1076).
+    #[test]
+    fn an_emoji_sequence_is_shaped_once_per_face_and_size() {
+        let face = font::new_from_name("Apple Color Emoji", 14.0).expect("the emoji face");
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let first = emoji_cluster_glyph(&face, family);
+        assert!(first.is_some(), "the family is one glyph");
+        let before = emoji_cluster_lines();
+        for _ in 0..5 {
+            assert_eq!(emoji_cluster_glyph(&face, family), first);
+        }
+        assert_eq!(emoji_cluster_lines(), before, "no CTLine for a sequence already shaped");
+    }
+
+    /// A face with no PostScript name (a downloaded face can lack one) is not
+    /// cached by name: two such faces would share an entry and one would
+    /// draw the other's glyph (Prometheus delta R1 LOW on #1076).
+    #[test]
+    fn a_nameless_face_is_not_cached_by_name() {
+        assert!(shaped_cache_key("", 14.0, "\u{1F44D}\u{1F3FD}").is_none());
+        assert!(shaped_cache_key("AppleColorEmoji", 14.0, "\u{1F44D}\u{1F3FD}").is_some());
     }
 
     /// Paint draws the fallback glyph from that same face: the advance the
