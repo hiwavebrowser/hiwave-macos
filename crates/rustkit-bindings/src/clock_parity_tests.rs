@@ -35,7 +35,7 @@ fn the_frame_timestamp_and_event_time_stamps_share_performance_nows_clock_in_a_l
     b.evaluate(&format!("(0, eval)({})", serde_json::to_string(PAGE_JS).unwrap())).unwrap();
     b.run_timers(5000, 1000).unwrap();
     let want: serde_json::Value = serde_json::from_str(CHROME).unwrap();
-    assert_eq!(observed(&b), want);
+    same(&observed(&b), &want);
 }
 
 /// The live loop: real time advances in turns; the same relations hold.
@@ -48,5 +48,29 @@ fn the_same_relations_hold_when_the_page_runs_live() {
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
     let want: serde_json::Value = serde_json::from_str(CHROME).unwrap();
-    assert_eq!(observed(&b), want);
+    same(&observed(&b), &want);
+}
+
+/// Equal, naming the first path that differs (the relations are booleans, so say which one).
+fn same(got: &serde_json::Value, want: &serde_json::Value) {
+    fn walk(path: String, got: &serde_json::Value, want: &serde_json::Value, out: &mut Vec<String>) {
+        match (got, want) {
+            (serde_json::Value::Object(g), serde_json::Value::Object(w)) => {
+                for (k, wv) in w {
+                    walk(format!("{path}.{k}"), g.get(k).unwrap_or(&serde_json::Value::Null), wv, out);
+                }
+            }
+            (serde_json::Value::Array(g), serde_json::Value::Array(w)) => {
+                for (i, wv) in w.iter().enumerate() {
+                    walk(format!("{path}[{i}]"), g.get(i).unwrap_or(&serde_json::Value::Null), wv, out);
+                }
+            }
+            _ if got != want => out.push(format!("{path}: chrome {want}, here {got}")),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(String::new(), got, want, &mut out);
+    assert!(out.is_empty(), "{}", out.join("
+"));
 }

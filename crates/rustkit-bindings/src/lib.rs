@@ -531,11 +531,34 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
+    // THE page clock: performance.now(), the frame callback's timestamp and Event.timeStamp
+    // (ms from the time origin). Real time flows, but a load that ran the timers ahead (a 300 ms
+    // timeout run at once) skipped time forward: after the virtual clock moves, this clock reads
+    // its time plus the real time since, never less than it has read. So it is never behind the
+    // timers' virtual clock, which a plain real clock was (`performance.now() - frameTime` was
+    // negative in a load), and it flows between virtual moves, which a virtual clock does not (a
+    // busy loop on performance.now() ends). The animation timeline stays on the virtual clock
+    // itself, so a capture that steps it is reproducible. The host clock is looked up at call
+    // time: it is installed after this script runs.
+    var seenNow = 0, anchor = 0, lastPerf = 0;
+    function perfNow() {
+        var f = window.__rustkit_now_ms;
+        var real = typeof f === 'function' ? f() : realNow();
+        if (now !== seenNow) { seenNow = now; anchor = real; }
+        var t = now + (real - anchor);
+        if (t < lastPerf) t = lastPerf;
+        lastPerf = t;
+        return t;
+    }
+    window.__rustkit_perf_now = perfNow;
+    // The timestamp every animation frame callback of one pass gets, as in a browser's frame.
+    // Taken when the pass's first frame callback runs (the clock has moved to its time by then).
+    var frameTs = -1;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
-            target: target, currentTarget: null, timeStamp: now, isTrusted: true,
+            target: target, currentTarget: null, timeStamp: perfNow(), isTrusted: true,
             preventDefault: function () { this.defaultPrevented = true; },
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         });
@@ -563,7 +586,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false, true);
+        return schedule(function () {
+            if (frameTs < 0) frameTs = perfNow();
+            cb(frameTs);
+        }, 16, [], false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -585,6 +611,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
+        frameTs = -1;
         var ran = 0;
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
@@ -2992,7 +3019,7 @@ impl DomBindings {
             "target: null".to_string(),
             "currentTarget: null".to_string(),
             "eventPhase: 0".to_string(),
-            "timeStamp: Date.now()".to_string(),
+            "timeStamp: __rustkit_perf_now()".to_string(),
             "isTrusted: true".to_string(),
             "preventDefault: function() { this.defaultPrevented = true; }".to_string(),
             "stopPropagation: function() { this._stopped = true; }".to_string(),
@@ -3843,13 +3870,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
-        // The callback is told the time of the frame it runs in.
-        assert_eq!(read("stamps.join(',')"), "600");
+        // The callback is told the time of the frame it runs in, on performance.now()'s clock: the
+        // virtual time (600 here) plus the real time since the virtual clock moved.
+        assert_eq!(read("String(stamps.length)"), "1");
+        assert_eq!(read("String(stamps[0] >= 600 && stamps[0] < 700)"), "true");
         // The loop asked for the frame after this one.
         assert_eq!(bindings.next_timer_delay(), Some(16));
         assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
         assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
-        assert_eq!(read("stamps.join(',')"), "600,616");
+        assert_eq!(read("String(stamps.length)"), "2");
+        assert_eq!(read("String(stamps[1] >= 616 && stamps[1] < 716)"), "true");
 
         // The turn's timers all run, and before its frame; a frame one of
         // them asks for is in the turn's round.

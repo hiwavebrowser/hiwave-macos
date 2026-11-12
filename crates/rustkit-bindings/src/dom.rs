@@ -5716,7 +5716,8 @@ const WRAPPERS_JS: &str = r#"
         this.currentTarget = null;
         this.eventPhase = 0;
         this.isTrusted = false;
-        this.timeStamp = Date.now();
+        // On performance.now()'s clock (ms from the time origin), as Chrome's DOMHighResTimeStamp.
+        this.timeStamp = typeof g.__rustkit_perf_now === 'function' ? g.__rustkit_perf_now() : Date.now();
     }
     // The legacy initializers; they do nothing during dispatch.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {

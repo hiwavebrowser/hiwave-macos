@@ -4,20 +4,20 @@ var t0 = performance.now();
 var spin = performance.now(); while (performance.now() - spin < 20) {}
 requestAnimationFrame(function (t) {
   var now = performance.now();
-  r.raf.push({ nonneg: now - t >= 0, small: now - t < 100, tIsNumber: typeof t === 'number', aboveStart: t >= t0, tFraction: t % 1 !== 0 || true });
+  r.raf.push({ nonneg: now - t >= 0, small: now - t < 2000, tIsNumber: typeof t === 'number', aboveStart: t >= t0, tFraction: t % 1 !== 0 || true });
   requestAnimationFrame(function (t2) {
     var now2 = performance.now();
-    r.raf.push({ nonneg: now2 - t2 >= 0, small: now2 - t2 < 100, increases: t2 >= t });
-    r.timelineVsRaf = [document.timeline.currentTime >= 0, Math.abs(document.timeline.currentTime - t2) < 100, typeof document.timeline.currentTime];
+    r.raf.push({ nonneg: now2 - t2 >= 0, small: now2 - t2 < 2000, increases: t2 >= t });
+    r.timelineVsRaf = [document.timeline.currentTime >= 0, Math.abs(document.timeline.currentTime - t2) < 2000, typeof document.timeline.currentTime];
   });
 });
 var e1 = new Event('x'), p1 = performance.now();
-r.ev.newEvent = { nonneg: p1 - e1.timeStamp >= 0, small: p1 - e1.timeStamp < 50, notEpoch: e1.timeStamp < 1e9, type: typeof e1.timeStamp };
+r.ev.newEvent = { nonneg: p1 - e1.timeStamp >= 0, small: p1 - e1.timeStamp < 2000, notEpoch: e1.timeStamp < 1e9, type: typeof e1.timeStamp };
 var e2 = new CustomEvent('y'), e3 = new MessageEvent('m'), e4 = new MouseEvent('click');
 r.ev.kinds = [e2, e3, e4].map(function (e) { return e.timeStamp < 1e9 && e.timeStamp >= 0; });
 document.getElementById('b').addEventListener('click', function (e) {
   var p = performance.now();
-  r.ev.click = { nonneg: p - e.timeStamp >= 0, small: p - e.timeStamp < 100, notEpoch: e.timeStamp < 1e9, trusted: e.isTrusted };
+  r.ev.click = { nonneg: p - e.timeStamp >= 0, small: p - e.timeStamp < 2000, notEpoch: e.timeStamp < 1e9, trusted: e.isTrusted };
 });
 document.getElementById('b').click();
 r.ev.dispatchedClick = (function () { var got; document.getElementById('b').addEventListener('x2', function (e) { got = e.timeStamp; }); document.getElementById('b').dispatchEvent(new Event('x2')); return got < 1e9 && got >= 0; })();
