@@ -2107,6 +2107,16 @@ fn create_flex_item<'a>(
         spec_main_to_border_box(css_min_main)
     } else if specified_min_is_auto && main_overflow_is_visible {
         let content_min = match main_axis {
+            // A size container (`container-type: inline-size` or `size`)
+            // has inline-size containment: its content does not size it,
+            // so its automatic minimum is its padding and border alone
+            // (css-contain-2 §3.2; Chromium 148: two `flex: 1` containers
+            // in a 200px row are 100 each though one holds 300px).
+            Axis::Horizontal
+                if layout_box.style.has_inline_size_containment() =>
+            {
+                crate::grid::horizontal_padding_border(&layout_box.style)
+            }
             Axis::Horizontal => {
                 crate::grid::replaced_min_content_width_in_row(layout_box, definite_inner_cross)
                     .unwrap_or_else(|| crate::grid::content_min_content_width(layout_box))
@@ -3624,6 +3634,15 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, defin
                 // Nothing to measure is a 0 max-content width, not a line
                 // height: an empty `<div>` row item is 0 wide in Chrome 148.
                 Axis::Horizontal if layout_box.children.is_empty() => 0.0,
+                // CQ2: a size container's content does not size it
+                // (inline-size containment): its content size is 0, not the
+                // line-height fallback below (Chromium 148: a `flex: 0 0
+                // auto` container around 300px with `padding: 0 5px` is 10).
+                Axis::Horizontal
+                    if style.has_inline_size_containment() =>
+                {
+                    0.0
+                }
                 Axis::Horizontal => {
                     let border_box = crate::grid::estimate_max_content_width(layout_box);
                     let content =
