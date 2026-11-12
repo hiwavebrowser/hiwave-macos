@@ -115,6 +115,7 @@ impl Rig {
                 8,
                 None,
                 &crate::inspector::Inspector::new(&Default::default()),
+                false,
             ));
             if self.out() != "no answer" {
                 break;

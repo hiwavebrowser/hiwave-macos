@@ -8457,6 +8457,7 @@ impl Engine {
                                 &mut count,
                                 inspector,
                                 requests,
+                                post_load_live,
                             ),
                         )
                         .await;
