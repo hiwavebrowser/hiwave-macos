@@ -7,7 +7,8 @@
 //!
 //! `terminate()` stops a worker that never returns through the view-control
 //! interrupt word the page's own watchdog uses: Boa reads it at every call
-//! and loop back-edge, so a `while (true) {}` ends.
+//! and loop back-edge, so a `while (true) {}` ends. The same happens to every
+//! worker of a page when its bindings are dropped (a navigation).
 
 use rustkit_js::{JsRuntime, JsValue, ViewControl, Watchdog};
 use serde_json::{json, Value};
@@ -30,6 +31,10 @@ const MAX_WORKERS: usize = 64;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Names of workers whose threads have returned (tests read it).
+#[cfg(test)]
+pub(crate) static ENDED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 enum FromWorker {
     Message(String),
     /// An uncaught error, as JSON `{m, f, l, c}`.
@@ -46,18 +51,41 @@ struct Handle {
     thread: JoinHandle<()>,
 }
 
-thread_local! {
-    /// The page thread's workers.
-    static WORKERS: RefCell<HashMap<u64, Handle>> = RefCell::new(HashMap::new());
+/// One page's workers. The host functions share it; the page's bindings
+/// hold a [`Guard`], whose drop stops every worker (the JS context may keep
+/// the host functions, and so this, alive past the page).
+#[derive(Default)]
+struct Registry {
+    workers: RefCell<HashMap<u64, Handle>>,
     /// Terminated workers whose threads have not ended yet.
-    static ENDING: RefCell<Vec<JoinHandle<()>>> = const { RefCell::new(Vec::new()) };
+    ending: RefCell<Vec<JoinHandle<()>>>,
 }
 
-/// How many worker threads have not yet returned.
-pub fn running() -> usize {
-    ENDING.with(|e| e.borrow_mut().retain(|t| !t.is_finished()));
-    let ending = ENDING.with(|e| e.borrow().len());
-    ending + WORKERS.with(|w| w.borrow().values().filter(|h| !h.thread.is_finished()).count())
+impl Registry {
+    fn running(&self) -> usize {
+        self.ending.borrow_mut().retain(|t| !t.is_finished());
+        self.ending.borrow().len() + self.workers.borrow().values().filter(|h| !h.thread.is_finished()).count()
+    }
+}
+
+impl Registry {
+    fn stop_all(&self) {
+        for (_, h) in self.workers.borrow_mut().drain() {
+            h.control.stop_all();
+            // `to` drops here, waking a worker that waits for a message. The
+            // thread is not joined: the page must not wait on script.
+            self.ending.borrow_mut().push(h.thread);
+        }
+    }
+}
+
+/// Stops the page's workers when the page's bindings go away.
+pub struct Guard(Rc<Registry>);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.0.stop_all();
+    }
 }
 
 fn arg_str(args: &[JsValue], i: usize) -> String {
@@ -82,14 +110,17 @@ fn item(m: FromWorker) -> Value {
     }
 }
 
-/// Install `__rustkit_worker_{spawn,post,poll,terminate}` on the page runtime.
-pub fn install(runtime: &mut JsRuntime) -> Result<(), rustkit_js::JsError> {
+/// Install `__rustkit_worker_*` on the page runtime.
+pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
+    let reg = Rc::new(Registry::default());
+
     // spawn(source, name, locationJson) -> id, 0 when refused
+    let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_spawn",
         3,
-        Box::new(|args| {
-            if WORKERS.with(|w| w.borrow().len()) >= MAX_WORKERS {
+        Box::new(move |args| {
+            if r.workers.borrow().len() >= MAX_WORKERS {
                 return JsValue::Number(0.0);
             }
             let (source, name, loc) = (arg_str(args, 0), arg_str(args, 1), arg_str(args, 2));
@@ -99,66 +130,69 @@ pub fn install(runtime: &mut JsRuntime) -> Result<(), rustkit_js::JsError> {
             let (tx, from) = channel();
             let control = Watchdog::shared().view_control();
             let c = control.clone();
-            let thread = std::thread::Builder::new()
-                .name(format!("worker-{id}"))
-                .spawn(move || worker_main(source, name, loc, rx, reply_rx, tx, c));
+            let thread = std::thread::Builder::new().name(format!("worker-{id}")).spawn(move || {
+                #[cfg(test)]
+                let label = name.clone();
+                worker_main(source, name, loc, rx, reply_rx, tx, c);
+                #[cfg(test)]
+                ENDED.lock().unwrap_or_else(|e| e.into_inner()).push(label);
+            });
             let Ok(thread) = thread else {
                 return JsValue::Number(0.0);
             };
-            WORKERS.with(|w| w.borrow_mut().insert(id, Handle { to, reply, from, control, thread }));
+            r.workers.borrow_mut().insert(id, Handle { to, reply, from, control, thread });
             JsValue::Number(id as f64)
         }),
     )?;
+    let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_post",
         2,
-        Box::new(|args| {
+        Box::new(move |args| {
             let (id, json) = (arg_id(args), arg_str(args, 1));
-            WORKERS.with(|w| {
-                if let Some(h) = w.borrow().get(&id) {
-                    let _ = h.to.send(json);
-                }
-            });
+            if let Some(h) = r.workers.borrow().get(&id) {
+                let _ = h.to.send(json);
+            }
             JsValue::Undefined
         }),
     )?;
+    let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_reply",
         3,
-        Box::new(|args| {
+        Box::new(move |args| {
             let (id, json) = (arg_id(args), arg_str(args, 2));
-            WORKERS.with(|w| {
-                if let Some(h) = w.borrow().get(&id) {
-                    let _ = h.reply.send(json);
-                }
-            });
+            if let Some(h) = r.workers.borrow().get(&id) {
+                let _ = h.reply.send(json);
+            }
             JsValue::Undefined
         }),
     )?;
-    // poll(id) -> JSON array of {k:"m",d}|{k:"e",m}, ended by {k:"x"} once
-    // the worker has returned and been drained; "null" for an unknown id.
+    // poll(id) -> JSON array of {k:"m",d}|{k:"e",m}|{k:"f",r,u}, ended by
+    // {k:"x"} once the worker has returned and been drained; "null" for an
+    // unknown id.
+    let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_poll",
         1,
-        Box::new(|args| {
+        Box::new(move |args| {
             let id = arg_id(args);
             let mut items = Vec::new();
-            let finished = WORKERS.with(|w| {
-                let w = w.borrow();
-                let h = w.get(&id)?;
+            let finished = {
+                let w = r.workers.borrow();
+                let Some(h) = w.get(&id) else {
+                    return JsValue::String("null".into());
+                };
                 // Read "finished" before draining, so nothing sent just
                 // before the end is missed.
                 let done = h.thread.is_finished();
                 while let Ok(m) = h.from.try_recv() {
                     items.push(item(m));
                 }
-                Some(done)
-            });
-            let Some(finished) = finished else {
-                return JsValue::String("null".into());
+                done
             };
             if finished {
-                if let Some(h) = WORKERS.with(|w| w.borrow_mut().remove(&id)) {
+                if let Some(h) = r.workers.borrow_mut().remove(&id) {
                     let _ = h.thread.join();
                 }
                 items.push(json!({"k": "x"}));
@@ -166,20 +200,30 @@ pub fn install(runtime: &mut JsRuntime) -> Result<(), rustkit_js::JsError> {
             JsValue::String(Value::Array(items).to_string())
         }),
     )?;
+    let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_terminate",
         1,
-        Box::new(|args| {
+        Box::new(move |args| {
             let id = arg_id(args);
-            if let Some(h) = WORKERS.with(|w| w.borrow_mut().remove(&id)) {
+            let removed = r.workers.borrow_mut().remove(&id);
+            if let Some(h) = removed {
                 h.control.stop_all();
                 drop(h.to); // a worker waiting for a message wakes and ends
-                ENDING.with(|e| e.borrow_mut().push(h.thread));
+                r.ending.borrow_mut().push(h.thread);
             }
             JsValue::Undefined
         }),
     )?;
-    Ok(())
+    runtime.register_host_function(
+        "__rustkit_worker_running",
+        0,
+        {
+            let r = reg.clone();
+            Box::new(move |_| JsValue::Number(r.running() as f64))
+        },
+    )?;
+    Ok(Guard(reg))
 }
 
 fn worker_main(

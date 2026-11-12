@@ -1109,6 +1109,8 @@ pub struct DomBindings {
     edit: Rc<dom::editing::EditContext>,
     /// Canvas 2D contexts and what they drew (see `web_canvas`).
     canvases: web_canvas::SharedCanvases,
+    /// Stops this page's workers when it goes away (see `worker_host`).
+    workers: worker_host::Guard,
 }
 
 impl DomBindings {
@@ -1219,7 +1221,7 @@ impl DomBindings {
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
         // Dedicated workers: a thread and a runtime each (worker_host.rs, web_worker.js).
-        worker_host::install(&mut runtime)?;
+        let workers = worker_host::install(&mut runtime)?;
         runtime.evaluate_with_host(include_str!("web_worker.js"))?;
         // Script elements script inserts are prepared and run (web_scripts.js).
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
@@ -1249,6 +1251,7 @@ impl DomBindings {
             scroll,
             edit,
             canvases,
+            workers,
         })
     }
 
@@ -2229,7 +2232,10 @@ impl DomBindings {
     }
     /// How many worker threads are still running (tests and diagnostics).
     pub fn worker_threads_running(&self) -> usize {
-        worker_host::running()
+        match self.runtime.borrow_mut().evaluate_bookkeeping("__rustkit_worker_running()") {
+            Ok(JsValue::Number(n)) => n as usize,
+            _ => 0,
+        }
     }
 
 

@@ -325,3 +325,41 @@ fn blob_and_data_scripts_run_as_in_chrome() {
     // none of these went to the network
     assert!(b.take_net_requests().is_empty());
 }
+
+// ---- Lifetime: a page's workers end with the page.
+
+#[test]
+fn dropping_the_bindings_stops_their_workers() {
+    let name = "lifetime-probe-spin";
+    let b = bound();
+    b.evaluate(&format!("var w = new Worker('http://a.test/spin.js', {{ name: '{name}' }}); w.postMessage('go');"))
+        .unwrap();
+    serve(&b, "onmessage = function () { postMessage('started'); while (true) {} };");
+    let _ = b.evaluate("w.onmessage = function () { window.up = 1; };");
+    assert!(pump_until(&b, "window.up === 1"));
+    assert_eq!(b.worker_threads_running(), 1);
+    drop(b);
+    let end = Instant::now() + Duration::from_secs(3);
+    let ended = || crate::worker_host::ENDED.lock().unwrap().iter().any(|n| n == name);
+    while !ended() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ended(), "the worker outlived its page");
+}
+
+#[test]
+fn an_idle_worker_with_a_timer_ends_with_its_page() {
+    let name = "lifetime-probe-timer";
+    let b = bound();
+    b.evaluate(&format!("var w = new Worker('http://a.test/t.js', {{ name: '{name}' }}); w.onmessage = function () {{ window.up = 1; }};"))
+        .unwrap();
+    serve(&b, "setInterval(function () {}, 5); postMessage('up');");
+    assert!(pump_until(&b, "window.up === 1"));
+    drop(b);
+    let end = Instant::now() + Duration::from_secs(3);
+    let ended = || crate::worker_host::ENDED.lock().unwrap().iter().any(|n| n == name);
+    while !ended() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ended(), "the worker outlived its page");
+}
