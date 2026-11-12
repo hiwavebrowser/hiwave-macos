@@ -64,6 +64,22 @@
         out[BYTES] = this[BYTES].slice(s, Math.max(s, e));
         return out;
     };
+    // ---- The blob URL store (File API §8.3): what `URL.createObjectURL`
+    // registers (web_url.js) and what a `blob:` URL is answered from: fetch()
+    // (web_fetch.js) and `<script src>` (the engine, through
+    // `DomBindings::blob_url_text`). A page reaches only its own blobs here.
+    var blobUrls = Object.create(null);
+    Object.defineProperty(g, '__rustkit_blob_urls', {
+        value: {
+            add: function (url, blob) { if (blob instanceof Blob) blobUrls[url] = blob; },
+            revoke: function (url) { delete blobUrls[url]; },
+            get: function (url) { return blobUrls[String(url).split('#')[0]] || null; },
+            // The blob's bytes as text, or null when no blob stands behind `url`.
+            text: function (url) { var b = this.get(url); return b ? fromUtf8(b[BYTES]) : null; },
+            bytes: function (url) { var b = this.get(url); return b ? b[BYTES] : null; }
+        }
+    });
+
     Blob.prototype.text = function () { var self = this; return Promise.resolve().then(function () { return fromUtf8(self[BYTES]); }); };
     Blob.prototype.arrayBuffer = function () {
         var self = this;

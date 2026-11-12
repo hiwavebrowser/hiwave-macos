@@ -199,9 +199,20 @@
         needArg(arguments.length, 'parse');
         try { return new URL(url, base); } catch (e) { return null; }
     };
+    // Blob URLs: the store is web_blob.js's (`__rustkit_blob_urls`), which
+    // holds the Blob until the URL is revoked. Anything that is not a Blob
+    // (a MediaSource) still gets a URL nothing stands behind.
     var blobCount = 0;
-    URL.createObjectURL = function () { return 'blob:' + (g.location && g.location.origin || 'null') + '/' + (++blobCount); };
-    URL.revokeObjectURL = function () {};
+    URL.createObjectURL = function (object) {
+        var url = 'blob:' + (g.location && g.location.origin || 'null') + '/' + (++blobCount);
+        var store = g.__rustkit_blob_urls;
+        if (store) store.add(url, object);
+        return url;
+    };
+    URL.revokeObjectURL = function (url) {
+        var store = g.__rustkit_blob_urls;
+        if (store) store.revoke(String(url));
+    };
 
     g.URL = URL;
     g.URLSearchParams = URLSearchParams;

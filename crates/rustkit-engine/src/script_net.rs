@@ -1506,6 +1506,7 @@ fn enqueue_inserted(
         return true;
     }
     let mut started = Vec::new();
+    let mut blobs = Vec::new();
     let taken_at = std::time::Instant::now();
     {
         let mut board = lock_board(&scripts.board);
@@ -1526,6 +1527,11 @@ fn enqueue_inserted(
                 debug_assert!(false, "inserted script URL does not parse");
                 continue;
             };
+            // A blob URL is the page's own bytes: answered from the bindings'
+            // store now, on this thread, and never sent anywhere.
+            let blob = (parsed.scheme() == "blob").then(|| {
+                catch_unwind(AssertUnwindSafe(|| bindings.blob_url_text(&url))).ok().flatten()
+            });
             let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
             let guard = inspector
                 .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
@@ -1550,6 +1556,10 @@ fn enqueue_inserted(
                 arrived_at: None,
                 inspector: Arc::clone(inspector),
             });
+            if let Some(text) = blob {
+                blobs.push((id, nav_id, text));
+                continue;
+            }
             started.push(FetchJob {
                 loader: Arc::clone(loader),
                 request,
@@ -1560,6 +1570,24 @@ fn enqueue_inserted(
                 wait,
             });
         }
+    }
+    for (id, nav_id, text) in blobs {
+        let fetched = match text {
+            Some(text) => FetchedInserted::Source(InsertedSource {
+                text,
+                status: 200,
+                mime: None,
+                encoded_size: None,
+                from_cache: false,
+            }),
+            None => FetchedInserted::Transport {
+                stage: FailureStage::Connect,
+                inspector_reason: "no blob behind this URL",
+                detail: "no blob behind this URL".into(),
+                blocked_by: None,
+            },
+        };
+        store_inserted_result(&scripts.board, id, nav_id, fetched);
     }
     for job in started {
         spawn_inserted_fetch(job);
