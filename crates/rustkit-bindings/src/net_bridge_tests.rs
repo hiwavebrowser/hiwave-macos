@@ -231,13 +231,13 @@ fn the_queue_is_bounded() {
         ev(
             &b,
             "var ids = []; \
-             for (var i = 0; i < 70; i++) ids.push(window.__rustkit_net.request({ url: 'http://a/' + i }, function () {})); \
+             for (var i = 0; i < 1030; i++) ids.push(window.__rustkit_net.request({ url: 'http://a/' + i }, function () {})); \
              ids.filter(function (n) { return n === 0; }).length"
         ),
         "6",
-        "the 65th request onward is refused with id 0"
+        "the 1025th request onward is refused with id 0"
     );
-    assert_eq!(b.take_net_requests().len(), 64);
+    assert_eq!(b.take_net_requests().len(), 1024);
 }
 
 #[test]
@@ -245,4 +245,99 @@ fn a_request_needs_a_callback() {
     let b = bindings();
     b.enable_net_bridge().unwrap();
     assert!(b.evaluate("window.__rustkit_net.request({ url: 'http://a/' })").is_err());
+}
+
+// ── R1 on #1088 ────────────────────────────────────────────────────────────
+
+/// The engine's blob lookup (`blob_url_text`, for `<script src="blob:">`)
+/// runs none of the page's script: it is evaluated as bookkeeping, with no
+/// script budget, so anything of the page's on that path could spin for
+/// ever. A page that replaces the store's methods, or the built-ins the
+/// lookup used to go through, changes nothing.
+#[test]
+fn the_engines_blob_lookup_runs_no_page_script() {
+    let b = bindings();
+    ev(&b, "var u = URL.createObjectURL(new Blob(['window.fromBlob = 7;'], { type: 'text/javascript' }));");
+    ev(
+        &b,
+        "window.hijacked = 0; function hit() { window.hijacked++; return 'evil'; } \
+         try { __rustkit_blob_urls.text = hit; } catch (e) {} \
+         try { __rustkit_blob_urls.get = hit; } catch (e) {} \
+         try { Object.defineProperty(window, '__rustkit_blob_urls', { value: { text: hit, get: hit } }); } catch (e) {} \
+         String.prototype.split = function () { hit(); return ['x']; }; \
+         window.TextDecoder = function () { hit(); this.decode = hit; }; \
+         Uint8Array.prototype.slice = hit; 'set'",
+    );
+    let url = ev(&b, "u");
+    assert_eq!(b.blob_url_text(&url).as_deref(), Some("window.fromBlob = 7;"));
+    assert_eq!(b.blob_url_text(&format!("{url}#frag")).as_deref(), Some("window.fromBlob = 7;"), "a fragment names the same blob");
+    assert_eq!(ev(&b, "window.hijacked"), "0", "the lookup ran page script");
+    // A page cannot put a record of its own making behind a name: an object
+    // that passes `instanceof Blob` with a trap for every read (R1 delta on
+    // #1088). There is no store on the window to hand it to, and what
+    // createObjectURL keeps is a copy of the bytes, made in the page's turn.
+    ev(
+        &b,
+        "var trap = new Proxy(Object.create(Blob.prototype), { get: function () { hit(); return new Uint8Array(0); } }); \
+         try { __rustkit_blob_urls.add('blob:x', trap); } catch (e) {} \
+         var made; try { made = URL.createObjectURL(trap); } catch (e) { made = 'threw'; } \
+         window.hijacked = 0; 'set'",
+    );
+    assert_eq!(b.blob_url_text("blob:x"), None);
+    let made = ev(&b, "String(made)");
+    if made != "threw" {
+        let _ = b.blob_url_text(&made);
+    }
+    assert_eq!(ev(&b, "window.hijacked"), "0", "a trap ran outside the page's own turn");
+    // (This page defined a window property of the store's old name above;
+    // a page that has not sees nothing of the store.)
+    let fresh = bindings();
+    assert_eq!(ev(&fresh, "typeof __rustkit_blob_urls + typeof __rkBlobInternals"), "undefinedundefined", "the store is not on the window");
+    // ... and a global of that name the page declares is just the page's.
+    let _ = b.evaluate("let __rustkit_blob_urls = { text: hit, get: hit, bytes: hit }; 0");
+    assert_eq!(b.blob_url_text(&url).as_deref(), Some("window.fromBlob = 7;"));
+    assert_eq!(ev(&b, "window.hijacked"), "0");
+}
+
+/// A blob URL names a Blob of the document that made it: revoked, it names
+/// nothing (for the engine and for fetch), and another document's bindings
+/// never had it. Chrome 148: fetching either is a TypeError.
+#[test]
+fn a_revoked_blob_url_and_another_documents_name_nothing() {
+    let b = bindings();
+    b.enable_net_bridge().unwrap();
+    ev(&b, "var u = URL.createObjectURL(new Blob(['x'])); var out = 'pending';");
+    let url = ev(&b, "u");
+    let other = bindings();
+    other.enable_net_bridge().unwrap();
+    assert_eq!(other.blob_url_text(&url), None);
+    ev(&other, &format!("var out = 'pending'; fetch({url:?}).then(function () {{ out = 'answered'; }}, function (e) {{ out = e.name; }}); 0"));
+    assert_eq!(ev(&other, "out"), "TypeError");
+    assert!(other.take_net_requests().is_empty(), "a blob URL never goes to the network");
+    ev(&b, "URL.revokeObjectURL(u); fetch(u).then(function () { out = 'answered'; }, function (e) { out = e.name; }); 0");
+    assert_eq!(ev(&b, "out"), "TypeError");
+    assert_eq!(b.blob_url_text(&url), None);
+}
+
+/// What a page can park before the engine drains is bounded in bytes as
+/// well as in count: request bodies travel in the queue, and 1024 requests
+/// of any size was no bound on memory. Past 64 MiB of parked body a request
+/// is refused, as past the count; taking the queue makes room again.
+#[test]
+fn the_queue_bounds_parked_body_bytes() {
+    let b = bindings();
+    b.enable_net_bridge().unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "var body = 'A'.repeat(40 * 1024 * 1024); \
+             var ids = [1, 2, 3].map(function (i) { return window.__rustkit_net.request({ method: 'POST', url: 'http://a/' + i, body_b64: body }, function () {}); }); \
+             var small = window.__rustkit_net.request({ url: 'http://a/small' }, function () {}); \
+             [ids[0] > 0, ids[1], ids[2], small > 0].join()"
+        ),
+        "true,0,0,true",
+        "the second 40 MiB body is past the 64 MiB bound; a request without a body still fits"
+    );
+    assert_eq!(b.take_net_requests().len(), 2);
+    assert_eq!(ev(&b, "window.__rustkit_net.request({ method: 'POST', url: 'http://a/4', body_b64: body }, function () {}) > 0"), "true");
 }

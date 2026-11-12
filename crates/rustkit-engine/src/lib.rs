@@ -405,6 +405,8 @@ mod script_net_tests;
 #[cfg(test)]
 mod script_net_t7_tests;
 #[cfg(test)]
+mod script_net_body_size_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -8462,6 +8464,7 @@ impl Engine {
                                 &mut count,
                                 inspector,
                                 requests,
+                                post_load_live,
                             ),
                         )
                         .await;
