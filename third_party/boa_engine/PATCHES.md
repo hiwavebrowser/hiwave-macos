@@ -466,3 +466,16 @@ The vendored crate's own parser tests are not run by the workspace, and `cargo t
 on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
+
+## Patch: `boa_ast` `this` through nested arrow functions (arrow this)
+
+`third_party/boa_ast` is crates.io `boa_ast` 0.22.0 exactly as published (first commit of its PR), wired
+through `[patch.crates-io]`. Two small changes, marked `HIWAVE PATCH (arrow this)`: `Scope` gets an `arrow`
+flag (`scope.rs`, set from `visit_function_like` in `scope_analyzer.rs`), and
+`escape_this_in_enclosing_function_scope` keeps climbing past an arrow's scope instead of stopping at the
+first enclosing function scope. Upstream stopped at the outer *arrow*, so in
+`m() { return () => () => this.name; }` the method was never told its `this` is used, kept it out of its
+function environment, and the inner arrow read the wrong one (strict and sloppy; breaks TipTap). It only
+showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
+(35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
+unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.

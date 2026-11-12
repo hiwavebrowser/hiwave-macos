@@ -1193,6 +1193,10 @@ impl BindingCollectorVisitor<'_> {
             Scope::new(self.scope.clone(), true)
         };
 
+        if arrow {
+            // HIWAVE PATCH (arrow this)
+            function_scope.mark_arrow();
+        }
         let function_scopes = function_declaration_instantiation(
             body,
             parameters,

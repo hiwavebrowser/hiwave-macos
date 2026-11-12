@@ -105,6 +105,9 @@ pub(crate) struct Inner {
     function: bool,
     // Has the `this` been accessed/escaped outside the function environment boundary.
     this_escaped: Cell<bool>,
+    // HIWAVE PATCH (arrow this): set on the function scope of an arrow function, whose `this`
+    // is its enclosing function's.
+    arrow: Cell<bool>,
 
     context: Rc<ScopeContext>,
 }
@@ -121,6 +124,7 @@ impl Scope {
                 bindings: RefCell::default(),
                 function: true,
                 this_escaped: Cell::new(false),
+                arrow: Cell::new(false),
                 context: Rc::default(),
             }),
         }
@@ -136,6 +140,7 @@ impl Scope {
                 bindings: RefCell::default(),
                 function,
                 this_escaped: Cell::new(false),
+                arrow: Cell::new(false),
                 context: parent.inner.context.clone(),
                 outer: Some(parent),
             }),
@@ -355,6 +360,11 @@ impl Scope {
         }
     }
 
+    /// Marks this function scope as an arrow function's.
+    pub fn mark_arrow(&self) {
+        self.inner.arrow.set(true);
+    }
+
     /// Escape enclosing function environment's `this`.
     pub fn escape_this_in_enclosing_function_scope(&self) {
         let mut current = self;
@@ -363,7 +373,12 @@ impl Scope {
         loop {
             if crossed_function_border && current.is_function() {
                 current.inner.this_escaped.set(true);
-                return;
+                // HIWAVE PATCH (arrow this): an arrow has no `this` of its own, so the
+                // `this` it escapes is the next function's out. Stopping here left a
+                // method whose only use of `this` is two arrows down without its `this`.
+                if !current.inner.arrow.get() {
+                    return;
+                }
             }
             if let Some(outer) = &current.inner.outer {
                 if current.is_function() {
