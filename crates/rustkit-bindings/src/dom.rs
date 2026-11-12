@@ -226,9 +226,14 @@ pub struct ControlWrites {
     pub values: Vec<(usize, String)>,
     pub checked: Vec<(usize, Option<bool>)>,
     /// LAT19: the only write since the last published layout is Web
-    /// Animations' paint-only layer (`transform`, `opacity`, colours): no
-    /// box moved, so an animation frame over the published boxes answers
-    /// the read without a build when it can.
+    /// Animations' layer: an animation frame over the published boxes
+    /// answers the read without a build when it can. LAT22: whatever
+    /// properties the layer holds, not only the paint ones (`transform`,
+    /// `opacity`, colours); the frame itself refuses when a value a
+    /// layout places moved (`LayoutCtx::animation_frame`), and the read
+    /// then builds. Until 2026-11-12 one property outside the paint list
+    /// (a constant `width` beside a `transform`) made every read of every
+    /// frame build the whole tree.
     pub layer_only: bool,
     /// LAT22 probe: what the read was and what was pending, for the
     /// engine's log line when the read builds the tree.
@@ -557,7 +562,7 @@ impl DomHost {
             ControlWrites {
                 values: std::mem::take(&mut h.value_writes),
                 checked: std::mem::take(&mut h.checked_writes),
-                layer_only: !dirty.written_since_layout(),
+                layer_only: dirty.only_layer_written_since_layout(),
                 probe: ForcedReadProbe {
                     read,
                     cause,

@@ -610,6 +610,8 @@ mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lat22_forced_read_build_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
@@ -1612,6 +1614,7 @@ impl ViewState {
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
+        self.lay.tree_styles.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
         self.lay.shown_images.borrow_mut().clear();
         *self.lay.failed_images.borrow_mut() = layout_ctx::FailedImages::default();
@@ -12127,11 +12130,13 @@ impl layout_ctx::LayoutCtx {
         drop(inline_sheets);
         let stylesheets = prepared.sheets;
         let css_vars = prepared.css_vars;
+        let _tree_indexes = TreeRuleIndexScope::install();
         let _tree_scopes = shadow_tree::BuildScope::install(
             document,
             &stylesheets,
             viewport,
             javascript_enabled,
+            self.building_lay().map(|lay| lay.tree_styles.clone()),
         );
         let index_started = mark();
         // CQ1: the view's last layout's container sizes answer the queries;
@@ -12414,6 +12419,10 @@ impl layout_ctx::LayoutCtx {
                 "Shadow tree styles"
             );
         }
+        self.with_building_lay(|lay| {
+            lay.last_shadow_build.set(shadow);
+            lay.last_unindexed_cascades.set(UNINDEXED_CASCADES.with(Cell::get));
+        });
         if let (Some((parse, started)), Some(vars), Some(index), Some(walk)) =
             (cascade_started, vars_started, index_started, walk_started)
         {
@@ -13664,7 +13673,10 @@ impl layout_ctx::LayoutCtx {
                 // With the attributes an ancestor compound reads, so that
                 // `[data-x] > .y` and `.a:not([hidden]) .y` are tested
                 // against this element and not passed by every parent.
-                let carried = match active_rule_index(stylesheets) {
+                // Only the document's index filters: a shadow tree's
+                // elements keep all their attributes for the chains other
+                // trees read (`:host-context()`, slotted nodes).
+                let carried = match document_rule_index(stylesheets) {
                     Some(ix) => ix.reads.ancestor_entry_attributes(attributes),
                     None => attributes.clone(),
                 };
@@ -13753,6 +13765,26 @@ impl layout_ctx::LayoutCtx {
                 let child_nodes = node.flat_children();
                 let host_scope =
                     shadow_tree::HostScope::enter(node, &tag_lower, attributes, sib, &child_ancestors);
+                // LAT22: the tree's own rules are indexed once per build
+                // (trees with the same sheet text share one slice).
+                if let Some(sheets) = host_scope.sheets() {
+                    let source = RuleIndex::source_of(sheets);
+                    let wanted = !TREE_RULE_INDEX_OFF.with(Cell::get)
+                        && !TREE_RULE_INDEXES.with(|c| c.borrow().contains_key(&source));
+                    if wanted {
+                        // Kept on the tree style: a tree the view's cache
+                        // hands to a later build brings its index.
+                        // The entry holds the sheets: the key is their
+                        // address, which a dropped tree would free for the
+                        // next tree's sheets of the same shape to reuse.
+                        if let (Some(index), Some(owner)) = (
+                            host_scope.index(|sheets| self.build_rule_index(sheets)),
+                            host_scope.sheets_owner(),
+                        ) {
+                            TREE_RULE_INDEXES.with(|c| c.borrow_mut().insert(source, (owner, index)));
+                        }
+                    }
+                }
                 let slot_scope =
                     shadow_tree::SlotScope::enter(node, attributes, ancestors, sib, &child_nodes);
                 let (children_sheets, children_ancestors): (&[Stylesheet], &[Ancestor]) =
@@ -15504,6 +15536,9 @@ impl layout_ctx::LayoutCtx {
         // element's id, classes, tag or the universal bucket can pass
         // `rule_may_match`; the rest are never visited.
         let index = active_rule_index(stylesheets);
+        if index.is_none() {
+            UNINDEXED_CASCADES.with(|c| c.set(c.get() + 1));
+        }
         // Match sharing: a selector with no sibling combinator and no
         // positional pseudo-class reads only the element's tag and
         // attributes and its ancestors' tags, classes and ids. An earlier
@@ -15666,11 +15701,13 @@ impl layout_ctx::LayoutCtx {
         // tag, the matched rules in this order, the inline style, the
         // presentational hints and whether a UA rule hid the element. An
         // earlier element with the same six already has this style. Only
-        // under the build's own rule index, whose rule numbers the key holds.
-        // Rules from other trees are not in the key: no sharing with them.
+        // under a rule index, whose rule numbers the key holds with the
+        // index's source. Rules from other trees are not in the key (extras):
+        // no sharing with them.
         let share = match (index.is_some() && extras.is_empty(), parent_style) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
+                source: index.as_ref().map_or((0, 0, 0), |ix| ix.source),
                 tag: tag_name.to_string(),
                 rules: matching_rules.iter().map(|r| (r.2, r.1)).collect(),
                 inline: attributes.get("style").cloned(),
@@ -44380,12 +44417,70 @@ impl Drop for RuleIndexScope {
 
 /// The installed index, if it was built from exactly this stylesheet slice.
 fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
+    document_rule_index(stylesheets).or_else(|| tree_rule_index(stylesheets))
+}
+
+/// The index installed for the build's document sheets, if `stylesheets`
+/// is that slice.
+fn document_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
     RULE_INDEX.with(|c| {
         c.borrow()
             .as_ref()
             .filter(|(source, _)| *source == RuleIndex::source_of(stylesheets))
             .map(|(_, ix)| ix.clone())
     })
+}
+
+thread_local! {
+    /// LAT22: the rule indexes of the shadow trees' sheets met by the build
+    /// in progress, by the identity of each tree's sheet slice
+    /// (`RuleIndex::source_of`). Until 2026-11-12 an element in a shadow
+    /// tree was matched against every rule of its tree's sheets: a build of
+    /// 300 hosts sharing 1500 rules took 595 ms, 11.5 ms with none.
+    static TREE_RULE_INDEXES: std::cell::RefCell<HashMap<(usize, usize, usize), TreeRuleIndexEntry>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Test switch: build without the shadow trees' indexes.
+    static TREE_RULE_INDEX_OFF: Cell<bool> = const { Cell::new(false) };
+    /// LAT22 probe: element cascades of the build in progress that had no
+    /// rule index for their sheets (every rule visited).
+    static UNINDEXED_CASCADES: Cell<u32> = const { Cell::new(0) };
+}
+
+fn tree_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
+    TREE_RULE_INDEXES.with(|c| c.borrow().get(&RuleIndex::source_of(stylesheets)).map(|(_, index)| index.clone()))
+}
+
+#[cfg(test)]
+pub(crate) fn set_tree_rule_index_off_for_test(off: bool) {
+    TREE_RULE_INDEX_OFF.with(|c| c.set(off));
+}
+
+/// Alive for one build: the shadow trees' indexes it registers are dropped
+/// with it (they name sheet slices the build's trees own), and an outer
+/// build's come back.
+/// The sheets an index was built from (kept alive so their address, the
+/// key, names them until the build ends) and the index.
+type TreeRuleIndexEntry = (Rc<Vec<Stylesheet>>, Rc<RuleIndex>);
+
+struct TreeRuleIndexScope(HashMap<(usize, usize, usize), TreeRuleIndexEntry>);
+
+impl TreeRuleIndexScope {
+    fn install() -> Self {
+        UNINDEXED_CASCADES.with(|c| c.set(0));
+        TreeRuleIndexScope(TREE_RULE_INDEXES.with(|c| std::mem::take(&mut *c.borrow_mut())))
+    }
+}
+
+impl Drop for TreeRuleIndexScope {
+    fn drop(&mut self) {
+        let outer = std::mem::take(&mut self.0);
+        // try_: a panic inside a borrow must not become a double panic.
+        TREE_RULE_INDEXES.with(|c| {
+            if let Ok(mut indexes) = c.try_borrow_mut() {
+                *indexes = outer;
+            }
+        });
+    }
 }
 
 /// `RUSTKIT_INCREMENTAL_RESTYLE`: on by default, so the images relayout
@@ -44483,6 +44578,9 @@ fn style_share_mode() -> StyleShareMode {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct StyleShareKey {
     parent: u64,
+    /// The index whose numbers `rules` holds: the document's or a shadow
+    /// tree's (LAT22). Two trees' rule 0 are different rules.
+    source: (usize, usize, usize),
     tag: String,
     rules: Vec<(usize, (usize, usize, usize))>,
     inline: Option<String>,
@@ -47251,6 +47349,7 @@ mod style_share_tests {
         let named = ComputedStyle::new();
         let other = ComputedStyle::new();
         let key = || StyleShareKey {
+            source: (0, 0, 0),
             parent: 0,
             tag: "p".to_string(),
             rules: Vec::new(),
@@ -47285,6 +47384,7 @@ mod style_share_tests {
         let named = ComputedStyle::new();
         let key = |tag: &'static str| {
             move || StyleShareKey {
+                source: (0, 0, 0),
                 parent: 0,
                 tag: tag.to_string(),
                 rules: Vec::new(),
