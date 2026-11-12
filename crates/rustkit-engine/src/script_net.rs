@@ -1508,9 +1508,23 @@ fn enqueue_inserted(
     let mut started = Vec::new();
     let mut blobs = Vec::new();
     let taken_at = std::time::Instant::now();
+    // A blob URL is the page's own bytes: answered from the bindings' store
+    // now, on this thread, and never sent anywhere. Asked before the board
+    // is locked: the lookup enters the script runtime, and nothing that
+    // does may run under the lock the fetch thread also takes.
+    let blob_texts: Vec<Option<Option<String>>> = queued
+        .iter()
+        .map(|script| {
+            script.url.starts_with("blob:").then(|| {
+                catch_unwind(AssertUnwindSafe(|| bindings.blob_url_text(&script.url))).ok().flatten()
+            })
+        })
+        .collect();
     {
         let mut board = lock_board(&scripts.board);
+        let mut blob_texts = blob_texts.into_iter();
         for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by, inserted_at } in queued {
+            let blob = blob_texts.next().flatten();
             let queued = taken_at.saturating_duration_since(inserted_at);
             if let Some(at) = inserted_by {
                 // The name `run_inserted` evaluates it under.
@@ -1527,11 +1541,6 @@ fn enqueue_inserted(
                 debug_assert!(false, "inserted script URL does not parse");
                 continue;
             };
-            // A blob URL is the page's own bytes: answered from the bindings'
-            // store now, on this thread, and never sent anywhere.
-            let blob = (parsed.scheme() == "blob").then(|| {
-                catch_unwind(AssertUnwindSafe(|| bindings.blob_url_text(&url))).ok().flatten()
-            });
             let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
             let guard = inspector
                 .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))

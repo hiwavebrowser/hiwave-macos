@@ -468,13 +468,14 @@
                     // A blob URL is answered from the store, never from the
                     // network (Fetch §4.2 "scheme fetch", blob): GET only,
                     // and a URL nothing stands behind is a network error.
-                    var blob = g.__rustkit_blob_urls && s.method === 'GET' ? g.__rustkit_blob_urls.get(s.url) : null;
+                    var blobName = String(s.url).split('#')[0];
+                    var blob = g.__rustkit_blob_urls && s.method === 'GET' ? g.__rustkit_blob_urls.get(blobName) : null;
                     done();
                     if (!blob) { reject(typeError('Failed to fetch')); return; }
                     var bh = new Headers();
                     bh[H].list = [['content-length', String(blob.size)]].concat(blob.type ? [['content-type', blob.type]] : []);
                     bh[H].guard = 'immutable';
-                    resolve(makeResponse(new Uint8Array(g.__rustkit_blob_urls.bytes(s.url)), 'basic', 200, 'OK', bh, s.url, false));
+                    resolve(makeResponse(new Uint8Array(g.__rustkit_blob_urls.bytes(blobName)), 'basic', 200, 'OK', bh, s.url, false));
                     return;
                 }
                 var headers = req[H][H].list.map(function (e) { return [e[0], e[1]]; });

@@ -68,16 +68,25 @@
     // registers (web_url.js) and what a `blob:` URL is answered from: fetch()
     // (web_fetch.js) and `<script src>` (the engine, through
     // `DomBindings::blob_url_text`). A page reaches only its own blobs here.
-    var blobUrls = Object.create(null);
+    //
+    // The engine asks `text` outside any script budget (it is bookkeeping,
+    // made while a script element waits), so nothing on that path may be
+    // the page's to replace: the store is frozen and cannot be redefined,
+    // the map has no prototype, the bytes are behind a symbol only this
+    // file holds, and the decoding is the host's. `url` arrives without its
+    // fragment (the callers strip it), so no String method runs here.
+    var blobUrls = Object.create(null), utf8Decode = __rk.utf8Decode;
+    function behind(url) { var b = blobUrls[url]; return b === undefined ? null : b; }
     Object.defineProperty(g, '__rustkit_blob_urls', {
-        value: {
+        value: Object.freeze({
             add: function (url, blob) { if (blob instanceof Blob) blobUrls[url] = blob; },
             revoke: function (url) { delete blobUrls[url]; },
-            get: function (url) { return blobUrls[String(url).split('#')[0]] || null; },
+            get: behind,
             // The blob's bytes as text, or null when no blob stands behind `url`.
-            text: function (url) { var b = this.get(url); return b ? fromUtf8(b[BYTES]) : null; },
-            bytes: function (url) { var b = this.get(url); return b ? b[BYTES] : null; }
-        }
+            text: function (url) { var b = behind(url); return b === null ? null : utf8Decode(b[BYTES], true)[0]; },
+            bytes: function (url) { var b = behind(url); return b === null ? null : b[BYTES]; }
+        }),
+        writable: false, configurable: false, enumerable: false
     });
 
     Blob.prototype.text = function () { var self = this; return Promise.resolve().then(function () { return fromUtf8(self[BYTES]); }); };

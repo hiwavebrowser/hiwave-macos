@@ -1351,9 +1351,13 @@ impl DomBindings {
     /// made, or revoked). For `<script src="blob:...">`: the engine has no
     /// network to ask for such a URL.
     pub fn blob_url_text(&self, url: &str) -> Option<String> {
-        let quoted = serde_json::to_string(url).ok()?;
+        // The fragment is not part of the name. Stripped here, and the
+        // store read as a bare global the page cannot redefine: this runs
+        // with no script budget, so it must run nothing of the page's.
+        let name = url.split('#').next().unwrap_or(url);
+        let quoted = serde_json::to_string(name).ok()?;
         match self.runtime.borrow_mut().evaluate_bookkeeping(&format!(
-            "window.__rustkit_blob_urls ? window.__rustkit_blob_urls.text({quoted}) : null"
+            "typeof __rustkit_blob_urls === 'object' ? __rustkit_blob_urls.text({quoted}) : null"
         )) {
             Ok(JsValue::String(text)) => Some(text),
             _ => None,
@@ -1597,7 +1601,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_platform.js"))?;
 
         // Blob, File, FormData, AbortController/AbortSignal, structuredClone (web_blob.js).
-        runtime.evaluate_script(include_str!("web_blob.js"))?;
+        runtime.evaluate_with_host(include_str!("web_blob.js"))?;
 
         // The observer interfaces and requestIdleCallback (web_observers.js).
         runtime.evaluate_script(include_str!("web_observers.js"))?;
