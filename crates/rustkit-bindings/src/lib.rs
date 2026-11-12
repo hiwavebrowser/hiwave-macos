@@ -780,6 +780,11 @@ pub(crate) struct DirtyMark {
     /// [`LAYER_TRANSFORM`]). The boxes did not move, so only the reads that
     /// see those values lay out first (`needs_layout_for`).
     layer_since_layout: Cell<u8>,
+    /// LAT22: a write other than Web Animations' layer since the last
+    /// published layout. While false, the only writes are the layer's, of
+    /// whatever property: an animation frame over the painted boxes can
+    /// answer a read when no value a layout places moved.
+    other_since_layout: Cell<bool>,
 }
 
 /// A layer write of paint properties (`opacity`, `color`,
@@ -795,8 +800,15 @@ impl DirtyMark {
     pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
+            self.other_since_layout.set(true);
             self.mark_animation_layer(bucket, kind);
         }
+    }
+
+    /// Whether Web Animations' layer is all that was written since the last
+    /// published layout (LAT22; see `other_since_layout`).
+    pub(crate) fn only_layer_written_since_layout(&self) -> bool {
+        !self.other_since_layout.get()
     }
 
     /// Web Animations wrote an element's animated-style layer, and nothing
@@ -883,6 +895,7 @@ impl DirtyMark {
     /// A layout of the DOM as it is now was published.
     pub(crate) fn laid_out(&self) {
         self.since_layout.set(false);
+        self.other_since_layout.set(false);
         self.layer_since_layout.set(0);
         self.cause.set(None);
     }
