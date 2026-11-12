@@ -1206,7 +1206,14 @@ fn layout_flex_container_at(
                 if cross_axis == Axis::Vertical
                     && children_height >= 0.0
                     && laid_out < item.cross_size
-                    && (!item.stretches(style.align_items) || definite_inner_cross.is_none())
+                    && (!item.stretches(style.align_items)
+                        || (definite_inner_cross.is_none()
+                            // A stretched item with a preferred aspect ratio
+                            // takes its cross size from the ratio, not from
+                            // the one-line guess: it keeps it (Chrome for
+                            // Testing 148, flex_aspect_ratio_tests: 294 and
+                            // 40 tall around a 30px picture).
+                            && item.layout_box.style.aspect_ratio.is_none()))
                 {
                     // Only an AUTHORED minimum floors it: without one,
                     // `min_cross_size` is that same one-line content floor.
@@ -1315,7 +1322,11 @@ fn layout_flex_container_at(
                 // one `min_cross_size` is the one-line content guess, and a
                 // stretched item in a 5px line is 5 (CB6c; Chrome for
                 // Testing 148), not that guess.
-                let floor = if authored_min { item.min_cross_size } else { 0.0 };
+                let floor = if authored_min || item.layout_box.style.aspect_ratio.is_some() {
+                    item.min_cross_size
+                } else {
+                    0.0
+                };
                 let target = target.max(floor).min(item.max_cross_size);
                 let content_height = (target - item.cross_pb()).max(0.0);
                 if content_height > item.layout_box.dimensions.content.height {
