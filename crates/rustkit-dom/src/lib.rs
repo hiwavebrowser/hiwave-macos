@@ -1501,6 +1501,8 @@ mod windows_parser_pins {
 
 #[cfg(test)]
 mod svg_name_case_tests;
+#[cfg(test)]
+mod attr_cost_bench;
 
 /// Script writes to a node's own data (js-ladder mutation surface).
 #[cfg(test)]

@@ -461,6 +461,8 @@ mod inline_content_area_tests;
 mod float_in_items_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod cleared_float_width_tests;
+#[cfg(all(test, feature = "headless"))]
+mod dom1_attr_order_hit_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
