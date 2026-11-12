@@ -466,8 +466,28 @@ impl ExecutionDeadline {
     }
 }
 
+/// One global environment of a [`JsRuntime`]: its own global object, its own
+/// `Object`, `Array` and every other intrinsic. A runtime starts with one
+/// ([`RealmId::MAIN`]); a same-origin nested document gets another
+/// ([`JsRuntime::create_realm`]). Realms of one runtime share its heap, its
+/// job queue and its limits, so their objects can hold each other and call
+/// each other directly (HTML: one agent, several realms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RealmId(usize);
+
+impl RealmId {
+    /// The realm the runtime was created with.
+    pub const MAIN: RealmId = RealmId(0);
+}
+
 /// JavaScript runtime that wraps the underlying engine.
 pub struct JsRuntime {
+    /// The realms made so far, by id; `None` once dropped. `[0]` is the
+    /// main realm.
+    #[cfg(feature = "boa")]
+    realms: Vec<Option<boa_engine::realm::Realm>>,
+    /// The realm evaluation and host-function registration act in.
+    current_realm: RealmId,
     #[cfg(feature = "boa")]
     context: boa_engine::Context,
     /// The module host (see `module`): imports the graph asks for are
@@ -575,6 +595,9 @@ impl JsRuntime {
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
+            realms: vec![Some(context.realm().clone())],
+            current_realm: RealmId::MAIN,
+            #[cfg(feature = "boa")]
             context,
             #[cfg(feature = "boa")]
             modules,
@@ -611,6 +634,91 @@ impl JsRuntime {
 
         debug!("JavaScript runtime initialized");
         Ok(runtime)
+    }
+
+    /// Make a new realm in this runtime: a fresh global object with the
+    /// language's own globals and this runtime's `console`. Everything the
+    /// embedder installs per page (host functions, its scripts) it installs
+    /// again while the realm is entered.
+    pub fn create_realm(&mut self) -> Result<RealmId, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let realm = self
+                .context
+                .create_realm()
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            self.realms.push(Some(realm));
+            let id = RealmId(self.realms.len() - 1);
+            let outer = self.enter_realm(id);
+            let console = self.setup_console();
+            self.enter_realm(outer);
+            console?;
+            Ok(id)
+        }
+        #[cfg(not(feature = "boa"))]
+        Err(JsError::NotInitialized)
+    }
+
+    /// Make `realm` the one evaluation and host-function registration act
+    /// in, and return the one that was. A dropped or unknown realm leaves
+    /// things as they are. Only between evaluations: a script that is
+    /// running keeps the realm it was started in.
+    pub fn enter_realm(&mut self, realm: RealmId) -> RealmId {
+        let outer = self.current_realm;
+        #[cfg(feature = "boa")]
+        if let Some(Some(target)) = self.realms.get(realm.0) {
+            self.context.enter_realm(target.clone());
+            self.current_realm = realm;
+        }
+        outer
+    }
+
+    /// The realm evaluation acts in now.
+    pub fn current_realm(&self) -> RealmId {
+        self.current_realm
+    }
+
+    /// Define `name` on `holder`'s global object as `target`'s global
+    /// object: how one document reaches another's `window` (a frame's
+    /// `contentWindow`, a child's `parent`).
+    pub fn expose_realm_global(&mut self, holder: RealmId, name: &str, target: RealmId) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let known = |id: RealmId, realms: &[Option<boa_engine::realm::Realm>]| matches!(realms.get(id.0), Some(Some(_)));
+            if !known(holder, &self.realms) || !known(target, &self.realms) {
+                return Err(JsError::ExecutionError("no such realm".into()));
+            }
+            let outer = self.enter_realm(target);
+            let global = self.context.global_object();
+            self.enter_realm(holder);
+            let set = self.context.global_object().set(
+                boa_engine::JsString::from(name),
+                boa_engine::JsValue::from(global),
+                true,
+                &mut self.context,
+            );
+            self.enter_realm(outer);
+            set.map(|_| ()).map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (holder, name, target);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Forget a realm this runtime made (never the main one, never the
+    /// current one). Objects of it that other realms still hold stay alive
+    /// and usable, as any object does; nothing can be evaluated in it again.
+    pub fn drop_realm(&mut self, realm: RealmId) -> bool {
+        if realm == RealmId::MAIN || realm == self.current_realm {
+            return false;
+        }
+        #[cfg(feature = "boa")]
+        if let Some(slot) = self.realms.get_mut(realm.0) {
+            return slot.take().is_some();
+        }
+        false
     }
 
     /// Get the runtime configuration.

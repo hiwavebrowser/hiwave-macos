@@ -131,6 +131,8 @@ mod mutation_observer_tests;
 mod web_messaging_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod child_realm_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
@@ -1091,8 +1093,60 @@ impl MutationLog {
 }
 
 /// DOM bindings context.
+/// A page's hold on the JavaScript runtime: the runtime, which the
+/// documents of one frame tree share, and the realm that is this page's.
+/// Every use goes through [`PageRuntime::borrow_mut`], which enters the
+/// page's realm for as long as the borrow lasts, so the rest of the
+/// bindings read as if the runtime were the page's alone.
+pub(crate) struct PageRuntime {
+    shared: Rc<RefCell<JsRuntime>>,
+    realm: rustkit_js::RealmId,
+}
+
+/// The runtime, with one page's realm entered until this is dropped.
+pub(crate) struct InRealm<'a> {
+    runtime: std::cell::RefMut<'a, JsRuntime>,
+    outer: rustkit_js::RealmId,
+}
+
+impl PageRuntime {
+    fn main(runtime: JsRuntime) -> Self {
+        Self { shared: Rc::new(RefCell::new(runtime)), realm: rustkit_js::RealmId::MAIN }
+    }
+
+    pub(crate) fn borrow_mut(&self) -> InRealm<'_> {
+        let mut runtime = self.shared.borrow_mut();
+        let outer = runtime.enter_realm(self.realm);
+        InRealm { runtime, outer }
+    }
+
+    /// For what reads the runtime without evaluating (no realm matters).
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, JsRuntime> {
+        self.shared.borrow()
+    }
+}
+
+impl std::ops::Deref for InRealm<'_> {
+    type Target = JsRuntime;
+    fn deref(&self) -> &JsRuntime {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for InRealm<'_> {
+    fn deref_mut(&mut self) -> &mut JsRuntime {
+        &mut self.runtime
+    }
+}
+
+impl Drop for InRealm<'_> {
+    fn drop(&mut self) {
+        self.runtime.enter_realm(self.outer);
+    }
+}
+
 pub struct DomBindings {
-    runtime: RefCell<JsRuntime>,
+    runtime: PageRuntime,
     window: RefCell<WindowState>,
     event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
@@ -1136,7 +1190,46 @@ impl DomBindings {
         Self::build(runtime, true)
     }
 
-    fn build(mut runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+    fn build(runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+        Self::build_in(PageRuntime::main(runtime), app_bridge)
+    }
+
+    /// Bindings for a document nested in this one's frame tree and of its
+    /// origin (a same-origin `<iframe>`): a new realm of the same runtime,
+    /// with everything a page has installed again in it, bound to its own
+    /// document. The two pages' objects can hold and call each other.
+    /// The child outlives neither the runtime nor its realm: drop it with
+    /// [`Self::drop_child`].
+    pub fn new_child(&self) -> Result<Self, BindingError> {
+        let realm = self.runtime.shared.borrow_mut().create_realm()?;
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false)
+    }
+
+    /// Give this page's global a property `name` that is `other`'s global
+    /// object (`contentWindow` on one side, `parent` on the other). Both
+    /// must share a runtime.
+    pub fn expose_window(&self, name: &str, other: &DomBindings) -> Result<(), BindingError> {
+        if !Rc::ptr_eq(&self.runtime.shared, &other.runtime.shared) {
+            return Err(JsError::ExecutionError("the two pages do not share a runtime".into()).into());
+        }
+        self.runtime
+            .shared
+            .borrow_mut()
+            .expose_realm_global(self.runtime.realm, name, other.runtime.realm)
+            .map_err(Into::into)
+    }
+
+    /// End a child made with [`Self::new_child`]: its realm can no longer be
+    /// evaluated in. Objects of it the parent still holds stay alive.
+    pub fn drop_child(&self, child: DomBindings) -> bool {
+        let realm = child.runtime.realm;
+        drop(child);
+        self.runtime.shared.borrow_mut().drop_realm(realm)
+    }
+
+    fn build_in(page: PageRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+        let mut entered = page.borrow_mut();
+        let runtime: &mut JsRuntime = &mut entered;
         debug!(app_bridge, "Initializing DOM bindings");
 
         // `window.ipc.postMessage` lands here (CH2.E9), in an app-owned
@@ -1161,18 +1254,18 @@ impl DomBindings {
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut runtime, app_bridge)?;
+        Self::inject_globals(&mut *runtime, app_bridge)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
         let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
-        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
+        dom::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_with_host(include_str!("web_interfaces.js"))?;
         // getBBox, getTotalLength, getPointAtLength on SVG shapes (svg_geometry.rs,
         // web_svg_geometry.js); needs the SVG interfaces node_apis.js made.
-        svg_geometry::install(&mut runtime)?;
+        svg_geometry::install(runtime)?;
         // XMLSerializer (web_xml_serializer.js).
         runtime.evaluate_script(include_str!("web_xml_serializer.js"))?;
         // FileReader over web_blob.js's Blob (web_file_reader.js); an EventTarget.
@@ -1187,7 +1280,7 @@ impl DomBindings {
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
-        web_match_media::install(&mut runtime)?;
+        web_match_media::install(&mut *runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -1209,18 +1302,18 @@ impl DomBindings {
         // execCommand, navigator.clipboard and the user's edit commands over
         // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
         let edit = Rc::new(dom::editing::EditContext::default());
-        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
+        dom::editing::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
-        web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        web_scroll::install(&mut *runtime, &scroll, &dom_host, &dirty)?;
         // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
         // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
         let canvases = web_canvas::SharedCanvases::default();
-        web_canvas::install(&mut runtime, &canvases, &dom_host)?;
+        web_canvas::install(&mut *runtime, &canvases, &dom_host)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -1245,8 +1338,9 @@ impl DomBindings {
              });",
         )?;
 
+        drop(entered);
         Ok(Self {
-            runtime: RefCell::new(runtime),
+            runtime: page,
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
