@@ -14,6 +14,8 @@ use thiserror::Error;
 
 pub mod logging;
 
+pub mod retry;
+
 /// `navigator.platform` for the OS the engine is built for, as Chromium
 /// reports it ("MacIntel" on every Mac, Apple silicon included). One value
 /// for the page (rustkit-bindings) and its workers (rustkit-worker).
@@ -26,7 +28,6 @@ pub const NAVIGATOR_PLATFORM: &str = if cfg!(target_os = "macos") {
 } else {
     "Linux x86_64"
 };
-pub mod retry;
 
 pub use logging::{init_logging, LogConfig, LogFormat};
 pub use retry::{retry_with_backoff, RetryConfig};

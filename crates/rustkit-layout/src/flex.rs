@@ -1204,7 +1204,6 @@ fn layout_flex_container_at(
                 // (a `height: 0` child; CB6c).
                 let laid_out = children_height + item.cross_pb();
                 if cross_axis == Axis::Vertical
-                    && children_height >= 0.0
                     && laid_out < item.cross_size
                     && (!item.stretches(style.align_items)
                         || (definite_inner_cross.is_none()
@@ -1212,7 +1211,11 @@ fn layout_flex_container_at(
                             // takes its cross size from the ratio, not from
                             // the one-line guess: it keeps it (Chrome for
                             // Testing 148, flex_aspect_ratio_tests: 294 and
-                            // 40 tall around a 30px picture).
+                            // 40 tall around a 30px picture). Keyed on
+                            // the declared ratio, not on whether the ratio
+                            // sized this item (`ratio_cross`): conservative,
+                            // an item with an unused ratio keeps the guess
+                            // as it did before CB6c.
                             && item.layout_box.style.aspect_ratio.is_none()))
                 {
                     // Only an AUTHORED minimum floors it: without one,

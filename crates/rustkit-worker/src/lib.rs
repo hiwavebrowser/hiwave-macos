@@ -865,16 +865,10 @@ mod tests {
     /// said "Win32" while the page said "MacIntel" after #1069.
     #[test]
     fn worker_navigator_platform_names_the_host_os() {
-        let want = if cfg!(target_os = "macos") {
-            "MacIntel"
-        } else if cfg!(windows) {
-            "Win32"
-        } else if cfg!(target_arch = "aarch64") {
-            "Linux aarch64"
-        } else {
-            "Linux x86_64"
-        };
-        assert_eq!(WorkerNavigator::new().platform, want);
+        // The page's own constant, so the two cannot drift apart on any OS.
+        assert_eq!(WorkerNavigator::new().platform, rustkit_common::NAVIGATOR_PLATFORM);
+        #[cfg(target_os = "macos")]
+        assert_eq!(WorkerNavigator::new().platform, "MacIntel");
     }
 
     #[test]
