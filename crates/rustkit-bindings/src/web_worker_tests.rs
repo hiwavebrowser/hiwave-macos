@@ -285,3 +285,43 @@ fn a_script_that_fails_to_load_is_a_plain_error_event() {
 fn the_worker_scope_error_handler_sees_nothing_when_nothing_throws() {
     assert_eq!(observe("selferr", "/err.js", None), chrome("selferr"));
 }
+
+// ---- W3: blob: and data: scripts. Expected: str4_worker_w3_cft148.json.
+
+const CHROME_W3: &str = include_str!("../../../docs/diagnostics/2026-11-12/str4_worker_w3_cft148.json");
+
+#[test]
+fn blob_and_data_scripts_run_as_in_chrome() {
+    let b = bound();
+    let src = "onmessage = function (e) { postMessage({ echo: e.data, proto: self.location.protocol, nm: self.name }); }; postMessage('up');";
+    let q = serde_json::to_string(src).unwrap();
+    b.evaluate(&format!(
+        "var res = {{}}; \
+         function go(key, url, opts) {{ \
+           var log = res[key] = [], w = new Worker(url, opts); \
+           w.onmessage = function (e) {{ log.push(e.data); }}; \
+           w.onerror = function (e) {{ log.push('error:' + e.constructor.name); }}; \
+           w.postMessage(key); return w; }} \
+         var blob = new Blob([{q}], {{ type: 'text/javascript' }}); \
+         var burl = URL.createObjectURL(blob); \
+         res.urlShape = [burl.indexOf('blob:' + location.origin + '/') === 0, typeof URL.revokeObjectURL]; \
+         go('blob', burl, {{ name: 'bn' }}); \
+         var u2 = URL.createObjectURL(blob); go('revokedAfterNew', u2); URL.revokeObjectURL(u2); \
+         go('data', 'data:text/javascript,' + encodeURIComponent({q})); \
+         go('dataB64', 'data:text/javascript;base64,' + btoa({q})); \
+         var u3 = URL.createObjectURL(blob); URL.revokeObjectURL(u3); \
+         setTimeout(function () {{ go('revokedBefore', u3); }}, 0); \
+         go('typedBlobHtml', URL.createObjectURL(new Blob(['postMessage(1)'], {{ type: 'text/html' }})));"
+    ))
+    .unwrap();
+    let end = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < end {
+        b.run_timers(0, 100).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let got: serde_json::Value = serde_json::from_str(&ev(&b, "JSON.stringify(res)")).unwrap();
+    let want: serde_json::Value = serde_json::from_str(CHROME_W3).unwrap();
+    assert_eq!(got, want);
+    // none of these went to the network
+    assert!(b.take_net_requests().is_empty());
+}
