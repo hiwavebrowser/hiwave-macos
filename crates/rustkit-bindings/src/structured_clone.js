@@ -140,17 +140,26 @@
             if ('b' in e) return g.BigInt(e.b);
             return undefined;
         }
+        // A "__proto__" key is an own data property, as in Chrome, not the prototype setter that a plain
+        // assignment would call. Every other key is a plain assignment.
+        function put(out, key, v) {
+            if (key === '__proto__') {
+                Object.defineProperty(out, key, { value: v, writable: true, enumerable: true, configurable: true });
+            } else {
+                out[key] = v;
+            }
+        }
         function build(id) {
             if (id in made) return made[id];
             var rec = nodes[id], out, i;
             switch (rec.t) {
                 case 'o':
                     out = {}; made[id] = out;
-                    for (i = 0; i < rec.k.length; i++) out[rec.k[i][0]] = dec(rec.k[i][1]);
+                    for (i = 0; i < rec.k.length; i++) put(out, rec.k[i][0], dec(rec.k[i][1]));
                     return out;
                 case 'a':
                     out = new g.Array(rec.l); made[id] = out;
-                    for (i = 0; i < rec.k.length; i++) out[rec.k[i][0]] = dec(rec.k[i][1]);
+                    for (i = 0; i < rec.k.length; i++) put(out, rec.k[i][0], dec(rec.k[i][1]));
                     return out;
                 case 'D': out = new g.Date(dec(rec.v)); made[id] = out; return out;
                 case 'R': out = new g.RegExp(rec.s, rec.f); made[id] = out; return out;

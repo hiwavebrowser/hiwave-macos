@@ -138,10 +138,11 @@
             // A script from another origin (another scheme, host or port, CORS headers or not) and a
             // `javascript:` URL are refused at the call, before any request, as Chrome does: pages catch the
             // SecurityError to fall back to a blob: worker. data: and blob: URLs take their own paths below.
-            // A page with no origin of its own (a document with no URL) is not checked.
+            // A page whose origin is opaque ('null': a data: URL page, a sandboxed frame, a document with no
+            // URL) matches no origin, so it may start only data: and blob: workers, as in Chrome.
             var pageOrigin = g.location ? String(g.location.origin) : 'null';
-            if (pageOrigin !== 'null' && u.protocol !== 'data:' && u.protocol !== 'blob:'
-                && (u.protocol === 'javascript:' || u.origin !== pageOrigin)) {
+            if (u.protocol !== 'data:' && u.protocol !== 'blob:'
+                && (u.protocol === 'javascript:' || pageOrigin === 'null' || u.origin !== pageOrigin)) {
                 throw dom("Failed to construct 'Worker': Script at '" + u.href + "' cannot be accessed from origin '" + pageOrigin + "'.", 'SecurityError');
             }
             var st = { w: this, href: u.href, id: 0, dead: false, queue: [], net: 0, on: {}, reg: {} };
