@@ -527,9 +527,10 @@ struct SettleStats {
 /// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
 /// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
 ///
-/// It also stops, between turns, once `budget` of real time is spent (`SETTLE_REAL_BUDGET`, less when the
-/// capture's timeout has less left): a page whose turns are slow gets a bounded settle, cut short and
-/// reported (`cut_short`, `virtual_ms`). A page whose span fits in the budget settles the same every run.
+/// It also stops, between turns, when `budget` of real time is spent or the next turn would likely end
+/// past it (the time spent plus the slowest turn so far). `budget` is `SETTLE_REAL_BUDGET`, less when the
+/// capture's timeout has less left. A page whose turns are slow gets a bounded settle, cut short and
+/// reported (`cut_short`, `virtual_ms`); a page whose span fits in the budget settles the same every run.
 ///
 /// Returns what it cost (`SettleStats`), including how many requests were still open once the cap ran
 /// out: a page with a request that never answers (a long poll, an event stream) pays the cap once.
@@ -564,7 +565,10 @@ fn settle_stepped(
     // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
     let mut in_flight = turn(&mut stats, 0);
     while left > 0 {
-        while in_flight > 0 && waited < REQUEST_WAIT_CAP && began.elapsed() < budget {
+        while in_flight > 0
+            && waited < REQUEST_WAIT_CAP
+            && began.elapsed() + Duration::from_millis(stats.max_turn_ms) < budget
+        {
             let t = Instant::now();
             std::thread::sleep(REQUEST_WAIT);
             in_flight = turn(&mut stats, 0);
@@ -573,8 +577,9 @@ fn settle_stepped(
         if in_flight > 0 {
             stats.held_open = stats.held_open.max(in_flight);
         }
-        // Between turns only: a turn already running is not interrupted.
-        if began.elapsed() >= budget {
+        // Between turns only: a turn already running is not interrupted, so a turn that would likely end
+        // past the budget (the time spent plus the slowest turn so far) is not started.
+        if began.elapsed() + Duration::from_millis(stats.max_turn_ms) > budget {
             stats.cut_short = true;
             break;
         }
