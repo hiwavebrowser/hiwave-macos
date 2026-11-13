@@ -923,6 +923,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                 name, attrs, self_closing: _
             } if name == "head" => {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.head_element = Some(node_id.clone());
                 self.open_elements.push((name, node_id));
                 self.mode = InsertionMode::InHead;
             }
@@ -935,6 +936,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             _ => {
                 // Implied head start tag
                 let node_id = self.sink.start_element("head".to_string(), vec![], false);
+                self.head_element = Some(node_id.clone());
                 self.open_elements.push(("head".to_string(), node_id));
                 self.mode = InsertionMode::InHead;
                 self.process_token(token)?;
@@ -983,6 +985,37 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.open_elements.push((name, node_id));
                 if !self.scripting {
                     self.mode = InsertionMode::InHeadNoscript;
+                }
+            }
+            // §13.2.6.4.4 "template": insert it and parse its contents "in
+            // template"; the head stays open under it.
+            Token::StartTag {
+                name, attrs, self_closing: _
+            } if name == "template" => {
+                self.flush_text();
+                let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.open_elements.push((name, node_id));
+                // A marker, so formatting opened inside the template is not
+                // reconstructed after it.
+                self.push_formatting_marker();
+                self.mode = InsertionMode::InTemplate;
+                self.template_insertion_modes.push(InsertionMode::InTemplate);
+            }
+            // §13.2.6.4.4 end tag "template": with a template open, close
+            // everything up to it and go back to the mode its parent has
+            // ("in head" for one in the head). Without one, ignored.
+            Token::EndTag { name } if name == "template" => {
+                self.flush_text();
+                if self.open_elements.iter().any(|(n, _)| n == "template") {
+                    while let Some((tag_name, _)) = self.open_elements.pop() {
+                        self.sink.end_element(tag_name.clone());
+                        if tag_name == "template" {
+                            break;
+                        }
+                    }
+                    self.clear_active_formatting_to_marker();
+                    self.template_insertion_modes.pop();
+                    self.reset_insertion_mode();
                 }
             }
             Token::EndTag { name } if name == "noscript" && self.scripting => {
@@ -1049,6 +1082,30 @@ impl<S: TreeSink> TreeBuilder<S> {
             Token::StartTag { ref name, .. } if name == "html" => {
                 self.handle_in_body(token)?;
             }
+            // §13.2.6.4.6: a head element after `</head>` (parse error) goes
+            // into the head: the head is open again for it, then taken off
+            // the stack wherever it is (a template stays open above it).
+            Token::StartTag { ref name, .. }
+                if self.head_element.is_some()
+                    && matches!(
+                        name.as_str(),
+                        "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "script" | "style" | "template" | "title"
+                    ) =>
+            {
+                self.flush_text();
+                let head = self.head_element.clone().expect("head");
+                self.sink.reopen(head.clone());
+                self.open_elements.push(("head".to_string(), head.clone()));
+                self.handle_in_head(token)?;
+                if let Some(at) = self.open_elements.iter().rposition(|(n, _)| n == "head") {
+                    self.open_elements.remove(at);
+                }
+                self.sink.remove_open(head);
+            }
+            // §13.2.6.4.6: end tag "template" is processed using "in head".
+            Token::EndTag { ref name } if name == "template" => {
+                self.handle_in_head(token)?;
+            }
             // HTML §13.2.6.4.6, start tag "frameset": insert the element and
             // switch to "in frameset". No body is implied: the frameset is
             // the html element's child, the document's body element (§3.1.3).
@@ -1112,6 +1169,22 @@ impl<S: TreeSink> TreeBuilder<S> {
                 // second body kept its UA `margin: 8px` (S11, gmail).
                 if name == "html" || name == "body" {
                     self.merge_into_existing(&name, attrs);
+                    return Ok(());
+                }
+
+                // §13.2.6.4.7: a "template" start tag is processed using the
+                // "in head" rules (its own mode, a formatting marker), the
+                // same rules its end tag takes.
+                if name == "template" {
+                    return self.handle_in_head(Token::StartTag { name, attrs, self_closing });
+                }
+
+                // §13.2.6.4.7: these start tags are a parse error "in
+                // body" and are ignored (a stray <td> makes no cell).
+                if matches!(
+                    name.as_str(),
+                    "caption" | "col" | "colgroup" | "frame" | "head" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+                ) {
                     return Ok(());
                 }
 
@@ -1197,6 +1270,11 @@ impl<S: TreeSink> TreeBuilder<S> {
                     }
                 }
             }
+            // §13.2.6.4.7: end tag "template" is processed using "in head".
+            Token::EndTag { ref name } if name == "template" => {
+                self.flush_text();
+                self.handle_in_head(token)?;
+            }
             Token::EndTag { name } => {
                 self.flush_text();
 
@@ -1209,6 +1287,13 @@ impl<S: TreeSink> TreeBuilder<S> {
                 // Find matching open element
                 let mut found = false;
                 for i in (0..self.open_elements.len()).rev() {
+                    // §13.2.6.4.7 "any other end tag": an open template is
+                    // special, so nothing below it is reached (`</head>`
+                    // inside a template in the head is ignored, not a close
+                    // of the head and the template with it).
+                    if self.open_elements[i].0 == "template" && name != "template" {
+                        break;
+                    }
                     if self.open_elements[i].0 == name {
                         // Close all elements up to and including this one
                         for _ in i..self.open_elements.len() {
@@ -2097,6 +2182,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                             break;
                         }
                     }
+                    self.clear_active_formatting_to_marker();
                     self.template_insertion_modes.pop();
                     self.reset_insertion_mode();
                     self.process_token(token)?;
