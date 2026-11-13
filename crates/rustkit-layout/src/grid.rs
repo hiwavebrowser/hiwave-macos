@@ -286,8 +286,11 @@ impl<'a> GridItem<'a> {
             // an auto row in a definite-height grid is not short (a lone
             // `min(100vh, 500px)` item made a 0 row; Chrome 148: 500).
             Length::Zero => return margins,
+            // A percentage form is cyclic while rows are sized (Chrome 148
+            // sizes the row to the content), so only the percentage-free
+            // forms resolve here.
             Length::Min(_) | Length::Max(_) | Length::Clamp(_)
-                if !crate::flex::has_percentage(&style.height) || container_height > 0.0 =>
+                if !crate::flex::has_percentage(&style.height) =>
             {
                 return self
                     .layout_box
@@ -303,7 +306,7 @@ impl<'a> GridItem<'a> {
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
             l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_height),
             l @ (Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_))
-                if !crate::flex::has_percentage(l) || container_height > 0.0 =>
+                if !crate::flex::has_percentage(l) =>
             {
                 self.layout_box.length_to_px(l, container_height)
             }
