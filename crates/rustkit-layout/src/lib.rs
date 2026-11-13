@@ -22,6 +22,7 @@ pub mod grid;
 pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
+pub mod layout_memo;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod path_data;
@@ -45,6 +46,8 @@ mod flex_resolve_tests;
 
 #[cfg(test)]
 mod float_line_wrap_tests;
+#[cfg(test)]
+mod float_in_items_unit_tests;
 
 #[cfg(test)]
 mod flex_auto_margin_relayout_tests;
@@ -353,6 +356,63 @@ pub(crate) fn button_border_box_width(
 /// Chrome for Testing 148.0.7778.216 at 16px Arial (Linux, macOS and Windows agree): bare 24 tall,
 /// line-height:1 only 22, padding:0 only 22, border:none only 20, padding:0 + border:none 18, all
 /// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
+/// Families whose average character width Chrome does not trust: a field
+/// in one is `size` advances of "0" wide, with nothing added. Matched as
+/// written, against the first family of `font-family`. The list is the one
+/// in Chromium's `HasValidAvgCharWidth` (core/layout/forms/
+/// layout_text_control.cc), read there, not copied.
+const NO_AVERAGE_WIDTH: &[&str] = &[
+    "American Typewriter", "Arial Hebrew", "Chalkboard", "Cochin", "Corsiva Hebrew", "Courier", "Euphemia UCAS",
+    "Geneva", "Gill Sans", "Hei", "Helvetica", "Hoefler Text", "InaiMathi", "Kai", "Lucida Grande", "Marker Felt",
+    "Monaco", "Mshtakan", "New Peninim MT", "Osaka", "Raanana", "STHeiti", "Symbol", "Times", "Apple Braille",
+    "Apple LiGothic", "Apple LiSung", "Apple Symbols", "AppleGothic", "AppleMyungjo", "#GungSeo", "#HeadLineA",
+    "#PCMyungjo", "#PilGi",
+];
+
+/// The content width of a single-line text field `size` characters wide
+/// (SET5; Chrome for Testing 148 on macOS, 15 families at 13 sizes in
+/// docs/diagnostics/2026-11-12/set5_input_content_width*).
+///
+/// A character is as wide as the font's "x" advances (which is what the
+/// font's average character width is on macOS), taken up to the next whole
+/// pixel from a half. The field is `size` of them, plus the room the
+/// widest character needs over an average one, where the widest is taken
+/// to be as wide as the font's rounded ascent; the sum is rounded up.
+///
+/// When the average is not to be trusted (no family, one of
+/// `NO_AVERAGE_WIDTH`, or an average over 1.7 advances of "0", as a CJK
+/// font's full-width average is), a character is the advance of "0" and
+/// nothing is added.
+///
+/// The structure (size characters plus the widest's excess, the list, the
+/// 1.7 test) is Chromium's. Two details are fitted to the measurements, not
+/// read: the "x" advance taken up from a half, and the font size taken
+/// down to 1/64 px before measuring.
+fn text_input_content_width(style: &ComputedStyle, font_size: f32, size: u32) -> f32 {
+    // The font size on the 1/64 px grid Chrome keeps lengths in, rounded
+    // down: at 13.3333px (the UA's size for a field) Courier New's "x" is
+    // 8.0013 wide by the font's numbers and under 8 in Chrome, which is the
+    // difference between a field of 163 and one of 164.
+    let size_px = (font_size * 64.0).floor() / 64.0;
+    let measure =
+        |text: &str| measure_text_advanced(text, &style.font_family, size_px, style.font_weight, style.font_style);
+    let family = style.font_family.split(',').next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'');
+    let advance = |text: &str| measure(text).width;
+    let (x, zero) = (advance("x"), advance("0"));
+    let trusted =
+        !family.is_empty() && !NO_AVERAGE_WIDTH.contains(&family) && x > 0.0 && !(zero > 0.0 && x > zero * 1.7);
+    let size = if size == 0 { 20.0 } else { size as f32 };
+    let width = if trusted {
+        let character = x.max(x.round());
+        let widest = measure("x").ascent.round();
+        character * size + (widest - character).max(0.0)
+    } else {
+        zero * size
+    };
+    // Up to the next whole pixel; a sum a float's width over one stays.
+    (width - 0.001).ceil()
+}
+
 pub(crate) fn form_control_intrinsic_size(
     style: &ComputedStyle,
     control: &FormControlType,
@@ -446,14 +506,59 @@ pub(crate) fn form_control_intrinsic_size(
 
     // Calculate intrinsic dimensions based on control type
     match control {
-        FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
+        FormControlType::TextInput { input_type, size, .. } => match input_type.as_str() {
             "range" => (129.0 * ua_scale, 16.0 * ua_scale),
             "color" => (50.0 * ua_scale, 27.0 * ua_scale),
             // Default text input: size=20 at the UA control font builds
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
+            _ => {
+                // SET3, Chrome for Testing 148 over 107 inputs
+                // (docs/diagnostics/2026-11-11/set3_input_heights*): the
+                // content line is the larger of the font's `normal` line and
+                // a `line-height` declared on the input, then the vertical
+                // padding (the author's, else the UA's 1px each side) and
+                // border (the author's, else the UA's 2px each side). Before,
+                // the UA border was dropped once the author set a padding
+                // (31 for 35 at 13.6px with `padding: 8px 12px`),
+                // `line-height` was ignored and a bare input at another font
+                // size was a scaled blob.
+                let normal = normal_line_height(style, font_size);
+                let line = if style.line_height_declared {
+                    content_line(font_size).max(normal)
+                } else {
+                    normal
+                };
+                // SET4: the width composes the same way. Chrome for Testing
+                // 148 at the UA font: content 145, the UA's 2px padding and
+                // 2px border each side, 153 (docs/diagnostics/2026-11-11/
+                // set4_input_widths*). The 149 built here before was Chrome's
+                // `padding: 0` width. The content width is built from the
+                // font and `size` (SET5, `text_input_content_width`).
+                // A percentage padding counts as 0 here: it resolves against
+                // the containing block's width, which this intrinsic size
+                // does not have (a border width cannot be a percentage).
+                let px_h = |l: &Length| match l {
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
+                };
+                // Sides are [top, right, bottom, left]; a side nobody
+                // declared keeps the UA's value, each on its own: with
+                // `padding-top: 4px` alone the bottom is still the UA's 1px
+                // (Chrome for Testing 148: 24 tall, and 24 with
+                // `border-top-width: 5px` alone).
+                let side = |declared: bool, value: f32, ua: f32| if declared || value > 0.0 { value } else { ua };
+                let pad = side(style.padding_declared[0], px_h(&style.padding_top), 1.0)
+                    + side(style.padding_declared[2], px_h(&style.padding_bottom), 1.0);
+                let border = side(style.border_declared[0], px_h(&style.border_top_width), 2.0)
+                    + side(style.border_declared[2], px_h(&style.border_bottom_width), 2.0);
+                let pad_h = side(style.padding_declared[3], px_h(&style.padding_left), 2.0)
+                    + side(style.padding_declared[1], px_h(&style.padding_right), 2.0);
+                let border_h = side(style.border_declared[3], px_h(&style.border_left_width), 2.0)
+                    + side(style.border_declared[1], px_h(&style.border_right_width), 2.0);
+                (text_input_content_width(style, font_size, *size) + pad_h + border_h, line + pad + border)
+            }
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -554,7 +659,40 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
+                // SET1, Chrome for Testing 148 over 69 selects
+                // (docs/diagnostics/2026-11-11/set1_select_heights*): the
+                // menulist's content line is round(ascent) + round(descent)
+                // of its font (the line gap left out) plus 2px it keeps
+                // inside, then the vertical padding (the UA's is 0) and
+                // border (the UA's 1px each side when the author sets
+                // none). `line-height` does not apply. 13.6px Arial with
+                // padding .5rem: 12 + 3 + 2 + 16 + 2 = 35 (settings'
+                // #theme). An `appearance: none` select is a plain box
+                // around the text line (chrome's #modeSelector, 31).
+                let height = if style.appearance == rustkit_css::Appearance::None {
+                    single_line_box(19.0 * ua_scale, false, None)
+                } else {
+                    let m = measure_text_advanced(
+                        "x",
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    );
+                    let content = m.ascent.round() + m.descent.round() + 2.0;
+                    // Each side on its own, as for a text input: one the
+                    // author did not declare keeps the UA's 1px (Chrome for
+                    // Testing 148: 23 with `border-top-width: 5px` alone).
+                    let px = |l: &Length| match l {
+                        Length::Percent(_) | Length::Auto => 0.0,
+                        other => other.to_px(font_size, 16.0, 0.0),
+                    };
+                    let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 1.0 };
+                    let border_v = side(style.border_declared[0], px(&style.border_top_width))
+                        + side(style.border_declared[2], px(&style.border_bottom_width));
+                    content + author_pad_v + border_v
+                };
+                (widest.ceil() + well + pb_h, height)
             }
         }
     }
@@ -1291,7 +1429,7 @@ pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32
 }
 
 /// Margin collapse context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarginCollapseContext {
     /// Pending positive margin.
     pub positive_margin: f32,
@@ -1354,7 +1492,7 @@ impl MarginCollapseContext {
 }
 
 /// A 2D rectangle.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -1390,7 +1528,7 @@ impl Rect {
 }
 
 /// Edge sizes (margin, padding, border).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EdgeSizes {
     pub top: f32,
     pub right: f32,
@@ -1409,7 +1547,7 @@ impl EdgeSizes {
 }
 
 /// Box dimensions including content, padding, border, and margin.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dimensions {
     /// Content area.
     pub content: Rect,
@@ -1547,6 +1685,10 @@ pub enum FormControlType {
         value: String,
         placeholder: String,
         input_type: String, // "text", "password", "email", etc.
+        /// The `size` attribute: how many characters wide the field is
+        /// built (HTML §4.10.5.3.2); 20 when absent or not a positive
+        /// number.
+        size: u32,
     },
     /// Multi-line text area.
     TextArea {
@@ -1748,12 +1890,13 @@ impl TextLine {
         content_x: f32,
         content_y: f32,
         line_height: f32,
+        pitch: f32,
     ) -> Rect {
         let expansion =
             self.justify_space * Self::justification_opportunities(self.text.trim_end()) as f32;
         Rect {
             x: content_x + self.x_offset,
-            y: content_y + index as f32 * line_height,
+            y: content_y + index as f32 * pitch,
             width: self.width + expansion,
             height: line_height,
         }
@@ -1951,6 +2094,9 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// Recorded results of this box's child layout for the current root layout (LAT21,
+    /// `layout_memo`). Never an input to layout.
+    pub(crate) layout_memo: Option<Box<layout_memo::BoxMemo>>,
     /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
     /// when it is an element scroller. Set through a shared tree by the
     /// engine, from its per-view table, when script scrolls. Layout never
@@ -1982,6 +2128,79 @@ pub struct LayoutBox {
     /// css-grid-1 §6), so its auto height encloses its floats. Set by the
     /// flex and grid containers on their in-flow children.
     pub formatting_root: bool,
+    /// SET2: the step between the lines of a WRAPPED text run when it is
+    /// larger than the run's own line-height: every line box is the union of
+    /// the block's strut and the run's box on the baseline (CSS2 §10.8), so a
+    /// 12.8px `line-height: 1.5` run (19.2) in a 16px system-ui block steps
+    /// 20.19 per line (Chrome for Testing 148). `None` steps by the run's
+    /// line-height. Set by the block that places the run; the run's content
+    /// height is then `line_height + (lines - 1) * pitch`.
+    pub text_line_pitch: Option<f32>,
+    /// Whether anything under this box can be hit outside its border box,
+    /// as `mark_hit_overflow` found it for this layout: 0 not known (the
+    /// hit test looks), 1 nothing (the hit test stops here), 2 something.
+    pub hit_overflow: HitOverflowMark,
+}
+
+thread_local! {
+    /// How many `position: fixed` boxes this thread's layouts have placed.
+    /// A root layout reads it before and after: a tree that placed none
+    /// has none to re-anchor, and skips that walk (`reanchor_fixed_boxes`).
+    static FIXED_BOXES_PLACED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `LayoutBox::hit_overflow`. A note the hit test keeps beside the layout,
+/// not part of it: two trees that lay out the same are the same tree
+/// whether or not a point was ever asked of them, so it prints as nothing.
+#[derive(Default)]
+pub struct HitOverflowMark(std::cell::Cell<u8>);
+
+/// A copy starts with no mark: the engine copies a laid-out tree to move
+/// boxes on it (an animation frame answered to a forced read), and a mark
+/// made before the move would stop the hit test at a box something now
+/// reaches out of.
+impl Clone for HitOverflowMark {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl HitOverflowMark {
+    fn get(&self) -> u8 {
+        self.0.get()
+    }
+
+    fn set(&self, mark: u8) {
+        self.0.set(mark);
+    }
+}
+
+impl std::fmt::Debug for HitOverflowMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// What a box and the boxes under it reach, for `mark_hit_overflow`: one
+/// rectangle each for the boxes its ancestors' clips apply to, the absolute
+/// boxes still looking for their containing block, and the fixed ones.
+struct HitReach {
+    flow: Option<Rect>,
+    absolute: Option<Rect>,
+    fixed: Option<Rect>,
+    /// Something here moves without a layout (a transform, a sticky box):
+    /// where it reaches is not known from the layout alone.
+    moves: bool,
+}
+
+fn union_reach(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            Some(Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y))
+        }
+        (a, b) => a.or(b),
+    }
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2033,6 +2252,7 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            layout_memo: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
@@ -2041,6 +2261,8 @@ impl LayoutBox {
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
             formatting_root: false,
+            text_line_pitch: None,
+            hit_overflow: HitOverflowMark::default(),
         }
     }
 
@@ -2287,7 +2509,7 @@ impl LayoutBox {
             ScrollerGap::ToContainingBlock if self.holds_absolute_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
-            ScrollerGap::ToTransform if self.transforms_descendants() => {
+            ScrollerGap::ToTransform if self.carries_fixed_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
             _ => {}
@@ -2382,12 +2604,19 @@ impl LayoutBox {
             _ => return None,
         };
         let content = self.dimensions.content;
-        let line_height = content.height / lines.len() as f32;
+        // SET2: with a pitch the height is `line_height + (n - 1) * pitch`.
+        let (line_height, pitch) = match self.text_line_pitch {
+            Some(pitch) => (content.height - (lines.len() as f32 - 1.0) * pitch, pitch),
+            None => {
+                let lh = content.height / lines.len() as f32;
+                (lh, lh)
+            }
+        };
         Some(
             lines
                 .iter()
                 .enumerate()
-                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height))
+                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height, pitch))
                 .collect(),
         )
     }
@@ -2614,8 +2843,87 @@ impl LayoutBox {
     /// callers lay out a child with `layout_with_definite_height`, which is
     /// the same thing without the pass, so the pass runs once per tree.
     pub fn layout(&mut self, containing_block: &Dimensions) {
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_definite_height(containing_block, containing_block.content.height);
         self.apply_relative_offsets(containing_block);
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
+    }
+
+    /// Whether this box is the containing block of the `position: fixed`
+    /// boxes inside it, which then move with it instead of staying in the
+    /// viewport (css-transforms-1 §3, filter-effects-1 §5, css-contain-2
+    /// §3; the list is Chrome for Testing 148's, LAY2): any transform, an
+    /// identity one included (`transform`, `translate`, `rotate`, `scale`),
+    /// `perspective`, `transform-style: preserve-3d`, a `filter` or
+    /// `backdrop-filter`, `will-change` naming one of those, `contain:
+    /// layout | paint | strict | content`, `content-visibility: auto |
+    /// hidden`. Not an inline box, which no transform applies to.
+    pub fn holds_fixed_boxes(&self) -> bool {
+        let style = &self.style;
+        !matches!(
+            self.box_type,
+            BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak | BoxType::AnonymousBlock
+        ) && (!style.transform.ops.is_empty()
+            || style.translate.is_some()
+            || style.rotate.is_some()
+            || style.scale.is_some()
+            || style.stacks
+                & (rustkit_css::STACKS_PERSPECTIVE
+                    | rustkit_css::STACKS_PRESERVE_3D
+                    | rustkit_css::STACKS_CONTENT_VISIBILITY)
+                != 0
+            || !style.filter.is_empty()
+            || !style.backdrop_filter.is_empty()
+            || style.will_change_holds_fixed
+            || style.contain_holds_fixed)
+    }
+
+    /// Put every `position: fixed` box under this one where its insets say,
+    /// against its real containing block: the viewport, or the padding box
+    /// of the nearest ancestor that `holds_fixed_boxes` (`holder`).
+    ///
+    /// A fixed box is first placed against the viewport while its parent is
+    /// laid out, at the parent's position of that moment. Every later move
+    /// of an ancestor (an absolute box going from its static position to
+    /// its insets, a flex or grid item being placed, a relative offset)
+    /// carries the whole subtree, the fixed box with it: one inside
+    /// `position: absolute; left: 400px; top: 10px` whose static position
+    /// was (0, 20) ended up (400, -10) away from its own `left` / `top`.
+    /// So the insets are applied again once nothing above moves. An axis
+    /// with no inset keeps the static position, which does move with the
+    /// ancestors.
+    /// A `position: fixed` box somewhere under this one.
+    pub(crate) fn has_fixed_box_below(&self) -> bool {
+        self.children.iter().any(|c| c.position == Position::Fixed || c.has_fixed_box_below())
+    }
+
+    fn reanchor_fixed_boxes(&mut self, holder: Option<&Dimensions>) {
+        let own = self.holds_fixed_boxes().then(|| self.abspos_containing_block());
+        let holder = own.as_ref().or(holder);
+        for child in &mut self.children {
+            if child.position == Position::Fixed {
+                let containing_block = match holder {
+                    Some(holder) => Some(holder.clone()),
+                    None => (child.viewport.0 > 0.0 && child.viewport.1 > 0.0).then(|| Dimensions {
+                        content: Rect::new(0.0, 0.0, child.viewport.0, child.viewport.1),
+                        ..Default::default()
+                    }),
+                };
+                if let Some(containing_block) = containing_block {
+                    let (x, y) = (child.dimensions.content.x, child.dimensions.content.y);
+                    child.apply_position_offsets_absolute(&containing_block);
+                    let (dx, dy) = (child.dimensions.content.x - x, child.dimensions.content.y - y);
+                    if dx != 0.0 || dy != 0.0 {
+                        for below in &mut child.children {
+                            Self::shift_subtree(below, dx, dy);
+                        }
+                    }
+                }
+            }
+            child.reanchor_fixed_boxes(holder);
+        }
     }
 
     /// Perform layout with an explicit definite height for percentage resolution.
@@ -2641,6 +2949,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
@@ -2935,6 +3244,7 @@ impl LayoutBox {
 
         let container_width = containing_block.content.width;
         self.text_lines = None;
+        self.text_line_pitch = None;
         // Block-path text never starts mid-line; a box re-laid out here
         // (e.g. after a line wrap re-layout) must shed any stale phase-5
         // flow state from an earlier pass.
@@ -3045,6 +3355,44 @@ impl LayoutBox {
         self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
+    /// SET2: give every wrapped text run in `b` (the run itself, or the
+    /// text inside an inline) the pitch of a line box that unites the
+    /// block's `strut` with the run's own box on the baseline, when that is
+    /// more than the run's line-height. Returns the run's own extents above
+    /// and below the baseline, its line-height and the pitch of the LAST
+    /// wrapped run (the one whose last line stays open), or `None` when
+    /// nothing in `b` wrapped.
+    fn set_wrapped_pitch(b: &mut LayoutBox, strut: (f32, f32)) -> Option<((f32, f32), f32, f32)> {
+        let mut out = None;
+        if let (BoxType::Text(_), Some(n)) = (&b.box_type, b.text_lines.as_ref().map(|l| l.len())) {
+            if n > 1 {
+                let own = Self::text_line_box_extents(&b.style);
+                // The run's own line height, from its height. This may be
+                // the second visit to a run that was not laid out again
+                // (a parent's inline loop over a kept child, a second
+                // measure pass): its height then already holds the pitch,
+                // which is taken back out, so the same answer is written
+                // every time and the run does not grow on each pass.
+                let lines = n as f32;
+                let lh = match b.text_line_pitch {
+                    Some(pitch) => b.dimensions.content.height - (lines - 1.0) * pitch,
+                    None => b.dimensions.content.height / lines,
+                };
+                let union = own.0.max(strut.0) + own.1.max(strut.1);
+                let pitch = if union > lh + 0.01 { union } else { lh };
+                b.text_line_pitch = (pitch > lh).then_some(pitch);
+                b.dimensions.content.height = lh + (lines - 1.0) * pitch;
+                out = Some((own, lh, pitch));
+            }
+        }
+        for c in &mut b.children {
+            if let Some(found) = Self::set_wrapped_pitch(c, strut) {
+                out = Some(found);
+            }
+        }
+        out
+    }
+
     /// A non-atomic inline child whose text wrapped onto several line boxes:
     /// `(line count, end x of the last line relative to the container's
     /// content left, that text's line height)`. `None` when every
@@ -3055,7 +3403,11 @@ impl LayoutBox {
             if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
                 if let Some(last) = lines.last().filter(|_| lines.len() > 1) {
                     let end = b.dimensions.content.x - left + last.x_offset + last.width;
-                    *out = Some((lines.len(), end.max(0.0), b.get_line_height()));
+                    *out = Some((
+                        lines.len(),
+                        end.max(0.0),
+                        b.text_line_pitch.unwrap_or_else(|| b.get_line_height()),
+                    ));
                 }
             }
             for c in &b.children {
@@ -3302,6 +3654,7 @@ impl LayoutBox {
         let line_count = text_lines.len();
         let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
         self.text_lines = Some(text_lines);
+        self.text_line_pitch = None;
         self.text_flow_first_offset = Some(first_line_offset);
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = line_top_y;
@@ -3569,9 +3922,15 @@ impl LayoutBox {
             vertical_decoration,
             border_box_sizing,
         );
+        // A specified height stays when `max-width` narrows the box: only a
+        // height the page left to the ratio follows the clamp (IMG1; Chrome
+        // 148: `width=300 height=100` under `max-width: 100%` in a 200px
+        // box is 200x100, not 200x67). The `max-height` clamp below still
+        // scales any width: an inline `<svg>` with a viewBox and no size
+        // carries `width: 100%` as its stand-in for `auto`.
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
-                height = if height > 0.0 {
+                height = if height > 0.0 && height_is_auto {
                     mw * height / width
                 } else {
                     height
@@ -3847,6 +4206,11 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size + extra_w,
+            // css-sizing-3 §3.1: a button's `min-content` is its longest word plus the horizontal
+            // padding and border (Chrome 148: "Medium Button" 72.91, where max-content is 123.61).
+            Length::Auto if self.style.width_min_content && matches!(control, FormControlType::Button { .. }) => {
+                crate::grid::form_control_min_content_width(&self.style, &control)
+            }
             Length::Auto | Length::Zero => intrinsic_width,
             // `vw`, `rem`, `calc()` and the rest: only px/%/em were read, so
             // a `width: calc(25vw + 10px)` button kept its intrinsic width
@@ -3926,6 +4290,21 @@ impl LayoutBox {
         let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
         let width = width.max(edges_w);
         let height = height.max(edges_h);
+
+        // CB3d: a button's label wraps inside its border box when the width is narrower than the
+        // label (a fixed `width`, `min-content`, a flexed or stretched width), one more line height
+        // per line (Chrome 148: "Medium Button" in `width: 120px` is 42 tall, 24 on one line).
+        // `white-space: nowrap`/`pre` keep one line; an author `height` is the author's.
+        let height = match &control {
+            FormControlType::Button { label, .. } if matches!(self.style.height, Length::Auto | Length::Zero) => {
+                let (pad_sides, border_sides) = button_box_sides(&self.style, font_size);
+                let inner = (width - pad_sides[1] - pad_sides[3] - border_sides[1] - border_sides[3]).max(0.0);
+                let lines = crate::grid::wrapped_line_count(label, &self.style, inner);
+                let line = (intrinsic_height - pad_sides[0] - pad_sides[2] - border_sides[0] - border_sides[2]).max(0.0);
+                height.max(intrinsic_height + (lines.saturating_sub(1)) as f32 * line)
+            }
+            _ => height,
+        };
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
@@ -4432,8 +4811,18 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        layout_memo::bump_epoch();
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        // Only a tree that placed a fixed box has one to place again.
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
+        // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
+        if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
+            layout_memo::clear_memos(self);
+        }
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -4449,6 +4838,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         // Handle clear property
         if self.clear != Clear::None {
@@ -5211,6 +5601,7 @@ impl LayoutBox {
                 self.apply_position_offsets_absolute(containing_block);
             }
             Position::Fixed => {
+                FIXED_BOXES_PLACED.with(|n| n.set(n.get().wrapping_add(1)));
                 // CSS2 §10.1: a fixed element's containing block is the
                 // VIEWPORT, not the block that laid it out. Resolving
                 // bottom:0 against the root's flow height painted
@@ -6396,9 +6787,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -6407,10 +6801,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -6419,7 +6812,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -6501,13 +6894,18 @@ impl LayoutBox {
                     // after the loop (the open last line is aligned by the
                     // recorded-lines pass when it eventually closes).
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -6736,7 +7134,7 @@ impl LayoutBox {
             }
             match (&c.text_flow_first_offset, &c.text_lines) {
                 (Some(_), Some(tls)) if tls.len() > 1 => {
-                    box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
+                    box_top + (tls.len() as f32 - 1.0) * c.text_line_pitch.unwrap_or_else(|| c.get_line_height())
                 }
                 _ => box_top,
             }
@@ -7086,7 +7484,7 @@ impl LayoutBox {
     }
 
     /// Layout block children with margin collapse.
-    fn layout_block_children_with_collapse(
+    pub(crate) fn layout_block_children_with_collapse_run(
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
@@ -7509,9 +7907,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -7520,10 +7921,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -7532,7 +7932,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -7606,13 +8006,18 @@ impl LayoutBox {
                 } else {
                     // B2: closed lines aligned by align_split_close below.
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -8330,7 +8735,8 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, (0.0, 0.0), 0, false)
+        self.ensure_hit_overflow();
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false, (false, false))
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -8343,6 +8749,7 @@ impl LayoutBox {
     /// fixed box with a negative `z-index` is under the page; the others
     /// are over it, the highest `z-index` and then the latest first.
     pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
         self.top_held_or_page(held, viewport_x, viewport_y, scroll)
@@ -8359,6 +8766,7 @@ impl LayoutBox {
         scroll: (f32, f32),
         held_fixed: &[Vec<usize>],
     ) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         for path in held_fixed {
             let mut ancestors = Vec::with_capacity(path.len());
@@ -8380,7 +8788,7 @@ impl LayoutBox {
                 .iter()
                 .find(|a| a.position == Position::Fixed)
                 .map_or(at.z_index, |outer| outer.z_index);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true, (false, false)) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -8402,7 +8810,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true, (false, false));
         match top {
             Some((z_index, hit)) if z_index >= 0 => {
                 // Pages with no sticky box pay for nothing here.
@@ -8553,6 +8961,12 @@ impl LayoutBox {
         !self.style.effective_transform().is_identity()
     }
 
+    /// The fixed boxes under this box move with it and with the page: it
+    /// transforms them, or is their containing block (`holds_fixed_boxes`).
+    fn carries_fixed_boxes(&self) -> bool {
+        self.transforms_descendants() || self.holds_fixed_boxes()
+    }
+
     /// Whether a point in this box can land on it: not when it is not
     /// shown, and not when it is `pointer-events: none`. Both inherit and
     /// a descendant can undo either, so its children are tested all the same.
@@ -8573,7 +8987,7 @@ impl LayoutBox {
     }
 
     fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         for (index, child) in self.children.iter().enumerate() {
@@ -8606,14 +9020,14 @@ impl LayoutBox {
         outer_z: Option<i32>,
         hits: &mut Vec<(i32, HitTestResult)>,
     ) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         let first = hits.len();
         for child in &self.children {
             let fixed = child.position == Position::Fixed;
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true, (false, false)) {
                     hit.viewport_fixed = true;
                     hits.push((outer_z.unwrap_or(child.z_index), hit));
                 }
@@ -8649,11 +9063,98 @@ impl LayoutBox {
         }
     }
 
+    /// Whether this box clips what it holds for hit testing, as it clips
+    /// the painting: any `overflow` but `visible`. The root and the body
+    /// hand theirs to the viewport.
+    fn clips_hit_overflow(&self) -> bool {
+        use rustkit_css::Overflow;
+        (self.style.overflow_x != Overflow::Visible || self.style.overflow_y != Overflow::Visible)
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::LineBreak)
+            && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
+    }
+
+    /// Find, for every box of this layout, whether anything under it can
+    /// be hit outside its border box (`hit_overflow`). A box outside its
+    /// ancestor's box is still hit (an absolutely positioned menu under a
+    /// short header, a float in a zero-height parent, content taller than
+    /// an `overflow: visible` box), so the hit test cannot stop at a box
+    /// the point is outside of unless it knows nothing of it reaches
+    /// there. Made at the first hit test of a layout (the engine calls
+    /// `forget_hit_overflow` when it stores or patches one).
+    ///
+    /// A clipping box keeps its in-flow content in; an absolute box under
+    /// it gets out when its containing block is further up. A transformed
+    /// or sticky box moves without a layout, so the boxes above one are
+    /// always looked into.
+    pub fn mark_hit_overflow(&self) {
+        self.hit_reach();
+    }
+
+    /// The boxes of this layout changed (a new layout, a patched one, an
+    /// animation frame): the next hit test from this root marks them
+    /// again. The marks cost one walk, so they are made when a point asks.
+    pub fn forget_hit_overflow(&self) {
+        self.hit_overflow.set(0);
+    }
+
+    /// The marks, made if this root has none.
+    fn ensure_hit_overflow(&self) {
+        if self.hit_overflow.get() == 0 {
+            self.mark_hit_overflow();
+        }
+    }
+
+    fn hit_reach(&self) -> HitReach {
+        let own = self.dimensions.border_box();
+        let (mut flow, mut absolute, mut fixed, mut below_moves) = (None, None, None, false);
+        for child in &self.children {
+            let reach = child.hit_reach();
+            below_moves |= reach.moves;
+            match child.position {
+                Position::Absolute => absolute = union_reach(absolute, reach.flow),
+                Position::Fixed => fixed = union_reach(fixed, reach.flow),
+                _ => flow = union_reach(flow, reach.flow),
+            }
+            absolute = union_reach(absolute, reach.absolute);
+            fixed = union_reach(fixed, reach.fixed);
+        }
+        let clips = self.clips_hit_overflow();
+        let mut reach = Some(own);
+        if !clips {
+            reach = union_reach(reach, flow);
+        }
+        // The absolute (fixed) boxes this box is the containing block of
+        // are its own overflow from here up, or clipped by it.
+        if self.holds_absolute_boxes() {
+            if !clips {
+                reach = union_reach(reach, absolute);
+            }
+            absolute = None;
+        }
+        if self.carries_fixed_boxes() {
+            if !clips {
+                reach = union_reach(reach, fixed);
+            }
+            fixed = None;
+        }
+        let outside = |r: Option<Rect>| {
+            r.is_some_and(|r| r.x < own.x || r.y < own.y || r.right() > own.right() || r.bottom() > own.bottom())
+        };
+        let reaches_out = below_moves || outside(reach) || outside(absolute) || outside(fixed);
+        self.hit_overflow.set(if reaches_out { 2 } else { 1 });
+        let moves = self.own_transform().is_some() || self.sticky_rule.get().is_some();
+        HitReach { flow: reach, absolute, fixed, moves: below_moves || moves }
+    }
+
     /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
     /// those with the viewport point). `escaped` is what static scrollers
     /// since the nearest containing block of absolute boxes added to the
     /// point: an absolute box under them is not in their scrolling box.
+    /// `clipped` says the point is outside a clipping ancestor: for this
+    /// box, and for the absolute boxes under it whose containing block is
+    /// above it. A clipped box is not hit; an absolute box under it whose
+    /// containing block is outside the clip still is.
     fn hit_test_internal(
         &self,
         x: f32,
@@ -8661,6 +9162,7 @@ impl LayoutBox {
         escaped: (f32, f32),
         depth: u32,
         skip_held_fixed: bool,
+        clipped: (bool, bool),
     ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
         // (`PushTransform`): the point is taken back to where they are
@@ -8687,13 +9189,19 @@ impl LayoutBox {
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
-        // Check if the point is within our border box
-        if !border_box.contains(x, y) {
+        // Outside our border box the point can still be on something we
+        // hold: a box that overflows us. `mark_hit_overflow` says when
+        // nothing does.
+        let inside = border_box.contains(x, y);
+        if !inside && self.hit_overflow.get() == 1 {
             return None;
         }
+        let flow_clipped =
+            clipped.0 || (self.clips_hit_overflow() && !self.dimensions.padding_box().contains(x, y));
+        let absolute_clipped = if self.holds_absolute_boxes() { flow_clipped } else { clipped.1 };
 
         // Check children in reverse paint order (topmost first)
-        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
+        let skip_held_fixed = skip_held_fixed && !self.carries_fixed_boxes();
         let paint_order = self.get_paint_order();
         // What this box's own scroll adds to the point, for its children.
         let scroll = self.element_scroll.get();
@@ -8713,7 +9221,14 @@ impl LayoutBox {
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
-            if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
+            let child_clipped = match child.position {
+                Position::Absolute => (absolute_clipped, absolute_clipped),
+                Position::Fixed => (false, false),
+                _ => (flow_clipped, absolute_clipped),
+            };
+            if let Some(mut result) =
+                child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed, child_clipped)
+            {
                 self.note_scroller_of_hit(child, &mut result);
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
@@ -8724,7 +9239,7 @@ impl LayoutBox {
         // No child was hit, so we are the target, if we can be one: a
         // see-through overlay or a closed menu leaves the point to
         // whatever is under it.
-        if !self.is_hit_target() {
+        if !inside || clipped.0 || !self.is_hit_target() {
             return None;
         }
 
@@ -10570,9 +11085,10 @@ pub struct DisplayList {
     open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
-    /// How many ancestors of the box being painted have a `transform`. A
-    /// transformed box is the containing block of the fixed boxes inside
-    /// it (css-transforms-1 §3), so those move with it and with the page.
+    /// How many ancestors of the box being painted have a `transform` or
+    /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
+    /// box is the containing block of the fixed boxes inside it
+    /// (css-transforms-1 §3), so those move with it and with the page.
     transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
@@ -10921,6 +11437,12 @@ impl DisplayList {
         // Check if this box has a transform
         let transform = layout_box.style.effective_transform();
         let has_transform = !transform.is_identity();
+        // Counted with the transformed ancestors: the fixed boxes under a
+        // box that holds them move with the page too.
+        let holds_fixed = !has_transform && layout_box.holds_fixed_boxes();
+        if holds_fixed {
+            self.transformed_ancestors += 1;
+        }
         if has_transform {
             let border_box = layout_box.dimensions.border_box();
             // Compute transform matrix
@@ -11137,6 +11659,9 @@ impl DisplayList {
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
+        }
+        if holds_fixed {
             self.transformed_ancestors -= 1;
         }
 
@@ -12797,7 +13322,13 @@ impl DisplayList {
                         // the layout export's inline union (TextLine::
                         // fragment_rect). `x`/`content_y` are this box's
                         // content origin, which is what that rule takes.
-                        let frag = l.fragment_rect(i, x, content_y, line_height);
+                        let frag = l.fragment_rect(
+                            i,
+                            x,
+                            content_y,
+                            line_height,
+                            layout_box.text_line_pitch.unwrap_or(line_height),
+                        );
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             frag.x,
@@ -13315,6 +13846,7 @@ impl DisplayList {
                 value,
                 placeholder,
                 input_type,
+                ..
             } => {
                 // A password paints one bullet per character. Masked HERE,
                 // so the value is in no display command, dump or frame.
@@ -14171,6 +14703,7 @@ mod tests {
             value: String::new(),
             placeholder: String::new(),
             input_type: "text".to_string(),
+            size: 20,
         };
         assert_eq!(form_control_intrinsic_size(&style, &input).1, 15.0);
     }
@@ -17272,6 +17805,7 @@ mod tests {
             value: "pässword".to_string(),
             placeholder: "Password".to_string(),
             input_type: "password".to_string(),
+            size: 20,
         });
         field.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
         field.focused_caret = Some(3);
@@ -17360,6 +17894,7 @@ mod tests {
             value: String::new(),
             placeholder: "Default size".to_string(),
             input_type: "text".to_string(),
+            size: 20,
         })
     }
 
@@ -17612,10 +18147,44 @@ mod tests {
         );
     }
 
+    /// R1 on #1090 (MED): `set_wrapped_pitch` writes the pitch into the
+    /// run's height, so a second visit to the same run (a parent's inline
+    /// loop over a child that was not laid out again) must read the run's
+    /// own line height back out of it, not divide the grown height again.
+    /// A two-line 16px run in a line whose strut is taller: 20 + 30 the
+    /// first time, and the same every time after.
+    #[test]
+    fn set_wrapped_pitch_gives_the_same_height_on_every_visit() {
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        let mut run = LayoutBox::new(BoxType::Text("aaa bbb".to_string()), style);
+        let line = |text: &str| TextLine { text: text.to_string(), width: 30.0, x_offset: 0.0, justify_space: 0.0 };
+        run.text_lines = Some(vec![line("aaa"), line("bbb")]);
+        run.dimensions.content.height = 40.0;
+        // A strut of 22 above and 8 below the baseline: a 30px line box.
+        let strut = (22.0, 8.0);
+        let first = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+        let height = run.dimensions.content.height;
+        assert_eq!((first.1, first.2), (20.0, 30.0), "line height 20, pitch 30");
+        assert_eq!(height, 50.0, "one line of its own height and one pitch");
+        for visit in 2..5 {
+            let again = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+            assert_eq!((again.1, again.2), (20.0, 30.0), "visit {visit}: the same line height and pitch");
+            assert_eq!(run.dimensions.content.height, height, "visit {visit}: the same height");
+        }
+        // A smaller strut later takes the pitch back off.
+        LayoutBox::set_wrapped_pitch(&mut run, (0.0, 0.0));
+        assert_eq!(run.text_line_pitch, None);
+        assert_eq!(run.dimensions.content.height, 40.0);
+    }
+
     #[test]
     fn bare_control_widths_match_chrome() {
         // n53 form-controls y-table vs Chrome 148 at the UA control font:
-        // text input 149 (was the 12em blob, 160); textarea cols=20 178 and
+        // text input 153 (SET4: content 145 + 2px UA padding + 2px UA
+        // border each side; CfT 148, was 149, before that the 12em blob,
+        // 160); textarea cols=20 178 and
         // cols=40 338 (0.6em per col + 18 border/scrollbar gutter; was 160 /
         // 320); a listbox is its widest option + 2 (39 for "Item 4"; was
         // 133), a dropdown its widest option + 24 (137 for "A longer option
@@ -17628,8 +18197,8 @@ mod tests {
         };
         let w = width(n53_text_input());
         assert!(
-            (w - 149.0).abs() <= 0.5,
-            "bare text input width: Chrome 149, got {w}"
+            (w - 153.0).abs() <= 0.5,
+            "bare text input width: Chrome 153, got {w}"
         );
 
         let ta = |cols: u32| {
@@ -18737,6 +19306,7 @@ mod tests {
         let controls = [
             FormControlType::TextInput {
                 input_type: "text".to_string(),
+                size: 20,
                 value: String::new(),
                 placeholder: String::new(),
             },
@@ -21651,6 +22221,7 @@ mod w3_zero_width_wrap_tests {
                     value: String::new(),
                     placeholder: String::new(),
                     input_type: "text".to_string(),
+                    size: 20,
                 }),
                 s,
             )
@@ -21755,7 +22326,7 @@ mod inline_fragment_union_tests {
             justify_space: 4.0,
         };
         // "a b c" has two separators, so the line spans 50 + 2 * 4.
-        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0).width, 58.0);
+        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0, 20.0).width, 58.0);
     }
 
     /// A single-run text box has no `text_lines`; its content rect already IS
@@ -22558,6 +23129,28 @@ mod overlay_hit_tests {
         assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
     }
 
+    /// R1 MED 3: a copy of a layout must not inherit its hit marks. The
+    /// engine answers a forced read from a clone of the painted tree and
+    /// then moves boxes on it (an animation frame); a mark that said
+    /// "nothing under this box reaches outside it" before the move would
+    /// stop the walk at the parent.
+    #[test]
+    fn a_copy_of_a_layout_makes_its_own_hit_marks() {
+        let mut root = page();
+        let mut parent = boxed(2, 0.0, 0.0, 100.0, 100.0);
+        parent.children.push(boxed(3, 10.0, 10.0, 50.0, 50.0));
+        root.children.push(parent);
+        // Marks the painted tree: nothing reaches outside the parent.
+        assert_eq!(root.hit_test(20.0, 20.0).and_then(|h| h.node_id), Some(3));
+        let mut copy = root.clone();
+        copy.children[0].children[0].dimensions.content.x += 300.0;
+        assert_eq!(
+            copy.hit_test(320.0, 20.0).and_then(|h| h.node_id),
+            Some(3),
+            "the moved box is hit where the copy has it"
+        );
+    }
+
     #[test]
     fn a_box_scaled_to_nothing_is_not_hit() {
         let mut root = page();
@@ -22596,4 +23189,22 @@ mod overlay_hit_tests {
         // Elsewhere on the overlay: the overlay, not the page under it.
         assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
+}
+
+thread_local! {
+    /// Boxes laid out on this thread since the last [`take_layout_visits`]: one per call of
+    /// `layout_with_collapse_in` or `layout_with_percent_base`. A box laid out k times in one pass
+    /// counts k, so `visits / boxes` is the pass's re-layout multiplicity (LAT21: walmart ran
+    /// ~160 visits per box).
+    static LAYOUT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_layout_visit() {
+    LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of box layouts on this thread since the last call, and a fresh count.
+pub fn take_layout_visits() -> u64 {
+    LAYOUT_VISITS.with(|n| n.replace(0))
 }

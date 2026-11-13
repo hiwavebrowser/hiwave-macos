@@ -467,6 +467,74 @@ on it fails from inside the tree ("believes it's in a workspace"). To run them, 
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
 
+## Patch: a catchable stack overflow (STR-10)
+
+Opt in with `RuntimeLimits::set_catchable_stack_overflow(true)` (off by default, so upstream's tests
+keep their uncatchable `RuntimeLimitError::Recursion`; the page runtime, `JsRuntime::new`, turns it
+on). Running out of call frames or operand-stack slots then throws a `RangeError` ("Maximum call
+stack size exceeded") that `try`/`catch` sees. Host re-entry (`host_recursion`) stays uncatchable.
+Second change, in `handle_throw` (always on): when a caller's `catch` takes an exception from a
+callee, the unwound callee's stack values are dropped, as its return would; they stayed until the
+caller returned, so a caught overflow left ~64K slots behind and the next call hit the slot limit.
+Pin: `crates/rustkit-js/tests/stack_overflow_catchable.rs`. The vendored crate's own `vm::tests`
+are not in the workspace and were not run here.
+
+## Patch: `boa_ast` `this` through nested arrow functions (arrow this)
+
+`third_party/boa_ast` is crates.io `boa_ast` 0.22.0 exactly as published (first commit of its PR), wired
+through `[patch.crates-io]`. Two small changes, marked `HIWAVE PATCH (arrow this)`: `Scope` gets an `arrow`
+flag (`scope.rs`, set from `visit_function_like` in `scope_analyzer.rs`), and
+`escape_this_in_enclosing_function_scope` keeps climbing past an arrow's scope instead of stopping at the
+first enclosing function scope. Upstream stopped at the outer *arrow*, so in
+`m() { return () => () => this.name; }` the method was never told its `this` is used, kept it out of its
+function environment, and the inner arrow read the wrong one (strict and sloppy; breaks TipTap). It only
+showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
+(35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
+unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: whole-number double keys without a string (`js-perf1`)
+
+**Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset
+arithmetic) converted the number to a string and parsed it back to an array index
+(`ToPropertyKey`'s Float64 arm: `JsString::from(float).into()`), an allocation and a parse per
+read. CodeMirror's first parse spent about 7% of 3,404 engine-thread samples there.
+
+**What.** `PropertyKey::from_f64_key` in `src/property/mod.rs`, used by `Value::to_property_key`
+(`src/value/mod.rs`, marked `HIWAVE PATCH (js-perf1)`): a whole number from 0 to 2^32 - 2 (`-0`
+included, whose string is "0") is that index; every other Number keeps `Number::toString`'s
+string (`NaN`, `1.5`, `-1`, `4294967295`, `2^32`, `1e+21`, `Infinity`). Pins:
+`crates/rustkit-js/tests/float_index_keys.rs` (correctness for those cases, which passed before
+the change too) and `float_index_keys_allocs.rs` (allocations per read: a float key 1.14 before,
+0.14 after, an integer key 0.12; red before). Measured (release, Linux): 2M reads of `a[x]` with a
+double `x`, 435 ms to 291 ms; an integer key is unchanged at 224 ms.
+
+## Patch: `a[i]` and `a[i] = v` without the general path (`js-perf2`, item 2)
+
+**Why.** `get_by_value` cloned the key and the base, then converted the key, and only then reached
+its dense-array path; typed arrays and strings read through `__get__`; `SetPropertyByValue` cloned
+four registers before its dense-array store, and typed arrays had no shortcut at all. A parser's
+inner loops are mostly `table[i]` on a typed array or array.
+
+**What.** Marked `HIWAVE PATCH (js-perf2)`: `fast_index` and `fast_get_by_index` in
+`src/vm/opcode/get/property.rs` take a whole-number key (int32 or whole double, `0..=2^32-2`) on an
+array's dense element, a typed array's element or a string's code unit straight off the registers;
+`SetPropertyByValue` in `src/vm/opcode/set/property.rs` does the same for an extensible array's
+dense element and for a typed array when the receiver is the base itself. Anything else (holes,
+sparse arrays, accessors, a proxy, `arguments`, another receiver) takes the general path as before.
+`typed_array_get_element` and `typed_array_set_element` are `pub(crate)` for it. Pins:
+`crates/rustkit-js/tests/index_fast_paths.rs` (30 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/index_fast_path_cases.json`, which pass before the change too, and a speed pin
+that does not). Measured (release, Linux, cost of the operation relative to an empty loop
+iteration, median of 7): array read 0.87 to 0.67, array write 0.77 to 0.50, Uint16Array read 1.38
+to 1.01, Uint16Array write 1.86 to 0.93.
+
+`js-perf2` follow-up (R1 on #1112): an index past the end of a string primitive is answered by
+`String.prototype` (`String.prototype[5] = 'P'; 'abc'[5]` is 'P'), and a dense-array store only
+happens when the receiver is the array itself (`super[i] = v` on an array home object and
+`Reflect.set(arr, i, v, other)` define the element on the receiver). Both holes were in the general
+path before this patch too (its string shortcut answered `undefined` past the end, its array store
+ignored the receiver); fixed in both paths, with the five cases added to the Chrome-148 set.
+
 ## Patch: global lexical scope across scripts
 
 **Why.** ES2024 GlobalDeclarationInstantiation: every classic script of a realm shares one global

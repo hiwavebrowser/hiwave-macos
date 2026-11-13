@@ -45,7 +45,7 @@
             inputType: inputType, data: data === undefined ? null : data,
             isComposing: !!isComposing
         });
-        ev.isTrusted = true;
+        __rk.trust(ev);
         return el.dispatchEvent(ev);
     }
 
@@ -117,7 +117,7 @@
         var ev = new g.CompositionEvent(type, {
             bubbles: true, cancelable: true, composed: true, view: g, data: data
         });
-        ev.isTrusted = true;
+        __rk.trust(ev);
         el.dispatchEvent(ev);
     }
     function replaceMarked(c, text) {

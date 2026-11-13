@@ -754,6 +754,11 @@ pub(crate) fn note_width_value(style: &mut ComputedStyle, bit: u8, parsed: bool,
                 keyword.as_str(),
                 "max-content" | "-webkit-max-content" | "-moz-max-content"
             );
+        style.width_min_content = !parsed
+            && matches!(
+                keyword.as_str(),
+                "min-content" | "-webkit-min-content" | "-moz-min-content"
+            );
     }
 }
 

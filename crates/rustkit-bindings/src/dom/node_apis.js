@@ -34,6 +34,22 @@
     getter(Element.prototype, 'namespaceURI', function () {
         var s = I.slotOf(this); return NS(s.gen, 'of', s.id);
     });
+    // The SVG shape and container interfaces (SVG 2 §4.6, §10), by local
+    // name. The geometry methods are web_svg_geometry.js's.
+    var SVG_PROTOS = Object.create(null);
+    (function () {
+        var Graphics = g.SVGGraphicsElement, Geometry = iface('SVGGeometryElement', Graphics);
+        [['path', 'SVGPathElement'], ['rect', 'SVGRectElement'], ['circle', 'SVGCircleElement'],
+         ['ellipse', 'SVGEllipseElement'], ['line', 'SVGLineElement'], ['polyline', 'SVGPolylineElement'],
+         ['polygon', 'SVGPolygonElement']].forEach(function (pair) {
+            SVG_PROTOS[pair[0]] = iface(pair[1], Geometry).prototype;
+        });
+        [['g', 'SVGGElement'], ['defs', 'SVGDefsElement'], ['use', 'SVGUseElement'], ['image', 'SVGImageElement'],
+         ['a', 'SVGAElement'], ['switch', 'SVGSwitchElement'], ['foreignObject', 'SVGForeignObjectElement'],
+         ['text', 'SVGTextElement']].forEach(function (pair) {
+            SVG_PROTOS[pair[0]] = iface(pair[1], Graphics).prototype;
+        });
+    })();
     // SVG elements get the SVG interfaces (the tag table already maps
     // `svg`); elements in any other non-HTML namespace are plain Element.
     I.extendElementProto(function (id, base) {
@@ -41,13 +57,16 @@
         if (ns === null || ns === HTML_NS) return base(id);
         if (ns !== SVG_NS) return Element.prototype;
         var p = base(id);
-        return p === g.SVGSVGElement.prototype ? p : g.SVGElement.prototype;
+        if (p === g.SVGSVGElement.prototype) return p;
+        return SVG_PROTOS[I.local(id)] || g.SVGElement.prototype;
     });
     var HOOKS = g.__rkDomHooks;
     Document.prototype.createElementNS = function (ns, qualified) {
         var r = NS(I.gen(), 'create', ns == null ? '' : String(ns), String(qualified));
         if (typeof r === 'string') fail('createElementNS', 'Document', r);
         var el = I.wrap(r);
+        // The element is this document's (its scripting state with it).
+        if (typeof __rk.adoptTo === 'function') __rk.adoptTo(el, this);
         // An HTML `script` made this way is a script like createElement's.
         if (HOOKS && HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
@@ -91,7 +110,14 @@
     function attrNode(el, name) {
         var byName = attrs.get(el);
         if (!byName) attrs.set(el, byName = Object.create(null));
-        return byName[name] || (byName[name] = hidden(hidden(Object.create(Attr.prototype), OWNER, el), NAME, name));
+        return byName[name] || (byName[name] = newAttr(el, name));
+    }
+    // The owner can change: an Attr taken off one element may be set on
+    // another (`setNamedItem`), and `createAttribute` makes one with none.
+    function newAttr(el, name) {
+        var a = hidden(Object.create(Attr.prototype), NAME, name);
+        Object.defineProperty(a, OWNER, { value: el, writable: true });
+        return a;
     }
     // The stored name `name` refers to on `el`, or null (HTML lowercases).
     function storedName(el, name) {
@@ -109,12 +135,12 @@
         return this[NAME] === 'xmlns' ? PREFIX_NS.xmlns : nsOf(this[NAME]);
     });
     getter(Attr.prototype, 'ownerElement', function () {
-        return !gone.has(this) && this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
+        return !gone.has(this) && this[OWNER] && this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
     });
     getter(Attr.prototype, 'nodeType', function () { return 2; });
     getter(Attr.prototype, 'specified', function () { return true; });
     getter(Attr.prototype, 'parentNode', function () { return null; });
-    getter(Attr.prototype, 'ownerDocument', function () { return this[OWNER].ownerDocument; });
+    getter(Attr.prototype, 'ownerDocument', function () { return this[OWNER] ? this[OWNER].ownerDocument : g.document; });
     ['value', 'nodeValue', 'textContent'].forEach(function (k) {
         Object.defineProperty(Attr.prototype, k, {
             get: function () {
@@ -148,6 +174,44 @@
         gone.set(a, v);
         return a;
     }
+    // DOM §4.9.2 "set an attribute": `a` becomes the element's Attr for its
+    // name (replacing, and returning, the one it had). An Attr another
+    // element still has cannot be taken.
+    function attach(el, a, method) {
+        if (!(a instanceof Attr)) {
+            throw new TypeError("Failed to execute '" + method + "' on 'NamedNodeMap': parameter 1 is not of type 'Attr'.");
+        }
+        var name = a[NAME], owner = gone.has(a) ? null : a[OWNER];
+        if (owner && owner !== el && owner.hasAttribute(name)) fail(method, 'NamedNodeMap', 'InUseAttributeError');
+        if (owner === el && el.hasAttribute(name)) return a;
+        var value = a.value, byName = attrs.get(el), old = null;
+        if (el.hasAttribute(name)) {
+            old = attrNode(el, name);
+            gone.set(old, old.value);
+        }
+        gone.delete(a);
+        a[OWNER] = el;
+        el.setAttribute(name, value);
+        if (!byName) attrs.set(el, byName = Object.create(null));
+        byName[name] = a;
+        return old;
+    }
+    NamedNodeMap.prototype.setNamedItem = function (a) { return attach(this[OWNER], a, 'setNamedItem'); };
+    NamedNodeMap.prototype.setNamedItemNS = function (a) { return attach(this[OWNER], a, 'setNamedItemNS'); };
+    Element.prototype.setAttributeNode = function (a) { return attach(this, a, 'setAttributeNode'); };
+    Element.prototype.setAttributeNodeNS = function (a) { return attach(this, a, 'setAttributeNodeNS'); };
+    // An Attr with no element yet (DOM §4.5 createAttribute): HTML
+    // documents lowercase the name.
+    Document.prototype.createAttribute = function (name) {
+        name = String(name);
+        if (!/^[^\s\/>=\0]+$/.test(name)) {
+            throw new DOMException("Failed to execute 'createAttribute' on 'Document': The localName provided ('" +
+                name + "') contains an invalid character.", 'InvalidCharacterError');
+        }
+        var a = newAttr(null, name.toLowerCase());
+        gone.set(a, '');
+        return a;
+    };
     NamedNodeMap.prototype.removeNamedItem = function (name) {
         var a = this.getNamedItem(name);
         if (!a) fail('removeNamedItem', 'NamedNodeMap', 'NotFoundError');
@@ -221,6 +285,7 @@
         return el.hasAttribute('tabindex') && !isNaN(parseInt(el.getAttribute('tabindex'), 10));
     }
     function current() { return focused && inDocument(focused) ? focused : null; }
+    var EventCtor = g.Event, dispatchNow = g.EventTarget.prototype.dispatchEvent;
     function fire(el, type, related) {
         var FE = g.FocusEvent || g.Event;
         el.dispatchEvent(new FE(type, { bubbles: type === 'focusin' || type === 'focusout',
@@ -231,7 +296,11 @@
     function commit(el) {
         if (!el.__rkEdited) return;
         el.__rkEdited = false;
-        el.dispatchEvent(new g.Event('change', { bubbles: true }));
+        // The engine's event: trusted, built with the Event of install
+        // time and dispatched as the engine dispatches.
+        var e = new EventCtor('change', { bubbles: true });
+        __rk.trust(e);
+        dispatchNow.call(el, e);
     }
     // A composition in the element losing the focus ends first (CH2.E3).
     function finishComposing(el) {
@@ -302,7 +371,7 @@
         focusevent: 'FocusEvent', hashchangeevent: 'HashChangeEvent', htmlevents: 'Event',
         keyboardevent: 'KeyboardEvent', messageevent: 'MessageEvent', mouseevent: 'MouseEvent',
         mouseevents: 'MouseEvent', storageevent: 'StorageEvent', svgevents: 'Event',
-        touchevent: 'TouchEvent', uievent: 'UIEvent', uievents: 'UIEvent'
+        textevent: 'TextEvent', touchevent: 'TouchEvent', uievent: 'UIEvent', uievents: 'UIEvent'
     };
     Document.prototype.createEvent = function (name) {
         var C = g[EVENT_INTERFACES[String(name).toLowerCase()]];
@@ -310,7 +379,8 @@
             throw new DOMException("Failed to execute 'createEvent' on 'Document': The provided event type ('" +
                 name + "') is invalid.", 'NotSupportedError');
         }
-        var e = new C('');
+        // TextEvent has no constructor for script; this is its only maker.
+        var e = C === g.TextEvent ? __rk.newTextEvent('') : new C('');
         e[UNINIT] = true;
         return e;
     };
