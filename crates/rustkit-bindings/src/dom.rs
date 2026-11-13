@@ -3316,18 +3316,22 @@ const WRAPPERS_JS: &str = r#"
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
-    // DOM Parsing §2.3 outerHTML setter: the markup, parsed in the context
-    // of the element's parent (a body for a fragment parent) by a holder of
-    // the element's document, replaces the element. No parent: nothing; a
-    // Document parent: NoModificationAllowedError.
+    // The outerHTML setter: the markup, parsed in the context of the
+    // element's parent by a holder of the element's document, replaces the
+    // element. As Chrome for Testing 148, and not as the HTML spec (which
+    // has a no-op and a body context there): an element with no parent, or
+    // whose parent is not an element, throws NoModificationAllowedError.
     accessor(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); }, function (v) {
         var parent = this.parentNode;
-        if (!parent) return;
-        if (parent.nodeType === 9) {
-            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document', which is not an element node.", 'NoModificationAllowedError');
+        if (!parent) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element has no parent node.", 'NoModificationAllowedError');
         }
-        var ctx = parent.nodeType === 1 ? parent.localName : 'body';
-        var holder = parent.nodeType === 1 && parent.namespaceURI === 'http://www.w3.org/2000/svg'
+        if (parent.nodeType !== 1) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '" +
+                parent.nodeName + "', which is not an element node.", 'NoModificationAllowedError');
+        }
+        var ctx = parent.localName;
+        var holder = parent.namespaceURI === 'http://www.w3.org/2000/svg'
             ? document.createElementNS(parent.namespaceURI, ctx)
             : create('element', ctx, 'outerHTML');
         ownedBy(holder, this.ownerDocument);
