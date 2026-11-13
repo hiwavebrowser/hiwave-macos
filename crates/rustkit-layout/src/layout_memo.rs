@@ -154,8 +154,8 @@ pub(crate) struct MemoKey {
 
 /// The fields layout writes on a descendant, positions relative to the memoised box's content
 /// origin. (`incremental.rs`'s `own_inputs_equal` destructure is the full field list; the others
-/// are style-derived, set by the engine after layout, or set before it.) `formatting_root` is
-/// structural (flex/grid set it on their children) and deliberately not memoised.
+/// are style-derived, set by the engine after layout, or set before it.) `formatting_root` is an input,
+/// hashed into the key (`input_fingerprint`), not an output.
 #[derive(Clone)]
 struct BoxOutputs {
     dimensions: Dimensions,
@@ -252,8 +252,10 @@ fn hash_edges(e: &EdgeSizes, h: &mut impl std::hash::Hasher) {
     }
 }
 
-/// Hash of the layout INPUT state below `b`: how many children each box has, its percent-height
-/// mark and whether it shares a float context. Outputs (positions, sizes, lines) are left out on
+/// Hash of the layout INPUT state of `b` and below: how many children each box has, its percent-height
+/// mark, whether it shares a float context, and whether it is a formatting root (flex and grid set
+/// it on an item before laying it out, so the block pre-pass and the item pass differ in it and
+/// enclose their floats differently). Outputs (positions, sizes, lines) are left out on
 /// purpose: they differ between the calls the memo is meant to match.
 fn input_fingerprint(b: &LayoutBox) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -262,10 +264,12 @@ fn input_fingerprint(b: &LayoutBox) -> u64 {
         for c in &b.children {
             c.percent_height_is_auto.hash(h);
             c.context_floats.is_some().hash(h);
+            c.formatting_root.hash(h);
             walk(c, h);
         }
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.formatting_root.hash(&mut h);
     walk(b, &mut h);
     h.finish()
 }
@@ -330,8 +334,8 @@ fn classify_every_field(b: &LayoutBox) {
         children_laid_at: _,
         abspos_cb_hint: _,
         text_line_pitch: _,
-        // Structural: flex and grid set it on their children before laying them out, so a subtree
-        // laid out again by the same parent sees the same value.
+        // An input, set by flex and grid on an item before laying it out (the block pre-pass lays
+        // the same item out without it), so `input_fingerprint` hashes it for the box and below.
         formatting_root: _,
         // The memo itself.
         layout_memo: _,
