@@ -269,6 +269,10 @@ struct CaptureResult {
     script_stats: Option<ScriptStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     live_stats: Option<LiveStats>,
+    /// A stepped capture's settle: how many requests the page still had open when the settle stopped
+    /// holding virtual time for them (its real-time cap ran out). A count only, never a URL; absent when none.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    settle_held_open: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
@@ -382,6 +386,7 @@ impl CaptureResult {
             layout_stats: None,
             script_stats: None,
             live_stats: None,
+            settle_held_open: None,
             elapsed_ms: None,
             error: None,
             captures: None,
@@ -3044,6 +3049,55 @@ Connection: close
             "the answer landed too late in virtual time for its timer: {}",
             &dumped[..dumped.len().min(400)]
         );
+    }
+
+    /// The settle's wait for an open request is capped in real time, measured, not counted in nominal
+    /// sleeps (R1 on #1104: a 5 ms sleep lasts about 15 ms on Windows, so 600 of them were 9 s, not 3 s).
+    /// A request that never answers (a long poll, an event stream) costs the cap once, and the result
+    /// says how many were still open, as a count.
+    #[test]
+    fn a_request_that_never_answers_costs_the_settle_its_cap_once_and_is_counted() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    if line.contains("/hang") {
+                        // Never answer; hold the connection past the capture.
+                        std::thread::sleep(Duration::from_secs(30));
+                        return;
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { fetch('/hang'); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert_eq!(result.settle_held_open, Some(1), "the open request is not counted");
+        // The 3 s cap, the load and the stepped rest of the settle; 9 s of nominal sleeps fails it.
+        assert!(took < Duration::from_millis(6_000), "the settle's cap is not real time: the capture took {took:?}");
     }
 
     /// `--live-ms` end to end: the window's end is the capture's end. A request
