@@ -133,3 +133,34 @@ fn engine_dispatches_do_not_go_through_the_pages_dispatch_event() {
     let got = text(b.evaluate("'replaced=' + replaced + ' ' + got.slice().sort().join(' ')").unwrap());
     assert_eq!(got, "replaced=0 ping:true port:p:true window:w:true");
 }
+
+const PAGE5: &str = r#"<!DOCTYPE html><html><body><input id="q" value=""></body></html>"#;
+
+const PAGE5_SCRIPT: &str = r#"
+var hooked = 0, got = [];
+var q = document.getElementById('q');
+['beforeinput', 'input'].forEach(function (t) { q.addEventListener(t, function (e) { got.push(t + ':' + e.isTrusted); }); });
+var realCall = Function.prototype.call;
+Function.prototype.call = function (self, ev) {
+    if (ev && typeof ev === 'object' && ev.isTrusted === true) hooked++;
+    return realCall.apply(this, arguments);
+};
+function unhook() { Function.prototype.call = realCall; }
+"#;
+
+#[test]
+fn the_users_edit_events_are_dispatched_by_the_engine_alone() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PAGE5).unwrap());
+    let id = doc.get_element_by_id("q").unwrap().id.raw();
+    b.set_document(doc).unwrap();
+    b.evaluate(PAGE5_SCRIPT).unwrap();
+    b.evaluate("q.focus()").unwrap();
+    let _ = b.user_edit(id, &rustkit_dom::forms::EditCommand::InsertText("a".to_string()));
+    let _ = b.user_compose(id, "mark", "b");
+    let _ = b.user_compose(id, "commit", "b");
+    b.evaluate("q.blur()").unwrap();
+    b.evaluate("unhook()").unwrap();
+    let got = text(b.evaluate("'hooked=' + hooked + ' ' + got.join(',')").unwrap());
+    assert!(got.starts_with("hooked=0 beforeinput:true,input:true"), "{got}");
+}
