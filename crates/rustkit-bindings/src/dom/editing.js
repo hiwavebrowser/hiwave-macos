@@ -39,7 +39,7 @@
         return typeof r === 'string' ? JSON.parse(r) : null;
     });
         function fire(el, type, inputType, data, cancelable, isComposing) {
-        if (type === 'input') hidden(el, '__rkEdited', true);
+        if (type === 'input') __rk.markEdited(el);
         var ev = new g.InputEvent(type, {
             bubbles: true, cancelable: !!cancelable, composed: true, view: g,
             inputType: inputType, data: data === undefined ? null : data,

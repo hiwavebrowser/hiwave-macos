@@ -20,7 +20,7 @@
 (function (g) {
     var internals = g.__rkScriptInternals;
     delete g.__rkScriptInternals;
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     if (!internals || !HOOKS) return;
     // Captured before page script can replace them.
     var indirectEval = g.eval, resolved = Promise.resolve(), URL_ = g.URL, Event_ = g.Event;

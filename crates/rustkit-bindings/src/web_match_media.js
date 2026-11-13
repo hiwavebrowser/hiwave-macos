@@ -32,7 +32,7 @@
 
     var proto = MediaQueryList.prototype;
     // The DOM install's listener registry (`hasListener(target, type)`).
-    var HOOKS = g.__rkDomHooks || {};
+    var HOOKS = __rk.domHooks || {};
     // MediaQueryList -> { media, w, h, matches, reported, onchange }
     var STATE = new WeakMap();
     // The lists that can hear `change`, in the order they started to.

@@ -26,7 +26,7 @@
 // The event hooks are installed only once a document has a shadow root
 // (attachShadow, or a declarative one when the document is bound).
 (function (g) {
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     var document = g.document;
     var S = g.__rkShadowInternals;
     delete g.__rkShadowInternals;

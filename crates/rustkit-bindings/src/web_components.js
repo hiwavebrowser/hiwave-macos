@@ -26,6 +26,8 @@
     var stack = [];                 // upgrade/construct in progress
     var rawCreateElement = null;    // the DOM's own createElement, below
     var selector = '';              // joined defined names, for subtree scans
+    // The natives already wrapped: kept here, not as a property of the function.
+    var WRAPPED = new WeakSet();
     var shadowHost = g.__rkShadowInternals || null;  // tells the DOM a name is defined
 
     function domError(message, name) {
@@ -288,7 +290,7 @@
     function wrapInsert(name, firstOnly) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
-            if (typeof native !== 'function' || native.__rkCE) return;
+            if (typeof native !== 'function' || WRAPPED.has(native)) return;
             var wrapped = function () {
                 if (!names.length) return native.apply(this, arguments);
                 var inserted = nodesIn(firstOnly ? [arguments[0]] : arguments);
@@ -312,7 +314,7 @@
                 inserted.forEach(reconcile);
                 return result;
             };
-            wrapped.__rkCE = true;
+            WRAPPED.add(wrapped);
             Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
         });
     }
@@ -322,7 +324,7 @@
     function wrapRemove(name, victim) {
         protoWith(name).forEach(function (proto) {
             var native = proto[name];
-            if (typeof native !== 'function' || native.__rkCE) return;
+            if (typeof native !== 'function' || WRAPPED.has(native)) return;
             var wrapped = function () {
                 if (!names.length) return native.apply(this, arguments);
                 var leaving = connectedCustom(victim(this, arguments));
@@ -330,7 +332,7 @@
                 afterRemoval(leaving);
                 return result;
             };
-            wrapped.__rkCE = true;
+            WRAPPED.add(wrapped);
             Object.defineProperty(proto, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, name) });
         });
     }
@@ -340,7 +342,7 @@
     // innerHTML / textContent setters replace the children: those leave.
     function wrapSetter(proto, prop, replacesChildren) {
         var d = Object.getOwnPropertyDescriptor(proto, prop);
-        if (!d || !d.set || d.set.__rkCE) return;
+        if (!d || !d.set || WRAPPED.has(d.set)) return;
         var set = d.set;
         var wrapped = function (v) {
             if (!names.length) return set.call(this, v);
@@ -350,7 +352,7 @@
             if (prop === 'innerHTML') reconcile(this);
             return result;
         };
-        wrapped.__rkCE = true;
+        WRAPPED.add(wrapped);
         Object.defineProperty(proto, prop, { get: d.get, set: wrapped, enumerable: d.enumerable, configurable: true });
     }
     wrapSetter(g.Element.prototype, 'innerHTML');
@@ -358,7 +360,7 @@
 
     protoWith('insertAdjacentHTML').forEach(function (proto) {
         var native = proto.insertAdjacentHTML;
-        if (native.__rkCE) return;
+        if (WRAPPED.has(native)) return;
         var wrapped = function (where) {
             var result = native.apply(this, arguments);
             if (names.length) {
@@ -367,14 +369,14 @@
             }
             return result;
         };
-        wrapped.__rkCE = true;
+        WRAPPED.add(wrapped);
         Object.defineProperty(proto, 'insertAdjacentHTML', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'insertAdjacentHTML') });
     });
 
     // Attributes: attributeChangedCallback for the observed ones.
     function wrapAttribute(name, newValue) {
         var native = g.Element.prototype[name];
-        if (typeof native !== 'function' || native.__rkCE) return;
+        if (typeof native !== 'function' || WRAPPED.has(native)) return;
         var wrapped = function (attr) {
             if (!names.length) return native.apply(this, arguments);
             var st = stateOf(this);
@@ -388,7 +390,7 @@
             }
             return result;
         };
-        wrapped.__rkCE = true;
+        WRAPPED.add(wrapped);
         Object.defineProperty(g.Element.prototype, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(g.Element.prototype, name) });
     }
     wrapAttribute('setAttribute');

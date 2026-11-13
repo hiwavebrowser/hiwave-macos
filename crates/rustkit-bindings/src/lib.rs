@@ -1148,7 +1148,7 @@ impl DomBindings {
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
-        runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        runtime.evaluate_with_host(include_str!("web_shadow.js"))?;
         // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
         runtime.evaluate_with_host(include_str!("web_reflect.js"))?;
         // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
@@ -1159,7 +1159,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
-        runtime.evaluate_script(include_str!("web_cssom.js"))?;
+        runtime.evaluate_with_host(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_with_host(include_str!("web_forms.js"))?;
         // execCommand, navigator.clipboard and the user's edit commands over

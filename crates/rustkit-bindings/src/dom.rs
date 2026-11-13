@@ -2840,6 +2840,11 @@ const WRAPPERS_JS: &str = r#"
     }
     // For the embedder's other scripts, which hold the host object.
     __rk.trust = trust;
+    // A field the user edited (it commits with `change` when it loses the
+    // focus): kept here, not as a property of the element.
+    var EDITED = new WeakSet();
+    __rk.markEdited = function (el) { setAdd(EDITED, el); };
+    __rk.takeEdited = function (el) { var was = setHas(EDITED, el); if (was) setDrop(EDITED, el); return was; };
 
     if (typeof g.DOMException !== 'function') {
         g.DOMException = function DOMException(message, name) {
@@ -2865,7 +2870,8 @@ const WRAPPERS_JS: &str = r#"
     // each element script creates, each insert before it happens (and gets
     // back what to run once it has), and each write to a node's own data.
     var HOOKS = {};
-    Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
+    // On the host object, for the embedder's other scripts.
+    __rk.domHooks = HOOKS;
     var gen = 0;
     var cache = new Map();
 
@@ -5794,7 +5800,7 @@ const WRAPPERS_JS: &str = r#"
     // the operation being what the dataTransfer's effects allow after the
     // listeners ran.
     __rk.fireDrag = function (id, type, init, op) {
-        var store = g.__rkDragStore;
+        var store = __rk.dragStore;
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!store || !target) return '1:none';
         if (type === 'dragstart') store.begin(target);
@@ -5892,9 +5898,7 @@ const WRAPPERS_JS: &str = r#"
             if (!target) return;
             // The user edited it: `change` when it loses the focus
             // (node_apis.js).
-            Object.defineProperty(target, '__rkEdited', {
-                value: true, configurable: true, enumerable: false, writable: true
-            });
+            __rk.markEdited(target);
             var ev = new g.InputEvent('input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
@@ -6435,13 +6439,13 @@ const WRAPPERS_JS: &str = r#"
     };
     // web_cssom.js publishes constructed-sheet text through this. The
     // wrapper's slot is private to this closure.
-    g.__rkSetAdoptedStyles = function (node, json) {
+    __rk.setAdoptedStyles = function (node, json) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
     };
     // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
-    g.__rkSetSheetDisabled = function (node, on) {
+    __rk.setSheetDisabled = function (node, on) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setSheetDisabled(s.gen, s.id, !!on);
@@ -6449,7 +6453,7 @@ const WRAPPERS_JS: &str = r#"
     // web_cssom.js: which sheet a <style> owns now (a number that changes
     // when its children change or it moves); -1 for a node of another
     // document.
-    g.__rkSheetGeneration = function (node) {
+    __rk.sheetGeneration = function (node) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return -1;
         return N.info(s.gen, s.id, 'sheetGen');

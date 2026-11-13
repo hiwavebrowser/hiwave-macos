@@ -60,7 +60,7 @@
         if (p === g.SVGSVGElement.prototype) return p;
         return SVG_PROTOS[I.local(id)] || g.SVGElement.prototype;
     });
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     Document.prototype.createElementNS = function (ns, qualified) {
         var r = NS(I.gen(), 'create', ns == null ? '' : String(ns), String(qualified));
         if (typeof r === 'string') fail('createElementNS', 'Document', r);
@@ -294,8 +294,7 @@
     // A field the user edited commits when it loses the focus: `change`
     // (HTML §4.10.5.5). `__rkFireInput` marks the edit.
     function commit(el) {
-        if (!el.__rkEdited) return;
-        el.__rkEdited = false;
+        if (!__rk.takeEdited(el)) return;
         // The engine's event: trusted, built with the Event of install
         // time and dispatched as the engine dispatches.
         var e = new EventCtor('change', { bubbles: true });

@@ -329,7 +329,7 @@
     tag(g.localStorage, Storage);
     tag(g.sessionStorage, Storage);
     var MQL = iface('MediaQueryList', EventTarget);
-    if (typeof g.matchMedia === 'function' && !g.matchMedia.__rkTagged) {
+    if (typeof g.matchMedia === 'function' && !__rk.matchMediaTagged) {
         var mm = g.matchMedia;
         var tagged = function matchMedia() {
             var r = mm.apply(this, arguments);
@@ -340,7 +340,7 @@
             }
             return r;
         };
-        tagged.__rkTagged = true;
+        __rk.matchMediaTagged = true;
         g.matchMedia = tagged;
     }
     // Interface-only: no instance is produced yet, but `x instanceof Attr`
