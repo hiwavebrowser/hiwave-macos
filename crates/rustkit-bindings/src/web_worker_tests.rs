@@ -516,3 +516,22 @@ fn a_proto_key_in_a_clone_is_an_own_property() {
     let got: serde_json::Value = serde_json::from_str(&ev(&b, "JSON.stringify(proto)")).unwrap();
     assert_eq!(got, chrome["protoKey"]);
 }
+
+/// A worker that floods the page cannot stall it: one page turn delivers at most
+/// `MAX_ITEMS_PER_POLL` (256) of a worker's messages and leaves the rest, in order, for the next
+/// turns (Chrome delivers one message per task; this keeps a turn bounded the same way). Before,
+/// a turn parsed and dispatched the whole backlog before the page could paint. R1 LOW on #1105.
+#[test]
+fn a_flooding_worker_cannot_hold_a_page_turn() {
+    let b = bound();
+    b.evaluate("var got = [], w = new Worker('http://a.test/flood.js'); w.onmessage = function (e) { got.push(e.data); };")
+        .unwrap();
+    serve(&b, "for (var i = 0; i < 5000; i++) postMessage(i);");
+    // Let the worker send everything before the page's first turn.
+    std::thread::sleep(Duration::from_millis(500));
+    b.run_timers(0, 100).unwrap();
+    let first: usize = ev(&b, "String(got.length)").parse().unwrap();
+    assert!(first > 0 && first <= 256, "one page turn delivered {first} messages");
+    assert!(pump_until(&b, "got.length === 5000"), "only {} arrived", ev(&b, "String(got.length)"));
+    assert_eq!(ev(&b, "String(got.every(function (v, i) { return v === i; }))"), "true", "out of order");
+}
