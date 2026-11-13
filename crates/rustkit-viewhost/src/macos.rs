@@ -588,6 +588,8 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     dx: -raw_dx * scale,
                     dy: raw_dy * scale,
                     gesture: phase != 0 || momentum != 0,
+                    // NSEventPhaseBegan (1) or NSEventPhaseMayBegin (32).
+                    began: phase & (1 | 32) != 0,
                 };
                 // A wheel right after a wheel is summed into it in the
                 // queue: a trackpad flick is ~50 events a second and the

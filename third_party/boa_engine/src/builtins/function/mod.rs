@@ -502,6 +502,10 @@ impl BuiltInFunctionObject {
             let parameters = parser
                 .parse_formal_parameters(context.interner_mut(), generator, r#async)
                 .map_err(|e| {
+                    // HIWAVE PATCH (native recursion): too deep a source is a RangeError.
+                    if e.is_stack_overflow() {
+                        return JsNativeError::range().with_message("Maximum call stack size exceeded");
+                    }
                     JsNativeError::syntax()
                         .with_message(format!("failed to parse function parameters: {e}"))
                 })?;
@@ -551,6 +555,10 @@ impl BuiltInFunctionObject {
             let body = parser
                 .parse_function_body(context.interner_mut(), generator, r#async)
                 .map_err(|e| {
+                    // HIWAVE PATCH (native recursion): too deep a source is a RangeError.
+                    if e.is_stack_overflow() {
+                        return JsNativeError::range().with_message("Maximum call stack size exceeded");
+                    }
                     JsNativeError::syntax()
                         .with_message(format!("failed to parse function body: {e}"))
                 })?;
