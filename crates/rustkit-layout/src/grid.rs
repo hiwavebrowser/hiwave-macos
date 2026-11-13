@@ -2216,7 +2216,24 @@ pub fn layout_grid_container(
                 // area, which is definite (css-grid §11.6): the block
                 // pre-pass's `auto` mark for it does not hold here (LAY1).
                 child.percent_height_is_auto = false;
-                crate::flex::layout_flex_container(child, &child_containing);
+                // A column flex item whose height is a percentage of its
+                // area, or that stretches to it, has that height as a
+                // DEFINITE main size (css-grid-1 §11.6, css-sizing-3 §5.1),
+                // so its own `height: 100%` items resolve against it. Laid
+                // out as content-sized, a `height: 100%; min-height: 0`
+                // pane in a product page's gallery column took its
+                // content, 204 tall, where Chrome 148 has the area's 800.
+                // A row container, or a column one with an auto height that
+                // does not stretch, keeps the content-sized pass.
+                let definite_in_area = !child.style.flex_direction.is_row()
+                    && (crate::flex::has_percentage(&child.style.height)
+                        || (matches!(child.style.height, rustkit_css::Length::Auto)
+                            && stretches_to_its_row(child, &container_align_items)));
+                if definite_in_area {
+                    crate::flex::layout_flex_container_at_used_height(child, area_height);
+                } else {
+                    crate::flex::layout_flex_container(child, &child_containing);
+                }
                 let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
                     *slot = Some(content_height);
