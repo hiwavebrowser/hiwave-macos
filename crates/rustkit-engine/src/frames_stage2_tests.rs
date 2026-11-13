@@ -526,3 +526,70 @@ fn an_event_from_another_window_of_the_tree_is_cancelled_as_its_own() {
     page.turns_until("typeof window.result === 'string'", Duration::from_secs(5));
     assert_eq!(page.js("window.result"), r#"String("A false true | B false true | C false true | D false true")"#);
 }
+
+/// A frame's response is parsed as markup only for an HTML type; other
+/// types render as Chrome for Testing 148 renders them in a same-origin
+/// frame (recorded 2026-11-13 on the probe page `ct.html`, the frame's
+/// title and body markup, the port written as PORT):
+///   ct.txt  -> `<pre style="word-wrap: break-word; white-space: pre-wrap;">plain &lt;b&gt;text&lt;/b&gt; line2 </pre>` (body text)
+///   ct.json -> `<pre>{"a": 1, "b": "&lt;i&gt;x&lt;/i&gt;"}</pre><div class="json-formatter-container"></div>`
+///   ct.js   -> the source as text in the same `<pre>`: it does not run
+///   ct.css  -> `<pre ...>body { color: red }</pre>`
+///   ct.png  -> title `ct.png (3×2)`, `<img style="display: block;-webkit-user-select: none;" src="http://127.0.0.1:PORT/ct.png">`
+///   ct.bin  -> downloaded: no `load` at the frame, which keeps its initial document
+/// (The image document's title has no size here: a stated deviation.)
+#[test]
+fn a_frames_response_is_markup_only_for_an_html_type() {
+    use crate::script_net_tests::serve_byte_routes;
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 3, 0, 0, 0, 2, 8, 2, 0, 0, 0,
+        0x12, 0x16, 0xf1, 0x4d, 0, 0, 0, 0x0f, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0x00, 0x42, 0x0c, 0x30, 0x02,
+        0x00, 0x46, 0xd4, 0x0b, 0xf5, 0x3c, 0x47, 0x62, 0xe5, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let page = "<!doctype html><body><script>
+window.loads = {}; window.ranJs = 0;
+['ct.txt','ct.json','ct.js','ct.css','ct.png','ct.bin'].forEach(function (k) {
+  var f = document.createElement('iframe'); f.id = k; f.src = '/' + k;
+  f.onload = function () { loads[k] = (loads[k] || 0) + 1; };
+  document.body.appendChild(f);
+});
+function shape(k) {
+  var d = document.getElementById(k).contentDocument;
+  return d ? d.title + ' | ' + (d.body ? d.body.innerHTML : 'nobody').replace(/\\s+/g, ' ').replace(/127\\.0\\.0\\.1:\\d+/, '127.0.0.1:PORT') : 'null';
+}
+</script></body>";
+    let server = serve_byte_routes(vec![
+        ("/", "text/html", page.as_bytes().to_vec()),
+        ("/ct.txt", "text/plain", b"plain <b>text</b>\nline2\n".to_vec()),
+        ("/ct.json", "application/json", br#"{"a": 1, "b": "<i>x</i>"}"#.to_vec()),
+        ("/ct.js", "text/javascript", b"window.parent.ranJs = 1;".to_vec()),
+        ("/ct.css", "text/css", b"body { color: red }".to_vec()),
+        ("/ct.png", "image/png", png),
+        ("/ct.bin", "application/octet-stream", b"\x00\x01binary".to_vec()),
+    ]);
+    let mut engine = Engine::new(config(true)).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).expect("load_url");
+    let done = "['ct.txt','ct.json','ct.js','ct.css','ct.png'].every(function (k) { return loads[k] >= 1; })";
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+        rt.block_on(engine.pump_live(view, 20));
+        if engine.execute_script(view, done).unwrap() == "Boolean(true)" {
+            break;
+        }
+    }
+    // A little longer, for the download's frame to (not) hear `load`.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(20));
+        rt.block_on(engine.pump_live(view, 20));
+    }
+    let js = |engine: &mut Engine, s: &str| engine.execute_script(view, s).unwrap();
+    assert_eq!(js(&mut engine, "shape('ct.txt')"), r#"String(" | <pre style=\"word-wrap: break-word; white-space: pre-wrap;\">plain &lt;b&gt;text&lt;/b&gt; line2 </pre>")"#);
+    assert_eq!(js(&mut engine, "shape('ct.json')"), r#"String(" | <pre>{\"a\": 1, \"b\": \"&lt;i&gt;x&lt;/i&gt;\"}</pre><div class=\"json-formatter-container\"></div>")"#);
+    assert_eq!(js(&mut engine, "shape('ct.js') + ' ran:' + ranJs"), r#"String(" | <pre style=\"word-wrap: break-word; white-space: pre-wrap;\">window.parent.ranJs = 1;</pre> ran:0")"#);
+    assert_eq!(js(&mut engine, "shape('ct.css')"), r#"String(" | <pre style=\"word-wrap: break-word; white-space: pre-wrap;\">body { color: red }</pre>")"#);
+    assert_eq!(js(&mut engine, "shape('ct.png')"), r#"String("ct.png | <img style=\"display: block;-webkit-user-select: none;\" src=\"http://127.0.0.1:PORT/ct.png\">")"#);
+    assert_eq!(js(&mut engine, "String(loads['ct.bin'] || 0)"), r#"String("0")"#, "a download is no document and no load");
+}
