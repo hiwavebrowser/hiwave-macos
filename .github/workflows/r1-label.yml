@@ -3,12 +3,17 @@ name: R1 label
 # Pete 2026-11-13: `r1-clear` marks a PR whose current head has a clear
 # independent R1, so nobody re-reviews it. Any new push (synchronize) means
 # the reviewed head is gone, so the label is removed and a delta review is due.
+# pull_request (not _target): _target reads the workflow from the default
+# branch (master), so it would not run for develop PRs. Same-repo PRs get a
+# write token; fork PRs get read-only and the step fails harmlessly.
 on:
-  pull_request_target:
+  pull_request:
     types: [synchronize]
 
 permissions:
   pull-requests: write
+  issues: write
+  contents: read
 
 jobs:
   drop-r1-clear:
