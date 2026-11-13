@@ -2596,6 +2596,54 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Whether script has registered a `wheel` listener: only then does
+    /// the engine dispatch `wheel` before a scroll (`fire_wheel_event`).
+    pub fn wants_wheel(&self) -> bool {
+        self.dom_host.borrow().wants_wheel()
+    }
+
+    /// Whether a wheel at an element (by node id) can be cancelled: a
+    /// listener on its way up is not passive. Then the event goes out
+    /// before the scroll; otherwise after it.
+    pub fn wheel_blocks(&self, node: usize) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_with_host(&format!("return __rk.wheelBlocks({node});"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
+    /// Dispatch the user's wheel at an element (by node id): `delta_x` /
+    /// `delta_y` are DOM deltas in pixels (positive is right and down).
+    /// `cancelable` before the scroll it would cause, and then false comes
+    /// back when a listener cancelled it.
+    pub fn fire_wheel_event(
+        &self,
+        node: usize,
+        data: &MouseEventBindingData,
+        delta_x: f64,
+        delta_y: f64,
+        cancelable: bool,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireWheel({node}, {{ clientX: {}, clientY: {}, screenX: {}, screenY: {}, \
+             offsetX: {}, offsetY: {}, buttons: {}, ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {}, \
+             deltaX: {delta_x}, deltaY: {delta_y} }}, {cancelable});",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+        ), &[])?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
     /// The user's click focused an element (by node id), or landed on
     /// nothing focusable (`None`): the page's focus follows, with `change`,
     /// `blur`/`focusout` and `focus`/`focusin`. The page may refuse (a

@@ -154,8 +154,8 @@ pub(crate) struct MemoKey {
 
 /// The fields layout writes on a descendant, positions relative to the memoised box's content
 /// origin. (`incremental.rs`'s `own_inputs_equal` destructure is the full field list; the others
-/// are style-derived, set by the engine after layout, or set before it.) `formatting_root` is
-/// structural (flex/grid set it on their children) and deliberately not memoised.
+/// are style-derived, set by the engine after layout, or set before it.) `formatting_root` is an input,
+/// hashed into the key (`input_fingerprint`), not an output.
 #[derive(Clone)]
 struct BoxOutputs {
     dimensions: Dimensions,
@@ -169,6 +169,9 @@ struct BoxOutputs {
     /// set or reset by every layout of the box, so a skipped layout must leave what it would have.
     children_laid_at: Option<(f32, f32)>,
     abspos_cb_hint: Option<Rect>,
+    /// SET2: the pitch `set_wrapped_pitch` gave a wrapped text run, which the next visit reads back
+    /// to take it out of the run's height again.
+    text_line_pitch: Option<f32>,
 }
 
 struct MemoEntry {
@@ -249,8 +252,10 @@ fn hash_edges(e: &EdgeSizes, h: &mut impl std::hash::Hasher) {
     }
 }
 
-/// Hash of the layout INPUT state below `b`: how many children each box has, its percent-height
-/// mark and whether it shares a float context. Outputs (positions, sizes, lines) are left out on
+/// Hash of the layout INPUT state of `b` and below: how many children each box has, its percent-height
+/// mark, whether it shares a float context, and whether it is a formatting root (flex and grid set
+/// it on an item before laying it out, so the block pre-pass and the item pass differ in it and
+/// enclose their floats differently). Outputs (positions, sizes, lines) are left out on
 /// purpose: they differ between the calls the memo is meant to match.
 fn input_fingerprint(b: &LayoutBox) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -259,10 +264,12 @@ fn input_fingerprint(b: &LayoutBox) -> u64 {
         for c in &b.children {
             c.percent_height_is_auto.hash(h);
             c.context_floats.is_some().hash(h);
+            c.formatting_root.hash(h);
             walk(c, h);
         }
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.formatting_root.hash(&mut h);
     walk(b, &mut h);
     h.finish()
 }
@@ -283,6 +290,67 @@ fn key_for(b: &LayoutBox, definite_height: Option<f32>, margin: &MarginCollapseC
         margin: margin.clone(),
         inputs: input_fingerprint(b),
     }
+}
+
+/// Every field of a box, classed for the memo. The destructure names every field, so a new one does
+/// not compile until it is classed here: a field layout WRITES on a descendant must be in
+/// `BoxOutputs` (snapshot, restore and `close_to`), or a memo hit leaves it stale. (Verify mode found
+/// `text_line_pitch` missing on a live page, after #1090 added it; this is the check that would
+/// have caught it at compile time.)
+#[allow(dead_code)]
+fn classify_every_field(b: &LayoutBox) {
+    let LayoutBox {
+        // Inputs: style, tag, text and tree shape. The key covers what layout reads of them, and a
+        // different shape fails the restore.
+        box_type: _,
+        style: _,
+        children: _,
+        position: _,
+        float: _,
+        clear: _,
+        z_index: _,
+        text_sources: _,
+        node_id: _,
+        element_id: _,
+        identity: _,
+        link_href: _,
+        focused_caret: _,
+        focused_selection: _,
+        root_element_height: _,
+        table_span: _,
+        offsets: _,
+        viewport: _,
+        // Built before layout, from the tree, not by layout.
+        stacking_context: _,
+        containing_block_index: _,
+        pseudo_animation_key: _,
+        // Written by layout and held in `BoxOutputs`.
+        dimensions: _,
+        text_lines: _,
+        text_flow_first_offset: _,
+        table_caption_shift: _,
+        percent_height_is_auto: _,
+        context_floats: _,
+        children_laid_at: _,
+        abspos_cb_hint: _,
+        text_line_pitch: _,
+        // An input, set by flex and grid on an item before laying it out (the block pre-pass lays
+        // the same item out without it), so `input_fingerprint` hashes it for the box and below.
+        formatting_root: _,
+        // The memo itself.
+        layout_memo: _,
+        // Stamped after layout (scroll, sticky, scrollbar passes), never by the layout call.
+        sticky_state: _,
+        element_scroll: _,
+        sticky_rule: _,
+        sticky_shift: _,
+        sticky_paths: _,
+        scrollbar_thumb_hovered: _,
+        scrollbar_overflows: _,
+        // A note the hit test keeps beside the layout: made from the root on the first hit test
+        // (`mark_hit_overflow` walks the whole tree) and forgotten by the engine on each new layout.
+        hit_overflow: _,
+    } = b;
 }
 
 /// The recorded outputs of every descendant of `b` (pre-order), or `None` when one of them
@@ -314,6 +382,7 @@ fn snapshot(b: &LayoutBox) -> Option<Vec<BoxOutputs>> {
                 context_floats,
                 children_laid_at: c.children_laid_at,
                 abspos_cb_hint: c.abspos_cb_hint.map(|r| Rect { x: r.x - ox, y: r.y - oy, ..r }),
+                text_line_pitch: c.text_line_pitch,
             });
             if !walk(c, ox, oy, out) {
                 return false;
@@ -348,6 +417,7 @@ fn restore(b: &mut LayoutBox, outputs: &[BoxOutputs]) -> bool {
             c.context_floats = o.context_floats.as_ref().map(|f| f.translated(ox, oy));
             c.children_laid_at = o.children_laid_at;
             c.abspos_cb_hint = o.abspos_cb_hint.map(|r| Rect { x: r.x + ox, y: r.y + oy, ..r });
+            c.text_line_pitch = o.text_line_pitch;
             walk(c, ox, oy, it);
         }
     }
@@ -448,6 +518,11 @@ impl BoxOutputs {
             && match (&self.abspos_cb_hint, &other.abspos_cb_hint) {
                 (None, None) => true,
                 (Some(x), Some(y)) => close_rect(x, y),
+                _ => false,
+            }
+            && match (self.text_line_pitch, other.text_line_pitch) {
+                (None, None) => true,
+                (Some(a), Some(b)) => close(a, b),
                 _ => false,
             }
     }
@@ -616,5 +691,66 @@ mod restore_tests {
         parent.children[0].children_laid_at = None;
         assert!(restore(&mut parent, &outputs));
         assert_eq!(parent.children[0].children_laid_at, Some((321.0, 45.0)));
+    }
+
+    /// `set_wrapped_pitch` (#1090) writes `text_line_pitch` on a wrapped text run and reads it back
+    /// on the next visit to take the pitch out of the run's height again, so a restore that left it
+    /// stale would make the next visit compute the wrong line height. Verify mode found the gap on
+    /// a live page ("a field the snapshot does not hold differs").
+    #[test]
+    fn a_restore_writes_back_the_text_line_pitch() {
+        let style = rustkit_css::ComputedStyle::default();
+        let mut parent = LayoutBox::new(BoxType::Block, style.clone());
+        let mut run = LayoutBox::new(BoxType::Text("a b".to_string()), style);
+        run.text_line_pitch = Some(40.0);
+        parent.children.push(run);
+        let outputs = snapshot(&parent).expect("snapshot");
+        for stale in [None, Some(7.0)] {
+            parent.children[0].text_line_pitch = stale;
+            assert!(restore(&mut parent, &outputs));
+            assert_eq!(parent.children[0].text_line_pitch, Some(40.0), "stale {stale:?}");
+        }
+        // The verify comparison sees a pitch that differs.
+        let mut other = outputs.clone();
+        other[0].text_line_pitch = None;
+        assert!(!outputs[0].close_to(&other[0]));
+    }
+
+    /// `formatting_root` is an INPUT to a box's own layout (it encloses its floats), and the same
+    /// item is laid out twice: by the block pre-pass (not a root, height 0 around a float-only
+    /// child) and by its grid or flex parent (a root, height 30). A key that left it out restored
+    /// the first answer for the second. Found by `float_in_items_unit_tests` under the memo.
+    #[test]
+    fn a_grid_item_that_becomes_a_formatting_root_is_not_restored_from_its_block_pass() {
+        use rustkit_css::{Display, Float, GridTemplate, Length, TrackDefinition, TrackSize};
+        let float = {
+            let mut st = rustkit_css::ComputedStyle::new();
+            st.width = Length::Px(10.0);
+            st.height = Length::Px(30.0);
+            st.float = Float::Left;
+            LayoutBox::with_float(BoxType::Block, st, Float::Left)
+        };
+        let mut grid_style = rustkit_css::ComputedStyle::new();
+        grid_style.display = Display::Grid;
+        grid_style.grid_template_columns = GridTemplate {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(400.0))],
+            ..Default::default()
+        };
+        let mut item = LayoutBox::new(BoxType::Block, rustkit_css::ComputedStyle::new());
+        item.children.push(float);
+        let mut grid = LayoutBox::new(BoxType::Block, grid_style);
+        grid.children.push(item);
+        let mut body = LayoutBox::new(BoxType::Block, rustkit_css::ComputedStyle::new());
+        body.children.push(grid);
+
+        set_memo_mode(Some(MemoMode::On));
+        set_memo_min_subtree(Some(1));
+        body.set_viewport(1280.0, 800.0);
+        let cb = Dimensions { content: Rect::new(0.0, 0.0, 400.0, 0.0), ..Default::default() };
+        body.layout_with_collapse(&cb, &mut MarginCollapseContext::new(), &mut FloatContext::new());
+        set_memo_mode(None);
+        set_memo_min_subtree(None);
+        let h = body.children[0].children[0].dimensions.border_box().height;
+        assert!((h - 30.0).abs() < 0.5, "grid float-only item height {h} with the memo on; Chromium 30");
     }
 }

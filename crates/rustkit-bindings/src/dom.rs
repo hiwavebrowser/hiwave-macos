@@ -357,6 +357,10 @@ pub(crate) struct DomHost {
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
+    /// Script has registered a `wheel` listener (or set `onwheel`): the
+    /// engine dispatches a `wheel` event before it scrolls. Until then a
+    /// scroll runs no script at all.
+    wants_wheel: bool,
     /// The layout's text geometry (`TextRects`), installed with a layout.
     text_rects: Option<TextRects>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
@@ -668,6 +672,10 @@ impl DomHost {
         self.hit_tester = tester;
     }
 
+    pub(crate) fn wants_wheel(&self) -> bool {
+        self.wants_wheel
+    }
+
     pub(crate) fn set_text_rects(&mut self, rects: Option<TextRects>) {
         self.text_rects = rects;
     }
@@ -676,6 +684,9 @@ impl DomHost {
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
         let templates = self.templates.get_mut();
         templates.clear();
+        // The page's own document owns itself and every node it has; what
+        // is made or moved in later takes its document from there.
+        document.root().set_owner(document.root().id.raw());
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
@@ -912,17 +923,42 @@ fn is_template(node: &Node) -> bool {
 /// the moved content) a content fragment and moves its children there.
 /// Run on freshly parsed nodes only: children script appends to a
 /// template later stay real children, as in the spec.
+/// Where the table of template contents keeps the inert document that
+/// owns them all (HTML §4.12.3 "template contents owner document"). No
+/// node has NodeId 0.
+const TEMPLATE_OWNER: usize = 0;
+
+/// The document that owns every template's contents, made on first use.
+fn template_owner(document: &Document, templates: &mut HashMap<usize, Rc<Node>>) -> usize {
+    templates
+        .entry(TEMPLATE_OWNER)
+        .or_insert_with(|| {
+            let doc = document.create_node(NodeType::Document);
+            doc.set_owner(doc.id.raw());
+            doc
+        })
+        .id
+        .raw()
+}
+
 fn adopt_template_contents(
     document: &Document,
     root: &Rc<Node>,
     templates: &mut HashMap<usize, Rc<Node>>,
 ) {
+    let owner = template_owner(document, templates);
     let mut pending = vec![root.clone()];
     while let Some(node) = pending.pop() {
         if is_template(&node) {
             let content = templates
                 .entry(node.id.raw())
-                .or_insert_with(|| document.create_node(NodeType::DocumentFragment))
+                .or_insert_with(|| {
+                    // A template's contents are in the inert document that
+                    // holds every template's contents (its owner document).
+                    let fragment = document.create_node(NodeType::DocumentFragment);
+                    fragment.set_owner(owner);
+                    fragment
+                })
                 .clone();
             for child in node.children() {
                 child.remove_from_parent();
@@ -991,8 +1027,21 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "fragmentHTML" {
             let context = if data.is_empty() { "body" } else { data.as_str() };
             let html = string_arg(args, 3).unwrap_or("");
-            let nodes = document.parse_fragment(html, context).map_err(|_| "SyntaxError")?;
+            // The fragment is the range's document's (`args[4]`, its
+            // Document node) and is parsed with that document's scripting
+            // flag: on only for the page's own document when it runs
+            // script; off for any other, or when the document is unknown.
+            let owner = number_arg(args, 4)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .filter(|n| matches!(n.node_type, NodeType::Document))
+                .map_or(0, |n| n.owner_document_id());
+            let scripting = document.scripting() && owner == document.root().id.raw();
+            let nodes = document
+                .parse_fragment_scripted(html, context, true, false, scripting)
+                .map_err(|_| "SyntaxError")?;
             let fragment = document.create_node(NodeType::DocumentFragment);
+            fragment.set_owner(owner);
             let templates = &mut host.templates.borrow_mut();
             for child in nodes {
                 adopt_template_contents(document, &child, templates);
@@ -1003,6 +1052,8 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "document" {
             let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
             let doc = document.create_node(NodeType::Document);
+            // Scripting is off in it: what is put in it is its.
+            doc.set_owner(doc.id.raw());
             let templates = &mut host.templates.borrow_mut();
             for child in parsed.root().children() {
                 // The parsed tree's NodeIds are its own: clone with an
@@ -1137,10 +1188,22 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("clone", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
             let templates = &mut host.templates.borrow_mut();
-            Ok((
-                node_id(Some(clone_node(document, &node, deep, templates))),
-                DomDirty::Clean,
-            ))
+            let copy = clone_node(document, &node, deep, templates);
+            Ok((node_id(Some(copy)), DomDirty::Clean))
+        }
+        // `adoptTo(doc)`: the node (just made by, adopted by or imported
+        // into the document `doc`) takes that document's scripting state.
+        ("adoptTo", _) => {
+            let owner = number_arg(args, 3)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .ok_or("NotFoundError")?;
+            if !matches!(owner.node_type, NodeType::Document) {
+                return Err("NotSupportedError");
+            }
+            // Every Document node owns itself, the page's included.
+            node.set_owner(owner.owner_document_id());
+            Ok((JsValue::Null, DomDirty::Clean))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
@@ -1157,6 +1220,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
                 top = parent;
             }
             let inert = tag_name.eq_ignore_ascii_case("template")
+                || node.owner_document_id() != document.root().id.raw()
                 || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
                 .parse_fragment_scripted(
@@ -1593,8 +1657,12 @@ fn clone_node(
             copy.append_child(clone_node(document, &child, true, templates));
         }
     }
+    // A clone is in its original's document.
+    copy.set_owner(node.owner_document_id());
     if let Some(content) = templates.get(&node.id.raw()).cloned() {
         let content = clone_node(document, &content, deep, templates);
+        // A template's contents are always the template contents' document's.
+        content.set_owner(template_owner(document, templates));
         templates.insert(copy.id.raw(), content);
     }
     copy
@@ -1724,23 +1792,20 @@ const VOID_ELEMENTS: &[&str] = &[
 const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
 
 /// Whether a `<noscript>` under `node` writes its text children as they
-/// are (HTML §13.3: when scripting is enabled for the node). That is in
-/// the page's own document, when the page runs script. Everywhere else
-/// the text is escaped like any other: in a document `DOMParser` or
-/// `createHTMLDocument` made (a Document node of its own), in template
-/// contents, and in a tree that is in no document, where nothing records
-/// which document made it. Chrome writes a detached node of the page's
-/// document raw; escaped is the safe answer when that is not known, since
-/// raw text read out of an inert tree is markup once it is parsed again.
+/// are (HTML §13.3: when scripting is enabled for the node). That is when
+/// the node's document is the page's own and the page runs script, in the
+/// tree or not (HTML2, Chrome for Testing 148). Its text is escaped like
+/// any other when its document is one `DOMParser` or `createHTMLDocument`
+/// made, or a template's contents, and when no path has given the node a
+/// document (`Node::owner_document_id`, which follows the node through
+/// creation, insertion, adoption, import, cloning and data writes).
 fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
     let Some(page) = page.filter(|d| d.scripting()) else {
         return false;
     };
-    let mut top = node.clone();
-    while let Some(parent) = top.parent() {
-        top = parent;
-    }
-    Rc::ptr_eq(&top, page.root())
+    // Only a node positively of the page's own document: one of another
+    // document, or one no path has given a document, is escaped.
+    node.owner_document_id() == page.root().id.raw()
 }
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
@@ -1775,6 +1840,9 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         NodeType::Text(data) => {
             let raw = node
                 .parent()
+                // HTML elements only: an SVG or MathML `style`, `script`
+                // or `noscript` writes its text escaped (Chrome for Testing 148).
+                .filter(|p| is_html_element(p))
                 .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t) || (raw_noscript && t == "noscript")))
                 .unwrap_or(false);
             if raw {
@@ -1905,6 +1973,8 @@ fn node_info(
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
+        // The NodeId of the node's Document node, 0 for the page's (HTML2).
+        "owner" => JsValue::Number(node.owner_document_id() as f64),
         _ => JsValue::Undefined,
     }
 }
@@ -2367,6 +2437,17 @@ pub(crate) fn install(
         }),
     )?;
 
+    // noteWheel(): script registered its first `wheel` listener.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_note_wheel",
+        0,
+        Box::new(move |_| {
+            h.borrow_mut().wants_wheel = true;
+            JsValue::Null
+        }),
+    )?;
+
     // rangeTextRects(gen, "node from to;node from to;..."): where the
     // characters [from, to) of each of those text nodes are (offsets in
     // UTF-16 units, as a Range has them), as a JSON array with one flat
@@ -2712,14 +2793,15 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
+        hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, noteWheel: __rustkit_dom_note_wheel,
+        rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'svg_hit', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2732,6 +2814,12 @@ const WRAPPERS_JS: &str = r#"
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
     var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
+    // `defaultPrevented` is read-only and only `preventDefault()` (or
+    // `returnValue = false`, or an on<type> handler returning false) by a
+    // listener that may cancel sets it: a passive listener cannot.
+    var CANCELED = new WeakSet();
+    var isProto = uncurry(Object.prototype.isPrototypeOf);
     var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
@@ -3003,6 +3091,12 @@ const WRAPPERS_JS: &str = r#"
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
         if (info(this, 'type') === 9) return null;
+        // A node of another document, in a tree or not (HTML2).
+        var owner = info(this, 'owner');
+        if (typeof owner === 'number' && owner > 0) {
+            if (g.document && g.document[SLOT] && g.document[SLOT].id === owner) return g.document;
+            var od = wrap(owner); if (od) return od;
+        }
         var n = this;
         while (n.parentNode) n = n.parentNode;
         return n.nodeType === 9 ? n : g.document;
@@ -3248,7 +3342,30 @@ const WRAPPERS_JS: &str = r#"
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
-    getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
+    // The outerHTML setter: the markup, parsed in the context of the
+    // element's parent by a holder of the element's document, replaces the
+    // element. As Chrome for Testing 148, and not as the HTML spec (which
+    // has a no-op and a body context there): an element with no parent, or
+    // whose parent is not an element, throws NoModificationAllowedError.
+    accessor(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); }, function (v) {
+        var parent = this.parentNode;
+        if (!parent) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element has no parent node.", 'NoModificationAllowedError');
+        }
+        if (parent.nodeType !== 1) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '" +
+                parent.nodeName + "', which is not an element node.", 'NoModificationAllowedError');
+        }
+        var ctx = parent.localName;
+        var holder = parent.namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(parent.namespaceURI, ctx)
+            : create('element', ctx, 'outerHTML');
+        ownedBy(holder, this.ownerDocument);
+        holder.innerHTML = text(v);
+        var self = this;
+        Array.prototype.slice.call(holder.childNodes).forEach(function (n) { parent.insertBefore(n, self); });
+        parent.removeChild(self);
+    });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
@@ -3484,6 +3601,25 @@ const WRAPPERS_JS: &str = r#"
             }, function (v) { this.setAttribute(p[1], String(v)); });
         });
     });
+    // HTML §4.10.5.3.2: how many characters wide the field is; 20 unless
+    // the attribute is a number above zero.
+    // The attribute is read by the rules for parsing non-negative integers
+    // (leading whitespace, an optional "+", then digits up to the first
+    // other character) and is 20 unless that gives 1 to 2147483647; layout
+    // reads it the same way (engine `input_size_attribute`). Setting the
+    // property converts to unsigned long: 0 throws, and a value above
+    // 2147483647 writes 20 (Chrome for Testing 148).
+    accessor(HTMLInputElement.prototype, 'size', function () {
+        var m = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(this.getAttribute('size') || '');
+        var n = m ? Number(m[1]) : 0;
+        return n >= 1 && n <= 2147483647 ? n : 20;
+    }, function (v) {
+        v = v >>> 0;
+        if (v === 0) {
+            throw new g.DOMException("Failed to set the 'size' property on 'HTMLInputElement': The value provided is 0, which is an invalid size.", 'IndexSizeError');
+        }
+        this.setAttribute('size', String(v > 2147483647 ? 20 : v));
+    });
     [['rows', 2], ['cols', 20]].forEach(function (p) {
         accessor(HTMLTextAreaElement.prototype, p[0], function () {
             var n = parseInt(this.getAttribute(p[0]), 10);
@@ -3620,6 +3756,9 @@ const WRAPPERS_JS: &str = r#"
         var holder = spot[0].namespaceURI === 'http://www.w3.org/2000/svg'
             ? document.createElementNS(spot[0].namespaceURI, ctx)
             : create('element', ctx, 'insertAdjacentHTML');
+        // The holder is the target's document's, so the markup parses with
+        // that document's scripting flag (Chrome for Testing 148).
+        ownedBy(holder, spot[0].nodeType === 9 ? spot[0] : spot[0].ownerDocument);
         holder.innerHTML = String(html);
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
             spot[0].insertBefore(n, spot[1]);
@@ -4468,17 +4607,28 @@ const WRAPPERS_JS: &str = r#"
         }
         return null;
     };
+    // A node a document makes is that document's (`adoptTo`): one made by
+    // a DOMParser document is in a document with scripting off.
+    function ownedBy(node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen && doc.nodeType === 9) N.write(gen, 'adoptTo', s.id, d.id);
+        return node;
+    }
+    __rk.adoptTo = function (node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen) N.write(gen, 'adoptTo', s.id, d.id);
+    };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
-        var el = create('element', tag, 'createElement');
+        var el = ownedBy(create('element', tag, 'createElement'), this);
         if (HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
     };
     Document.prototype.createTextNode = function (data) {
-        return create('text', String(data), 'createTextNode');
+        return ownedBy(create('text', String(data), 'createTextNode'), this);
     };
     Document.prototype.createComment = function (data) {
-        return create('comment', String(data), 'createComment');
+        return ownedBy(create('comment', String(data), 'createComment'), this);
     };
     // DOM §4.5 importNode: a copy for this document. Nodes here all share
     // the one Rust Document, so importing is cloning.
@@ -4488,10 +4638,10 @@ const WRAPPERS_JS: &str = r#"
             throw new DOMException("Failed to execute 'importNode' on 'Document': " +
                 'The node provided is a document, which may not be imported.', 'NotSupportedError');
         }
-        return node.cloneNode(!!deep);
+        return ownedBy(node.cloneNode(!!deep), this);
     };
     Document.prototype.createDocumentFragment = function () {
-        return create('fragment', '', 'createDocumentFragment');
+        return ownedBy(create('fragment', '', 'createDocumentFragment'), this);
     };
     // DOM Range (DOM §5) and createContextualFragment (DOM Parsing). A new
     // range is collapsed at the start of its document. createContextualFragment
@@ -4782,7 +4932,9 @@ const WRAPPERS_JS: &str = r#"
         var r = slots(this, 'createContextualFragment');
         var ctx = rangeContext(r.start.node);
         var tag = ctx && ctx.localName ? ctx.localName : 'body';
-        var made = N.write(gen, 'create:fragmentHTML', tag, String(html));
+        var home = r.start.node.nodeType === 9 ? r.start.node : r.start.node.ownerDocument;
+        var hs = home && home[SLOT];
+        var made = N.write(gen, 'create:fragmentHTML', tag, String(html), hs && hs.gen === gen ? hs.id : -1);
         if (typeof made === 'string') {
             throw new DOMException("Failed to execute 'createContextualFragment' on 'Range'.", made);
         }
@@ -5585,6 +5737,57 @@ const WRAPPERS_JS: &str = r#"
         configurable: true, enumerable: false, writable: true
     });
 
+    // Whether a wheel at this element can be cancelled: something on its
+    // way up to the window listens for `wheel` and is not passive (an
+    // `onwheel` handler never is). Chrome for Testing 148 asks the same
+    // before it scrolls: with only passive listeners it scrolls first and
+    // tells them afterwards.
+    // On the host object, like the key dispatch: not the page's to call.
+    __rk.wheelBlocks = function (id) {
+            var n = typeof id === 'number' ? wrap(id) : null;
+            while (n) {
+                var all = LISTENERS.get(n);
+                var lists = all ? [all.wheel, all.mousewheel] : [];
+                for (var i = 0; i < lists.length; i++) {
+                    if (lists[i] && lists[i].some(function (l) { return !l.removed && !l.passive; })) return true;
+                }
+                if (typeof handlerOf(n, 'wheel') === 'function') return true;
+                n = n === g ? null : (n === doc ? g : (n.parentNode || (n.nodeType === 9 ? g : null)));
+            }
+            return false;
+    };
+    // The engine delivers the user's wheel (UI Events §5.5): a trusted
+    // WheelEvent that bubbles, in pixels, with the legacy deltas Chrome
+    // reports (120 a notch, a notch per 100px and at least one). Before
+    // the scroll when it can be cancelled (`wheelBlocks`), and then it
+    // returns false when a listener called preventDefault(): the engine
+    // leaves the scroll alone. After the scroll, and not cancelable, when
+    // only passive listeners hear it.
+    __rk.fireWheel = function (id, init, cancelable) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target || typeof g.WheelEvent !== 'function') return true;
+            if (target.localName === 'svg') target = svgShapeAt(target, init.clientX, init.clientY);
+            init.bubbles = true;
+            init.cancelable = cancelable !== false;
+            init.composed = true;
+            init.view = g;
+            init.deltaZ = 0;
+            init.deltaMode = 0;
+            var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * Math.max(1, Math.round(Math.abs(d) / 100)); };
+            init.wheelDeltaX = notches(init.deltaX);
+            init.wheelDeltaY = notches(init.deltaY);
+            var ev = new g.WheelEvent('wheel', init);
+            trust(ev);
+            var at = {
+                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+                offsetX: init.offsetX, offsetY: init.offsetY
+            };
+            Object.keys(at).forEach(function (k) {
+                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+            });
+            return dispatchTo(target, ev);
+    };
+
     // The engine's drag-and-drop processing model (HTML §6.11.5) delivers
     // a trusted DragEvent with the drag's DataTransfer (web_dnd.js): every
     // drag event bubbles; dragleave and dragend cannot be cancelled. `op`
@@ -5736,6 +5939,19 @@ const WRAPPERS_JS: &str = r#"
     function flag(opts, key) {
         return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
     }
+    var PASSIVE_BY_DEFAULT = { wheel: true, mousewheel: true, touchstart: true, touchmove: true };
+    // The event a passive listener is hearing now, if one is: it cannot
+    // cancel that event. Held here, not on the event, where a page could
+    // clear it.
+    var passiveNow = null;
+    // The engine dispatches `wheel` only once something can hear it, so a
+    // page with no wheel listener scrolls without running any script.
+    var wheelNoted = false;
+    function noteWheel() {
+        if (wheelNoted) return;
+        wheelNoted = true;
+        N.noteWheel();
+    }
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -5749,7 +5965,13 @@ const WRAPPERS_JS: &str = r#"
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) return;
         }
-        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+        // `passive` (DOM §2.7): such a listener cannot cancel the event.
+        // Left out, it is on for `wheel`, `mousewheel` and the touch moves
+        // on the window, the document, its root and its body, as in Chrome.
+        var passive = opts && typeof opts === 'object' && opts.passive !== undefined ? !!opts.passive
+            : PASSIVE_BY_DEFAULT[type] === true && (t === g || t === doc || t === doc.documentElement || t === doc.body);
+        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), passive: passive, removed: false });
+        if (type === 'wheel' || type === 'mousewheel') noteWheel();
         if (signal != null && typeof signal.addEventListener === 'function') {
             signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
         }
@@ -5920,6 +6142,7 @@ const WRAPPERS_JS: &str = r#"
         return typeof v === 'function' || (typeof v === 'object' && v !== null) ? v : null;
     }
     function elementHandlerSet(t, type, v) {
+        if (type === 'wheel' && typeof v === 'function') noteWheel();
         var a = ASSIGNED.get(t);
         if (!a) { a = Object.create(null); ASSIGNED.set(t, a); }
         a[type] = handlerValue(v);
@@ -5989,13 +6212,15 @@ const WRAPPERS_JS: &str = r#"
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
                 if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
-                callListener(t, l.cb, event);
+                var passiveBefore = passiveNow;
+                passiveNow = l.passive === true ? event : null;
+                try { callListener(t, l.cb, event); } finally { passiveNow = passiveBefore; }
             }
         }
         // The on<type> handler runs with the non-capture listeners.
         var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
-            event.defaultPrevented = true;
+            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
@@ -6047,8 +6272,11 @@ const WRAPPERS_JS: &str = r#"
         event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
         event[ORIGIN] = null;
         event[PATH] = null;
-        if (activated) activated(!event.defaultPrevented);
-        return !event.defaultPrevented;
+        // The canceled flag, not a property a listener can redefine; an
+        // object that is not an Event keeps its own.
+        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        if (activated) activated(!canceled);
+        return !canceled;
     };
 
     // The engine's own dispatches go through this, whatever a page has put
@@ -6067,7 +6295,6 @@ const WRAPPERS_JS: &str = r#"
         this.bubbles = !!init.bubbles;
         this.cancelable = !!init.cancelable;
         this.composed = !!init.composed;
-        this.defaultPrevented = false;
         this.target = null;
         this.currentTarget = null;
         this.eventPhase = 0;
@@ -6081,7 +6308,19 @@ const WRAPPERS_JS: &str = r#"
         this.bubbles = !!bubbles;
         this.cancelable = !!cancelable;
     };
-    Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
+    function cancel(ev) { if (ev.cancelable && passiveNow !== ev) setAdd(CANCELED, ev); }
+    Event.prototype.preventDefault = function () { cancel(this); };
+    // Read-only (no setter: an assignment does nothing, and throws in
+    // strict code); the canceled flag above (Chrome for Testing 148).
+    Object.defineProperty(Event.prototype, 'defaultPrevented', {
+        get: function () { return setHas(CANCELED, this); }, enumerable: true, configurable: true
+    });
+    // The legacy alias (DOM §2.2): false cancels, as preventDefault() does.
+    Object.defineProperty(Event.prototype, 'returnValue', {
+        get: function () { return !setHas(CANCELED, this); },
+        set: function (v) { if (!v) cancel(this); },
+        enumerable: true, configurable: true
+    });
     // The nodes the event is going through, target first; empty outside dispatch.
     Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };

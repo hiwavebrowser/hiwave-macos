@@ -16,16 +16,7 @@ const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_nosc
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html1_noscript_serialize_cft148.txt");
 
 /// Lines that still differ, by their start: each must still differ.
-const KNOWN: &[&str] = &[
-    // A noscript the page's own document made that is in no document yet
-    // (on its own, or under a fragment): Chrome writes it raw. Nothing here
-    // records which document made a detached node, and raw is the unsafe
-    // answer when that is unknown (a node made by an inert document would
-    // get it too), so it is escaped. Owner-document tracking for detached
-    // nodes is a row of its own.
-    "main, created, not inserted:",
-    "main, in a fragment:",
-];
+const KNOWN: &[&str] = &[];
 
 #[test]
 fn a_noscripts_text_is_written_raw_only_where_scripting_is_on() {
