@@ -4157,7 +4157,14 @@ impl Engine {
         gesture: bool,
         began: bool,
     ) -> Result<bool, EngineError> {
-        let _ = began;
+        // A gesture that begins starts a new scroll sequence: whatever the
+        // last one held (its scroller, its first wheel's fate) is let go,
+        // however soon this follows it (R1 on #1121).
+        if began {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.wheel_gesture = None;
+            }
+        }
         // The page hears the wheel when it has a listener for one
         // (`DomBindings::wants_wheel`); a page with none runs no script
         // here. A listener that is not passive hears it first and may
