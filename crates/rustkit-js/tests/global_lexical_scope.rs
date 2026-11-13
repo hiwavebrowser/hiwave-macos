@@ -128,3 +128,10 @@ fn assigning_or_reading_a_later_lexical_binding_before_it_is_initialised_matches
     assert_eq!(run(&["function get() { return w }", "var r; try { get() } catch (e) { r = e.name } const w = 1;", "r"]), "ReferenceError");
     assert_eq!(run(&["function ty() { return typeof v }", "var r; try { ty() } catch (e) { r = e.name } const v = 1;", "r"]), "ReferenceError");
 }
+
+#[test]
+fn typeof_an_undeclared_global_is_still_undefined() {
+    assert_eq!(run(&["String(typeof neverDeclaredAnywhere)"]), "undefined");
+    // After the declaration has run, `typeof` of the late binding is its value's type.
+    assert_eq!(run(&["function ty() { return typeof late }", "const late = 1;", "ty()"]), "number");
+}

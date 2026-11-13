@@ -202,6 +202,11 @@ impl GetNameOrUndefined {
 
         context.find_runtime_binding(&mut binding_locator)?;
 
+        // HIWAVE PATCH (global-lexical-scope): a global name that resolved, at run time, to a later
+        // script's lexical binding is no longer "an undeclared global": while that binding is
+        // uninitialised, `typeof x` is a ReferenceError (the temporal dead zone), not "undefined".
+        let is_global = is_global && binding_locator.is_global();
+
         let result = if let Some(value) = context.get_binding(&binding_locator)? {
             value
         } else if is_global {
