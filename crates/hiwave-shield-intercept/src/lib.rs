@@ -102,9 +102,9 @@ impl ShieldInterceptHandler {
         thread_local! {
             static FLOOR: hiwave_shield::AdBlocker = hiwave_shield::AdBlocker::new();
         }
-        let source = request.referrer.as_ref().unwrap_or(&request.url);
+        let source = first_party(request);
         FLOOR
-            .with(|engine| engine.check(&request.url, source, dest_to_shield(request.destination)))
+            .with(|engine| engine.check(&request.url, &source, dest_to_shield(request.destination)))
             .map(|found| BlockReason { list: "domain-floor".into(), rule: found.rule })
     }
 
@@ -205,15 +205,12 @@ impl InterceptHandler for ShieldInterceptHandler {
             return InterceptAction::Allow;
         }
 
-        // First party = the document that made the request. The loader
-        // carries it as the (policy-governed) referrer; a subresource with
-        // no referrer context is judged against its own origin, which
-        // disables third-party-only rules rather than inventing a party.
-        let source = request.referrer.as_ref().unwrap_or(&request.url);
+        // First party = the document that made the request (see `first_party`).
+        let source = first_party(request);
 
         // Which list and rule blocked it (dev-tools T2: the event log's
         // `failure.blocked_by`); the floor names itself and its domain.
-        let blocked = match shared_block(&request.url, source, dest_to_shield(dest)) {
+        let blocked = match shared_block(&request.url, &source, dest_to_shield(dest)) {
             Some(verdict) => verdict.map(|found| BlockReason { list: found.list, rule: found.rule }),
             None => {
                 // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
@@ -448,6 +445,19 @@ where
     let mut interceptor = rustkit_net::RequestInterceptor::new();
     interceptor.add_handler(Arc::new(handler));
     interceptor
+}
+
+/// The first party a request is judged against: the document that made it, which the loader
+/// carries as the referrer (the document's URL, whatever its referrer policy sends as a header).
+/// A request with none (a view loaded without a URL) gets an opaque first party that matches no
+/// site, so every third-party rule applies to it, as for a document whose origin is opaque.
+/// Judging it against its own URL made it first-party to itself and turned the `$third-party`
+/// defaults off there (R1 on #1132).
+fn first_party(request: &Request) -> Url {
+    match &request.referrer {
+        Some(referrer) => referrer.clone(),
+        None => Url::parse("https://opaque.invalid/").expect("a constant URL"),
+    }
 }
 
 #[cfg(test)]
