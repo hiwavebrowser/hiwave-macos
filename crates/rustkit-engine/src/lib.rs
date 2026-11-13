@@ -792,6 +792,8 @@ mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
 #[cfg(all(test, feature = "headless"))]
+mod grid_item_flex_percent_tests;
+#[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_maximize_tracks_tests;
