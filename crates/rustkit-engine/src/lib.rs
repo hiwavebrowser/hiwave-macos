@@ -477,12 +477,18 @@ mod lay2_fixed_containing_block_tests;
 mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless"))]
 mod html1_noscript_serialize_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
 mod r1_stack_pins_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl1_trusted_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl2_discrete_wheel_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -495,6 +501,8 @@ mod select_height_tests;
 mod input_height_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod input_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod set5_input_content_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod inline_line_pitch_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -791,6 +799,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_flex_percent_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -4165,6 +4175,13 @@ impl Engine {
     /// becomes the held target: a box at its end hands on at once, as
     /// Chromium does.
     ///
+    /// The hold is for the steps of a gesture only (WHL2): a trackpad's
+    /// scroll, which the platform marks with a phase. A wheel on its own (a
+    /// mouse's notch) goes to what is under the pointer however soon after
+    /// the last one, as in Chrome, and so does the first step of a gesture
+    /// after such a wheel. `scroll_at` is a step of a gesture; `wheel_at`
+    /// takes which it is.
+    ///
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
     pub fn scroll_at(
@@ -4175,25 +4192,121 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        self.wheel_at(id, x, y, delta_x, delta_y, true)
+    }
+
+    /// A wheel over a viewport point (`scroll_at` has the rules); `gesture`
+    /// says whether it is a step of a gesture or a wheel on its own.
+    pub fn wheel_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
+        // The page hears the wheel when it has a listener for one
+        // (`DomBindings::wants_wheel`); a page with none runs no script
+        // here. A listener that is not passive hears it first and may
+        // cancel it, and then nothing scrolls. Passive ones hear it after
+        // the scroll, at whatever is then under the pointer (WHL1; Chrome
+        // for Testing 148). An open `<select>` drop-down keeps the wheel.
+        let listening = !self.select_popup_open(id)
+            && self
+                .views
+                .get(&id)
+                .and_then(|v| v.bindings.as_ref())
+                .is_some_and(|bindings| bindings.wants_wheel());
+        if !listening {
+            return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
+        }
+        let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
+            self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+        });
+        if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
+            return Ok(false);
+        }
+        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture)?;
+        if !cancelable {
+            self.fire_wheel(id, x, y, delta_x, delta_y, false);
+        }
+        Ok(changed)
+    }
+
+    /// `scroll_at` without the page's `wheel` event.
+    fn scroll_by_wheel(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
         // An open `<select>` drop-down takes the wheel.
         if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
             return Ok(moved);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        let recent = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        // Only a step of a gesture stays on what the step before it moved.
+        let held = recent.filter(|g| gesture && g.gesture);
         let held_target = held
             .map(|g| g.target)
             .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
         let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
-        let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
+        let rest = recent.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
         let (changed, rest) = match target {
             WheelTarget::Window => (self.scroll_view(id, delta_x, delta_y)?, (0.0, 0.0)),
             WheelTarget::Element(node) => self.wheel_element(id, node, delta_x, delta_y, rest)?,
         };
         if let Some(view) = self.views.get_mut(&id) {
-            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
+            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest, gesture });
         }
         Ok(changed)
+    }
+
+    /// The element under a viewport point (raw NodeId), for a `wheel`.
+    fn wheel_target(&self, id: EngineViewId, x: f32, y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let raw = Self::hit_at(view, x, y)?.node_id?;
+        let doc = view.document.as_ref()?;
+        let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// Dispatch `wheel` at the element under a viewport point, with the
+    /// engine's scroll deltas as DOM ones (down and right are positive).
+    /// Returns false when a listener cancelled it.
+    fn fire_wheel(&mut self, id: EngineViewId, x: f32, y: f32, delta_x: f32, delta_y: f32, cancelable: bool) -> bool {
+        let Some(target) = self.wheel_target(id, x, y) else {
+            return true;
+        };
+        let (offset_x, offset_y) = self
+            .views
+            .get(&id)
+            .and_then(|view| Self::hit_at(view, x, y))
+            .map_or((0.0, 0.0), |hit| (hit.local_x as f64, hit.local_y as f64));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: x as f64,
+            client_y: y as f64,
+            screen_x: x as f64,
+            screen_y: y as f64,
+            offset_x,
+            offset_y,
+            ..Default::default()
+        };
+        let not_cancelled = self.run_listeners(id, target, "wheel", true, |bindings| {
+            bindings.fire_wheel_event(target, &data, delta_x as f64, -(delta_y as f64), cancelable)
+        });
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after wheel event failed");
+        }
+        not_cancelled
     }
 
     /// What a new wheel over a point moves: the innermost scroller under the
@@ -14000,6 +14113,8 @@ impl layout_ctx::LayoutCtx {
                             value,
                             placeholder,
                             input_type,
+                            // SET5: how many characters wide the field is.
+                            size: input_size_attribute(attributes.get("size").map(String::as_str)),
                         },
                     };
 
@@ -29606,9 +29721,26 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
     computed_read::set_root_font(root_style);
 }
 
-/// How long after a wheel the next one still belongs to its gesture. macOS
-/// marks a real gesture's phases, but the input queue does not carry them; a
+/// An `<input>`'s `size` attribute as a number of characters (HTML
+/// §4.10.5.3.2, the rules for parsing non-negative integers): leading ASCII
+/// whitespace, an optional "+", then the digits up to the first other
+/// character ("10px" is 10, "3.9" is 3, "1e2" is 1); 20 unless that is 1 to
+/// 2147483647. `HTMLInputElement.size` reads it the same way (dom.rs).
+fn input_size_attribute(value: Option<&str>) -> u32 {
+    let text = value.unwrap_or("").trim_start_matches(['\t', '\n', '\u{c}', '\r', ' ']);
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let digits: &str = &text[..text.bytes().take_while(u8::is_ascii_digit).count()];
+    match digits.trim_start_matches('0').len() {
+        0 if digits.is_empty() => 20,
+        n if n > 10 => 20,
+        _ => digits.parse::<u64>().ok().filter(|n| (1..=2_147_483_647).contains(n)).map_or(20, |n| n as u32),
+    }
+}
+
+/// How long after a step of a gesture the next step still belongs to it. A
 /// flick's events, inertia included, come much closer together than this.
+/// Which wheels are steps of a gesture is the platform's to say (macOS
+/// marks them with a phase; `PendingScroll::gesture`).
 const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// CH2.E7: a thumb drag in progress. The scroll follows the pointer's
@@ -29642,6 +29774,8 @@ struct WheelGesture {
     last: std::time::Instant,
     /// What rounding the last step to a whole pixel left over.
     rest: (f32, f32),
+    /// Whether that wheel was a step of a gesture (`Engine::wheel_at`).
+    gesture: bool,
 }
 
 /// Copy the view's element scroll offsets onto the scrollers of a layout tree,

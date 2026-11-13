@@ -2208,6 +2208,7 @@ fn dispatch_view_input(
                 scroll.y as f32,
                 scroll.dx as f32,
                 scroll.dy as f32,
+                scroll.gesture,
             ) {
                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
             }
