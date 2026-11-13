@@ -198,7 +198,7 @@
         this.ports = portList(ports, "Failed to execute 'initMessageEvent' on 'MessageEvent': ");
     };
     hide(g, 'MessageEvent', MessageEvent);
-    __rk.keepCtor('MessageEvent', MessageEvent);
+    __rk.keepCtor('MessageEvent', MessageEvent, 'Event', [['data', null], ['origin', ''], ['lastEventId', ''], ['source', null], ['ports', []]]);
 
     // ---- window.postMessage (HTML §9.3.3), same window only.
     // '*' matches any origin; '/' the document's own; anything else must

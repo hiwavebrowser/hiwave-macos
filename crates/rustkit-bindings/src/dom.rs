@@ -2830,7 +2830,7 @@ const WRAPPERS_JS: &str = r#"
     // for an object that will not take it.
     function stamp(ev) {
         if (setHas(STAMPED, ev)) return;
-        defineOwn(ev, 'isTrusted', { get: TRUST_GET, set: undefined, enumerable: true, configurable: false });
+        defineOwn(ev, 'isTrusted', getterDesc(TRUST_GET));
         setAdd(STAMPED, ev);
     }
     // The engine made this event. It reads trusted through its one
@@ -2841,20 +2841,51 @@ const WRAPPERS_JS: &str = r#"
     // (`make`) can be trusted, and once: whatever a page has put on the
     // window since never builds an event the engine marks.
     var CTORS = Object.create(null), MADE = new WeakSet();
+    // The engine builds its events with nothing a page can reach: these
+    // built-ins are taken now, and every descriptor has no prototype.
+    var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
+    function getterDesc(get) {
+        var d = objCreate(null);
+        d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;
+        return d;
+    }
+    function fixed(o, k, v) {
+        var d = objCreate(null);
+        d.value = v; d.writable = true; d.enumerable = true; d.configurable = false;
+        defineOwn(o, k, d);
+    }
+    // What the engine adds to its event past the interface's fields (a
+    // point's page and offset coordinates), defined as the fields are.
+    function extra(ev, at) {
+        for (var k in at) {
+            if (!hasOwn(at, k)) continue;
+            if (hasOwn(ev, k)) { fixed(ev, k, at[k]); continue; }
+            var d = objCreate(null);
+            d.value = at[k]; d.writable = false; d.enumerable = true; d.configurable = true;
+            defineOwn(ev, k, d);
+        }
+    }
+    // An interface's own fields (`[name, default]` pairs), its parent and
+    // a finishing step (a direct call; WheelEvent's legacy deltas).
+    var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
     var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
     var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
-    __rk.keepCtor = function (name, C) {
+    __rk.keepCtor = function (name, C, parent, fields) {
         if (typeof C !== 'function') return;
         CTORS[name] = C;
         PROTOS[name] = C.prototype;
+        if (typeof parent === 'string') { PARENT[name] = parent; FIELDS[name] = fields || []; }
         // An interface's prototype cannot be replaced (Web IDL).
         try { defineOwn(C, 'prototype', { writable: false }); } catch (_) {}
     };
     // An event's type as its constructor or initEvent set it: what dispatch
     // and activation read, whatever a page defines on the prototypes.
+    // An engine event is always in the map; only a page's own event, which
+    // is never trusted, falls back to its `type`.
     function evType(e) { return mapHas(EVTYPE, e) ? mapGet(EVTYPE, e) : e.type; }
+    __rk.keepFinish = function (name, fn) { if (typeof fn === 'function') FINISH[name] = fn; };
     // A click made by the engine as a mouse or pointer event, or made by
     // script with the MouseEvent of install time.
     function isMouseClick(e) {
@@ -2863,17 +2894,44 @@ const WRAPPERS_JS: &str = r#"
         return !!PROTOS.MouseEvent && isProto(PROTOS.MouseEvent, e);
     }
     __rk.hasCtor = function (name) { return typeof CTORS[name] === 'function'; };
-    function made(ev) { setAdd(MADE, ev); return ev; }
+    // The engine's event: an object of the interface's prototype with
+    // every field an own, non-configurable property, built here and
+    // nowhere else (no constructor, no call through a built-in a page can
+    // replace). `init` is the engine's own object literal.
     function make(name, type, init) {
-        var known = typeof CTORS[name] === 'function';
-        var C = known ? CTORS[name] : CTORS.Event;
-        var ev = new C(type, init);
-        mapSet(KIND, ev, known ? name : 'Event');
-        return made(ev);
+        if (!PROTOS[name] || (name !== 'Event' && !FIELDS[name])) name = 'Event';
+        var i = init || objCreate(null);
+        function arg(k) { return hasOwn(i, k) ? i[k] : undefined; }
+        var ev = objCreate(PROTOS[name]);
+        mapSet(EVTYPE, ev, '' + type);
+        defineOwn(ev, 'type', getterDesc(TYPE_GET));
+        fixed(ev, 'bubbles', !!arg('bubbles'));
+        fixed(ev, 'cancelable', !!arg('cancelable'));
+        fixed(ev, 'composed', !!arg('composed'));
+        fixed(ev, 'target', null);
+        fixed(ev, 'currentTarget', null);
+        fixed(ev, 'eventPhase', 0);
+        stamp(ev);
+        fixed(ev, 'timeStamp', dateNow());
+        // The fields, the root interface's first.
+        var chain = objCreate(null), depth = 0, n;
+        for (n = name; n !== 'Event' && FIELDS[n]; n = PARENT[n]) chain[depth++] = n;
+        while (depth > 0) {
+            var fields = FIELDS[chain[--depth]];
+            for (var j = 0; j < fields.length; j++) {
+                var f = fields[j], v = arg(f[0]);
+                fixed(ev, f[0], v === undefined ? (isArray(f[1]) ? [] : f[1]) : v);
+            }
+        }
+        var finish = FINISH[name];
+        if (finish) finish(ev, i);
+        mapSet(KIND, ev, name);
+        setAdd(MADE, ev);
+        return ev;
     }
     __rk.make = make;
     function trust(ev) {
-        if (!setHas(MADE, ev)) throw new TypeError('not an engine-made event');
+        if (!setHas(MADE, ev) || !mapHas(EVTYPE, ev)) throw new TypeError('not an engine-made event');
         setDrop(MADE, ev);
         stamp(ev);
         setAdd(TRUSTED, ev);
@@ -5768,7 +5826,6 @@ const WRAPPERS_JS: &str = r#"
             init.pressure = init.buttons ? 0.5 : 0;
         }
         var ev = make(pointer && __rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', type, init);
-        trust(ev);
         // Where the point is in the document and in the target's box.
         var at = {
             pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
@@ -5778,9 +5835,8 @@ const WRAPPERS_JS: &str = r#"
         // A move or a boundary event has no button of its own: `which`
         // is the primary button while it is held.
         if (!press && !pointer) at.which = init.buttons & 1;
-        Object.keys(at).forEach(function (k) {
-            Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-        });
+        extra(ev, at);
+        trust(ev);
         return dispatchTo(target, ev);
     };
 
@@ -5824,14 +5880,12 @@ const WRAPPERS_JS: &str = r#"
             init.wheelDeltaX = notches(init.deltaX);
             init.wheelDeltaY = notches(init.deltaY);
             var ev = make('WheelEvent', 'wheel', init);
-            trust(ev);
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY
             };
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
+            extra(ev, at);
+            trust(ev);
             return dispatchTo(target, ev);
     };
 
@@ -5856,17 +5910,13 @@ const WRAPPERS_JS: &str = r#"
         init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
         init.dataTransfer = dt;
         var ev = make(__rk.hasCtor('DragEvent') ? 'DragEvent' : 'MouseEvent', type, init);
-        if (!(ev.dataTransfer instanceof Object)) {
-            Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
-        }
-        trust(ev);
+
         var at = {
             pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-            offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
+            offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0, dataTransfer: dt
         };
-        Object.keys(at).forEach(function (k) {
-            Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-        });
+        extra(ev, at);
+        trust(ev);
         var notCancelled = dispatchTo(target, ev);
         // A cancelled dragstart ends the drag before it began.
         var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
@@ -5926,7 +5976,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireTextInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target || typeof __rk.newTextEvent !== 'function') return true;
-            var ev = made(__rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data }));
+            var ev = make('TextEvent', 'textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
             trust(ev);
             return dispatchTo(target, ev);
     };
@@ -6333,7 +6383,7 @@ const WRAPPERS_JS: &str = r#"
         // Own properties, defined (not assigned): what a page puts on the
         // prototypes is never run for them. The type is kept here too.
         mapSet(EVTYPE, this, String(type));
-        defineOwn(this, 'type', { get: TYPE_GET, enumerable: true, configurable: false });
+        defineOwn(this, 'type', getterDesc(TYPE_GET));
         own(this, 'bubbles', !!init.bubbles);
         own(this, 'cancelable', !!init.cancelable);
         own(this, 'composed', !!init.composed);

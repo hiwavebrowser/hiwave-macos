@@ -70,6 +70,10 @@
         ['PromiseRejectionEvent', 'Event', [['promise', null, 'any'], ['reason', undefined, 'any']]],
         ['SubmitEvent', 'Event', [['submitter', null, 'any']]]
     ];
+    function fieldsOf(name) {
+        for (var n = 0; n < EVENTS.length; n++) if (EVENTS[n][0] === name) return EVENTS[n][2];
+        return [];
+    }
     EVENTS.forEach(function (spec) {
         var name = spec[0], Parent = g[spec[1]], fields = spec[2];
         if (g[name] !== undefined || typeof Parent !== 'function') return;
@@ -93,7 +97,7 @@
         if (name === 'FocusEvent') __rk.FocusEvent = C;
         C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
         Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
-        __rk.keepCtor(name, C);
+        __rk.keepCtor(name, C, spec[1], fields);
         def(name, C);
     });
     var ME = g.MouseEvent;
@@ -179,7 +183,18 @@
             });
         });
         g.WheelEvent = WheelEventWithLegacy;
-        __rk.keepCtor('WheelEvent', WheelEventWithLegacy);
+        __rk.keepCtor('WheelEvent', WheelEventWithLegacy, 'MouseEvent', fieldsOf('WheelEvent'));
+        // The engine's wheel events get their legacy deltas here, with
+        // built-ins taken at install.
+        var wheelSet = Function.prototype.call.bind(WeakMap.prototype.set), trunc = Math.trunc, finite = isFinite;
+        var hasOwnInit = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+        __rk.keepFinish('WheelEvent', function (e, i) {
+            if (!WHEEL) return;
+            var x = hasOwnInit(i, 'wheelDeltaX') ? i.wheelDeltaX : e.deltaX;
+            var y = hasOwnInit(i, 'wheelDeltaY') ? i.wheelDeltaY : e.deltaY;
+            x = trunc(x); y = trunc(y);
+            wheelSet(WHEEL, e, { x: finite(x) ? x : 0, y: finite(y) ? y : 0 });
+        });
     }
     // UIEvent.which (UI Events §7.3, legacy): a key event's keyCode, a mouse
     // event's button + 1, else 0. Chrome for Testing 148 has it on
@@ -217,6 +232,7 @@
             this.data = data === undefined ? 'undefined' : String(data);
         };
         def('TextEvent', TextEvent);
+        __rk.keepCtor('TextEvent', TextEvent, 'UIEvent', [['data', '']]);
         __rk.newTextEvent = function (type, init) {
             makingText = true;
             try { return new TextEvent(type, init); } finally { makingText = false; }
@@ -253,7 +269,7 @@
             });
         };
         g.InputEvent = InputEventWithRanges;
-        __rk.keepCtor('InputEvent', InputEventWithRanges);
+        __rk.keepCtor('InputEvent', InputEventWithRanges, 'UIEvent', fieldsOf('InputEvent'));
     }
     var KE = g.KeyboardEvent;
     if (KE) {
