@@ -22,6 +22,7 @@ pub mod grid;
 pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
+pub mod layout_memo;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod path_data;
@@ -1291,7 +1292,7 @@ pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32
 }
 
 /// Margin collapse context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarginCollapseContext {
     /// Pending positive margin.
     pub positive_margin: f32,
@@ -1354,7 +1355,7 @@ impl MarginCollapseContext {
 }
 
 /// A 2D rectangle.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -1390,7 +1391,7 @@ impl Rect {
 }
 
 /// Edge sizes (margin, padding, border).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EdgeSizes {
     pub top: f32,
     pub right: f32,
@@ -1409,7 +1410,7 @@ impl EdgeSizes {
 }
 
 /// Box dimensions including content, padding, border, and margin.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dimensions {
     /// Content area.
     pub content: Rect,
@@ -1951,6 +1952,9 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// Recorded results of this box's child layout for the current root layout (LAT21,
+    /// `layout_memo`). Never an input to layout.
+    pub(crate) layout_memo: Option<Box<layout_memo::BoxMemo>>,
     /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
     /// when it is an element scroller. Set through a shared tree by the
     /// engine, from its per-view table, when script scrolls. Layout never
@@ -2033,6 +2037,7 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            layout_memo: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
@@ -2641,6 +2646,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
@@ -4452,8 +4458,13 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        layout_memo::bump_epoch();
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
+        if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
+            layout_memo::clear_memos(self);
+        }
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -4469,6 +4480,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         // Handle clear property
         if self.clear != Clear::None {
@@ -7106,7 +7118,7 @@ impl LayoutBox {
     }
 
     /// Layout block children with margin collapse.
-    fn layout_block_children_with_collapse(
+    pub(crate) fn layout_block_children_with_collapse_run(
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
@@ -22616,4 +22628,22 @@ mod overlay_hit_tests {
         // Elsewhere on the overlay: the overlay, not the page under it.
         assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
+}
+
+thread_local! {
+    /// Boxes laid out on this thread since the last [`take_layout_visits`]: one per call of
+    /// `layout_with_collapse_in` or `layout_with_percent_base`. A box laid out k times in one pass
+    /// counts k, so `visits / boxes` is the pass's re-layout multiplicity (LAT21: walmart ran
+    /// ~160 visits per box).
+    static LAYOUT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_layout_visit() {
+    LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of box layouts on this thread since the last call, and a fresh count.
+pub fn take_layout_visits() -> u64 {
+    LAYOUT_VISITS.with(|n| n.replace(0))
 }
