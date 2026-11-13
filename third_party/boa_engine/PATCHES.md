@@ -466,3 +466,15 @@ The vendored crate's own parser tests are not run by the workspace, and `cargo t
 on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
+
+## Patch: a catchable stack overflow (STR-10)
+
+Opt in with `RuntimeLimits::set_catchable_stack_overflow(true)` (off by default, so upstream's tests
+keep their uncatchable `RuntimeLimitError::Recursion`; the page runtime, `JsRuntime::new`, turns it
+on). Running out of call frames or operand-stack slots then throws a `RangeError` ("Maximum call
+stack size exceeded") that `try`/`catch` sees. Host re-entry (`host_recursion`) stays uncatchable.
+Second change, in `handle_throw` (always on): when a caller's `catch` takes an exception from a
+callee, the unwound callee's stack values are dropped, as its return would; they stayed until the
+caller returned, so a caught overflow left ~64K slots behind and the next call hit the slot limit.
+Pin: `crates/rustkit-js/tests/stack_overflow_catchable.rs`. The vendored crate's own `vm::tests`
+are not in the workspace and were not run here.
