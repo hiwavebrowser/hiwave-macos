@@ -2899,10 +2899,76 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             layout.to_str().unwrap(),
         ])
         .unwrap();
+        let began = Instant::now();
         let result = run_capture(&args);
+        let took = began.elapsed();
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let dumped = fs::read_to_string(&layout).unwrap();
         assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
+        // The settle is 5 s of virtual time: a plain capture of a page with nothing to wait for must not
+        // spend 5 s of real time on it (every board capture would).
+        assert!(took < Duration::from_millis(3_000), "a plain capture took {took:?}: the settle waited in real time");
+    }
+
+    /// An `--animations` capture runs on the real clock, so its settle is a real 5000 ms live phase (live
+    /// loop turns), not virtual steps: every capture mode gives the page the reference's 5 s after load.
+    /// The page is the first settle test's (a reveal timer due just past the load's timer pass); without
+    /// the phase the capture ended at the load and the timer never ran.
+    #[test]
+    fn an_animations_capture_gets_the_settle_as_a_real_live_phase() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-timer'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: {}
+Connection: close
+
+{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-anim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--animations",
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
+        assert!(took >= Duration::from_millis(4_500), "the settle was not a real-time phase: the capture took {took:?}");
     }
 
     /// The settle's virtual span must not depend on how fast the server answers (R1 on #1104). A page
