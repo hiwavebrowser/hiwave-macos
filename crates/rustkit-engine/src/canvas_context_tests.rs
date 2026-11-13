@@ -360,3 +360,36 @@ fn source_node(engine: &mut Engine, id: EngineViewId, element: &str) -> usize {
     let doc = view.document.as_ref().expect("document");
     doc.get_element_by_id(element).expect("element").id.raw()
 }
+
+/// STR-7 slice 2: drawImage of a loaded `<img>` (a data: PNG) at 1:1, a
+/// rect and a scaled-up sub-rect, read back with getImageData, against
+/// Chrome for Testing 148 (tools/parity_oracle/canvas_img_cases.json,
+/// canvas_img_log.mjs). The image cache is where the canvas reads the
+/// decoded pixels.
+#[test]
+fn draw_image_of_a_loaded_img_matches_chrome() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_img_cases.json")).unwrap();
+    for case in data["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let (mut engine, id) = view(case["html"].as_str().unwrap());
+        let mut ours = String::new();
+        for _ in 0..40 {
+            pump(&mut engine, id, 50);
+            ours = eval(&mut engine, id, "typeof window.__r === 'string' ? window.__r : ''");
+            if !ours.is_empty() {
+                break;
+            }
+        }
+        assert!(!ours.is_empty(), "{name}: the image never loaded or drew");
+        let chrome = case["chrome_rgba"].as_str().unwrap();
+        let px = |h: &str| -> Vec<u8> { (0..h.len() / 2).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap()).collect() };
+        let (a, b) = (px(&ours), px(chrome));
+        assert_eq!(a.len(), b.len(), "{name}: length");
+        let max = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+        // The 1:1 draws are exact; the scaled-up sub-rect is bilinear, and
+        // tiny-skia's 8-bit bilinear rounds differently from Skia's (11 here,
+        // 15 in canvas_raster2_cases.json "draw-image-scaled-up").
+        assert!(max <= 16, "{name}: max channel difference {max}\n ours   {ours}\n chrome {chrome}");
+    }
+}
