@@ -550,3 +550,38 @@ fn the_worker_bridge_is_not_left_on_the_page_global() {
     assert_eq!(left, "[]");
     assert_eq!(ev(&b, "typeof Worker"), "function");
 }
+
+/// The bound is the page turn's, not each worker's: four flooding workers still get at most 256
+/// messages delivered in one turn between them (not 4 x 256), and the turns after it take from each
+/// worker in turn, so a busy first worker does not starve the others. Security review of #1105.
+#[test]
+fn flooding_workers_share_one_turns_budget_and_each_is_served() {
+    let b = bound();
+    b.evaluate(
+        "var got = [[], [], [], []]; \
+         for (var k = 0; k < 4; k++) (function (k) { var w = new Worker('http://a.test/flood' + k + '.js'); \
+           w.onmessage = function (e) { got[k].push(e.data); }; })(k);",
+    )
+    .unwrap();
+    serve(&b, "for (var i = 0; i < 2000; i++) postMessage(i);");
+    std::thread::sleep(Duration::from_millis(500));
+    let total = "String(got[0].length + got[1].length + got[2].length + got[3].length)";
+    b.run_timers(0, 100).unwrap();
+    let first: usize = ev(&b, total).parse().unwrap();
+    assert!(first > 0 && first <= 256, "one page turn delivered {first} messages from four workers");
+    for _ in 0..4 {
+        b.run_timers(0, 100).unwrap();
+    }
+    assert_eq!(
+        ev(&b, "String(got.every(function (g) { return g.length > 0; }))"),
+        "true",
+        "a worker was starved: {}",
+        ev(&b, "JSON.stringify(got.map(function (g) { return g.length; }))")
+    );
+    assert!(pump_until(&b, "got.every(function (g) { return g.length === 2000; })"), "not all arrived");
+    assert_eq!(
+        ev(&b, "String(got.every(function (g) { return g.every(function (v, i) { return v === i; }); }))"),
+        "true",
+        "out of order"
+    );
+}
