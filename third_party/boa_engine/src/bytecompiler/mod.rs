@@ -1079,6 +1079,111 @@ impl<'ctx> ByteCompiler<'ctx> {
         expr.visit_with(&mut Finder).is_break()
     }
 
+    /// HIWAVE PATCH (js-perf2 item 6): whether compiling `expr` into a destination register writes
+    /// that register only with its LAST instruction (every operand goes to its own temporary or is
+    /// read from its own register first). Then a local variable's own register can be the
+    /// destination: a read of the variable inside `expr` still sees its old value, and if `expr`
+    /// throws the variable keeps it. Only the top-level kind matters, since every sub-expression is
+    /// compiled into a temporary of its own. Logical operators, conditionals, sequences, literals of
+    /// arrays and objects, templates and unary operators write the destination early and are left
+    /// out.
+    fn writes_dst_last(expr: &Expression) -> bool {
+        use boa_ast::expression::operator::binary::BinaryOp;
+        match expr {
+            Expression::Literal(_) | Expression::Identifier(_) => true,
+            Expression::Parenthesized(p) => Self::writes_dst_last(p.expression()),
+            Expression::Binary(b) => matches!(
+                b.op(),
+                BinaryOp::Arithmetic(_) | BinaryOp::Bitwise(_) | BinaryOp::Relational(_)
+            ),
+            Expression::PropertyAccess(PropertyAccess::Simple(_)) => true,
+            Expression::Call(_) | Expression::New(_) => true,
+            _ => false,
+        }
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): the register of `name` when it is a local that may be
+    /// written (a `var`, a parameter, a mutable `let`; not a `const` or a named function
+    /// expression's own name), the same rule as the in-place `x++`.
+    fn writable_local_register(&mut self, name: &JsString) -> Option<u32> {
+        let binding = self.lexical_scope.get_identifier_reference(name.clone());
+        let is_lexical = binding.is_lexical();
+        let BindingKind::Local(Some(local_reg)) = self.get_binding(&binding) else {
+            return None;
+        };
+        let writable = if is_lexical {
+            self.lexical_scope.set_mutable_binding(name.clone()).is_ok()
+        } else {
+            self.lexical_scope.is_binding_mutable(name) == Some(true)
+        };
+        writable.then_some(local_reg)
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): a statement `x = rhs` on a writable local: `rhs` is compiled
+    /// straight into `x`'s register when it writes its destination last. Returns false (nothing
+    /// emitted) for any other shape.
+    fn compile_local_simple_assign(&mut self, assign: &boa_ast::expression::operator::Assign) -> bool {
+        use boa_ast::expression::operator::assign::{AssignOp, AssignTarget};
+        if assign.op() != AssignOp::Assign || !Self::writes_dst_last(assign.rhs()) {
+            return false;
+        }
+        let AssignTarget::Identifier(ident) = assign.lhs() else {
+            return false;
+        };
+        let name = ident.to_js_string(self.interner());
+        let Some(local_reg) = self.writable_local_register(&name) else {
+            return false;
+        };
+        self.compile_expr(assign.rhs(), &Register::persistent(local_reg));
+        true
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): a statement `obj.name = rhs` or `obj[key] = rhs` whose key
+    /// and right side cannot assign: the object, the key and the value are each read from a local's
+    /// own register when they are one (no copies). Returns false (nothing emitted) otherwise.
+    fn compile_member_assign_direct(&mut self, assign: &boa_ast::expression::operator::Assign) -> bool {
+        use boa_ast::expression::operator::assign::{AssignOp, AssignTarget};
+        if assign.op() != AssignOp::Assign || Self::may_assign(assign.rhs()) {
+            return false;
+        }
+        let AssignTarget::Access(PropertyAccess::Simple(access)) = assign.lhs() else {
+            return false;
+        };
+        if let PropertyAccessField::Expr(key) = access.field()
+            && Self::may_assign(key)
+        {
+            return false;
+        }
+        let rhs = assign.rhs();
+        self.compile_expr_operand(access.target(), |this, object| match access.field() {
+            PropertyAccessField::Const(ident) => {
+                this.compile_expr_operand(rhs, |this, value| {
+                    this.emit_set_property_by_name_from(value, object, ident.sym());
+                });
+            }
+            PropertyAccessField::Expr(key) => {
+                this.compile_expr_operand(key, |this, key| {
+                    this.compile_expr_operand(rhs, |this, value| {
+                        this.bytecode.emit_set_property_by_value(value, key, object, object);
+                    });
+                });
+            }
+        });
+        true
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): `object.ident = value` with both given as operands.
+    fn emit_set_property_by_name_from(&mut self, value: RegisterOperand, object: RegisterOperand, ident: Sym) {
+        let ic_index = self.ic.len() as u32;
+        let name_index = self.get_or_insert_name(ident);
+        let Constant::String(ref name) = self.constants[name_index as usize].clone() else {
+            unreachable!("there should be a string at index")
+        };
+        self.ic.push(InlineCache::new(name.clone()));
+        self.bytecode
+            .emit_set_property_by_name(value, object, ic_index.into());
+    }
+
     fn emit_set_property_by_name(
         &mut self,
         value: &Register,
@@ -1830,6 +1935,8 @@ impl<'ctx> ByteCompiler<'ctx> {
             // mutable local: one instruction on the local's own register after the right side,
             // instead of a copy in, the operation, and a copy out.
             Expression::Assign(assign) if self.compile_local_compound_assign(assign) => {}
+            Expression::Assign(assign) if self.compile_local_simple_assign(assign) => {}
+            Expression::Assign(assign) if self.compile_member_assign_direct(assign) => {}
             Expression::Parenthesized(parenthesized) => {
                 self.compile_expr_for_side_effects(parenthesized.expression());
             }
@@ -2329,6 +2436,14 @@ impl<'ctx> ByteCompiler<'ctx> {
                     if let Some(expr) = variable.init() {
                         let binding = self.lexical_scope.get_identifier_reference(ident.clone());
                         let index = self.insert_binding(binding);
+                        // HIWAVE PATCH (js-perf2 item 6): a local `var` whose initializer writes its
+                        // destination last is initialised in its own register, with no copy.
+                        if let BindingKind::Local(Some(local_reg)) = index
+                            && Self::writes_dst_last(expr)
+                        {
+                            self.compile_expr(expr, &Register::persistent(local_reg));
+                            continue;
+                        }
                         let value = self.register_allocator.alloc();
                         self.emit_binding_access(BindingAccessOpcode::GetLocator, &index, &value);
                         self.compile_expr(expr, &value);
