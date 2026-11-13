@@ -1036,6 +1036,49 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
     }
 
+    /// HIWAVE PATCH (js-perf2 item 6): `dst = value.ident` with `value` given as an operand, so a
+    /// local variable's own register can be the object without a `Move` into a temporary.
+    fn emit_get_property_by_name_from(&mut self, dst: &Register, value: RegisterOperand, ident: Sym) {
+        let ic_index = self.ic.len() as u32;
+
+        let name_index = self.get_or_insert_name(ident);
+        let Constant::String(ref name) = self.constants[name_index as usize].clone() else {
+            unreachable!("there should be a string at index")
+        };
+        self.ic.push(InlineCache::new(name.clone()));
+
+        if name == &StaticJsStrings::LENGTH {
+            self.bytecode
+                .emit_get_length_property(dst.variable(), value, ic_index.into());
+        } else {
+            self.bytecode
+                .emit_get_property_by_name(dst.variable(), value, ic_index.into());
+        }
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): whether evaluating `expr` could assign to or update a
+    /// variable of this function. Conservative: any assignment or update expression anywhere in it
+    /// (function bodies inside it included) answers true. A local variable held in a register can
+    /// only change through such an expression in the function's own code, so when this is false
+    /// the register may be read lazily, after `expr` has run, instead of copied first.
+    pub(crate) fn may_assign(expr: &Expression) -> bool {
+        use boa_ast::visitor::{VisitWith, Visitor};
+        use boa_ast::expression::operator::{Assign, Update};
+        use std::ops::ControlFlow;
+
+        struct Finder;
+        impl<'ast> Visitor<'ast> for Finder {
+            type BreakTy = ();
+            fn visit_assign(&mut self, _: &'ast Assign) -> ControlFlow<()> {
+                ControlFlow::Break(())
+            }
+            fn visit_update(&mut self, _: &'ast Update) -> ControlFlow<()> {
+                ControlFlow::Break(())
+            }
+        }
+        expr.visit_with(&mut Finder).is_break()
+    }
+
     fn emit_set_property_by_name(
         &mut self,
         value: &Register,
@@ -1351,7 +1394,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                 });
             }
             None => {
-                self.compile_expr_operand(binary.lhs(), |compiler, lhs| {
+                self.compile_expr_operand_before(binary.lhs(), binary.rhs(), |compiler, lhs| {
                     compiler.compile_expr_operand(binary.rhs(), |compiler, rhs| {
                         label_index = compiler.next_opcode_location();
                         emit_fn(&mut compiler.bytecode, Self::DUMMY_ADDRESS, lhs, rhs);
@@ -1475,6 +1518,34 @@ impl<'ctx> ByteCompiler<'ctx> {
             Access::Property { access } => match access {
                 PropertyAccess::Simple(access) => {
                     let mut compiler = self.position_guard(access.field());
+
+                    // HIWAVE PATCH (js-perf2 item 6): when nothing evaluated between reading the
+                    // object and using it can assign, a local variable's register is the operand
+                    // itself (no `Move` into a temporary), and likewise a local key.
+                    let direct = match access.field() {
+                        PropertyAccessField::Const(_) => true,
+                        PropertyAccessField::Expr(expr) => !Self::may_assign(expr),
+                    };
+                    if direct {
+                        compiler.compile_expr_operand(access.target(), |compiler, object| {
+                            match access.field() {
+                                PropertyAccessField::Const(ident) => {
+                                    compiler.emit_get_property_by_name_from(dst, object, ident.sym());
+                                }
+                                PropertyAccessField::Expr(expr) => {
+                                    compiler.compile_expr_operand(expr, |compiler, key| {
+                                        compiler.bytecode.emit_get_property_by_value(
+                                            dst.variable(),
+                                            key,
+                                            object,
+                                            object,
+                                        );
+                                    });
+                                }
+                            }
+                        });
+                        return;
+                    }
 
                     let object = compiler.register_allocator.alloc();
                     compiler.compile_expr(access.target(), &object);
@@ -1798,6 +1869,26 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// it allocates a temporary register and compiles into it.
     ///
     /// The `inner_fn` passed in will be called before the register get deallocated.
+    /// HIWAVE PATCH (js-perf2 item 6): `compile_expr_operand` for an operand that is read BEFORE
+    /// another one (`later`) is evaluated and used after it, as the left side of `lhs op rhs`. A
+    /// local's register is used directly only when `later` cannot assign: `a + --a` and
+    /// `a < (a = 5)` read `a` first, so its old value has to be copied before `later` runs.
+    pub(crate) fn compile_expr_operand_before(
+        &mut self,
+        expr: &Expression,
+        later: &Expression,
+        inner_fn: impl FnOnce(&mut Self, RegisterOperand),
+    ) {
+        if Self::may_assign(later) {
+            let reg = self.register_allocator.alloc();
+            self.compile_expr(expr, &reg);
+            inner_fn(self, reg.variable());
+            self.register_allocator.dealloc(reg);
+        } else {
+            self.compile_expr_operand(expr, inner_fn);
+        }
+    }
+
     pub(crate) fn compile_expr_operand(
         &mut self,
         expr: &Expression,

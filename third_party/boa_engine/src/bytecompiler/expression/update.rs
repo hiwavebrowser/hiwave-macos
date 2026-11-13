@@ -43,13 +43,19 @@ impl ByteCompiler<'_> {
                 // so when dst==src the new value wins.
                 //
                 // Skip for const bindings — they must fall through to emit ThrowMutateImmutable.
-                if is_lexical
-                    && compiler
+                // HIWAVE PATCH (js-perf2 item 6): the same for a mutable non-lexical local (a
+                // `var` or a parameter), which was left on the slow path of three copies.
+                let local_in_place = match &index {
+                    BindingKind::Local(Some(_)) if is_lexical => compiler
                         .lexical_scope
                         .set_mutable_binding(name.clone())
-                        .is_ok()
-                    && let BindingKind::Local(Some(local_reg)) = &index
-                {
+                        .is_ok(),
+                    BindingKind::Local(Some(_)) => {
+                        compiler.lexical_scope.is_binding_mutable(&name) == Some(true)
+                    }
+                    _ => false,
+                };
+                if local_in_place && let BindingKind::Local(Some(local_reg)) = &index {
                     let local_op = (*local_reg).into();
 
                     if discard {
