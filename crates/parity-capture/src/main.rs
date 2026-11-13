@@ -478,22 +478,28 @@ impl LiveWake {
 /// every run: the page clock in a stepped capture is virtual.
 const STEPPED_SETTLE_MS: u64 = 5_000;
 
-/// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. No real waiting except while a request the page
-/// started is still open (bounded), so the answer arrives; the virtual span itself never depends on real time.
+/// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. While a request the page started is open,
+/// virtual time stands still: turns of 0 ms (real waiting, bounded by a cap across the settle) until it
+/// answers, then the steps go on. So the answer lands at the same virtual time whatever the server's
+/// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
+/// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
 fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) {
     const STEP_MS: u64 = 50;
     const REQUEST_WAIT: Duration = Duration::from_millis(5);
     const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
     let mut left = STEPPED_SETTLE_MS;
     let mut waited = Duration::ZERO;
+    // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
+    let mut in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
     while left > 0 {
-        let step = STEP_MS.min(left);
-        let turn = rt.block_on(engine.pump_live(view_id, step));
-        left -= step;
-        if turn.in_flight > 0 && waited < REQUEST_WAIT_CAP {
+        while in_flight > 0 && waited < REQUEST_WAIT_CAP {
             std::thread::sleep(REQUEST_WAIT);
             waited += REQUEST_WAIT;
+            in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
         }
+        let step = STEP_MS.min(left);
+        in_flight = rt.block_on(engine.pump_live(view_id, step)).in_flight;
+        left -= step;
     }
 }
 
