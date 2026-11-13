@@ -750,4 +750,19 @@ mod tests {
         assert!(differ.is_empty(), "{}", differ.join("
 "));
     }
+
+    /// A request with no first party (a view loaded without a URL passes no referrer) is judged
+    /// against an opaque first party that matches no site, so every `$third-party` default applies
+    /// (R1 LOW on #1132). It was judged against its own URL, which made it first-party to itself and
+    /// turned every default off there.
+    #[test]
+    fn a_request_with_no_first_party_still_meets_the_third_party_defaults() {
+        let handler = ShieldInterceptHandler::new();
+        for url in ["https://doubleclick.net/pagead.js", "https://mixpanel.com/lib.js"] {
+            let request = test_request_with(url, RequestDestination::Script, None);
+            assert!(handler.pending_floor(&request).is_some(), "{url} with no first party was allowed");
+        }
+        let own = test_request_with("https://mixpanel.com/lib.js", RequestDestination::Script, Some("https://mixpanel.com/"));
+        assert!(handler.pending_floor(&own).is_none(), "a site's own script was blocked");
+    }
 }
