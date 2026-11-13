@@ -533,7 +533,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(window);
     makeEventTarget(document);
 
-    var now = 0, nextId = 1, timers = [];
+    // The timer queue and its clock. The documents of a frame tree share one
+    // (same-origin frames are one event loop, HTML 8.1.7): a frame's realm
+    // finds its parent's on the host object's `shared`, which every realm
+    // of a runtime holds. Each entry runs in the realm that set it.
+    var shared = __rk.shared || {};
+    var Q = shared.timerQueue || (shared.timerQueue = { now: 0, nextId: 1, timers: [] });
+    var timers = Q.timers;
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
@@ -541,7 +547,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var target = targetName === 'document' ? document : window;
         var event = {
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
-            target: target, currentTarget: null, timeStamp: now, isTrusted: true,
+            target: target, currentTarget: null, timeStamp: Q.now, isTrusted: true,
             preventDefault: function () { this.defaultPrevented = true; },
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         };
@@ -553,14 +559,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function schedule(cb, ms, args, repeat, frame) {
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
-        var id = nextId++;
-        timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
+        var id = Q.nextId++;
+        timers.push({ id: id, seq: id, due: Q.now + delay, cb: cb, args: args,
+                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame, win: window, run: call });
         return id;
     }
     function clearTimer(id) {
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].id === id) { timers.splice(i, 1); return; }
+            if (timers[i].id === id && timers[i].win === window) { timers.splice(i, 1); return; }
         }
     }
     window.setTimeout = function (cb, ms) {
@@ -572,7 +578,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false, true);
+        return schedule(function () { cb(Q.now); }, 16, [], false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -607,17 +613,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var timer = timers[best];
             // A timer a cut-short live turn owed runs after the clock has
             // moved on; the clock does not go back for it.
-            if (timer.due > now) now = timer.due;
+            if (timer.due > Q.now) Q.now = timer.due;
             // An interval that fell behind (a live turn held it back) is not
             // caught up: its next run counts from now, as in a browser.
             if (timer.every) {
                 timer.due += timer.every;
-                if (timer.due <= now) timer.due = now + timer.every;
-                timer.seq = nextId++;
+                if (timer.due <= Q.now) timer.due = Q.now + timer.every;
+                timer.seq = Q.nextId++;
             }
             else timers.splice(best, 1);
             ran++;
-            call(timer);
+            timer.run(timer);
         }
         return ran;
     }
@@ -657,17 +663,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     window.__rustkit_advance_timers = function (delta, max, slice) {
-        var target = now + delta;
+        var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
         if (ran >= max) {
-            if (now < target) now = target;
+            if (Q.now < target) Q.now = target;
             return ran;
         }
-        if (now < target) now = target;
+        if (Q.now < target) Q.now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
         }
         for (var j = 0; j < round.length && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
@@ -675,7 +681,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (at < 0) continue;
             timers.splice(at, 1);
             ran++;
-            call(round[j]);
+            round[j].run(round[j]);
         }
         return ran;
     };
@@ -696,7 +702,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
     window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
-        var target = now + delta;
+        var target = Q.now + delta;
         var start = Date.now();
         var ran = 0;
         var yielded = false;
@@ -709,30 +715,51 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 break;
             }
         }
-        if (now < target) now = target;
+        if (Q.now < target) Q.now = target;
         if (ran >= max) return yielded ? -ran : ran;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
         }
         for (var j = 0; j < round.length && ran < max; j++) {
             var at = timers.indexOf(round[j]);
             if (at < 0) continue;
             timers.splice(at, 1);
             ran++;
-            call(round[j]);
+            round[j].run(round[j]);
         }
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
-    window.__rustkit_now = function () { return now; };
+    window.__rustkit_now = function () { return Q.now; };
+    // The animation-frame round of a frame tree's turn that stopped for
+    // its time with timers still due (`Engine::pump_live`): the frame
+    // callbacks due now run once, as a turn's round does.
+    window.__rustkit_animation_round = function (max) {
+        var round = [], ran = 0;
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            round[j].run(round[j]);
+        }
+        return ran;
+    };
+    // A frame's document is going away: its timers go with it.
+    window.__rustkit_drop_timers = function () {
+        for (var i = timers.length - 1; i >= 0; i--) if (timers[i].win === window) timers.splice(i, 1);
+    };
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
         }
-        return due < 0 ? -1 : Math.max(0, due - now);
+        return due < 0 ? -1 : Math.max(0, due - Q.now);
     };
 })();
 "#;
@@ -1337,6 +1364,8 @@ impl DomBindings {
     /// End a child made with [`Self::new_child`]: its realm can no longer be
     /// evaluated in. Objects of it the parent still holds stay alive.
     pub fn drop_child(&self, child: DomBindings) -> bool {
+        // Its timers are in the tree's queue: they go with it.
+        let _ = child.runtime.borrow_mut().evaluate_bookkeeping("window.__rustkit_drop_timers && window.__rustkit_drop_timers()");
         let realm = child.runtime.realm;
         drop(child);
         self.runtime.shared.borrow_mut().drop_realm(realm)
@@ -3095,6 +3124,19 @@ impl DomBindings {
 
     /// The page's virtual clock, in ms: what its timers and animation
     /// frames have run up to. The engine's CSS transitions run on it.
+    /// Run the animation-frame callbacks that are due (a turn's round),
+    /// at most `max` of them. Returns how many ran.
+    pub fn run_animation_round(&self, max: u32) -> Result<u32, BindingError> {
+        let ran = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("window.__rustkit_animation_round({max})"))?;
+        Ok(match ran {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
     pub fn clock_now_ms(&self) -> f64 {
         match self
             .runtime

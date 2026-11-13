@@ -122,21 +122,26 @@ fn an_event_made_in_the_parent_reaches_a_listener_in_the_child() {
     assert_eq!(ev(&t.parent, "child.document.getElementById('c').click(); 'clicked'"), "clicked");
 }
 
+/// The documents of a frame tree are one event loop (HTML 8.1.7): their
+/// timers are one queue on one clock, run in due order (ties in the order
+/// set), each in the document that set it. (Stage 1 gave each page its own
+/// clock; Speedometer's React-Stockcharts-SVG then ran a frame's due timers
+/// after the page's later ones. The order is Chrome 148's, pinned in
+/// rustkit-engine `frames_stage2_tests`.)
 #[test]
-fn each_page_runs_its_own_timers() {
+fn a_frame_trees_timers_are_one_queue() {
     let t = tree();
     ev(&t.parent, "var ticks = []; setTimeout(function () { ticks.push('parent'); }, 10);");
     ev(&t.child, "var ticks = []; setTimeout(function () { ticks.push('child'); }, 10); requestAnimationFrame(function () { ticks.push('child frame'); });");
+    ev(&t.parent, "window.seen = []; setTimeout(function () { seen.push(child.ticks.length); }, 10);");
     t.parent.run_timers(100, 100).unwrap();
     assert_eq!(ev(&t.parent, "ticks.join()"), "parent");
-    assert_eq!(ev(&t.child, "ticks.join()"), "", "the parent's clock does not run the child's timers");
-    t.child.run_timers(100, 100).unwrap();
-    assert_eq!(ev(&t.child, "ticks.join()"), "child,child frame");
-    // A timer the parent sets through the child's window is the child's.
-    ev(&t.parent, "child.setTimeout(function () { child.ticks.push('set by parent'); }, 10);");
-    t.parent.run_timers(100, 100).unwrap();
-    assert_eq!(ev(&t.child, "ticks.length"), "2");
-    t.child.run_timers(100, 100).unwrap();
+    assert_eq!(ev(&t.child, "ticks.join()"), "child,child frame", "the tree's clock runs the child's timers");
+    assert_eq!(ev(&t.parent, "seen.join()"), "1", "in the order set: the child's 10 ms ran before the parent's later 10 ms");
+    // A timer the parent sets through the child's window is the child's,
+    // and clearing it from the parent's own clearTimeout does nothing.
+    ev(&t.parent, "var id = child.setTimeout(function () { child.ticks.push('set by parent'); }, 10); clearTimeout(id);");
+    t.parent.run_timers(200, 100).unwrap();
     assert_eq!(ev(&t.child, "ticks[2]"), "set by parent");
 }
 

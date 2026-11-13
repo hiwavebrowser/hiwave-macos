@@ -204,6 +204,37 @@ function arm() {
     assert_eq!(page.js("order.join(',')"), r#"String("frame0,page0,page50")"#);
 }
 
+/// Timers of a frame tree that fall due together run in the order they
+/// were set, whichever document set them; each runs its microtasks before
+/// the next. Chrome 148 (probe page, in one page task: the page's 0 ms,
+/// the frame's 0 ms, the page's 0 ms, each queueing a microtask):
+/// `page0,page0-micro,frame0,frame0-micro,page0b,page0b-micro`.
+#[test]
+fn a_frame_trees_timers_due_together_run_in_the_order_set() {
+    let page = "<!doctype html><body><iframe id=f src=/child.html></iframe><script>
+window.order = []; window.ready = false;
+document.getElementById('f').addEventListener('load', function () { ready = true; });
+function arm() {
+  var w = document.getElementById('f').contentWindow;
+  setTimeout(function () {
+    function t(name, win) { return function () { order.push(name); win.Promise.resolve().then(function () { order.push(name + '-micro'); }); }; }
+    setTimeout(t('page0', window), 0);
+    w.setTimeout(t('frame0', w), 0);
+    setTimeout(t('page0b', window), 0);
+  }, 10);
+}
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.ready", Duration::from_secs(5));
+    page.js("arm()");
+    page.rt.block_on(page.engine.pump_live(page.view, 500));
+    page.rt.block_on(page.engine.pump_live(page.view, 0));
+    assert_eq!(
+        page.js("order.join(',')"),
+        r#"String("page0,page0-micro,frame0,frame0-micro,page0b,page0b-micro")"#
+    );
+}
+
 /// A removed frame is dropped: its window is no longer the element's.
 /// Chrome 148: `contentWindow` and `contentDocument` are null once the
 /// element is out of the document.

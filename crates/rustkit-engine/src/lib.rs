@@ -2365,6 +2365,18 @@ pub struct LivePump {
     pub next_timer_ms: Option<u64>,
 }
 
+/// Fold a later turn of the frames into what the frames' turns so far
+/// said: its next timer is the one that stands (the earlier answer's has
+/// run or moved), the rest add up.
+fn merge_live(into: &mut LivePump, later: LivePump) {
+    into.timers_ran += later.timers_ran;
+    into.requests += later.requests;
+    into.in_flight = later.in_flight;
+    into.relaid_out |= later.relaid_out;
+    into.yielded_for_frame |= later.yielded_for_frame;
+    into.next_timer_ms = later.next_timer_ms;
+}
+
 /// How far [`Engine::load_url_yielding`] got before it returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadYield {
@@ -3149,6 +3161,10 @@ impl SiblingContext {
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
+    /// The most timer callbacks a view's live turn runs: one per task while
+    /// a frame tree's page runs the tree's timers, none for its frames
+    /// (`pump_live`), else the usual cap.
+    live_timer_cap: u32,
     /// The window thread's half: view host, compositor, renderer. The
     /// page side (everything below) hands it frames; see `presenter.rs`.
     presenter: Option<Presenter>,
@@ -3430,6 +3446,7 @@ impl Engine {
         let system_clipboard = config.system_clipboard;
         let nested_contexts = config.nested_contexts;
         Ok(Self {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config,
             presenter,
             page_commits: HashMap::new(),
@@ -6451,14 +6468,76 @@ impl Engine {
             return self.pump_live_turn(id, elapsed_ms).await;
         }
         self.drive_frames(id).await;
-        let frames = self.pump_frames(id, elapsed_ms).await;
+        let has_frames = self.views.get(&id).is_some_and(|v| !v.frames.is_empty());
+        // A frame's own frames are the tree's: only its top runs the timers.
+        let is_frame = self.views.values().any(|v| v.frames.values().any(|f| f.view == id));
+        if !has_frames || is_frame {
+            let frames = self.pump_frames(id, elapsed_ms).await;
+            let mut out = self.pump_live_turn(id, elapsed_ms).await;
+            out.relaid_out |= frames.relaid_out;
+            out.in_flight += frames.in_flight;
+            out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            return self.frame_requests_wake(id, out);
+        }
+        // A frame tree is one event loop (HTML 8.1.7): one timer queue and
+        // clock for every document in it (the page's lifecycle script shares
+        // them), run from the page's turn alone. Each timer task is its own
+        // evaluation, so its microtasks run before the next task, whichever
+        // document set it; the frames' turns take no timers and do what
+        // their documents' scripts asked of the network and of layout. The
+        // turn's time is the tree's.
+        let started = std::time::Instant::now();
+        self.live_timer_cap = 0;
+        let mut frames = self.pump_frames(id, 0).await;
+        self.live_timer_cap = 1;
         let mut out = self.pump_live_turn(id, elapsed_ms).await;
+        let mut stopped = false;
+        while out.timers_ran > 0 && out.next_timer_ms == Some(0) {
+            if started.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                stopped = true;
+                break;
+            }
+            let turn = self.pump_live_turn(id, 0).await;
+            out.timers_ran += turn.timers_ran;
+            out.requests += turn.requests;
+            out.in_flight = turn.in_flight;
+            out.relaid_out |= turn.relaid_out;
+            out.next_timer_ms = turn.next_timer_ms;
+            if turn.timers_ran == 0 {
+                break;
+            }
+        }
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        if stopped {
+            // The turn's frame still comes (#776): the tree's due animation
+            // frame callbacks run once before it returns.
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
+                    debug!(error = %e, "frames: the tree's animation round failed");
+                }
+            }
+            out.yielded_for_frame = true;
+        }
+        // The frames lay out and send what this turn's tasks wrote and asked.
+        self.live_timer_cap = 0;
+        let after = self.pump_frames(id, 0).await;
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        merge_live(&mut frames, after);
         out.relaid_out |= frames.relaid_out;
         out.in_flight += frames.in_flight;
         out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        self.frame_requests_wake(id, out)
+    }
+
+    /// A frame request the page made during this turn asks for the next
+    /// turn at once (see [`Self::pump_live`]).
+    fn frame_requests_wake(&self, id: EngineViewId, mut out: LivePump) -> LivePump {
         let asked = self
             .views
             .get(&id)
@@ -6501,6 +6580,7 @@ impl Engine {
                 .is_some_and(|view| view.doc.load_tail.is_none());
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
+        let live_timer_cap = self.live_timer_cap;
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
@@ -6555,7 +6635,7 @@ impl Engine {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let (ran, yielded) = bindings.advance_timers_for_frame(
                         elapsed_ms,
-                        MAX_LIVE_TIMER_CALLBACKS,
+                        live_timer_cap,
                         LIVE_FRAME_MS,
                     )?;
                     frame_yield.set(yielded);
@@ -31237,6 +31317,7 @@ mod tests {
         let compositor = crate::test_compositor().ok()?;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Some(Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -32020,6 +32101,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32092,6 +32174,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -32180,6 +32263,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -32393,6 +32477,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32487,6 +32572,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32601,6 +32687,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32679,6 +32766,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32751,6 +32839,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32837,6 +32926,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -32940,7 +33030,8 @@ mod tests {
             let compositor = crate::test_compositor().expect("compositor");
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let engine = Engine {
-                config: EngineConfig::default(),
+                live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
+                    config: EngineConfig::default(),
                 views: HashMap::new(),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
@@ -33043,6 +33134,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33124,6 +33216,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -33211,6 +33304,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33294,6 +33388,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33368,6 +33463,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33420,6 +33516,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33612,6 +33709,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33691,6 +33789,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -36280,6 +36379,7 @@ mod web_font_tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
