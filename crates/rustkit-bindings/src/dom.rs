@@ -676,6 +676,9 @@ impl DomHost {
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
         let templates = self.templates.get_mut();
         templates.clear();
+        // The page's own document owns itself and every node it has; what
+        // is made or moved in later takes its document from there.
+        document.root().set_owner(document.root().id.raw());
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
@@ -1016,8 +1019,21 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "fragmentHTML" {
             let context = if data.is_empty() { "body" } else { data.as_str() };
             let html = string_arg(args, 3).unwrap_or("");
-            let nodes = document.parse_fragment(html, context).map_err(|_| "SyntaxError")?;
+            // The fragment is the range's document's (`args[4]`, its
+            // Document node) and is parsed with that document's scripting
+            // flag: on only for the page's own document when it runs
+            // script; off for any other, or when the document is unknown.
+            let owner = number_arg(args, 4)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .filter(|n| matches!(n.node_type, NodeType::Document))
+                .map_or(0, |n| n.owner_document_id());
+            let scripting = document.scripting() && owner == document.root().id.raw();
+            let nodes = document
+                .parse_fragment_scripted(html, context, true, false, scripting)
+                .map_err(|_| "SyntaxError")?;
             let fragment = document.create_node(NodeType::DocumentFragment);
+            fragment.set_owner(owner);
             let templates = &mut host.templates.borrow_mut();
             for child in nodes {
                 adopt_template_contents(document, &child, templates);
@@ -1165,8 +1181,6 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
             let templates = &mut host.templates.borrow_mut();
             let copy = clone_node(document, &node, deep, templates);
-            // A clone is in the original's document.
-            copy.set_owner(node.owner_document_id());
             Ok((node_id(Some(copy)), DomDirty::Clean))
         }
         // `adoptTo(doc)`: the node (just made by, adopted by or imported
@@ -1179,8 +1193,8 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             if !matches!(owner.node_type, NodeType::Document) {
                 return Err("NotSupportedError");
             }
-            // The page's own Document node has owner 0; another's owns itself.
-            node.set_owner(if Rc::ptr_eq(&owner, document.root()) { 0 } else { owner.id.raw() });
+            // Every Document node owns itself, the page's included.
+            node.set_owner(owner.owner_document_id());
             Ok((JsValue::Null, DomDirty::Clean))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
@@ -1198,7 +1212,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
                 top = parent;
             }
             let inert = tag_name.eq_ignore_ascii_case("template")
-                || node.is_inert()
+                || node.owner_document_id() != document.root().id.raw()
                 || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
                 .parse_fragment_scripted(
@@ -1635,8 +1649,12 @@ fn clone_node(
             copy.append_child(clone_node(document, &child, true, templates));
         }
     }
+    // A clone is in its original's document.
+    copy.set_owner(node.owner_document_id());
     if let Some(content) = templates.get(&node.id.raw()).cloned() {
         let content = clone_node(document, &content, deep, templates);
+        // A template's contents are always the template contents' document's.
+        content.set_owner(template_owner(document, templates));
         templates.insert(copy.id.raw(), content);
     }
     copy
@@ -1770,21 +1788,16 @@ const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembe
 /// the node's document is the page's own and the page runs script, in the
 /// tree or not (HTML2, Chrome for Testing 148). Its text is escaped like
 /// any other when its document is one `DOMParser` or `createHTMLDocument`
-/// made, or a template's contents: `Node::is_inert`, which follows the
-/// node through creation, insertion, adoption, import and cloning.
+/// made, or a template's contents, and when no path has given the node a
+/// document (`Node::owner_document_id`, which follows the node through
+/// creation, insertion, adoption, import, cloning and data writes).
 fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
     let Some(page) = page.filter(|d| d.scripting()) else {
         return false;
     };
-    if node.is_inert() {
-        return false;
-    }
-    // Under a Document node, that one must be the page's.
-    let mut top = node.clone();
-    while let Some(parent) = top.parent() {
-        top = parent;
-    }
-    !matches!(top.node_type, NodeType::Document) || Rc::ptr_eq(&top, page.root())
+    // Only a node positively of the page's own document: one of another
+    // document, or one no path has given a document, is escaped.
+    node.owner_document_id() == page.root().id.raw()
 }
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
@@ -1819,6 +1832,9 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         NodeType::Text(data) => {
             let raw = node
                 .parent()
+                // HTML elements only: an SVG or MathML `style`, `script`
+                // or `noscript` writes its text escaped (Chrome for Testing 148).
+                .filter(|p| is_html_element(p))
                 .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t) || (raw_noscript && t == "noscript")))
                 .unwrap_or(false);
             if raw {
@@ -3051,7 +3067,10 @@ const WRAPPERS_JS: &str = r#"
         if (info(this, 'type') === 9) return null;
         // A node of another document, in a tree or not (HTML2).
         var owner = info(this, 'owner');
-        if (typeof owner === 'number' && owner > 0) { var od = wrap(owner); if (od) return od; }
+        if (typeof owner === 'number' && owner > 0) {
+            if (g.document && g.document[SLOT] && g.document[SLOT].id === owner) return g.document;
+            var od = wrap(owner); if (od) return od;
+        }
         var n = this;
         while (n.parentNode) n = n.parentNode;
         return n.nodeType === 9 ? n : g.document;
@@ -4842,7 +4861,9 @@ const WRAPPERS_JS: &str = r#"
         var r = slots(this, 'createContextualFragment');
         var ctx = rangeContext(r.start.node);
         var tag = ctx && ctx.localName ? ctx.localName : 'body';
-        var made = N.write(gen, 'create:fragmentHTML', tag, String(html));
+        var home = r.start.node.nodeType === 9 ? r.start.node : r.start.node.ownerDocument;
+        var hs = home && home[SLOT];
+        var made = N.write(gen, 'create:fragmentHTML', tag, String(html), hs && hs.gen === gen ? hs.id : -1);
         if (typeof made === 'string') {
             throw new DOMException("Failed to execute 'createContextualFragment' on 'Range'.", made);
         }

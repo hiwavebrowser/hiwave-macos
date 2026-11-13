@@ -198,13 +198,14 @@ pub struct Node {
     /// shadow root: equal readings, the same adopted texts.
     adopted_generation: Cell<u64>,
     /// The node's document (DOM "node document"), as the NodeId of its
-    /// Document node, or 0 for the page's own document. The other
-    /// documents here are inert, scripting off (HTML §8.1.3.4): one
-    /// `DOMParser` or `createHTMLDocument` made, and the one that holds
-    /// template contents. Set where such a document's nodes are made,
-    /// taken from the new parent whenever a node is inserted (the move
-    /// adopts it), kept on removal (a removed node keeps its document),
-    /// copied by a clone. See `set_owner`.
+    /// Document node; 0 when no path has said (unknown). The page's own
+    /// Document node owns itself, and so does each other document here
+    /// (one `DOMParser` or `createHTMLDocument` made, and the one that
+    /// holds template contents). Set where a document makes a node, taken
+    /// from the new parent whenever a node is inserted (the move adopts
+    /// it), kept on removal and on a data write, copied by a clone. A
+    /// reader that needs to know must treat 0 as "not the page's". See
+    /// `set_owner`.
     owner: Cell<usize>,
 }
 
@@ -228,13 +229,7 @@ impl Node {
         })
     }
 
-    /// Whether this node's document has scripting off: any document but
-    /// the page's (`owner` above).
-    pub fn is_inert(&self) -> bool {
-        self.owner.get() != 0
-    }
-
-    /// The NodeId of this node's Document node, 0 for the page's document.
+    /// The NodeId of this node's Document node, 0 when unknown.
     pub fn owner_document_id(&self) -> usize {
         self.owner.get()
     }
@@ -255,14 +250,10 @@ impl Node {
         }
     }
 
-    /// The document whose nodes a node inserted under this one joins: this
-    /// node's own id for a Document node that is not the page's (it owns
-    /// what is in it), else this node's document.
+    /// The document whose nodes a node inserted under this one joins:
+    /// this node's own document (a Document node owns itself).
     fn document_for_children(&self) -> usize {
-        match self.node_type {
-            NodeType::Document if self.owner.get() == self.id.raw() => self.id.raw(),
-            _ => self.owner.get(),
-        }
+        self.owner.get()
     }
 
     /// The current lifetime of this element's sheet: changes whenever the
@@ -998,6 +989,8 @@ impl Document {
         // child ends its parent's.
         new.sheet_generation.set(old.sheet_generation.get());
         new.connection_generation.set(old.connection_generation.get());
+        // A data write keeps the node's document.
+        new.owner.set(old.owner.get());
         if let Some(p) = old.parent() {
             p.end_sheet();
         }
