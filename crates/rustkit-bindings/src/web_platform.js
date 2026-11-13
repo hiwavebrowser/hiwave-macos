@@ -48,7 +48,14 @@
         var entries = [];
         var performance = {
             timeOrigin: origin,
-            now: typeof g.__rustkit_now_ms === 'function' ? g.__rustkit_now_ms : function () { return Date.now() - origin; },
+            // The page clock (lib.rs, the timer script): one clock for performance.now(), the frame
+            // timestamp and Event.timeStamp. Looked up at call time, because that script runs after
+            // this one; before it exists the host clock answers.
+            now: function now() {
+                var page = g.__rustkit_perf_now;
+                if (typeof page === 'function') return page();
+                return typeof g.__rustkit_now_ms === 'function' ? g.__rustkit_now_ms() : Date.now() - origin;
+            },
             mark: function (name) {
                 var e = { name: String(name), entryType: 'mark', startTime: performance.now(), duration: 0 };
                 entries.push(e);

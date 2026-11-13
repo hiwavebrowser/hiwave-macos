@@ -269,6 +269,14 @@ struct CaptureResult {
     script_stats: Option<ScriptStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     live_stats: Option<LiveStats>,
+    /// A stepped capture's settle: how many requests the page still had open when the settle stopped
+    /// holding virtual time for them (its real-time cap ran out). A count only, never a URL; absent when none.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    settle_held_open: Option<usize>,
+    /// A stepped capture's settle, what it cost in real time (shapes only): turns, wall and wait time,
+    /// the slowest turn, timer callbacks and relayouts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    settle_stats: Option<SettleStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
@@ -382,6 +390,8 @@ impl CaptureResult {
             layout_stats: None,
             script_stats: None,
             live_stats: None,
+            settle_held_open: None,
+            settle_stats: None,
             elapsed_ms: None,
             error: None,
             captures: None,
@@ -469,6 +479,118 @@ impl LiveWake {
             .unwrap_or_else(|e| e.into_inner());
         *woken = false;
     }
+}
+
+/// How long a stepped capture lets the page run after its load, in virtual time. The Chrome reference
+/// waits this long between `load` and its screenshot (`CHROME_SETTLE_MS` in scripts/realsite_board.py, the
+/// default of tools/parity_oracle/realsite.mjs), so a timer the page sets after the load's timer pass (an
+/// A/B test settled by `setTimeout`, an entrance reveal) has run by the time ours is taken. The same span on
+/// every run: the page clock in a stepped capture is virtual.
+const STEPPED_SETTLE_MS: u64 = 5_000;
+
+/// The most real time a stepped settle may take: the reference's own wait (5 s of real time). A settle
+/// whose turns are slow (a page that relays itself out on every step, at up to a second a turn) stops
+/// between turns once this is spent, and reports how far its virtual time got (batch 74's A/B: github's
+/// settle took over 77 s, squarespace's 36 s). Fast pages finish their virtual span well inside it.
+const SETTLE_REAL_BUDGET: Duration = Duration::from_secs(5);
+
+/// Real time a capture keeps, after its settle, for the layout, the frame and the dumps within
+/// `--timeout-ms`: the settle's budget shrinks when the load has left less than this plus the budget.
+const SETTLE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+
+/// What a stepped settle cost (`CaptureResult::settle_stats`).
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+struct SettleStats {
+    /// Turns pumped (steps and 0 ms waiting turns).
+    turns: u32,
+    /// Real time the settle took, all of it.
+    wall_ms: u64,
+    /// Real time spent waiting for open requests (bounded by the cap).
+    wait_ms: u64,
+    /// The slowest single turn.
+    max_turn_ms: u64,
+    /// Turns that relaid the page out.
+    relayouts: u32,
+    /// Timer callbacks that ran.
+    timer_callbacks: u64,
+    /// Requests still open once the cap ran out.
+    held_open: usize,
+    /// How far the page's virtual time got (`STEPPED_SETTLE_MS` unless cut short).
+    virtual_ms: u64,
+    /// The settle stopped at its real-time budget before `STEPPED_SETTLE_MS` of virtual time.
+    cut_short: bool,
+}
+
+/// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. While a request the page started is open,
+/// virtual time stands still: turns of 0 ms (real waiting, bounded by a cap across the settle) until it
+/// answers, then the steps go on. So the answer lands at the same virtual time whatever the server's
+/// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
+/// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
+///
+/// It also stops, between turns, when `budget` of real time is spent or the next turn would likely end
+/// past it (the time spent plus the slowest turn so far). `budget` is `SETTLE_REAL_BUDGET`, less when the
+/// capture's timeout has less left. A page whose turns are slow gets a bounded settle, cut short and
+/// reported (`cut_short`, `virtual_ms`); a page whose span fits in the budget settles the same every run.
+///
+/// Returns what it cost (`SettleStats`), including how many requests were still open once the cap ran
+/// out: a page with a request that never answers (a long poll, an event stream) pays the cap once.
+fn settle_stepped(
+    rt: &tokio::runtime::Runtime,
+    engine: &mut rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    budget: Duration,
+) -> SettleStats {
+    const STEP_MS: u64 = 50;
+    const REQUEST_WAIT: Duration = Duration::from_millis(5);
+    const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
+    let began = Instant::now();
+    let mut stats = SettleStats::default();
+    let mut left = STEPPED_SETTLE_MS;
+    // Real time spent waiting, measured: a 5 ms sleep can last about 15 ms (Windows), and the pump counts.
+    let mut waited = Duration::ZERO;
+    let mut turn = |stats: &mut SettleStats, elapsed_ms: u64| {
+        let t = Instant::now();
+        let out = rt.block_on(engine.pump_live(view_id, elapsed_ms));
+        stats.turns += 1;
+        stats.max_turn_ms = stats.max_turn_ms.max(t.elapsed().as_millis() as u64);
+        stats.relayouts += out.relaid_out as u32;
+        stats.timer_callbacks += out.timers_ran as u64;
+        out.in_flight
+    };
+    // No budget (the load used the capture's timeout down to the margin): no turn at all.
+    if budget.is_zero() {
+        stats.cut_short = true;
+        return stats;
+    }
+    // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
+    let mut in_flight = turn(&mut stats, 0);
+    while left > 0 {
+        while in_flight > 0
+            && waited < REQUEST_WAIT_CAP
+            && began.elapsed() + Duration::from_millis(stats.max_turn_ms) < budget
+        {
+            let t = Instant::now();
+            std::thread::sleep(REQUEST_WAIT);
+            in_flight = turn(&mut stats, 0);
+            waited += t.elapsed();
+        }
+        if in_flight > 0 {
+            stats.held_open = stats.held_open.max(in_flight);
+        }
+        // Between turns only: a turn already running is not interrupted, so a turn that would likely end
+        // past the budget (the time spent plus the slowest turn so far) is not started.
+        if began.elapsed() + Duration::from_millis(stats.max_turn_ms) > budget {
+            stats.cut_short = true;
+            break;
+        }
+        let step = STEP_MS.min(left);
+        in_flight = turn(&mut stats, step);
+        left -= step;
+    }
+    stats.virtual_ms = STEPPED_SETTLE_MS - left;
+    stats.wait_ms = waited.as_millis() as u64;
+    stats.wall_ms = began.elapsed().as_millis() as u64;
+    stats
 }
 
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
@@ -659,6 +781,7 @@ fn write_event_log(path: &str, records: &[rustkit_engine::InspectorRecord]) -> s
 }
 
 fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Arc<Inspector>>) -> CaptureResult {
+    let capture_began = Instant::now();
     let mut result = CaptureResult::new(args);
 
     if let Some(ref dump_path) = args.inspector_dump {
@@ -783,6 +906,25 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 "error",
                 format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
             );
+        }
+        // With no live window the page gets the reference's settle time after the load: virtual steps in a
+        // stepped capture, a real live phase when animations run on the real clock.
+        if args.live_ms.is_none() {
+            // The reference's 5 s, or what the capture's timeout leaves after a margin for the frame.
+            let left_in_timeout = Duration::from_millis(args.timeout_ms)
+                .saturating_sub(capture_began.elapsed())
+                .saturating_sub(SETTLE_TIMEOUT_MARGIN);
+            let budget = SETTLE_REAL_BUDGET.min(left_in_timeout);
+            if args.animations {
+                // The real clock: live loop turns for the same span, in real time, within the same budget.
+                if !budget.is_zero() {
+                    run_live(&rt, &mut engine, view_id, budget.as_millis() as u64);
+                }
+            } else {
+                let stats = settle_stepped(&rt, &mut engine, view_id, budget);
+                result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
+                result.settle_stats = Some(stats);
+            }
         }
         if let Some(log) = engine.script_log(view_id) {
             result.script_stats = Some(script_stats(log));
@@ -2816,6 +2958,380 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         let (with, text) = report_with("shield", page, &["--shield", "--shield-wait-ms", "0"]);
         assert_eq!(with["shield"], true, "{text}");
         assert!(!text.contains(LINE), "{text}");
+    }
+
+    /// A load-only capture (no `--live-ms`) of a page whose reveal timer is due just past the load's
+    /// timer pass (Squarespace's homepage settles an A/B test with a timer it sets after the pass: the
+    /// timer never ran in a stepped capture, and the hero stayed hidden). The Chrome reference waits
+    /// 5 s after load before its screenshot (`CHROME_SETTLE_MS` in scripts/realsite_board.py, the
+    /// default of tools/parity_oracle/realsite.mjs); the stepped capture gives the page the same
+    /// span of virtual time after the load.
+    #[test]
+    fn a_stepped_load_only_capture_gives_the_page_the_references_settle_time() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    // The last timer the load's pass (5 s of virtual time) runs schedules the reveal
+                    // 200 ms later: due just past the pass, as a timer set after the pass would be.
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-timer'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
+        // The settle is 5 s of virtual time: a plain capture of a page with nothing to wait for must not
+        // spend 5 s of real time on it (every board capture would).
+        assert!(took < Duration::from_millis(3_000), "a plain capture took {took:?}: the settle waited in real time");
+    }
+
+    /// An `--animations` capture runs on the real clock, so its settle is a real 5000 ms live phase (live
+    /// loop turns), not virtual steps: every capture mode gives the page the reference's 5 s after load.
+    /// The page is the first settle test's (a reveal timer due just past the load's timer pass); without
+    /// the phase the capture ended at the load and the timer never ran.
+    #[test]
+    fn an_animations_capture_gets_the_settle_as_a_real_live_phase() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-timer'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: {}
+Connection: close
+
+{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-anim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--animations",
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
+        assert!(took >= Duration::from_millis(4_500), "the settle was not a real-time phase: the capture took {took:?}");
+    }
+
+    /// The settle's virtual span must not depend on how fast the server answers (R1 on #1104). A page
+    /// starts a fetch just after the load's 5000 ms timer pass (a timer the pass sets for 5190 ms, so the request is open during the settle) and sets its reveal from the answer
+    /// (`fetch config`, then `setTimeout(reveal, c.delay)`). While the request is open the settle
+    /// held no virtual time still: it advanced 50 ms a turn and waited 5 ms of real time, so a server
+    /// that took 1.5 s put the answer thousands of ms into the settle (a 5 ms wait a turn is 50 ms of
+    /// virtual time per 5 ms, and a Windows sleep of 5 ms lasts about 15 ms), the reveal past its 5000 ms
+    /// span, and the capture differed from the one against a fast server. The reveal is due 3000 ms
+    /// after the answer; with virtual time held until the answer it is always inside the span.
+    #[test]
+    fn the_settle_holds_virtual_time_while_a_request_is_open() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (kind, body) = if line.contains("/cfg") {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        ("application/json", "{\"delay\":3000}".to_string())
+                    } else {
+                        (
+                            "text/html",
+                            "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { fetch('/cfg').then(function (r) { return r.json(); }).then(function (c) { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-config'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, c.delay); }); }, 200); }, 4990);</script></body></html>"
+                                .to_string(),
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-slow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(
+            dumped.contains("revealed-by-config"),
+            "the answer landed too late in virtual time for its timer: {}",
+            &dumped[..dumped.len().min(400)]
+        );
+    }
+
+    /// The settle's wait for an open request is capped in real time, measured, not counted in nominal
+    /// sleeps (R1 on #1104: a 5 ms sleep lasts about 15 ms on Windows, so 600 of them were 9 s, not 3 s).
+    /// A request that never answers (a long poll, an event stream) costs the cap once, and the result
+    /// says how many were still open, as a count.
+    #[test]
+    fn a_request_that_never_answers_costs_the_settle_its_cap_once_and_is_counted() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    if line.contains("/hang") {
+                        // Never answer; hold the connection past the capture.
+                        std::thread::sleep(Duration::from_secs(30));
+                        return;
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { fetch('/hang'); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert_eq!(result.settle_held_open, Some(1), "the open request is not counted");
+        // The 3 s cap, the load and the stepped rest of the settle; 9 s of nominal sleeps fails it.
+        assert!(took < Duration::from_millis(6_000), "the settle's cap is not real time: the capture took {took:?}");
+    }
+
+    /// The settle is bounded in real time as well (batch 74's A/B: github's settle took over 77 s and
+    /// squarespace's 36 s, because nearly every turn relaid the page out at up to a second each). It
+    /// stops between turns once its real-time budget (the reference's 5 s, less if the capture's timeout
+    /// has less left) is spent, and says how far virtual time got. Here every turn costs about 150 ms,
+    /// so 100 turns would take 15 s.
+    #[test]
+    fn a_settle_whose_turns_are_slow_stops_at_its_real_time_budget() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setInterval(function () { var t = Date.now(); while (Date.now() - t < 150) {} document.body.style.paddingTop = (document.body.style.paddingTop === '1px' ? '2px' : '1px'); }, 16); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
+        let began = Instant::now();
+        let result = run_capture(&args);
+        let took = began.elapsed();
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
+        assert!(stats.cut_short, "the settle was not cut short: {stats:?}");
+        assert!(stats.virtual_ms > 0 && stats.virtual_ms < STEPPED_SETTLE_MS, "virtual time reached: {stats:?}");
+        assert!(took < Duration::from_millis(9_000), "the settle ran past its budget: the capture took {took:?} ({stats:?})");
+    }
+
+    /// The settle does not start a turn that would likely end past its budget: it stops when the time spent
+    /// plus the slowest turn so far would pass it (R1 LOW on #1104: a turn is not interrupted, so a slow
+    /// one started just inside the budget overran it). Here every turn costs about 900 ms: the sixth
+    /// would start at about 4.5 s and end near 5.4 s, past the 5 s budget.
+    #[test]
+    fn the_settle_does_not_start_a_turn_that_would_end_past_its_budget() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setInterval(function () { var t = Date.now(); while (Date.now() - t < 900) {} }, 16); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
+        assert!(stats.cut_short, "{stats:?}");
+        assert!(
+            stats.wall_ms <= SETTLE_REAL_BUDGET.as_millis() as u64,
+            "a turn started that ended past the budget: {stats:?}"
+        );
+    }
+
+    /// When the load has used the capture's timeout down to the margin the frame needs, the settle does not
+    /// start at all, not even its first turn: a heavy page (walmart's load is most of the 30 s on the Mac)
+    /// must not be pushed past its timeout by the settle.
+    #[test]
+    fn no_settle_turn_runs_when_the_timeout_leaves_no_budget() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        // A timeout no larger than the margin: nothing is left for the settle.
+        let timeout = SETTLE_TIMEOUT_MARGIN.as_millis().to_string();
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str(), "--timeout-ms", timeout.as_str()]).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
+        assert_eq!(stats.turns, 0, "a settle turn ran with no budget: {stats:?}");
+        assert!(stats.cut_short && stats.virtual_ms == 0, "{stats:?}");
     }
 
     /// `--live-ms` end to end: the window's end is the capture's end. A request
