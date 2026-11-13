@@ -88,6 +88,14 @@ impl Registry {
 /// Stops the page's workers when the page's bindings go away.
 pub struct Guard(Rc<Registry>);
 
+impl Guard {
+    /// How many of the page's worker threads are still running, terminated ones that have not ended
+    /// included.
+    pub(crate) fn running(&self) -> usize {
+        self.0.running()
+    }
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         self.0.stop_all();
@@ -231,14 +239,6 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
             }
             JsValue::Undefined
         }),
-    )?;
-    runtime.register_host_function(
-        "__rustkit_worker_running",
-        0,
-        {
-            let r = reg.clone();
-            Box::new(move |_| JsValue::Number(r.running() as f64))
-        },
     )?;
     Ok(Guard(reg))
 }

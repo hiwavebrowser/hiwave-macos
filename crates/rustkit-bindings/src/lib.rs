@@ -2252,10 +2252,7 @@ impl DomBindings {
     }
     /// How many worker threads are still running (tests and diagnostics).
     pub fn worker_threads_running(&self) -> usize {
-        match self.runtime.borrow_mut().evaluate_bookkeeping("__rustkit_worker_running()") {
-            Ok(JsValue::Number(n)) => n as usize,
-            _ => 0,
-        }
+        self.workers.running()
     }
 
 
