@@ -47,6 +47,9 @@ fn bound() -> DomBindings {
         Document::parse_html("<html><head></head><body></body></html>").unwrap(),
     ))
     .unwrap();
+    // The worker scripts these tests serve are on this origin: a page with no origin of its own may start
+    // only data: and blob: workers, as in Chrome.
+    b.set_location(&url::Url::parse("http://a.test/").unwrap()).unwrap();
     b.enable_net_bridge().unwrap();
     b
 }
@@ -460,4 +463,56 @@ fn a_worker_script_from_another_origin_throws_at_construction_as_in_chrome() {
     }
     try_url("blobSameOrigin", "URL.createObjectURL(new Blob(['postMessage(1)'], { type: 'text/javascript' }))");
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+const NITS: &str = include_str!("../../../docs/diagnostics/2026-11-13/str4_worker_nits_cft148.json");
+
+/// A document whose origin is opaque (a data: URL page, a sandboxed frame) starts no worker from an
+/// http(s) URL: an opaque origin matches nothing, so Chrome throws the SecurityError naming origin
+/// 'null'. data: and blob: workers still start. Measured in CfT 148.0.7778.216
+/// (`docs/diagnostics/2026-11-13/str4_worker_nits_chrome.mjs`). R1 LOW on #1105.
+#[test]
+fn a_page_with_an_opaque_origin_starts_only_data_and_blob_workers() {
+    let b = bound();
+    b.set_location(&url::Url::parse("data:text/html,x").unwrap()).unwrap();
+    let chrome: serde_json::Value = serde_json::from_str(&NITS.replace("PORT", "7001")).unwrap();
+    let want = &chrome["dataUrlPage"];
+    let script = "(function () { \
+        function t(u) { var r = { threw: false }, w; \
+          try { w = new Worker(u); } catch (e) { r = { threw: true, name: e && e.name, code: e && e.code, message: String(e && e.message) }; } \
+          if (w) { try { w.terminate(); } catch (_) {} } return r; } \
+        return JSON.stringify({ origin: String(location.origin), http: t('http://127.0.0.1:7001/w.js'), \
+          data: t('data:text/javascript,postMessage(1)') }); })()";
+    let got: serde_json::Value = serde_json::from_str(&ev(&b, script)).unwrap();
+    let asked = b.take_net_requests().len();
+    for key in ["origin", "http", "data"] {
+        assert_eq!(got[key], want[key], "{key}");
+    }
+    assert_eq!(asked, 0, "a refused worker made a request");
+}
+
+/// A "__proto__" key in a cloned object arrives as an own property, as in Chrome: the receiver's
+/// prototype is not set from it, at the top level or nested. CfT 148.0.7778.216. R1 LOW on #1105.
+#[test]
+fn a_proto_key_in_a_clone_is_an_own_property() {
+    let b = bound();
+    b.evaluate(
+        "var got = [], proto = null, w = new Worker('http://a.test/proto.js'); \
+         w.onmessage = function (e) { got.push(e.data); if (got.length === 2) { \
+           var o = got[0], a = got[1][0]; \
+           proto = { objKeys: Object.keys(o), objOwnProto: Object.prototype.hasOwnProperty.call(o, '__proto__'), \
+             objX: o.x === undefined ? 'undefined' : o.x, objProtoIsObjectProto: Object.getPrototypeOf(o) === Object.prototype, \
+             objOwnProtoX: o.hasOwnProperty('__proto__') ? Object.getOwnPropertyDescriptor(o, '__proto__').value.x : null, \
+             inArrayKeys: Object.keys(a), inArrayOwnProto: Object.prototype.hasOwnProperty.call(a, '__proto__'), \
+             inArrayX: a.x === undefined ? 'undefined' : a.x }; } };",
+    )
+    .unwrap();
+    serve(
+        &b,
+        "postMessage(JSON.parse('{\"__proto__\":{\"x\":1},\"y\":2}'));\npostMessage([JSON.parse('{\"__proto__\":{\"x\":1}}')]);",
+    );
+    assert!(pump_until(&b, "proto !== null"), "got {}", ev(&b, "JSON.stringify(got)"));
+    let chrome: serde_json::Value = serde_json::from_str(NITS).unwrap();
+    let got: serde_json::Value = serde_json::from_str(&ev(&b, "JSON.stringify(proto)")).unwrap();
+    assert_eq!(got, chrome["protoKey"]);
 }
