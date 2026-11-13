@@ -491,3 +491,19 @@ function environment, and the inner arrow read the wrong one (strict and sloppy;
 showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: whole-number double keys without a string (`js-perf1`)
+
+**Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset
+arithmetic) converted the number to a string and parsed it back to an array index
+(`ToPropertyKey`'s Float64 arm: `JsString::from(float).into()`), an allocation and a parse per
+read. CodeMirror's first parse spent about 7% of 3,404 engine-thread samples there.
+
+**What.** `PropertyKey::from_f64_key` in `src/property/mod.rs`, used by `Value::to_property_key`
+(`src/value/mod.rs`, marked `HIWAVE PATCH (js-perf1)`): a whole number from 0 to 2^32 - 2 (`-0`
+included, whose string is "0") is that index; every other Number keeps `Number::toString`'s
+string (`NaN`, `1.5`, `-1`, `4294967295`, `2^32`, `1e+21`, `Infinity`). Pins:
+`crates/rustkit-js/tests/float_index_keys.rs` (correctness for those cases, which passed before
+the change too) and `float_index_keys_allocs.rs` (allocations per read: a float key 1.14 before,
+0.14 after, an integer key 0.12; red before). Measured (release, Linux): 2M reads of `a[x]` with a
+double `x`, 435 ms to 291 ms; an integer key is unchanged at 224 ms.
