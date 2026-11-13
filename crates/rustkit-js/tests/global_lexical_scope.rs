@@ -115,3 +115,16 @@ fn an_earlier_function_can_assign_typeof_and_update_a_later_lexical_binding() {
     // Before the later script declares it, a sloppy assignment still creates a global property.
     assert_eq!(run(&[setter, "set(3); String(globalThis.x)"]), "3");
 }
+
+/// Assigning a later script's lexical binding BEFORE its declaration has run (R1 on #1101 asked for
+/// ReferenceError for a `const`). Chrome for Testing 148.0.7778.216, measured with two script tags:
+/// a `const` answers TypeError (the constness is checked first), a `let` answers ReferenceError, and a
+/// read or `typeof` of either answers ReferenceError. Ours matches each.
+#[test]
+fn assigning_or_reading_a_later_lexical_binding_before_it_is_initialised_matches_chrome() {
+    assert_eq!(run(&["function set() { x = 2 }", "var r; try { set() } catch (e) { r = e.name } const x = 1;", "r"]), "TypeError");
+    assert_eq!(run(&["function set() { y = 2 }", "var r; try { set() } catch (e) { r = e.name } let y = 1;", "r"]), "ReferenceError");
+    assert_eq!(run(&["function set() { try { z = 2 } catch (e) { return e.name } }", "const z = 1;", "set()"]), "TypeError");
+    assert_eq!(run(&["function get() { return w }", "var r; try { get() } catch (e) { r = e.name } const w = 1;", "r"]), "ReferenceError");
+    assert_eq!(run(&["function ty() { return typeof v }", "var r; try { ty() } catch (e) { r = e.name } const v = 1;", "r"]), "ReferenceError");
+}
