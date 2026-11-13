@@ -116,3 +116,9 @@ pub(crate) fn check_file(json: &str) {
 fn canvas_pixels_match_chrome() {
     check_file(include_str!("../../../tools/parity_oracle/canvas_raster_cases.json"));
 }
+
+/// Slice 2: clip, gradients, patterns, drawImage of a canvas, putImageData.
+#[test]
+fn canvas_pixels_match_chrome_slice_2() {
+    check_file(include_str!("../../../tools/parity_oracle/canvas_raster2_cases.json"));
+}
