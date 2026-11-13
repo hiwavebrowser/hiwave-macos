@@ -442,3 +442,61 @@ fn canvas_frames_match_chrome_screenshots() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+/// STR-7 slice 3: drawImage of an SVG `<img>` at 50x50, as MotionMark's
+/// Images test draws its icons, read back with getImageData, against
+/// Chrome for Testing 148 (docs/diagnostics/2026-11-12/str7: the six
+/// icons, canvas_draw_svg.html, canvas_draw_svg.chrome148.json). Chrome
+/// rasterizes the SVG at the size it is drawn. The icons are loaded here
+/// as data: URLs of the same files.
+#[test]
+fn draw_image_of_an_svg_img_matches_chrome() {
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/diagnostics/2026-11-12/str7/");
+    let chrome: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{DIR}canvas_draw_svg.chrome148.json")).unwrap()).unwrap();
+    let mut failures = Vec::new();
+    for name in ["fill_curves", "fill_hole", "stroke_lines", "stroke_curves", "fill_and_stroke", "aa_edges"] {
+        let svg = std::fs::read_to_string(format!("{DIR}{name}.svg")).unwrap();
+        let encoded: String = svg
+            .bytes()
+            .map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") })
+            .collect();
+        let html = format!(
+            "<!doctype html><body style='margin:0'><canvas id=c width=50 height=50></canvas><img id=i src=\"data:image/svg+xml,{encoded}\">\
+             <script>var i = document.getElementById('i'); function go() {{ var x = document.getElementById('c').getContext('2d'); \
+             x.drawImage(i, 0, 0, 50, 50); var d = x.getImageData(0, 0, 50, 50).data, h = ''; \
+             for (var k = 0; k < d.length; k++) h += (d[k] < 16 ? '0' : '') + d[k].toString(16); window.__r = h; }} \
+             if (i.complete && i.naturalWidth) go(); else i.addEventListener('load', go);</script></body>"
+        );
+        let (mut engine, id) = view(&html);
+        let mut ours = String::new();
+        for _ in 0..40 {
+            pump(&mut engine, id, 50);
+            ours = eval(&mut engine, id, "typeof window.__r === 'string' ? window.__r : ''");
+            if !ours.is_empty() {
+                break;
+            }
+        }
+        if ours.is_empty() {
+            failures.push(format!("{name}: never drew"));
+            continue;
+        }
+        let px = |h: &str| -> Vec<u8> { (0..h.len() / 2).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap()).collect() };
+        let (a, b) = (px(&ours), px(chrome["pixels"][name].as_str().unwrap()));
+        assert_eq!(a.len(), b.len(), "{name}: length");
+        // Premultiplied, per pixel the largest channel difference.
+        let pm = |p: &[u8]| -> [i32; 4] { let al = p[3] as i32; [p[0] as i32 * al / 255, p[1] as i32 * al / 255, p[2] as i32 * al / 255, al] };
+        let diffs: Vec<i32> = a.chunks(4).zip(b.chunks(4))
+            .map(|(x, y)| { let (x, y) = (pm(x), pm(y)); (0..4).map(|k| (x[k] - y[k]).abs()).max().unwrap() })
+            .collect();
+        let max = *diffs.iter().max().unwrap();
+        let mean = diffs.iter().map(|&d| d as f64).sum::<f64>() / diffs.len() as f64;
+        let painted = b.chunks(4).filter(|p| p[3] > 0).count();
+        println!("{name}: max {max} mean {mean:.2} (Chrome paints {painted} px)");
+        // The raster's anti-aliasing bound (STR-7 slices 1 and 2).
+        if max > 80 || mean > 14.0 {
+            failures.push(format!("{name}: max {max} mean {mean:.2}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
