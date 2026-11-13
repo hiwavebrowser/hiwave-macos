@@ -5591,9 +5591,10 @@ impl Engine {
             return;
         };
         debug!(?id, %target, "Navigating to a fragment");
-        let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
+        // The URL is an argument, not script source.
+        let href = target.as_str().to_string();
         view.url = Some(target);
-        if let Err(e) = self.execute_script(id, &script) {
+        if let Err(e) = self.execute_host_turn(id, "return __rk.fragmentNavigation(__a[0]);", &[&href]) {
             debug!(?id, ?e, "hashchange listener threw");
         }
     }
@@ -5605,7 +5606,7 @@ impl Engine {
             view.scroll_offset == (0.0, 0.0) && view.url.as_ref().is_some_and(|url| url.fragment().is_some())
         });
         if due {
-            if let Err(e) = self.execute_script(id, "__rustkit_scroll_to_location_fragment()") {
+            if let Err(e) = self.execute_host_turn(id, "return __rk.scrollToLocationFragment();", &[]) {
                 debug!(?id, ?e, "scroll to the loaded fragment threw");
             }
         }
@@ -24565,6 +24566,30 @@ impl Engine {
         id: EngineViewId,
         script: &str,
     ) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.evaluate(script))
+    }
+
+    /// [`Self::execute_script`] for one of the engine's own entry points:
+    /// `body` is a function body whose `__rk` is the host object, which no
+    /// page script reaches (`return __rk.fragmentNavigation(__a[0]);`), and
+    /// `strings` are read in it as `__a[0]`, `__a[1]`, ... (text that must
+    /// not be in script source). The same turn: armed, flushed, recorded.
+    pub(crate) fn execute_host_turn(
+        &mut self,
+        id: EngineViewId,
+        body: &str,
+        strings: &[&str],
+    ) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.host_turn(body, strings))
+    }
+
+    /// One turn of script on view `id`: armed against a runaway, its DOM
+    /// writes flushed (also when it threw), a stop recorded.
+    fn script_turn(
+        &mut self,
+        id: EngineViewId,
+        run: impl FnOnce(&DomBindings) -> Result<rustkit_js::JsValue, rustkit_bindings::BindingError>,
+    ) -> Result<String, EngineError> {
         // The app runs page code from the window thread here (the chrome's
         // IPC path, a toolbar's `history.back()`): a W-gate entry, so a
         // listener that spins without writing to the DOM is still seen.
@@ -24583,7 +24608,7 @@ impl Engine {
         // only bound on a `while (true) {}` typed into the devtools console
         // (or sent by the chrome) is the loop-iteration cap (JS1).
         let armed = arm_live_turn(&self.config, bindings);
-        let result = bindings.evaluate(script);
+        let result = run(bindings);
         let stopped = end_live_turn(&self.config, armed, bindings, "eval");
         drop(turn);
         self.flush_script_dom_writes(id, None)?;

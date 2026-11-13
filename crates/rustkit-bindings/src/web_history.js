@@ -42,7 +42,7 @@
         // document's own URL without one loads it again (HTML §7.4.2.2
         // step 12), as `location.href = location.href` does in Chrome.
         if (!sameDocument(current, target) || target.href.indexOf('#') < 0) return requestNavigation(target);
-        if (target.href !== current.href) g.__rustkit_fragment_navigation(target.href);
+        if (target.href !== current.href) __rk.fragmentNavigation(target.href);
     }
     // `location.reload()`: the same URL again, as a request like the rest.
     loc.reload = function () {
@@ -219,7 +219,7 @@
     // The engine followed a link to a fragment of this document (HTML
     // §7.4.2.3.3): a new entry, the new URL, then `hashchange`.
     // The same URL again adds no entry and hears no `hashchange`, but scrolls.
-    g.__rustkit_fragment_navigation = function (href) {
+    __rk.fragmentNavigation = function (href) {
         var oldURL = loc.href;
         if (oldURL !== href) {
             entries.length = index + 1;
@@ -227,14 +227,14 @@
             index++;
             setLocation(href);
         }
-        g.__rustkit_scroll_to_location_fragment();
+        __rk.scrollToLocationFragment();
         if (oldURL !== href) {
             g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
         }
     };
     // Scroll to what the URL's fragment names, if it has one (a URL ending in
     // a bare `#` has an empty one, whose `hash` reads as none).
-    g.__rustkit_scroll_to_location_fragment = function () {
+    __rk.scrollToLocationFragment = function () {
         var at = loc.href.indexOf('#');
         if (at >= 0 && typeof __rk.scrollToFragment === 'function') __rk.scrollToFragment(loc.href.slice(at + 1));
     };
