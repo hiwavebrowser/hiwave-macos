@@ -128,7 +128,11 @@ pub(crate) struct Pump {
 /// work); `None` delivers only.
 ///
 /// Whatever is still waiting when the rounds or the deadline run out
-/// completes with a network error. `deadline` is a network cap: it does
+/// completes with a network error, unless `leave_waiting`: then a live loop
+/// follows this load (`EngineConfig::post_load_requests_live`) and what is
+/// still asked stays queued for it to take. (Failed here, the ninth link of
+/// a `fetch()` chain a load script started got `TypeError: Failed to fetch`
+/// while the page went on to the tenth.) `deadline` is a network cap: it does
 /// not arm the watchdog and it does not refuse a host call. A delivery
 /// whose JavaScript budget is already spent is parked for a later turn
 /// instead of being run or failed.
@@ -140,6 +144,7 @@ pub(crate) async fn pump(
     rounds: u32,
     timers: Option<(u64, u32)>,
     inspector: &Arc<Inspector>,
+    leave_waiting: bool,
 ) -> Pump {
     let mut out = Pump::default();
 
@@ -225,7 +230,11 @@ pub(crate) async fn pump(
         }
     }
 
-    // Out of rounds or time. Nothing may be left waiting forever.
+    // Out of rounds or time. Nothing may be left waiting forever: the
+    // live loop takes it, or it fails here.
+    if leave_waiting {
+        return out;
+    }
     if catch_unwind(AssertUnwindSafe(|| bindings.fail_pending_net_requests(NETWORK_ERROR))).is_err() {
         out.poisoned = true;
     }
@@ -1004,6 +1013,7 @@ pub(crate) async fn pump_all(
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
     requests: bool,
+    leave_waiting: bool,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
@@ -1011,7 +1021,7 @@ pub(crate) async fn pump_all(
         // Without `requests` the page's fetches stay queued for the live
         // loop (`pump_live` takes them), and nothing here fails them.
         let net = match requests {
-            true => pump(bindings, policy, loader, deadline, rounds, timers, inspector).await,
+            true => pump(bindings, policy, loader, deadline, rounds, timers, inspector, leave_waiting).await,
             false => Pump::default(),
         };
         let modules = match document {
@@ -1496,10 +1506,25 @@ fn enqueue_inserted(
         return true;
     }
     let mut started = Vec::new();
+    let mut blobs = Vec::new();
     let taken_at = std::time::Instant::now();
+    // A blob URL is the page's own bytes: answered from the bindings' store
+    // now, on this thread, and never sent anywhere. Asked before the board
+    // is locked: the lookup enters the script runtime, and nothing that
+    // does may run under the lock the fetch thread also takes.
+    let blob_texts: Vec<Option<Option<String>>> = queued
+        .iter()
+        .map(|script| {
+            script.url.starts_with("blob:").then(|| {
+                catch_unwind(AssertUnwindSafe(|| bindings.blob_url_text(&script.url))).ok().flatten()
+            })
+        })
+        .collect();
     {
         let mut board = lock_board(&scripts.board);
+        let mut blob_texts = blob_texts.into_iter();
         for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by, inserted_at } in queued {
+            let blob = blob_texts.next().flatten();
             let queued = taken_at.saturating_duration_since(inserted_at);
             if let Some(at) = inserted_by {
                 // The name `run_inserted` evaluates it under.
@@ -1540,6 +1565,10 @@ fn enqueue_inserted(
                 arrived_at: None,
                 inspector: Arc::clone(inspector),
             });
+            if let Some(text) = blob {
+                blobs.push((id, nav_id, text));
+                continue;
+            }
             started.push(FetchJob {
                 loader: Arc::clone(loader),
                 request,
@@ -1550,6 +1579,24 @@ fn enqueue_inserted(
                 wait,
             });
         }
+    }
+    for (id, nav_id, text) in blobs {
+        let fetched = match text {
+            Some(text) => FetchedInserted::Source(InsertedSource {
+                text,
+                status: 200,
+                mime: None,
+                encoded_size: None,
+                from_cache: false,
+            }),
+            None => FetchedInserted::Transport {
+                stage: FailureStage::Connect,
+                inspector_reason: "no blob behind this URL",
+                detail: "no blob behind this URL".into(),
+                blocked_by: None,
+            },
+        };
+        store_inserted_result(&scripts.board, id, nav_id, fetched);
     }
     for job in started {
         spawn_inserted_fetch(job);

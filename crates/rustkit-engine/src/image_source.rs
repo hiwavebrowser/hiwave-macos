@@ -113,12 +113,27 @@ fn type_supported(mime: &str) -> bool {
     )
 }
 
-/// One `sizes` length in CSS px: `px`, `vw`, `vh`, `em`/`rem` (16 px), or a bare 0. `calc()` and
-/// anything else is unknown (`None`).
+/// One `sizes` length in CSS px: `px`, `vw`, `vh`, `em`/`rem` (16 px), a bare 0, or a math
+/// function (`calc()`, `min()`, `max()`, `clamp()`) over those, never negative. Anything else is
+/// unknown (`None`).
 fn size_px(token: &str, env: &Env) -> Option<f32> {
     let t = token.trim();
     if t == "0" {
         return Some(0.0);
+    }
+    // IMG1: `sizes="calc(50vw - 100px)"` was unknown, so the slot fell back to 100vw and the
+    // image was sized 800 wide where Chrome 148 has 300. A percentage has no meaning in `sizes`.
+    if t.contains('(') {
+        return match rustkit_css::parse_length(t)? {
+            length @ (rustkit_css::Length::Calc(_)
+            | rustkit_css::Length::Min(..)
+            | rustkit_css::Length::Max(..)
+            | rustkit_css::Length::Clamp(..)) => {
+                let px = length.to_px_with_viewport(16.0, 16.0, 0.0, env.viewport_w, env.viewport_h);
+                px.is_finite().then_some(px.max(0.0))
+            }
+            _ => None,
+        };
     }
     let split = t.find(|c: char| c.is_ascii_alphabetic())?;
     let (num, unit) = t.split_at(split);

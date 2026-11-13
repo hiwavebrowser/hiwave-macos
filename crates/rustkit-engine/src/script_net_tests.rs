@@ -207,6 +207,7 @@ impl Rig {
             rounds,
             None,
             &crate::inspector::Inspector::new(&Default::default()),
+            false,
         ))
     }
 
@@ -373,6 +374,7 @@ fn a_page_without_the_bridge_has_no_requests() {
         8,
         None,
         &crate::inspector::Inspector::new(&Default::default()),
+        false,
     ));
     assert_eq!((found.requests, found.rounds, found.poisoned), (0, 0, false));
 }

@@ -29,7 +29,8 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// 20 here, in a grid item and in a plain block alike (each of these pages
 /// has both). It is the line box of a form control, not the grid pass. These
 /// two wait for it; the button lines match since CB3 (#1037).
-const CONTROL_LINE_GAPS: &[&str] = &["text-and-a-text-input", "text-and-a-checkbox"];
+// The text-input line matches since SET3 (#1090); the checkbox line still waits.
+const CONTROL_LINE_GAPS: &[&str] = &["text-and-a-checkbox"];
 
 /// A grid item whose only child is an image is as tall as the image (50),
 /// where Chrome and a plain block put it on a line (55, the image above the

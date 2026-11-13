@@ -1081,6 +1081,10 @@ impl Context {
             let exit_early = self.vm.frame().exit_early();
 
             if self.vm.handle_exception_at(pc) {
+                // HIWAVE PATCH (STR-10): a catch in a caller drops the unwound callee's values (as
+                // its return would). They stayed until the caller returned, so a caught overflow
+                // left its whole stack behind and the next one met the slot limit at once.
+                self.vm.stack.truncate_to_frame(&frame);
                 return ControlFlow::Continue(());
             }
 
@@ -1209,13 +1213,25 @@ impl Context {
     // still rejects `factorial(11)` and accepts `factorial(8)`.
     fn enforce_depth_limits(&self) -> JsResult<()> {
         let frames = self.vm.frames.len().saturating_sub(1);
-        if self.vm.runtime_limits.recursion_limit() <= frames
-            || self.vm.runtime_limits.host_recursion_limit() <= self.vm.host_call_depth
-        {
+        if self.vm.runtime_limits.host_recursion_limit() <= self.vm.host_call_depth {
             return Err(RuntimeLimitError::Recursion.into());
         }
+        // HIWAVE PATCH (STR-10): with the flag on, a frame or stack-slot overflow is a RangeError
+        // the script can catch, as in every browser.
+        let catchable = self.vm.runtime_limits.catchable_stack_overflow();
+        if self.vm.runtime_limits.recursion_limit() <= frames {
+            return Err(if catchable {
+                JsNativeError::range().with_message("Maximum call stack size exceeded").into()
+            } else {
+                RuntimeLimitError::Recursion.into()
+            });
+        }
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(RuntimeLimitError::StackSize.into());
+            return Err(if catchable {
+                JsNativeError::range().with_message("Maximum call stack size exceeded").into()
+            } else {
+                RuntimeLimitError::StackSize.into()
+            });
         }
         Ok(())
     }

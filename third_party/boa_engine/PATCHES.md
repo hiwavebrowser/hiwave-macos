@@ -466,3 +466,28 @@ The vendored crate's own parser tests are not run by the workspace, and `cargo t
 on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
+
+## Patch: a catchable stack overflow (STR-10)
+
+Opt in with `RuntimeLimits::set_catchable_stack_overflow(true)` (off by default, so upstream's tests
+keep their uncatchable `RuntimeLimitError::Recursion`; the page runtime, `JsRuntime::new`, turns it
+on). Running out of call frames or operand-stack slots then throws a `RangeError` ("Maximum call
+stack size exceeded") that `try`/`catch` sees. Host re-entry (`host_recursion`) stays uncatchable.
+Second change, in `handle_throw` (always on): when a caller's `catch` takes an exception from a
+callee, the unwound callee's stack values are dropped, as its return would; they stayed until the
+caller returned, so a caught overflow left ~64K slots behind and the next call hit the slot limit.
+Pin: `crates/rustkit-js/tests/stack_overflow_catchable.rs`. The vendored crate's own `vm::tests`
+are not in the workspace and were not run here.
+
+## Patch: `boa_ast` `this` through nested arrow functions (arrow this)
+
+`third_party/boa_ast` is crates.io `boa_ast` 0.22.0 exactly as published (first commit of its PR), wired
+through `[patch.crates-io]`. Two small changes, marked `HIWAVE PATCH (arrow this)`: `Scope` gets an `arrow`
+flag (`scope.rs`, set from `visit_function_like` in `scope_analyzer.rs`), and
+`escape_this_in_enclosing_function_scope` keeps climbing past an arrow's scope instead of stopping at the
+first enclosing function scope. Upstream stopped at the outer *arrow*, so in
+`m() { return () => () => this.name; }` the method was never told its `this` is used, kept it out of its
+function environment, and the inner arrow read the wrong one (strict and sloppy; breaks TipTap). It only
+showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
+(35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
+unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.

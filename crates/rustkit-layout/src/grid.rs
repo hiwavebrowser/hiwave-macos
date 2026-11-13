@@ -3958,7 +3958,7 @@ fn min_content_width_impl(layout_box: &LayoutBox, use_own_width: bool) -> f32 {
 /// The variants are listed rather than wildcarded so that a new control type
 /// has to answer this question explicitly instead of silently inheriting
 /// "min == max".
-fn form_control_min_content_width(style: &ComputedStyle, control: &crate::FormControlType) -> f32 {
+pub(crate) fn form_control_min_content_width(style: &ComputedStyle, control: &crate::FormControlType) -> f32 {
     match control {
         crate::FormControlType::Button { label, .. } => {
             let font_size = match style.font_size {
@@ -4048,6 +4048,30 @@ fn text_min_content_width(text: &str, style: &ComputedStyle) -> f32 {
         return measure(text);
     }
     text.split_whitespace().map(measure).fold(0.0f32, f32::max)
+}
+
+/// How many lines `text` takes in a box `avail` px wide: greedy word wrap, one line when the
+/// white-space value forbids wrapping, and a word wider than the box keeps its own line (it overflows).
+pub(crate) fn wrapped_line_count(text: &str, style: &ComputedStyle, avail: f32) -> usize {
+    if matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+        return 1;
+    }
+    let mut lines = 1;
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+            continue;
+        }
+        let candidate = format!("{line} {word}");
+        if spaced_text_width(&candidate, style) <= avail {
+            line = candidate;
+        } else {
+            lines += 1;
+            line = word.to_string();
+        }
+    }
+    lines
 }
 
 /// Max-content width of a text run: the full single-line measure.
@@ -5402,6 +5426,20 @@ fn apply_justify_self(
 /// narrow (bing's search icon: an svg in a label whose column is 1.6px
 /// wide; flowed, the icon shrank to a dot).
 fn item_children_flow_inline(item: &LayoutBox) -> bool {
+    // GR3: floats share lines with each other and with what follows, which
+    // the block arm's one-under-the-other re-stack cannot express: two
+    // 100px floats in a 200-wide item came out stacked (Chrome 148: side by
+    // side, the item 10 tall, not 20). Such an item is flowed whole, at its
+    // final width, by the same block-children pass the inline arm runs.
+    if item.children.iter().any(|c| {
+        c.float != crate::Float::None
+            && !matches!(
+                c.style.position,
+                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+            )
+    }) {
+        return true;
+    }
     let mut in_flow = item.children.iter().filter(|c| {
         !matches!(
             c.style.position,
@@ -8642,6 +8680,77 @@ mod tests {
         // Track can grow by 150px (to 200px growth_limit)
         assert!(tracks[0].size >= tracks[0].base_size);
         assert!(tracks[0].size <= 200.0, "Should not exceed growth_limit");
+    }
+
+    /// GR1 (#1075): css-grid-1 §12.6 maximize runs before §12.7 expand
+    /// flexible tracks. An empty `minmax(0, 300px)` beside `minmax(0, 1fr)`
+    /// in 500 grows to 300 first; the fr takes the remaining 200. Expanding
+    /// fr first left the sidebar at 0 (real-site `minmax(0, 340px)`).
+    #[test]
+    fn maximize_tracks_grows_minmax_before_the_fr_track() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (300.0, 200.0),
+            "minmax(0,300px) + minmax(0,1fr) in 500; Chromium 300/200 (bug was 0/500)"
+        );
+    }
+
+    /// GR1: two finite growth limits share free space equally and each
+    /// freezes at its limit. In 500 with `minmax(0, 200px)` and
+    /// `minmax(0, 300px)`, both maximize before any leftover is handed to
+    /// a later fr (here none): 200 and 300.
+    #[test]
+    fn maximize_tracks_shares_free_space_up_to_each_growth_limit() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(200.0)),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (200.0, 300.0),
+            "two finite growth limits in 500 freeze at 200 and 300"
+        );
+    }
+
+    /// GR1: an `auto` maximum is max-content for sizing and stretches like
+    /// `auto`. Empty `minmax(0, auto)` beside `minmax(0, 300px)` in 1000
+    /// takes the remaining 700 (Chromium 148), not 0.
+    #[test]
+    fn maximize_tracks_treats_auto_maximum_like_max_content_stretch() {
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Auto),
+            )),
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(0.0)),
+                Box::new(TrackSize::Px(300.0)),
+            )),
+        ];
+        size_grid_tracks(&mut tracks, 1000.0, 0.0);
+        assert_eq!(
+            (tracks[0].size, tracks[1].size),
+            (700.0, 300.0),
+            "minmax(0,auto) + minmax(0,300px) in 1000; Chromium 700/300"
+        );
     }
 
     // ==================== Phase 7 Tests (Edge Cases) ====================

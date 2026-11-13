@@ -1371,6 +1371,17 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_navigation_requests()
     }
 
+    /// The text of the Blob behind a `blob:` URL this page made with
+    /// `URL.createObjectURL`, or `None` when nothing stands behind it (never
+    /// made, or revoked). For `<script src="blob:...">`: the engine has no
+    /// network to ask for such a URL.
+    pub fn blob_url_text(&self, url: &str) -> Option<String> {
+        // The host's store, read in Rust: no script runs, so nothing of
+        // the page's can be on this path.
+        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// The external classic scripts script inserted since the last call,
     /// oldest first. The engine fetches each and runs it as that element's
     /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
@@ -1605,6 +1616,19 @@ impl DomBindings {
 
         runtime.evaluate_script(&window_js.replace("__NAVIGATOR_PLATFORM__", NAVIGATOR_PLATFORM))?;
 
+        // The monotonic clock behind `performance.now()` (STR-9), before web_platform.js reads it.
+        let time_origin = std::time::Instant::now(); // this page's time origin
+        runtime.register_host_function(
+            "__rustkit_now_ms",
+            0,
+            Box::new(move |_| {
+                let start = &time_origin;
+                // 0.1 ms steps, as Chrome's coarsened clock: finer is a fingerprinting aid.
+                let tenths = (start.elapsed().as_secs_f64() * 10_000.0).floor();
+                JsValue::Number(tenths / 10.0)
+            }),
+        )?;
+
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
         runtime.evaluate_script(include_str!("web_platform.js"))?;
@@ -1622,7 +1646,7 @@ impl DomBindings {
         web_crypto::install(runtime)?;
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
-        runtime.evaluate_script(include_str!("web_encoding.js"))?;
+        runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_with_host(include_str!("web_streams.js"))?;
@@ -3320,6 +3344,26 @@ mod tests {
             JsValue::String(s) => s,
             other => panic!("{script} evaluated to {other:?}"),
         }
+    }
+
+    /// STR-9: `performance.now()` ticks every 0.1 ms, as Chrome for Testing 148.0.7778.216 does
+    /// (measured 2026-11-12: over 50 ms of a busy loop every step between distinct readings is 0.1,
+    /// 500 distinct values). It stepped by a whole millisecond, so the stress suites' short timings
+    /// read 0.
+    #[test]
+    fn performance_now_ticks_every_tenth_of_a_millisecond() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let out = eval_string(
+            &bindings,
+            "var d = [], last = performance.now(), end = last + 5;              while (last < end) { var n = performance.now(); if (n !== last) { d.push(n - last); last = n; } }              d.sort(function (a, b) { return a - b; }); String(d.length + ',' + d[0].toFixed(3))",
+        );
+        let (count, min) = out.split_once(',').unwrap();
+        let (count, min): (u32, f64) = (count.parse().unwrap(), min.parse().unwrap());
+        // 5 ms at 0.1 ms is about 50 distinct readings; whole-millisecond steps give at most 5.
+        assert!(count >= 20, "distinct readings in 5 ms: {count}");
+        assert!(min < 0.5, "the smallest step is {min} ms");
+        // Not finer than a tenth of a millisecond: a high-resolution timer is a fingerprinting aid.
+        assert!(min >= 0.0999, "the smallest step is {min} ms");
     }
 
     /// Pages read these without feature-testing; each used to throw a

@@ -604,6 +604,8 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         table_span,
         table_caption_shift,
         context_floats,
+        // A record of the last child layouts, never read by layout.
+        layout_memo: _,
         // Outputs the engine stamps after layout; layout never reads them.
         element_scroll: _,
         sticky_rule: _,
@@ -614,6 +616,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         scrollbar_overflows,
         pseudo_animation_key,
         formatting_root,
+        text_line_pitch,
     } = a;
     box_type_eq(box_type, &b.box_type)
         && *position == b.position
@@ -635,6 +638,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         && *table_caption_shift == b.table_caption_shift
         && *pseudo_animation_key == b.pseudo_animation_key
         && *formatting_root == b.formatting_root
+        && *text_line_pitch == b.text_line_pitch
         && scrollbar_overflows.get() == b.scrollbar_overflows.get()
         && dims_eq(dimensions, &b.dimensions)
         && offsets_eq(offsets, &b.offsets)

@@ -22,6 +22,7 @@ pub mod grid;
 pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
+pub mod layout_memo;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod path_data;
@@ -45,6 +46,8 @@ mod flex_resolve_tests;
 
 #[cfg(test)]
 mod float_line_wrap_tests;
+#[cfg(test)]
+mod float_in_items_unit_tests;
 
 #[cfg(test)]
 mod flex_auto_margin_relayout_tests;
@@ -453,7 +456,52 @@ pub(crate) fn form_control_intrinsic_size(
             // a 149px border-box in Chrome CfT-148 (n53 form-controls
             // y-table: 149 on every bare text/email/password/number
             // input; the old 12em blob said 160).
-            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale, false, None)),
+            _ => {
+                // SET3, Chrome for Testing 148 over 107 inputs
+                // (docs/diagnostics/2026-11-11/set3_input_heights*): the
+                // content line is the larger of the font's `normal` line and
+                // a `line-height` declared on the input, then the vertical
+                // padding (the author's, else the UA's 1px each side) and
+                // border (the author's, else the UA's 2px each side). Before,
+                // the UA border was dropped once the author set a padding
+                // (31 for 35 at 13.6px with `padding: 8px 12px`),
+                // `line-height` was ignored and a bare input at another font
+                // size was a scaled blob.
+                let normal = normal_line_height(style, font_size);
+                let line = if style.line_height_declared {
+                    content_line(font_size).max(normal)
+                } else {
+                    normal
+                };
+                // SET4: the width composes the same way. Chrome for Testing
+                // 148 at the UA font: content 145, the UA's 2px padding and
+                // 2px border each side, 153 (docs/diagnostics/2026-11-11/
+                // set4_input_widths*). The 149 built here before was Chrome's
+                // `padding: 0` width. The content width is still the UA-font
+                // calibration scaled by the font size (SET5).
+                // A percentage padding counts as 0 here: it resolves against
+                // the containing block's width, which this intrinsic size
+                // does not have (a border width cannot be a percentage).
+                let px_h = |l: &Length| match l {
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
+                };
+                // Sides are [top, right, bottom, left]; a side nobody
+                // declared keeps the UA's value, each on its own: with
+                // `padding-top: 4px` alone the bottom is still the UA's 1px
+                // (Chrome for Testing 148: 24 tall, and 24 with
+                // `border-top-width: 5px` alone).
+                let side = |declared: bool, value: f32, ua: f32| if declared || value > 0.0 { value } else { ua };
+                let pad = side(style.padding_declared[0], px_h(&style.padding_top), 1.0)
+                    + side(style.padding_declared[2], px_h(&style.padding_bottom), 1.0);
+                let border = side(style.border_declared[0], px_h(&style.border_top_width), 2.0)
+                    + side(style.border_declared[2], px_h(&style.border_bottom_width), 2.0);
+                let pad_h = side(style.padding_declared[3], px_h(&style.padding_left), 2.0)
+                    + side(style.padding_declared[1], px_h(&style.padding_right), 2.0);
+                let border_h = side(style.border_declared[3], px_h(&style.border_left_width), 2.0)
+                    + side(style.border_declared[1], px_h(&style.border_right_width), 2.0);
+                (145.0 * ua_scale + pad_h + border_h, line + pad + border)
+            }
         },
         FormControlType::TextArea { rows, cols, .. } => {
             // Textarea: cols × the monospace advance (0.6em) plus 18px
@@ -554,7 +602,40 @@ pub(crate) fn form_control_intrinsic_size(
                 } else {
                     20.0
                 };
-                (widest.ceil() + well + pb_h, single_line_box(19.0 * ua_scale, false, None))
+                // SET1, Chrome for Testing 148 over 69 selects
+                // (docs/diagnostics/2026-11-11/set1_select_heights*): the
+                // menulist's content line is round(ascent) + round(descent)
+                // of its font (the line gap left out) plus 2px it keeps
+                // inside, then the vertical padding (the UA's is 0) and
+                // border (the UA's 1px each side when the author sets
+                // none). `line-height` does not apply. 13.6px Arial with
+                // padding .5rem: 12 + 3 + 2 + 16 + 2 = 35 (settings'
+                // #theme). An `appearance: none` select is a plain box
+                // around the text line (chrome's #modeSelector, 31).
+                let height = if style.appearance == rustkit_css::Appearance::None {
+                    single_line_box(19.0 * ua_scale, false, None)
+                } else {
+                    let m = measure_text_advanced(
+                        "x",
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    );
+                    let content = m.ascent.round() + m.descent.round() + 2.0;
+                    // Each side on its own, as for a text input: one the
+                    // author did not declare keeps the UA's 1px (Chrome for
+                    // Testing 148: 23 with `border-top-width: 5px` alone).
+                    let px = |l: &Length| match l {
+                        Length::Percent(_) | Length::Auto => 0.0,
+                        other => other.to_px(font_size, 16.0, 0.0),
+                    };
+                    let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 1.0 };
+                    let border_v = side(style.border_declared[0], px(&style.border_top_width))
+                        + side(style.border_declared[2], px(&style.border_bottom_width));
+                    content + author_pad_v + border_v
+                };
+                (widest.ceil() + well + pb_h, height)
             }
         }
     }
@@ -1291,7 +1372,7 @@ pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32
 }
 
 /// Margin collapse context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarginCollapseContext {
     /// Pending positive margin.
     pub positive_margin: f32,
@@ -1354,7 +1435,7 @@ impl MarginCollapseContext {
 }
 
 /// A 2D rectangle.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -1390,7 +1471,7 @@ impl Rect {
 }
 
 /// Edge sizes (margin, padding, border).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EdgeSizes {
     pub top: f32,
     pub right: f32,
@@ -1409,7 +1490,7 @@ impl EdgeSizes {
 }
 
 /// Box dimensions including content, padding, border, and margin.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dimensions {
     /// Content area.
     pub content: Rect,
@@ -1748,12 +1829,13 @@ impl TextLine {
         content_x: f32,
         content_y: f32,
         line_height: f32,
+        pitch: f32,
     ) -> Rect {
         let expansion =
             self.justify_space * Self::justification_opportunities(self.text.trim_end()) as f32;
         Rect {
             x: content_x + self.x_offset,
-            y: content_y + index as f32 * line_height,
+            y: content_y + index as f32 * pitch,
             width: self.width + expansion,
             height: line_height,
         }
@@ -1951,6 +2033,9 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// Recorded results of this box's child layout for the current root layout (LAT21,
+    /// `layout_memo`). Never an input to layout.
+    pub(crate) layout_memo: Option<Box<layout_memo::BoxMemo>>,
     /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
     /// when it is an element scroller. Set through a shared tree by the
     /// engine, from its per-view table, when script scrolls. Layout never
@@ -1982,6 +2067,14 @@ pub struct LayoutBox {
     /// css-grid-1 §6), so its auto height encloses its floats. Set by the
     /// flex and grid containers on their in-flow children.
     pub formatting_root: bool,
+    /// SET2: the step between the lines of a WRAPPED text run when it is
+    /// larger than the run's own line-height: every line box is the union of
+    /// the block's strut and the run's box on the baseline (CSS2 §10.8), so a
+    /// 12.8px `line-height: 1.5` run (19.2) in a 16px system-ui block steps
+    /// 20.19 per line (Chrome for Testing 148). `None` steps by the run's
+    /// line-height. Set by the block that places the run; the run's content
+    /// height is then `line_height + (lines - 1) * pitch`.
+    pub text_line_pitch: Option<f32>,
     /// Whether anything under this box can be hit outside its border box,
     /// as `mark_hit_overflow` found it for this layout: 0 not known (the
     /// hit test looks), 1 nothing (the hit test stops here), 2 something.
@@ -2098,6 +2191,7 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            layout_memo: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
@@ -2106,6 +2200,7 @@ impl LayoutBox {
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
             pseudo_animation_key: None,
             formatting_root: false,
+            text_line_pitch: None,
             hit_overflow: HitOverflowMark::default(),
         }
     }
@@ -2448,12 +2543,19 @@ impl LayoutBox {
             _ => return None,
         };
         let content = self.dimensions.content;
-        let line_height = content.height / lines.len() as f32;
+        // SET2: with a pitch the height is `line_height + (n - 1) * pitch`.
+        let (line_height, pitch) = match self.text_line_pitch {
+            Some(pitch) => (content.height - (lines.len() as f32 - 1.0) * pitch, pitch),
+            None => {
+                let lh = content.height / lines.len() as f32;
+                (lh, lh)
+            }
+        };
         Some(
             lines
                 .iter()
                 .enumerate()
-                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height))
+                .map(|(i, l)| l.fragment_rect(i, content.x, content.y, line_height, pitch))
                 .collect(),
         )
     }
@@ -2786,6 +2888,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
@@ -3080,6 +3183,7 @@ impl LayoutBox {
 
         let container_width = containing_block.content.width;
         self.text_lines = None;
+        self.text_line_pitch = None;
         // Block-path text never starts mid-line; a box re-laid out here
         // (e.g. after a line wrap re-layout) must shed any stale phase-5
         // flow state from an earlier pass.
@@ -3190,6 +3294,44 @@ impl LayoutBox {
         self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
+    /// SET2: give every wrapped text run in `b` (the run itself, or the
+    /// text inside an inline) the pitch of a line box that unites the
+    /// block's `strut` with the run's own box on the baseline, when that is
+    /// more than the run's line-height. Returns the run's own extents above
+    /// and below the baseline, its line-height and the pitch of the LAST
+    /// wrapped run (the one whose last line stays open), or `None` when
+    /// nothing in `b` wrapped.
+    fn set_wrapped_pitch(b: &mut LayoutBox, strut: (f32, f32)) -> Option<((f32, f32), f32, f32)> {
+        let mut out = None;
+        if let (BoxType::Text(_), Some(n)) = (&b.box_type, b.text_lines.as_ref().map(|l| l.len())) {
+            if n > 1 {
+                let own = Self::text_line_box_extents(&b.style);
+                // The run's own line height, from its height. This may be
+                // the second visit to a run that was not laid out again
+                // (a parent's inline loop over a kept child, a second
+                // measure pass): its height then already holds the pitch,
+                // which is taken back out, so the same answer is written
+                // every time and the run does not grow on each pass.
+                let lines = n as f32;
+                let lh = match b.text_line_pitch {
+                    Some(pitch) => b.dimensions.content.height - (lines - 1.0) * pitch,
+                    None => b.dimensions.content.height / lines,
+                };
+                let union = own.0.max(strut.0) + own.1.max(strut.1);
+                let pitch = if union > lh + 0.01 { union } else { lh };
+                b.text_line_pitch = (pitch > lh).then_some(pitch);
+                b.dimensions.content.height = lh + (lines - 1.0) * pitch;
+                out = Some((own, lh, pitch));
+            }
+        }
+        for c in &mut b.children {
+            if let Some(found) = Self::set_wrapped_pitch(c, strut) {
+                out = Some(found);
+            }
+        }
+        out
+    }
+
     /// A non-atomic inline child whose text wrapped onto several line boxes:
     /// `(line count, end x of the last line relative to the container's
     /// content left, that text's line height)`. `None` when every
@@ -3200,7 +3342,11 @@ impl LayoutBox {
             if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
                 if let Some(last) = lines.last().filter(|_| lines.len() > 1) {
                     let end = b.dimensions.content.x - left + last.x_offset + last.width;
-                    *out = Some((lines.len(), end.max(0.0), b.get_line_height()));
+                    *out = Some((
+                        lines.len(),
+                        end.max(0.0),
+                        b.text_line_pitch.unwrap_or_else(|| b.get_line_height()),
+                    ));
                 }
             }
             for c in &b.children {
@@ -3447,6 +3593,7 @@ impl LayoutBox {
         let line_count = text_lines.len();
         let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
         self.text_lines = Some(text_lines);
+        self.text_line_pitch = None;
         self.text_flow_first_offset = Some(first_line_offset);
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = line_top_y;
@@ -3714,9 +3861,15 @@ impl LayoutBox {
             vertical_decoration,
             border_box_sizing,
         );
+        // A specified height stays when `max-width` narrows the box: only a
+        // height the page left to the ratio follows the clamp (IMG1; Chrome
+        // 148: `width=300 height=100` under `max-width: 100%` in a 200px
+        // box is 200x100, not 200x67). The `max-height` clamp below still
+        // scales any width: an inline `<svg>` with a viewBox and no size
+        // carries `width: 100%` as its stand-in for `auto`.
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
-                height = if height > 0.0 {
+                height = if height > 0.0 && height_is_auto {
                     mw * height / width
                 } else {
                     height
@@ -3992,6 +4145,11 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size + extra_w,
+            // css-sizing-3 §3.1: a button's `min-content` is its longest word plus the horizontal
+            // padding and border (Chrome 148: "Medium Button" 72.91, where max-content is 123.61).
+            Length::Auto if self.style.width_min_content && matches!(control, FormControlType::Button { .. }) => {
+                crate::grid::form_control_min_content_width(&self.style, &control)
+            }
             Length::Auto | Length::Zero => intrinsic_width,
             // `vw`, `rem`, `calc()` and the rest: only px/%/em were read, so
             // a `width: calc(25vw + 10px)` button kept its intrinsic width
@@ -4071,6 +4229,21 @@ impl LayoutBox {
         let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
         let width = width.max(edges_w);
         let height = height.max(edges_h);
+
+        // CB3d: a button's label wraps inside its border box when the width is narrower than the
+        // label (a fixed `width`, `min-content`, a flexed or stretched width), one more line height
+        // per line (Chrome 148: "Medium Button" in `width: 120px` is 42 tall, 24 on one line).
+        // `white-space: nowrap`/`pre` keep one line; an author `height` is the author's.
+        let height = match &control {
+            FormControlType::Button { label, .. } if matches!(self.style.height, Length::Auto | Length::Zero) => {
+                let (pad_sides, border_sides) = button_box_sides(&self.style, font_size);
+                let inner = (width - pad_sides[1] - pad_sides[3] - border_sides[1] - border_sides[3]).max(0.0);
+                let lines = crate::grid::wrapped_line_count(label, &self.style, inner);
+                let line = (intrinsic_height - pad_sides[0] - pad_sides[2] - border_sides[0] - border_sides[2]).max(0.0);
+                height.max(intrinsic_height + (lines.saturating_sub(1)) as f32 * line)
+            }
+            _ => height,
+        };
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
@@ -4577,12 +4750,17 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        layout_memo::bump_epoch();
         let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
         // Only a tree that placed a fixed box has one to place again.
         if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
             self.reanchor_fixed_boxes(None);
+        }
+        // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
+        if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
+            layout_memo::clear_memos(self);
         }
     }
 
@@ -4599,6 +4777,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         // Handle clear property
         if self.clear != Clear::None {
@@ -6547,9 +6726,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -6558,10 +6740,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -6570,7 +6751,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -6652,13 +6833,18 @@ impl LayoutBox {
                     // after the loop (the open last line is aligned by the
                     // recorded-lines pass when it eventually closes).
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -6887,7 +7073,7 @@ impl LayoutBox {
             }
             match (&c.text_flow_first_offset, &c.text_lines) {
                 (Some(_), Some(tls)) if tls.len() > 1 => {
-                    box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
+                    box_top + (tls.len() as f32 - 1.0) * c.text_line_pitch.unwrap_or_else(|| c.get_line_height())
                 }
                 _ => box_top,
             }
@@ -7237,7 +7423,7 @@ impl LayoutBox {
     }
 
     /// Layout block children with margin collapse.
-    fn layout_block_children_with_collapse(
+    pub(crate) fn layout_block_children_with_collapse_run(
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
@@ -7660,9 +7846,12 @@ impl LayoutBox {
                     // block sibling was laid over lines 2..n (`<p><span>long
                     // text</span></p>` was one line tall; `<pre><code>` six
                     // lines painted over the following paragraph).
-                    if let Some((n_lines, last_end, lh)) =
+                    let wrapped_pitch = Self::set_wrapped_pitch(child, strut);
+                    if let Some((n_lines, last_end, _)) =
                         Self::inline_wrapped_tail(child, self.dimensions.content.x)
                     {
+                        // SET2 (see the split run): the strut union per line.
+                        let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -7671,10 +7860,9 @@ impl LayoutBox {
                                 floats.line_band(cursor_y, empty_line_height, container_width),
                             ));
                         }
-                        cursor_y +=
-                            line_advance(line_height, line_below_baseline, line_extents, strut)
-                                .max(lh)
-                                + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                        cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * pitch;
                         cursor_x = (last_end
                             - floats
                                 .line_band(cursor_y, empty_line_height, container_width)
@@ -7683,7 +7871,7 @@ impl LayoutBox {
                         line_width = cursor_x;
                         line_height = lh;
                         line_below_baseline = 0.0;
-                        line_extents = (0.0, 0.0);
+                        line_extents = own;
                         line_start_index = Some(i);
                         seam = Self::seam_edge(child, true);
                         continue;
@@ -7757,13 +7945,18 @@ impl LayoutBox {
                 } else {
                     // B2: closed lines aligned by align_split_close below.
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
-                        + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    // SET2: every line is the union of the strut and the
+                    // run's box, so the middle lines step by that pitch and
+                    // the open last line carries the run's extents.
+                    let (own, _, pitch) = Self::set_wrapped_pitch(child, strut).unwrap_or(((0.0, 0.0), lh, lh));
+                    let first = (line_extents.0.max(own.0), line_extents.1.max(own.1));
+                    cursor_y += line_advance(line_height, line_below_baseline, first, strut).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * pitch;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
-                    line_extents = (0.0, 0.0);
+                    line_extents = own;
                     line_start_index = Some(i);
                 }
             } else {
@@ -13068,7 +13261,13 @@ impl DisplayList {
                         // the layout export's inline union (TextLine::
                         // fragment_rect). `x`/`content_y` are this box's
                         // content origin, which is what that rule takes.
-                        let frag = l.fragment_rect(i, x, content_y, line_height);
+                        let frag = l.fragment_rect(
+                            i,
+                            x,
+                            content_y,
+                            line_height,
+                            layout_box.text_line_pitch.unwrap_or(line_height),
+                        );
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             frag.x,
@@ -17883,10 +18082,44 @@ mod tests {
         );
     }
 
+    /// R1 on #1090 (MED): `set_wrapped_pitch` writes the pitch into the
+    /// run's height, so a second visit to the same run (a parent's inline
+    /// loop over a child that was not laid out again) must read the run's
+    /// own line height back out of it, not divide the grown height again.
+    /// A two-line 16px run in a line whose strut is taller: 20 + 30 the
+    /// first time, and the same every time after.
+    #[test]
+    fn set_wrapped_pitch_gives_the_same_height_on_every_visit() {
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.line_height = rustkit_css::LineHeight::Px(20.0);
+        let mut run = LayoutBox::new(BoxType::Text("aaa bbb".to_string()), style);
+        let line = |text: &str| TextLine { text: text.to_string(), width: 30.0, x_offset: 0.0, justify_space: 0.0 };
+        run.text_lines = Some(vec![line("aaa"), line("bbb")]);
+        run.dimensions.content.height = 40.0;
+        // A strut of 22 above and 8 below the baseline: a 30px line box.
+        let strut = (22.0, 8.0);
+        let first = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+        let height = run.dimensions.content.height;
+        assert_eq!((first.1, first.2), (20.0, 30.0), "line height 20, pitch 30");
+        assert_eq!(height, 50.0, "one line of its own height and one pitch");
+        for visit in 2..5 {
+            let again = LayoutBox::set_wrapped_pitch(&mut run, strut).expect("the run wrapped");
+            assert_eq!((again.1, again.2), (20.0, 30.0), "visit {visit}: the same line height and pitch");
+            assert_eq!(run.dimensions.content.height, height, "visit {visit}: the same height");
+        }
+        // A smaller strut later takes the pitch back off.
+        LayoutBox::set_wrapped_pitch(&mut run, (0.0, 0.0));
+        assert_eq!(run.text_line_pitch, None);
+        assert_eq!(run.dimensions.content.height, 40.0);
+    }
+
     #[test]
     fn bare_control_widths_match_chrome() {
         // n53 form-controls y-table vs Chrome 148 at the UA control font:
-        // text input 149 (was the 12em blob, 160); textarea cols=20 178 and
+        // text input 153 (SET4: content 145 + 2px UA padding + 2px UA
+        // border each side; CfT 148, was 149, before that the 12em blob,
+        // 160); textarea cols=20 178 and
         // cols=40 338 (0.6em per col + 18 border/scrollbar gutter; was 160 /
         // 320); a listbox is its widest option + 2 (39 for "Item 4"; was
         // 133), a dropdown its widest option + 24 (137 for "A longer option
@@ -17899,8 +18132,8 @@ mod tests {
         };
         let w = width(n53_text_input());
         assert!(
-            (w - 149.0).abs() <= 0.5,
-            "bare text input width: Chrome 149, got {w}"
+            (w - 153.0).abs() <= 0.5,
+            "bare text input width: Chrome 153, got {w}"
         );
 
         let ta = |cols: u32| {
@@ -22026,7 +22259,7 @@ mod inline_fragment_union_tests {
             justify_space: 4.0,
         };
         // "a b c" has two separators, so the line spans 50 + 2 * 4.
-        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0).width, 58.0);
+        assert_eq!(line.fragment_rect(0, 0.0, 0.0, 20.0, 20.0).width, 58.0);
     }
 
     /// A single-run text box has no `text_lines`; its content rect already IS
@@ -22889,4 +23122,22 @@ mod overlay_hit_tests {
         // Elsewhere on the overlay: the overlay, not the page under it.
         assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
+}
+
+thread_local! {
+    /// Boxes laid out on this thread since the last [`take_layout_visits`]: one per call of
+    /// `layout_with_collapse_in` or `layout_with_percent_base`. A box laid out k times in one pass
+    /// counts k, so `visits / boxes` is the pass's re-layout multiplicity (LAT21: walmart ran
+    /// ~160 visits per box).
+    static LAYOUT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_layout_visit() {
+    LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of box layouts on this thread since the last call, and a fresh count.
+pub fn take_layout_visits() -> u64 {
+    LAYOUT_VISITS.with(|n| n.replace(0))
 }
