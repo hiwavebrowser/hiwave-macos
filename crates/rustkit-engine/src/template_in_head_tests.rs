@@ -7,7 +7,10 @@
 //!
 //! Expected lines: docs/diagnostics/2026-11-13/template_in_head_cft148.txt,
 //! `window.report()` of the page beside it in Chrome for Testing
-//! 148.0.7778.216 (each case parsed with DOMParser).
+//! 148.0.7778.216 (each case parsed with DOMParser). Two cases from the R1:
+//! formatting opened in a template stays in it (a marker), and a template
+//! started "in body" takes its own mode, so its end tag leaves the outer
+//! template's mode alone.
 
 use super::*;
 

@@ -12,7 +12,9 @@ var cases = {
   'nested': '<head><template id="u"><template id="v"><b>deep</b></template><i>outer</i></template><script>1<\/script></head><body></body>',
   'after head': '<head><title>t</title></head><template id="u"><p>after</p></template><body><p>b</p></body>',
   'div inside': '<head><template id="u"><div>d</div><span>s</span></template><meta name="after"></head><body></body>',
-  'no end tag': '<head><template id="u"><p>unclosed</p></head><body><p>b</p></body>'
+  'no end tag': '<head><template id="u"><p>unclosed</p></head><body><p>b</p></body>',
+  'formatting stays inside': '<head><template id="u"><b>x</template></head><body>y</body>',
+  'template in body in template': '<head><template id="o"><div><template id="u">i</template><p>after</p></div><s>s</s></template></head><body><p>b</p></body>'
 };
 function names(list) { return Array.prototype.map.call(list, function (e) { return e.nodeType === 1 ? e.localName + (e.id ? '#' + e.id : '') : e.nodeType === 3 ? '"' + e.data.replace(/\s+/g, ' ') + '"' : '?'; }).join(','); }
 function tree(node) { return names(node.childNodes); }

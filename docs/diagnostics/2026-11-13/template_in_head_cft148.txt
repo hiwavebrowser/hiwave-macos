@@ -5,3 +5,5 @@ nested: head=[template#u,script] body=[] u.content=[template#v,i] in head v.cont
 after head: head=[title,template#u] body=[p] u.content=[p] in head
 div inside: head=[template#u,meta] body=[] u.content=[div,span] in head
 no end tag: head=[template#u] body=[] u.content=[p,p] in head
+formatting stays inside: head=[template#u] body=["y"] u.content=[b] in head
+template in body in template: head=[template#o] body=[p] o.content=[div,s] in head u.content=["i"]
