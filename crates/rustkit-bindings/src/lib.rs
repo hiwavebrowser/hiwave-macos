@@ -2608,6 +2608,13 @@ impl DomBindings {
         self.dom_host.borrow().wants_wheel()
     }
 
+    /// Whether one of those can cancel the wheel (a listener that is not
+    /// passive, or a handler). When none can, the engine dispatches after
+    /// the scroll without asking which listeners are on the path.
+    pub fn wheel_blocking(&self) -> bool {
+        self.dom_host.borrow().wheel_blocking()
+    }
+
     /// Whether a wheel at an element (by node id) can be cancelled: a
     /// listener on its way up is not passive. Then the event goes out
     /// before the scroll; otherwise after it.
