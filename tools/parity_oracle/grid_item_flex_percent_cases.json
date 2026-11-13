@@ -80,6 +80,26 @@
    "name": "a-lone-clamp-height-item-in-an-auto-row-of-a-definite-grid",
    "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:900px;grid-template-rows:auto 1fr\"><div id=a style=\"height:clamp(100px, 50vh, 600px)\"></div><div id=b></div></div><div id=after>x</div></body></html>",
    "chrome_boxes": "g:0:0:1280:900 a:0:0:1280:400 b:0:400:1280:500 after:0:900:1280:18"
+  },
+  {
+   "name": "a-percent-min-height-item-in-the-auto-row-of-a-definite-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:600px;grid-template-rows:auto 1fr\"><div id=a style=\"height:min(50%, 400px)\">x</div><div id=b></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:600 a:0:0:1280:9 b:0:18:1280:582 after:0:600:1280:18"
+  },
+  {
+   "name": "a-percent-clamp-height-item-in-the-auto-row-of-a-definite-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:600px;grid-template-rows:auto 1fr\"><div id=a style=\"height:clamp(10px, 50%, 400px)\">x</div><div id=b></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:600 a:0:0:1280:10 b:0:18:1280:582 after:0:600:1280:18"
+  },
+  {
+   "name": "a-percent-calc-min-height-item-in-the-auto-row-of-a-definite-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:600px;grid-template-rows:auto 1fr\"><div id=a style=\"min-height:calc(50% + 0px)\">x</div><div id=b></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:600 a:0:0:1280:18 b:0:18:1280:582 after:0:600:1280:18"
+  },
+  {
+   "name": "a-flex-item-spanning-a-fixed-row-and-an-implicit-auto-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-columns:1fr 1fr;grid-template-rows:300px\"><div id=col style=\"display:flex;flex-direction:column;grid-row:1 / span 2\"><div id=pane style=\"height:100%;min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div><div id=t1 style=\"height:300px\"></div><div id=t2 style=\"height:200px\"></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:500 col:0:0:640:500 pane:0:0:640:500 t1:640:0:640:300 t2:640:300:640:200 after:0:500:1280:18"
   }
  ]
 }
