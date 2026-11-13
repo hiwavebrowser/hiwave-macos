@@ -267,15 +267,17 @@ impl<'a> GridItem<'a> {
                 trace!("get_height_contribution: explicit Px height = {}", h);
                 return *h + margins;
             }
-            Length::Percent(p) if container_height > 0.0 => {
-                let result = container_height * p / 100.0;
-                trace!("get_height_contribution: Percent {}% of {} = {}", p, container_height, result);
-                return result + margins;
-            }
+            // A percentage `height` (plain, or inside a `calc()`) is cyclic
+            // while the rows are sized, even in a grid with a definite
+            // height (css-grid-1 §6.5, css-sizing-3 §5.2.1): the item
+            // contributes its content, and the percentage resolves against
+            // the row afterwards. Resolved against the grid, a
+            // `calc(50% + 0px)` item made a 600px grid's `auto` row 300;
+            // Chrome 148 sizes it to the content, 18 (GR7).
             l if is_font_or_viewport_relative(l) => {
                 return self.layout_box.length_to_px(l, container_height) + margins;
             }
-            Length::Calc(sum) if sum.percent == 0.0 || container_height > 0.0 => {
+            Length::Calc(sum) if sum.percent == 0.0 => {
                 return self
                     .layout_box
                     .length_to_px(&style.height, container_height)
@@ -2065,6 +2067,30 @@ pub fn layout_grid_container(
                 _ => {
                     l0_records.push(None);
                     estimate
+                }
+            };
+            // GR7: a cyclic percentage height contributes the content, but
+            // a row whose max is `fr` only takes the item's MINIMUM
+            // contribution (css-grid-1 §6.6, §12.5), and with a definite
+            // `min-height` that is the min-height, not the content. A
+            // `height: 100%; min-height: 0` column with 1134px of content
+            // in an 800px grid's `1fr` row keeps the row at 800 in
+            // Chrome 148. (Items with an `auto` height still floor fr rows
+            // at their content; that is older and not this row.)
+            let contribution = {
+                let item_style = &item.layout_box.style;
+                let r0 = (item.row_start - 1).max(0) as usize;
+                let r1 = (r0 + item.row_span.max(1) as usize).min(grid.rows.len());
+                match definite_len(&item.layout_box, &item_style.min_height) {
+                    Some(min_h)
+                        if has_definite_height
+                            && crate::flex::has_percentage(&item_style.height)
+                            && r0 < r1
+                            && grid.rows[r0..r1].iter().all(|t| t.is_flexible) =>
+                    {
+                        contribution.min(min_h + vertical_margins(item_style))
+                    }
+                    _ => contribution,
                 }
             };
             (
