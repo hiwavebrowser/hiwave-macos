@@ -62,6 +62,18 @@ pub(crate) fn text_measurer() -> CanvasTextMeasurer {
     })
 }
 
+/// The image cache as canvas `drawImage`/`createPattern` reads it: an
+/// `<img>`'s decoded pixels by URL (its first frame), `None` when the
+/// image is not decoded.
+pub(crate) fn image_loader(images: std::sync::Arc<rustkit_image::ImageManager>) -> rustkit_bindings::CanvasImageLoader {
+    Box::new(move |url: &str| {
+        let url = url::Url::parse(url).ok()?;
+        let image = images.get_cached(&url)?;
+        let frame = image.current_frame(std::time::Duration::ZERO);
+        rustkit_bindings::canvas::CanvasBitmap::from_rgba(frame.width(), frame.height(), frame.data())
+    })
+}
+
 fn measure(font: &CanvasFont, text: &str) -> rustkit_layout::TextMetrics {
     rustkit_layout::measure_text_advanced(
         text,

@@ -149,7 +149,7 @@ pub use dom::{
 };
 pub mod events;
 pub use rustkit_canvas as canvas;
-pub use web_canvas::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
+pub use web_canvas::{CanvasImageLoader, CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
     AnimationEventData, DataTransfer, DragEventData, DroppedFile, Event, EventDispatcher,
@@ -1283,6 +1283,12 @@ impl DomBindings {
     /// The text shaper `measureText` and canvas text use (the engine's).
     pub fn set_canvas_text_measurer(&self, measurer: Option<CanvasTextMeasurer>) {
         self.canvases.borrow_mut().set_measurer(measurer);
+    }
+
+    /// Where `drawImage`/`createPattern` get an `<img>`'s decoded pixels
+    /// (by its URL): the engine's image cache.
+    pub fn set_canvas_image_loader(&self, loader: Option<CanvasImageLoader>) {
+        self.canvases.borrow_mut().images = loader;
     }
 
     /// Measure `text` in the canvas `font` the way the canvas does.

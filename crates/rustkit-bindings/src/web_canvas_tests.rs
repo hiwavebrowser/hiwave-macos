@@ -112,8 +112,8 @@ fn drawing_members_are_there_and_the_rest_absent() {
         ev(&b, "var x = document.getElementById('c').getContext('2d'); \
                 var have = ['save','restore','scale','rotate','translate','transform','setTransform','resetTransform','fillRect','clearRect','strokeRect', \
                 'beginPath','moveTo','lineTo','arc','arcTo','bezierCurveTo','quadraticCurveTo','rect','closePath','fill','stroke','clip', \
-                'setLineDash','getLineDash','fillText','strokeText','measureText','createLinearGradient','getImageData'].filter(function (m) { return typeof x[m] !== 'function'; }); \
-                var absent = ['drawImage','createPattern','createRadialGradient','putImageData','isPointInPath'].filter(function (m) { return m in x; }); \
+                'setLineDash','getLineDash','fillText','strokeText','measureText','createLinearGradient','getImageData','putImageData','createImageData','drawImage','createPattern','createRadialGradient'].filter(function (m) { return typeof x[m] !== 'function'; }); \
+                var absent = ['isPointInPath','shadowBlur','globalCompositeOperation'].filter(function (m) { return m in x; }); \
                 JSON.stringify([have, absent, typeof document.getElementById('c').toDataURL])"),
         "[[],[],\"undefined\"]"
     );

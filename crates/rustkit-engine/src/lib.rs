@@ -9570,6 +9570,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10036,6 +10037,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }

@@ -29,6 +29,20 @@ use std::f32::consts::PI;
 use thiserror::Error;
 
 mod raster;
+pub use raster::CanvasBitmap;
+
+/// What the raster takes from a context's state for a draw (a macro, so
+/// that it borrows the state's fields and leaves `raster` free).
+macro_rules! raster_ctx {
+    ($c:expr) => {
+        raster::Ctx {
+            size: ($c.width, $c.height),
+            op: $c.state.global_composite_operation,
+            clip: $c.state.raster_clip.as_deref(),
+            alpha: $c.state.global_alpha,
+        }
+    };
+}
 
 // ==================== Errors ====================
 
@@ -197,9 +211,8 @@ impl RadialGradient {
 /// Canvas pattern.
 #[derive(Debug, Clone)]
 pub struct CanvasPattern {
-    pub image_data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
+    /// The source's pixels when the pattern was set as a style.
+    pub bitmap: std::sync::Arc<CanvasBitmap>,
     pub repetition: PatternRepetition,
 }
 
@@ -634,6 +647,9 @@ pub struct CanvasState {
     /// box of every clip path intersected so far (a non-rectangular clip
     /// clips to its box). `None` is the whole bitmap.
     pub clip_rect: Option<[f32; 4]>,
+    /// The clip as the bitmap's coverage mask (`None`: no clip), which
+    /// the raster draws through.
+    pub(crate) raster_clip: raster::ClipMask,
 }
 
 impl Default for CanvasState {
@@ -659,6 +675,7 @@ impl Default for CanvasState {
             shadow_offset_y: 0.0,
             clip_path: None,
             clip_rect: None,
+            raster_clip: None,
         }
     }
 }
@@ -1210,14 +1227,9 @@ impl CanvasRenderingContext2D {
                 self.occlude(region);
             }
         }
-        self.raster.fill(
-            (self.width, self.height),
-            &[PathCommand::Rect(x, y, w, h)],
-            false,
-            &style,
-            self.state.global_composite_operation,
-            &t,
-        );
+        let ctx = raster_ctx!(self);
+        let raster = &mut self.raster;
+        raster.fill(&ctx, &[PathCommand::Rect(x, y, w, h)], false, &style, &t);
         self.record(DrawCommand::FillRect { x, y, w, h, style, transform: t });
     }
 
@@ -1248,14 +1260,9 @@ impl CanvasRenderingContext2D {
             dash: &self.state.line_dash,
             dash_offset: self.state.line_dash_offset,
         };
-        self.raster.stroke(
-            (self.width, self.height),
-            path,
-            &line,
-            &style,
-            self.state.global_composite_operation,
-            &self.state.transform,
-        );
+        let ctx = raster_ctx!(self);
+        let raster = &mut self.raster;
+        raster.stroke(&ctx, path, &line, &style, &self.state.transform);
     }
 
     fn dash(&self) -> LineDash {
@@ -1274,7 +1281,7 @@ impl CanvasRenderingContext2D {
             return;
         }
         let t = self.state.transform;
-        self.raster.clear(x, y, w, h, &t);
+        self.raster.clear(self.state.raster_clip.as_deref(), x, y, w, h, &t);
         let q = quad(&t, x, y, w, h);
         let canvas = self.canvas_rect();
         let clip_covers = self.state.clip_rect.is_none_or(|c| contains4(c, canvas));
@@ -1324,14 +1331,9 @@ impl CanvasRenderingContext2D {
             return;
         }
         let style = self.state.fill_style.with_alpha(self.state.global_alpha);
-        self.raster.fill(
-            (self.width, self.height),
-            self.path.commands(),
-            even_odd,
-            &style,
-            self.state.global_composite_operation,
-            &self.state.transform,
-        );
+        let ctx = raster_ctx!(self);
+        let raster = &mut self.raster;
+        raster.fill(&ctx, self.path.commands(), even_odd, &style, &self.state.transform);
         self.record(DrawCommand::FillPath {
             segments,
             style: self.state.fill_style.with_alpha(self.state.global_alpha),
@@ -1360,6 +1362,18 @@ impl CanvasRenderingContext2D {
     /// Clip to current path: the clip becomes its intersection with the
     /// path's bounding box in bitmap pixels.
     pub fn clip(&mut self) {
+        self.clip_with_rule(false);
+    }
+
+    /// Clip to the current path under the even-odd rule or non-zero.
+    pub fn clip_with_rule(&mut self, even_odd: bool) {
+        self.state.raster_clip = raster::clip_to(
+            (self.width, self.height),
+            self.state.raster_clip.as_deref(),
+            self.path.commands(),
+            even_odd,
+            &self.state.transform,
+        );
         self.state.clip_path = Some(self.path.clone());
         let t = self.state.transform;
         let mut b = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
@@ -1516,6 +1530,31 @@ impl CanvasRenderingContext2D {
     /// Get image data from canvas.
     pub fn get_image_data(&self, x: i32, y: i32, width: u32, height: u32) -> ImageData {
         ImageData { width, height, data: self.raster.read(x, y, width, height) }
+    }
+
+    /// The bitmap's pixels, for another canvas to draw or repeat; `None`
+    /// when nothing was drawn on it.
+    pub fn bitmap(&self) -> Option<CanvasBitmap> {
+        self.raster.bitmap()
+    }
+
+    /// drawImage of a bitmap (another canvas, a decoded image): the source
+    /// rect `src` (`sx, sy, sw, sh`) into the destination rect `dst`.
+    pub fn draw_bitmap(&mut self, image: &CanvasBitmap, src: [f32; 4], dst: [f32; 4]) {
+        if src.iter().chain(&dst).any(|v| !v.is_finite()) {
+            return;
+        }
+        let ctx = raster_ctx!(self);
+        let raster = &mut self.raster;
+        raster.draw_image(&ctx, image, src, dst, &self.state.transform);
+        self.generation = next_generation();
+    }
+
+    /// putImageData: the part `dirty` (`x, y, w, h`, already cut to the
+    /// image) of `data` written at `x, y` as it is (HTML §4.12.5.1.15).
+    pub fn put_image_data_dirty(&mut self, data: &ImageData, x: i32, y: i32, dirty: [i32; 4]) {
+        self.raster.put((self.width, self.height), &data.data, data.width, x, y, dirty);
+        self.generation = next_generation();
     }
 
     /// Put image data to canvas.
