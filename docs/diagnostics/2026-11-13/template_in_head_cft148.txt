@@ -7,3 +7,4 @@ div inside: head=[template#u,meta] body=[] u.content=[div,span] in head
 no end tag: head=[template#u] body=[] u.content=[p,p] in head
 formatting stays inside: head=[template#u] body=["y"] u.content=[b] in head
 template in body in template: head=[template#o] body=[p] o.content=[div,s] in head u.content=["i"]
+td in body in template: head=[template#o] body=[] o.content=[p] in head u.content=["b"]

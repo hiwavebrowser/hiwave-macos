@@ -14,7 +14,8 @@ var cases = {
   'div inside': '<head><template id="u"><div>d</div><span>s</span></template><meta name="after"></head><body></body>',
   'no end tag': '<head><template id="u"><p>unclosed</p></head><body><p>b</p></body>',
   'formatting stays inside': '<head><template id="u"><b>x</template></head><body>y</body>',
-  'template in body in template': '<head><template id="o"><div><template id="u">i</template><p>after</p></div><s>s</s></template></head><body><p>b</p></body>'
+  'template in body in template': '<head><template id="o"><div><template id="u">i</template><p>after</p></div><s>s</s></template></head><body><p>b</p></body>',
+  'td in body in template': '<head><template id="o"><p>a<template id="u">b</template><td>c</td></template></head><body></body>'
 };
 function names(list) { return Array.prototype.map.call(list, function (e) { return e.nodeType === 1 ? e.localName + (e.id ? '#' + e.id : '') : e.nodeType === 3 ? '"' + e.data.replace(/\s+/g, ' ') + '"' : '?'; }).join(','); }
 function tree(node) { return names(node.childNodes); }
@@ -27,6 +28,14 @@ Object.keys(cases).forEach(function (k) {
   Array.prototype.forEach.call(d.querySelectorAll('template'), function (t) {
     Array.prototype.forEach.call(t.content.querySelectorAll('template'), function (inner) { out += ' ' + inner.id + '.content=[' + tree(inner.content) + ']'; });
   });
+  // Table cells anywhere in a template's content (none in Chrome's: a
+  // <td> outside a table is ignored), listed only when there are some.
+  var cells = 0;
+  (function count(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('td'), function () { cells++; });
+    Array.prototype.forEach.call(root.querySelectorAll('template'), function (t) { count(t.content); });
+  })(d);
+  if (cells) out += ' cells=' + cells;
   lines.push(out);
 });
 window.report = function () { return lines.join('\n'); };
