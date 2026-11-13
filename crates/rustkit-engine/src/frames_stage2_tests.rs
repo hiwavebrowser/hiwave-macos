@@ -36,6 +36,7 @@ impl Page {
             ("/child.html", "text/html", CHILD.to_string()),
             ("/other.html", "text/html", "<!doctype html><title>other-title</title><p id=o>other</p>".to_string()),
             ("/child.js", "text/javascript", "window.externalRan = true;".to_string()),
+            ("/noscript.html", "text/html", "<!doctype html><body><noscript><strong>x</strong></noscript><p>c</p></body>".to_string()),
         ];
         let server = serve_routes(routes);
         let mut engine = Engine::new(config(on)).expect("engine");
@@ -150,6 +151,25 @@ document.getElementById('f').addEventListener('load', function () { loaded = tru
     let mut page = Page::load(true, page);
     page.turns_until("window.loaded", Duration::from_secs(5));
     assert_eq!(page.js("document.getElementById('f').contentDocument.title"), r#"String("child-title")"#);
+}
+
+/// A frame's document is parsed with scripting on, as its parent's is:
+/// the contents of its `<noscript>` are one text node, not elements
+/// (HTML §13.2.3.5). Chrome 148, a page and its same-origin frame with
+/// `<noscript><strong>x</strong></noscript>`: `1|3|0` for each (one child,
+/// a text node, no `strong`). The frame's was parsed with scripting off
+/// (Speedometer's TodoMVC-Vue had an extra `strong` in its frame).
+#[test]
+fn a_frames_noscript_is_text() {
+    let page = "<!doctype html><body><noscript><strong>top</strong></noscript><iframe id=f src=/noscript.html></iframe><script>
+window.loaded = false;
+document.getElementById('f').addEventListener('load', function () { loaded = true; });
+function shape(doc) { var n = doc.querySelector('noscript'); return n.childNodes.length + '|' + n.firstChild.nodeType + '|' + doc.querySelectorAll('strong').length; }
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.loaded", Duration::from_secs(5));
+    assert_eq!(page.js("shape(document)"), r#"String("1|3|0")"#);
+    assert_eq!(page.js("shape(document.getElementById('f').contentDocument)"), r#"String("1|3|0")"#, "the frame's noscript");
 }
 
 /// A removed frame is dropped: its window is no longer the element's.
