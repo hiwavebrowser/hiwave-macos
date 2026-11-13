@@ -124,6 +124,31 @@
    "name": "loop-fill",
    "js": "function f(x) { return (x + 0.5) - 0.5; } var a = []; for (var i = 0; i < 20; i += 1.0) a[i + 0.0] = i * 2; var u = new Int16Array(20); for (var j = 0; j < 20; j++) u[(j + 0.5) - 0.5] = a[j] - 5; a.length + ',' + u[19] + ',' + a[19]",
    "chrome": "20,33,38"
+  },
+  {
+   "name": "string-oob-proto",
+   "js": "function f(x) { return (x + 0.5) - 0.5; } String.prototype[5] = 'P'; var r = 'abc'[f(5)] + ',' + 'abc'[f(1)] + ',' + 'abc'[f(2)]; delete String.prototype[5]; r",
+   "chrome": "P,b,c"
+  },
+  {
+   "name": "string-oob-plain",
+   "js": "function f(x) { return (x + 0.5) - 0.5; } String(('abc')[f(5)]) + ',' + String('abc'[f(3)])",
+   "chrome": "undefined,undefined"
+  },
+  {
+   "name": "super-set-array-home",
+   "js": "function f(x) { return (x + 0.5) - 0.5; } var arr = [1,2,3]; var obj = { __proto__: arr, m() { super[f(1)] = 'x'; } }; obj.m(); String(arr[1]) + ',' + obj.hasOwnProperty(1) + ',' + obj[1]",
+   "chrome": "2,true,x"
+  },
+  {
+   "name": "super-set-array-home-append",
+   "js": "function f(x) { return (x + 0.5) - 0.5; } var arr = [1,2,3]; var obj = { __proto__: arr, m() { super[f(3)] = 'y'; } }; obj.m(); arr.length + ',' + obj.hasOwnProperty(3)",
+   "chrome": "3,true"
+  },
+  {
+   "name": "reflect-set-array-receiver",
+   "js": "function f(x) { return (x + 0.5) - 0.5; } var arr = [1,2,3]; var other = {}; Reflect.set(arr, f(1), 'z', other); String(arr[1]) + ',' + other[1]",
+   "chrome": "2,z"
   }
  ],
  "chrome_version": "148.0.7778.216"
