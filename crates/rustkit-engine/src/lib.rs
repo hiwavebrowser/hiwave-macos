@@ -343,6 +343,10 @@ pub use page_protocol::{
     PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
+/// Tell script runtimes made on the calling thread how much native stack they may use before a
+/// built-in that recurses in Rust throws a `RangeError` (see `rustkit_js`). Call it first thing
+/// on a thread whose stack size is known.
+pub use rustkit_js::set_thread_native_stack_budget;
 pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
@@ -487,6 +491,8 @@ mod r1_stack_pins_tests;
 mod whl1_trusted_wheel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod whl2_discrete_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl3_wheel_sequence_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -887,6 +893,8 @@ mod feed_fill_paint_tests;
 mod backdrop_filter_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_global_lexical_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -4142,24 +4150,62 @@ impl Engine {
         delta_y: f32,
         gesture: bool,
     ) -> Result<bool, EngineError> {
+        self.wheel_phase_at(id, x, y, delta_x, delta_y, gesture, false)
+    }
+
+    /// [`Engine::wheel_at`] for a wheel the platform says begins a gesture
+    /// (`began`): the first wheel of a new scroll sequence, however soon
+    /// it follows the last one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wheel_phase_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+        began: bool,
+    ) -> Result<bool, EngineError> {
+        // A gesture that begins starts a new scroll sequence: whatever the
+        // last one held (its scroller, its first wheel's fate) is let go,
+        // however soon this follows it (R1 on #1121).
+        if began {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.wheel_gesture = None;
+            }
+        }
         // The page hears the wheel when it has a listener for one
         // (`DomBindings::wants_wheel`); a page with none runs no script
         // here. A listener that is not passive hears it first and may
         // cancel it, and then nothing scrolls. Passive ones hear it after
         // the scroll, at whatever is then under the pointer (WHL1; Chrome
         // for Testing 148). An open `<select>` drop-down keeps the wheel.
-        let listening = !self.select_popup_open(id)
-            && self
-                .views
+        let (listening, blocking) = if self.select_popup_open(id) {
+            (false, false)
+        } else {
+            self.views
                 .get(&id)
                 .and_then(|v| v.bindings.as_ref())
-                .is_some_and(|bindings| bindings.wants_wheel());
+                .map_or((false, false), |bindings| (bindings.wants_wheel(), bindings.wheel_blocking()))
+        };
         if !listening {
             return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
         }
-        let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
-            self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
-        });
+        // WHL3: only the first wheel of a scroll sequence can be cancelled
+        // (Chrome): a later step of a gesture whose first step was not
+        // cancelled (it scrolled, so the gesture is held) goes after the
+        // scroll. A wheel on its own (a mouse's) is always a first.
+        let continues = gesture
+            && self.views.get(&id).and_then(|v| v.wheel_gesture).is_some_and(|g| {
+                g.gesture && g.last.elapsed() < WHEEL_GESTURE_HOLD
+            });
+        // With no listener that can cancel, the path is not walked.
+        let cancelable = blocking
+            && !continues
+            && self.wheel_target(id, x, y).is_some_and(|target| {
+                self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+            });
         if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
             return Ok(false);
         }

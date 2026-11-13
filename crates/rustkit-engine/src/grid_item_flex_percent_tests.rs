@@ -24,7 +24,13 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+const GAPS: &[&str] = &[
+    // Pre-existing on develop a9db07bb (not row sizing): the item's own
+    // block flow resolves `min-height: calc(50% + 0px)` against the 600px
+    // grid, 300, and Phase 9.5 grows the row to it. Chrome 148 treats the
+    // percentage as cyclic while rows are sized: row 18, item 18.
+    "a-percent-calc-min-height-item-in-the-auto-row-of-a-definite-grid",
+];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]

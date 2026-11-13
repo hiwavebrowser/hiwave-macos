@@ -113,7 +113,22 @@ pub enum Error {
     },
 }
 
+/// The message of the error a too-deep parse fails with (HIWAVE PATCH, native recursion).
+pub const STACK_OVERFLOW_MESSAGE: &str = "Maximum call stack size exceeded";
+
 impl Error {
+    /// The parse recursed past the native stack budget (HIWAVE PATCH, native recursion). An engine
+    /// reports it as a `RangeError`, as V8 does.
+    pub(crate) fn stack_overflow() -> Self {
+        Self::general(STACK_OVERFLOW_MESSAGE, Position::new(1, 1))
+    }
+
+    /// Whether this is the too-deep-parse error (HIWAVE PATCH, native recursion).
+    #[must_use]
+    pub fn is_stack_overflow(&self) -> bool {
+        matches!(self, Self::General { message, .. } if &**message == STACK_OVERFLOW_MESSAGE)
+    }
+
     /// Creates an `Expected` parsing error.
     pub(crate) fn expected<E, F>(expected: E, found: F, span: Span, context: &'static str) -> Self
     where
