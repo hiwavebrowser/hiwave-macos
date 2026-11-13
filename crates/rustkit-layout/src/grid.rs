@@ -2225,7 +2225,16 @@ pub fn layout_grid_container(
                 // content, 204 tall, where Chrome 148 has the area's 800.
                 // A row container, or a column one with an auto height that
                 // does not stretch, keeps the content-sized pass.
-                let definite_in_area = !child.style.flex_direction.is_row()
+                //
+                // Only in a grid whose own height is definite: there the
+                // rows are final by now. In an auto-height grid the area is
+                // the track estimate, and Phase 9.5 sizes the row from the
+                // item's CONTENT height recorded below, which the
+                // content-sized pass must give it (#1110 R1: a column-flex
+                // card with wrapping text otherwise stayed at the estimate,
+                // 20 tall where Chrome's row is 100, and overflowed).
+                let definite_in_area = has_definite_height
+                    && !child.style.flex_direction.is_row()
                     && (crate::flex::has_percentage(&child.style.height)
                         || (matches!(child.style.height, rustkit_css::Length::Auto)
                             && stretches_to_its_row(child, &container_align_items)));
