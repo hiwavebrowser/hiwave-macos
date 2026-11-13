@@ -995,6 +995,9 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.flush_text();
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
                 self.open_elements.push((name, node_id));
+                // A marker, so formatting opened inside the template is not
+                // reconstructed after it.
+                self.push_formatting_marker();
                 self.mode = InsertionMode::InTemplate;
                 self.template_insertion_modes.push(InsertionMode::InTemplate);
             }
@@ -1010,6 +1013,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                             break;
                         }
                     }
+                    self.clear_active_formatting_to_marker();
                     self.template_insertion_modes.pop();
                     self.reset_insertion_mode();
                 }
@@ -1166,6 +1170,13 @@ impl<S: TreeSink> TreeBuilder<S> {
                 if name == "html" || name == "body" {
                     self.merge_into_existing(&name, attrs);
                     return Ok(());
+                }
+
+                // §13.2.6.4.7: a "template" start tag is processed using the
+                // "in head" rules (its own mode, a formatting marker), the
+                // same rules its end tag takes.
+                if name == "template" {
+                    return self.handle_in_head(Token::StartTag { name, attrs, self_closing });
                 }
 
                 // Handle table specially - switch to InTable mode
@@ -2162,6 +2173,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                             break;
                         }
                     }
+                    self.clear_active_formatting_to_marker();
                     self.template_insertion_modes.pop();
                     self.reset_insertion_mode();
                     self.process_token(token)?;
