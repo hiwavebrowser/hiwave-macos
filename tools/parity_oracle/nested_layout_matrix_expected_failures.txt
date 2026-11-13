@@ -165,7 +165,6 @@ margin-auto--block--grid grid-item-auto-margins-ignored
 margin-auto--grid--grid  grid-item-auto-margins-ignored
 
 # percent-height-chain-in-stretched-grid-item: 1
-percent-height--grid--through-auto percent-height-chain-in-stretched-grid-item
 
 # max-height-ignored-on-stretched-item: 1
 clamp--grid--max-height-grid max-height-ignored-on-stretched-item
