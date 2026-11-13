@@ -281,6 +281,19 @@ impl<'a> GridItem<'a> {
                     .length_to_px(&style.height, container_height)
                     + margins;
             }
+            // GR5 (#1114 LOW): `0` and `min()`/`max()`/`clamp()` resolve
+            // through the resolver placement uses, so the first estimate of
+            // an auto row in a definite-height grid is not short (a lone
+            // `min(100vh, 500px)` item made a 0 row; Chrome 148: 500).
+            Length::Zero => return margins,
+            Length::Min(_) | Length::Max(_) | Length::Clamp(_)
+                if !crate::flex::has_percentage(&style.height) || container_height > 0.0 =>
+            {
+                return self
+                    .layout_box
+                    .length_to_px(&style.height, container_height)
+                    + margins;
+            }
             _ => {}
         }
 
@@ -289,6 +302,11 @@ impl<'a> GridItem<'a> {
             Length::Px(h) => *h,
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
             l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_height),
+            l @ (Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_))
+                if !crate::flex::has_percentage(l) || container_height > 0.0 =>
+            {
+                self.layout_box.length_to_px(l, container_height)
+            }
             _ => 0.0,
         };
 
@@ -2233,7 +2251,16 @@ pub fn layout_grid_container(
                 // content-sized pass must give it (#1110 R1: a column-flex
                 // card with wrapping text otherwise stayed at the estimate,
                 // 20 tall where Chrome's row is 100, and overflowed).
-                let definite_in_area = has_definite_height
+                // GR5: rows of a fixed size are final from track sizing
+                // too, whatever the grid's own height (a 300px row of a
+                // content-sized grid: Chrome 148's `height: 100%` pane is
+                // 300, the content-sized pass gave 40).
+                let in_fixed_rows = row_spans.get(item_idx).is_some_and(|&(r0, r1)| {
+                    r0 < grid.rows.len()
+                        && (r0..r1.clamp(r0 + 1, grid.rows.len()))
+                            .all(|r| track_is_fixed(&grid.rows[r]))
+                });
+                let definite_in_area = (has_definite_height || in_fixed_rows)
                     && !child.style.flex_direction.is_row()
                     && (crate::flex::has_percentage(&child.style.height)
                         || (matches!(child.style.height, rustkit_css::Length::Auto)
