@@ -63,3 +63,30 @@ fn a_double_key_and_its_string_are_the_same_property() {
     );
     assert_eq!(run("var m = {}; m['12'] = 'a'; m[12.0] = 'b'; String(Object.keys(m).length) + m[12]"), "1b");
 }
+
+/// Typed arrays and Proxies see the CANONICAL key of a double (`ToPropertyKey` = `ToString`), not
+/// the index the fast path may have used for it. Expected values: Chrome for Testing
+/// 148.0.7778.216, `tools/parity_oracle`'s Playwright, the same expressions.
+#[test]
+fn typed_arrays_and_proxies_see_the_canonical_key_of_a_double() {
+    let cases: [(&str, &str); 9] = [
+        ("var ta = new Int8Array([5,6,7]); String(ta[-0]) + ',' + ta[f(0)] + ',' + ta[0 * -1]", "5,5,5"),
+        ("var ta = new Int8Array([5,6,7]); ta[1.5] = 9; String(ta[1.5]) + ',' + ta[f(1)] + ',' + Object.keys(ta).join('|') + ',' + ta.hasOwnProperty(1.5)", "undefined,6,0|1|2,false"),
+        ("var ta = new Int8Array([5,6,7]); ta[2**53] = 9; String(ta[2**53]) + ',' + String(ta[f(3)]) + ',' + String(ta[4294967295]) + ',' + String(ta[2**32]) + ',' + Object.keys(ta).join('|')", "undefined,undefined,undefined,undefined,0|1|2"),
+        ("var ta = new Int8Array([5,6,7]); ta[f(5)] = 1; String(ta[f(5)]) + ',' + ta.length + ',' + Object.keys(ta).join('|')", "undefined,3,0|1|2"),
+        ("var ta = new Int8Array(3); ta[f(1)] = 42; ta[f(2)] = 7.9; Array.from(ta).join()", "0,42,7"),
+        ("var ta = new Int8Array([5,6,7]); ta[NaN] = 1; String(ta[NaN]) + ',' + ta.hasOwnProperty('NaN') + ',' + Object.keys(ta).join('|')", "undefined,false,0|1|2"),
+        ("var ta = new Int8Array([5,6,7]); ta[-1] = 1; String(ta[-1]) + ',' + ta.hasOwnProperty('-1')", "undefined,false"),
+        (
+            "var log = []; var p = new Proxy({}, { get(t, k) { log.push(typeof k + ':' + k); return 1; }, has(t, k) { log.push('has ' + typeof k + ':' + k); return true; } }); p[f(0)]; p[f(7)]; p[-0]; p[1.5]; p[2**32]; p[NaN]; p[1e21]; (f(3) in p); log.join(' ')",
+            "string:0 string:7 string:0 string:1.5 string:4294967296 string:NaN string:1e+21 has string:3",
+        ),
+        (
+            "var log = []; var p = new Proxy({}, { set(t, k, v) { log.push(typeof k + ':' + k); return true; }, deleteProperty(t, k) { log.push('del ' + k); return true; } }); p[f(0)] = 1; p[-0] = 2; p[f(12)] = 3; delete p[f(4)]; p[0.25] = 4; log.join(' ')",
+            "string:0 string:0 string:12 del 4 string:0.25",
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(run(&format!("{FLOAT} {body}")), expected, "{body}");
+    }
+}
