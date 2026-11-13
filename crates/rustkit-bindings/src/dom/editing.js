@@ -11,6 +11,8 @@
     delete g.__rustkit_clip_write;
     var Document = g.Document;
 
+    // The engine's dispatch, as installed (a page may replace the public one).
+    var dispatchNow = g.EventTarget.prototype.dispatchEvent;
     function hidden(o, name, value) {
         Object.defineProperty(o, name, { value: value, configurable: true, enumerable: false, writable: true });
     }
@@ -46,7 +48,7 @@
             isComposing: !!isComposing
         });
         __rk.trust(ev);
-        return el.dispatchEvent(ev);
+        return dispatchNow.call(el, ev);
     }
 
     // ---- document.execCommand (the Editing API's text-control subset) ----
@@ -118,7 +120,7 @@
             bubbles: true, cancelable: true, composed: true, view: g, data: data
         });
         __rk.trust(ev);
-        el.dispatchEvent(ev);
+        dispatchNow.call(el, ev);
     }
     function replaceMarked(c, text) {
         compose(c.el, 'compositionupdate', text);

@@ -286,10 +286,15 @@
     }
     function current() { return focused && inDocument(focused) ? focused : null; }
     var EventCtor = g.Event, dispatchNow = g.EventTarget.prototype.dispatchEvent;
+    // The engine's focus events: built with the constructor of install
+    // time and dispatched as the engine dispatches, whatever a page has put
+    // in place of either since.
     function fire(el, type, related) {
-        var FE = g.FocusEvent || g.Event;
-        el.dispatchEvent(new FE(type, { bubbles: type === 'focusin' || type === 'focusout',
-                                        composed: true, relatedTarget: related }));
+        // FocusEvent is made after this script (web_interfaces.js); the
+        // engine's reference is on the host object.
+        var FocusEventCtor = __rk.FocusEvent || EventCtor;
+        dispatchNow.call(el, new FocusEventCtor(type, { bubbles: type === 'focusin' || type === 'focusout',
+                                                       composed: true, relatedTarget: related }));
     }
     // A field the user edited commits when it loses the focus: `change`
     // (HTML §4.10.5.5). `__rkFireInput` marks the edit.

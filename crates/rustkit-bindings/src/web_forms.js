@@ -379,9 +379,12 @@
         if (!form.isConnected) return;
         var noValidate = form.noValidate || (submitter !== null && submitter.hasAttribute('formnovalidate'));
         if (!noValidate && !validate(form)) return;
+        // The engine's event (trusted, as Chrome's is whoever asked for the
+        // submission), dispatched as the engine dispatches.
         var e = new EventCtor('submit', { bubbles: true, cancelable: true });
         Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
-        if (form.dispatchEvent(e)) noteSubmit(form, submitter);
+        __rk.trust(e);
+        if (dispatch(form, e)) noteSubmit(form, submitter);
     }
     // Implicit submission (HTML §4.10.21.2): Enter in a text field clicks
     // the form's default button, its first submit button. A form with none
@@ -449,7 +452,8 @@
             var e = new EventCtor('toggle');
             e.oldState = was ? 'open' : 'closed';
             e.newState = open ? 'open' : 'closed';
-            details.dispatchEvent(e);
+            __rk.trust(e);
+            dispatch(details, e);
         });
     }
     if (typeof g.HTMLDetailsElement === 'function') {

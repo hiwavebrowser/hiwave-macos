@@ -88,6 +88,9 @@
             }
         };
         Object.defineProperty(C, 'name', { value: name });
+        // The engine's own reference, on the host object: it builds its
+        // events with these whatever a page puts on the window since.
+        if (name === 'FocusEvent') __rk.FocusEvent = C;
         C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
         Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
         def(name, C);

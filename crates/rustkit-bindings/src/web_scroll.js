@@ -13,6 +13,8 @@
 // from a timer, not synchronously.
 (function (g) {
     var read = g.__rustkit_scroll_state, to = g.__rustkit_scroll_to, table = g.__rustkit_element_scroll;
+    // The engine's scroll events: the Event and dispatch of install time.
+    var EventCtor = g.Event, dispatchNow = g.EventTarget.prototype.dispatchEvent;
     delete g.__rustkit_scroll_state;
     delete g.__rustkit_scroll_to;
     delete g.__rustkit_element_scroll;
@@ -48,7 +50,7 @@
         queued = true;
         g.setTimeout(function () {
             queued = false;
-            try { document.dispatchEvent(new g.Event('scroll', { bubbles: true })); } catch (_) {}
+            try { dispatchNow.call(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
         }, 0);
     }
 
@@ -88,7 +90,7 @@
         eventsDue.add(el);
         g.setTimeout(function () {
             eventsDue.delete(el);
-            try { el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
+            try { dispatchNow.call(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
         }, 0);
     }
     function setOwn(el, x, y) {
@@ -212,13 +214,13 @@
     // The engine calls this when the USER scrolled (wheel, keys, scrollbar):
     // the scroll event fires at once, not from a timer.
     __rk.userScrolled = function () {
-        try { document.dispatchEvent(new g.Event('scroll', { bubbles: true })); } catch (_) {}
+        try { dispatchNow.call(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
     };
 
     // The same when the user scrolled an element: at once, at the element.
     __rk.userScrolledElement = function (id) {
         var el = table.byId(id);
-        try { if (el) el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
+        try { if (el) dispatchNow.call(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
     };
 
     var D = g.Document && g.Document.prototype;
