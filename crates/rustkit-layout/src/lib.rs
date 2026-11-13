@@ -356,7 +356,9 @@ pub(crate) fn button_border_box_width(
 /// three 16, lh1 + padding:0 20, lh1 + border:none 18, padding 4px 8px 30, padding 8px 16px 38.
 /// Families whose average character width Chrome does not trust: a field
 /// in one is `size` advances of "0" wide, with nothing added. Matched as
-/// written, against the first family of `font-family`.
+/// written, against the first family of `font-family`. The list is the one
+/// in Chromium's `HasValidAvgCharWidth` (core/layout/forms/
+/// layout_text_control.cc), read there, not copied.
 const NO_AVERAGE_WIDTH: &[&str] = &[
     "American Typewriter", "Arial Hebrew", "Chalkboard", "Cochin", "Corsiva Hebrew", "Courier", "Euphemia UCAS",
     "Geneva", "Gill Sans", "Hei", "Helvetica", "Hoefler Text", "InaiMathi", "Kai", "Lucida Grande", "Marker Felt",
@@ -379,6 +381,11 @@ const NO_AVERAGE_WIDTH: &[&str] = &[
 /// `NO_AVERAGE_WIDTH`, or an average over 1.7 advances of "0", as a CJK
 /// font's full-width average is), a character is the advance of "0" and
 /// nothing is added.
+///
+/// The structure (size characters plus the widest's excess, the list, the
+/// 1.7 test) is Chromium's. Two details are fitted to the measurements, not
+/// read: the "x" advance taken up from a half, and the font size taken
+/// down to 1/64 px before measuring.
 fn text_input_content_width(style: &ComputedStyle, font_size: f32, size: u32) -> f32 {
     // The font size on the 1/64 px grid Chrome keeps lengths in, rounded
     // down: at 13.3333px (the UA's size for a field) Courier New's "x" is
