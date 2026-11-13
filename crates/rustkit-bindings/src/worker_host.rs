@@ -30,8 +30,9 @@ const TURN_BUDGET: Duration = Duration::from_secs(60 * 60 * 24);
 /// At most this many workers a page may have at once.
 const MAX_WORKERS: usize = 64;
 
-/// At most this many of a worker's messages and events reach the page in one turn (Chrome delivers one
-/// a task): a worker that floods the page cannot hold a turn.
+/// At most this many workers' messages and events reach the page in one turn, between all its workers
+/// (Chrome delivers one a task): workers that flood the page cannot hold a turn. web_worker.js's pump
+/// carries the turn's budget across workers.
 const MAX_ITEMS_PER_POLL: usize = 256;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -173,15 +174,20 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
             JsValue::Undefined
         }),
     )?;
-    // poll(id) -> JSON array of {k:"m",d}|{k:"e",m}|{k:"f",r,u}, ended by
+    // poll(id, max) -> at most `max` (and MAX_ITEMS_PER_POLL) items: a JSON array of {k:"m",d}|{k:"e",m}|{k:"f",r,u}, ended by
     // {k:"x"} once the worker has returned and been drained; "null" for an
     // unknown id.
     let r = reg.clone();
     runtime.register_host_function(
         "__rustkit_worker_poll",
-        1,
+        2,
         Box::new(move |args| {
             let id = arg_id(args);
+            // The page's pump passes what is left of its turn's budget; never more than the cap.
+            let max = match args.get(1) {
+                Some(JsValue::Number(n)) if *n >= 1.0 => (*n as usize).min(MAX_ITEMS_PER_POLL),
+                _ => MAX_ITEMS_PER_POLL,
+            };
             let mut items = Vec::new();
             let finished = {
                 let w = r.workers.borrow();
@@ -193,14 +199,14 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
                 let done = h.thread.is_finished();
                 // At most MAX_ITEMS_PER_POLL a turn: a worker that floods the
                 // page leaves the rest, in order, for the next turns.
-                while items.len() < MAX_ITEMS_PER_POLL {
+                while items.len() < max {
                     match h.from.try_recv() {
                         Ok(m) => items.push(item(m)),
                         Err(_) => break,
                     }
                 }
                 // A full batch may have left items behind: the end waits for them.
-                done && items.len() < MAX_ITEMS_PER_POLL
+                done && items.len() < max
             };
             if finished {
                 if let Some(h) = r.workers.borrow_mut().remove(&id) {

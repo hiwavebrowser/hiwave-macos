@@ -71,14 +71,21 @@
         });
     }
 
+    // One turn's budget of worker items, shared by all the page's workers (the host caps a poll at the same
+    // number). Each turn starts after the worker the last one ended on, so a busy worker cannot starve the rest.
+    var TURN_ITEMS = 256, nextWorker = 0;
     function pump() {
-        var ran = 0;
-        for (var key in live) {
+        var ran = 0, left = TURN_ITEMS, keys = Object.keys(live), n = keys.length;
+        var start = n ? nextWorker % n : 0;
+        for (var j = 0; j < n && left > 0; j++) {
+            var key = keys[(start + j) % n];
+            nextWorker = start + j + 1;
             var st = live[key];
             if (!st || !st.id) continue;
-            var raw = poll(st.id);
+            var raw = poll(st.id, left);
             if (raw === 'null') { delete live[key]; continue; }
             var items = JSON.parse(raw);
+            left -= items.length;
             for (var i = 0; i < items.length; i++) {
                 if (st.dead) break;
                 var it = items[i];
