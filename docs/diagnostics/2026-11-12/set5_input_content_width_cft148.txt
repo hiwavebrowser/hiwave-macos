@@ -1,5 +1,6 @@
 # SET5: a text input's content width (padding: 0; border: none), Chrome for Testing 148.0.7778.216, headless 800x600.
 # window.report() of set5_input_content_width.html: per font family, the width at each font size; then by the size attribute; then by type.
+# Lines 27 on (R1 on #1102): fractional font sizes, the size attribute as written, and setting the size property.
 sizes 10 11 12 13 13.3333 14 15 16 17 18 20 24 32
 Arial: 104 124 125 145 145 146 166 166 186 187 208 250 333
 Times: 100 110 120 130 134 140 150 160 170 180 200 240 320
@@ -26,3 +27,28 @@ type email 16px Arial: 166
 type number 16px Arial: 166
 type tel 16px Arial: 166
 type url 16px Arial: 166
+fractional 13.1 13.4 14.6 15.9 17.3, Arial: 145 145 152 166 187
+fractional 13.1 13.4 14.6 15.9 17.3, Courier New: 163 164 183 203 212
+fractional 13.1 13.4 14.6 15.9 17.3, Menlo: 164 166 185 205 214
+fractional 13.1 13.4 14.6 15.9 17.3, Times: 131 134 146 159 173
+fractional 13.1 13.4 14.6 15.9 17.3, Verdana: 165 165 186 195 212
+size attribute "10px": width 80 size 10
+size attribute " 7": width 56 size 7
+size attribute "+3": width 24 size 3
+size attribute "0": width 160 size 20
+size attribute "-1": width 160 size 20
+size attribute "2147483648": width 160 size 20
+size attribute "1e2": width 8 size 1
+size attribute "3.9": width 24 size 3
+size attribute "abc": width 160 size 20
+size attribute "": width 160 size 20
+size attribute "00012": width 96 size 12
+size = 5: attribute "5" size 5
+size = -1: attribute "20" size 20
+size = -5: attribute "20" size 20
+size = 2147483647: attribute "2147483647" size 2147483647
+size = 2147483648: attribute "20" size 20
+size = 4294967295: attribute "20" size 20
+size = 4294967296: threw IndexSizeError
+size = 3.9: attribute "3" size 3
+size = x: threw IndexSizeError

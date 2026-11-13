@@ -41,7 +41,7 @@ fn a_text_inputs_content_width_is_built_from_its_font_and_size() {
     let got: String = serde_json::from_str(&got).expect("a JSON string");
     let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
     let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
-    assert_eq!(expected.len(), 26, "the Chrome report has 26 lines");
+    assert_eq!(expected.len(), 51, "the Chrome report has 51 lines");
     let (mut wrong, mut healed) = (Vec::new(), Vec::new());
     for i in 0..expected.len().max(got.len()) {
         let (g, e) = (got.get(i).map_or("(missing)", String::as_str), expected.get(i).copied().unwrap_or("(none)"));
