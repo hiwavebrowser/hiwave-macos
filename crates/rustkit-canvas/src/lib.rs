@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::f32::consts::PI;
 use thiserror::Error;
 
+mod raster;
+
 // ==================== Errors ====================
 
 /// Errors that can occur in canvas operations.
@@ -788,8 +790,8 @@ pub struct CanvasRenderingContext2D {
     bytes: usize,
     /// See [`Self::generation`].
     generation: u64,
-    /// Pixel buffer (optional, for getImageData).
-    pixel_buffer: Option<ImageData>,
+    /// The bitmap every draw is rasterized into (`getImageData`).
+    raster: raster::Raster,
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -811,7 +813,7 @@ impl CanvasRenderingContext2D {
             bounds: Vec::new(),
             bytes: 0,
             generation: next_generation(),
-            pixel_buffer: None,
+            raster: raster::Raster::default(),
         }
     }
 
@@ -969,6 +971,7 @@ impl CanvasRenderingContext2D {
         self.state = CanvasState::default();
         self.state_stack.clear();
         self.path = Path2D::new();
+        self.raster.reset();
         self.drop_all();
     }
 
@@ -1207,6 +1210,14 @@ impl CanvasRenderingContext2D {
                 self.occlude(region);
             }
         }
+        self.raster.fill(
+            (self.width, self.height),
+            &[PathCommand::Rect(x, y, w, h)],
+            false,
+            &style,
+            self.state.global_composite_operation,
+            &t,
+        );
         self.record(DrawCommand::FillRect { x, y, w, h, style, transform: t });
     }
 
@@ -1215,6 +1226,8 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
             return;
         }
+        let path = [PathCommand::Rect(x, y, w, h)];
+        self.raster_stroke(&path);
         self.record(DrawCommand::StrokeRect {
             x, y, w, h,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
@@ -1222,6 +1235,27 @@ impl CanvasRenderingContext2D {
             dash: self.dash(),
             transform: self.state.transform,
         });
+    }
+
+    /// Rasterizes a stroke of `path` with the current line styles.
+    fn raster_stroke(&mut self, path: &[PathCommand]) {
+        let style = self.state.stroke_style.with_alpha(self.state.global_alpha);
+        let line = raster::StrokeStyle {
+            width: self.state.line_width,
+            cap: self.state.line_cap,
+            join: self.state.line_join,
+            miter_limit: self.state.miter_limit,
+            dash: &self.state.line_dash,
+            dash_offset: self.state.line_dash_offset,
+        };
+        self.raster.stroke(
+            (self.width, self.height),
+            path,
+            &line,
+            &style,
+            self.state.global_composite_operation,
+            &self.state.transform,
+        );
     }
 
     fn dash(&self) -> LineDash {
@@ -1240,6 +1274,7 @@ impl CanvasRenderingContext2D {
             return;
         }
         let t = self.state.transform;
+        self.raster.clear(x, y, w, h, &t);
         let q = quad(&t, x, y, w, h);
         let canvas = self.canvas_rect();
         let clip_covers = self.state.clip_rect.is_none_or(|c| contains4(c, canvas));
@@ -1288,6 +1323,15 @@ impl CanvasRenderingContext2D {
         if segments.is_empty() {
             return;
         }
+        let style = self.state.fill_style.with_alpha(self.state.global_alpha);
+        self.raster.fill(
+            (self.width, self.height),
+            self.path.commands(),
+            even_odd,
+            &style,
+            self.state.global_composite_operation,
+            &self.state.transform,
+        );
         self.record(DrawCommand::FillPath {
             segments,
             style: self.state.fill_style.with_alpha(self.state.global_alpha),
@@ -1302,6 +1346,8 @@ impl CanvasRenderingContext2D {
         if segments.is_empty() {
             return;
         }
+        let path = self.path.commands().to_vec();
+        self.raster_stroke(&path);
         self.record(DrawCommand::StrokePath {
             segments,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
@@ -1469,21 +1515,7 @@ impl CanvasRenderingContext2D {
 
     /// Get image data from canvas.
     pub fn get_image_data(&self, x: i32, y: i32, width: u32, height: u32) -> ImageData {
-        // Return from pixel buffer if available
-        if let Some(ref buffer) = self.pixel_buffer {
-            let mut data = ImageData::new(width, height);
-            for dy in 0..height {
-                for dx in 0..width {
-                    let sx = (x + dx as i32) as u32;
-                    let sy = (y + dy as i32) as u32;
-                    if let Some((r, g, b, a)) = buffer.get_pixel(sx, sy) {
-                        data.set_pixel(dx, dy, r, g, b, a);
-                    }
-                }
-            }
-            return data;
-        }
-        ImageData::new(width, height)
+        ImageData { width, height, data: self.raster.read(x, y, width, height) }
     }
 
     /// Put image data to canvas.

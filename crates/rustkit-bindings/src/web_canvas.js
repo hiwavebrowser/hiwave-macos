@@ -9,7 +9,7 @@
 // rects, paths, clip, solid colours and linear gradients, line styles and
 // dashes, text and measureText. Members not listed below are absent, not
 // stubbed: no createRadialGradient/createPattern, drawImage, shadows,
-// globalCompositeOperation, getImageData/putImageData, isPointInPath,
+// globalCompositeOperation, putImageData, isPointInPath,
 // toDataURL. getContext of any other kind is null.
 (function (g) {
     var C = g.__rustkit_canvas, slot = g.__rustkit_canvas_slot;
@@ -312,4 +312,41 @@
     method(P, 'fill', function fill(r) { var d = data(this); call(d, 'fill', rule(r)); });
     method(P, 'stroke', function stroke() { call(data(this), 'stroke'); });
     method(P, 'clip', function clip(r) { var d = data(this); call(d, 'clip', rule(r)); });
+
+    // ---- Pixels: the bitmap rasterized behind the recording (STR-7).
+    var Image = iface('ImageData');
+    var IMG = new WeakMap();
+    function imageData(w, h, bytes) {
+        var o = Object.create(Image.prototype);
+        IMG.set(o, { width: w, height: h, data: bytes });
+        return o;
+    }
+    function img(o) {
+        var v = o != null ? IMG.get(o) : undefined;
+        if (!v) throw new TypeError('Illegal invocation');
+        return v;
+    }
+    accessor(Image.prototype, 'width', function () { return img(this).width; });
+    accessor(Image.prototype, 'height', function () { return img(this).height; });
+    accessor(Image.prototype, 'data', function () { return img(this).data; });
+    method(P, 'getImageData', function getImageData(sx, sy, sw, sh) {
+        need(4, arguments, 'CanvasRenderingContext2D', 'getImageData');
+        var d = data(this);
+        var a = [+sx, +sy, +sw, +sh];
+        for (var i = 0; i < 4; i++) {
+            if (!isFinite(a[i])) throw new TypeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+        }
+        var w = Math.trunc(a[2]), h = Math.trunc(a[3]);
+        if (w === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source width is 0.");
+        if (h === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source height is 0.");
+        var x = Math.trunc(a[0]), y = Math.trunc(a[1]);
+        if (w < 0) { x += w; w = -w; }
+        if (h < 0) { y += h; h = -h; }
+        var hex = String(call(d, 'getImageData', x, y, w, h) || '');
+        var bytes = new Uint8ClampedArray(w * h * 4);
+        for (var k = 0, n = Math.min(bytes.length, hex.length >> 1); k < n; k++) {
+            bytes[k] = parseInt(hex.substr(k * 2, 2), 16);
+        }
+        return imageData(w, h, bytes);
+    });
 })(typeof globalThis === 'object' ? globalThis : this);

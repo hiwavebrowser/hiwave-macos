@@ -5,8 +5,9 @@
 //! web_canvas.js is the script surface; every call lands in the one host
 //! function `__rustkit_canvas(gen, id, op, ...)`.
 //!
-//! Nothing is rasterized here: the recording is the canvas's content, and
-//! the engine paints it as vector display commands in the canvas's box.
+//! The engine paints the recording as vector display commands in the
+//! canvas's box; rustkit-canvas also rasterizes every draw into a bitmap,
+//! which `getImageData` reads (STR-7).
 
 use crate::dom::{DomHost, SharedDomHost};
 use rustkit_canvas::{
@@ -457,6 +458,18 @@ pub(crate) fn install(
                     drew = false;
                     if let Some([x, y, w, hh]) = nums::<4>(args, 3) {
                         ctx.rect(x, y, w, hh);
+                    }
+                }
+                "getImageData" => {
+                    drew = false;
+                    if let Some([x, y, w, hh]) = nums::<4>(args, 3) {
+                        let d = ctx.get_image_data(x as i32, y as i32, w as u32, hh as u32);
+                        let mut hex = String::with_capacity(d.data.len() * 2);
+                        for b in &d.data {
+                            use std::fmt::Write;
+                            let _ = write!(hex, "{b:02x}");
+                        }
+                        result = JsValue::String(hex);
                     }
                 }
                 "fill" => ctx.fill_with_rule(text(args, 3) == Some("evenodd")),
