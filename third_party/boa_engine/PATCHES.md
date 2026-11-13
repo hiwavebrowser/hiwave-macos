@@ -505,7 +505,7 @@ that already missed) are one branch on that flag. `rustkit_js::vm_stats_report()
 the top 40 opcodes with counts and shares, the misses per site split into cacheable (cold, or the
 shape changed) and not cacheable (misses every time, e.g. a store that adds a property), and the top
 40 (site, receiver kind, name) misses. Hits are the opcode's count minus its misses.
-`RUSTKIT_VM_STATS_FILE=<path>` also rewrites the report to that file every 4M opcodes and when the
+`RUSTKIT_VM_STATS_FILE=<path>` also rewrites the report to that file every 1M opcodes and when the
 thread ends, for a probe that exits without calling the function. Pin:
 `crates/rustkit-js/tests/vm_stats.rs` (red first, against a stub report). Cost with the flag off,
 measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
