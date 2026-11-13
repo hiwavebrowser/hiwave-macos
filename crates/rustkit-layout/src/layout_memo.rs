@@ -169,6 +169,9 @@ struct BoxOutputs {
     /// set or reset by every layout of the box, so a skipped layout must leave what it would have.
     children_laid_at: Option<(f32, f32)>,
     abspos_cb_hint: Option<Rect>,
+    /// SET2: the pitch `set_wrapped_pitch` gave a wrapped text run, which the next visit reads back
+    /// to take it out of the run's height again.
+    text_line_pitch: Option<f32>,
 }
 
 struct MemoEntry {
@@ -285,6 +288,64 @@ fn key_for(b: &LayoutBox, definite_height: Option<f32>, margin: &MarginCollapseC
     }
 }
 
+/// Every field of a box, classed for the memo. The destructure names every field, so a new one does
+/// not compile until it is classed here: a field layout WRITES on a descendant must be in
+/// `BoxOutputs` (snapshot, restore and `close_to`), or a memo hit leaves it stale. (Verify mode found
+/// `text_line_pitch` missing on a live page, after #1090 added it; this is the check that would
+/// have caught it at compile time.)
+#[allow(dead_code)]
+fn classify_every_field(b: &LayoutBox) {
+    let LayoutBox {
+        // Inputs: style, tag, text and tree shape. The key covers what layout reads of them, and a
+        // different shape fails the restore.
+        box_type: _,
+        style: _,
+        children: _,
+        position: _,
+        float: _,
+        clear: _,
+        z_index: _,
+        text_sources: _,
+        node_id: _,
+        element_id: _,
+        identity: _,
+        link_href: _,
+        focused_caret: _,
+        focused_selection: _,
+        root_element_height: _,
+        table_span: _,
+        offsets: _,
+        viewport: _,
+        // Built before layout, from the tree, not by layout.
+        stacking_context: _,
+        containing_block_index: _,
+        pseudo_animation_key: _,
+        // Written by layout and held in `BoxOutputs`.
+        dimensions: _,
+        text_lines: _,
+        text_flow_first_offset: _,
+        table_caption_shift: _,
+        percent_height_is_auto: _,
+        context_floats: _,
+        children_laid_at: _,
+        abspos_cb_hint: _,
+        text_line_pitch: _,
+        // Structural: flex and grid set it on their children before laying them out, so a subtree
+        // laid out again by the same parent sees the same value.
+        formatting_root: _,
+        // The memo itself.
+        layout_memo: _,
+        // Stamped after layout (scroll, sticky, scrollbar passes), never by the layout call.
+        sticky_state: _,
+        element_scroll: _,
+        sticky_rule: _,
+        sticky_shift: _,
+        sticky_paths: _,
+        scrollbar_thumb_hovered: _,
+        scrollbar_overflows: _,
+    } = b;
+}
+
 /// The recorded outputs of every descendant of `b` (pre-order), or `None` when one of them
 /// depends on state outside the subtree.
 fn snapshot(b: &LayoutBox) -> Option<Vec<BoxOutputs>> {
@@ -314,6 +375,7 @@ fn snapshot(b: &LayoutBox) -> Option<Vec<BoxOutputs>> {
                 context_floats,
                 children_laid_at: c.children_laid_at,
                 abspos_cb_hint: c.abspos_cb_hint.map(|r| Rect { x: r.x - ox, y: r.y - oy, ..r }),
+                text_line_pitch: c.text_line_pitch,
             });
             if !walk(c, ox, oy, out) {
                 return false;
@@ -348,6 +410,7 @@ fn restore(b: &mut LayoutBox, outputs: &[BoxOutputs]) -> bool {
             c.context_floats = o.context_floats.as_ref().map(|f| f.translated(ox, oy));
             c.children_laid_at = o.children_laid_at;
             c.abspos_cb_hint = o.abspos_cb_hint.map(|r| Rect { x: r.x + ox, y: r.y + oy, ..r });
+            c.text_line_pitch = o.text_line_pitch;
             walk(c, ox, oy, it);
         }
     }
@@ -448,6 +511,11 @@ impl BoxOutputs {
             && match (&self.abspos_cb_hint, &other.abspos_cb_hint) {
                 (None, None) => true,
                 (Some(x), Some(y)) => close_rect(x, y),
+                _ => false,
+            }
+            && match (self.text_line_pitch, other.text_line_pitch) {
+                (None, None) => true,
+                (Some(a), Some(b)) => close(a, b),
                 _ => false,
             }
     }
@@ -635,5 +703,9 @@ mod restore_tests {
             assert!(restore(&mut parent, &outputs));
             assert_eq!(parent.children[0].text_line_pitch, Some(40.0), "stale {stale:?}");
         }
+        // The verify comparison sees a pitch that differs.
+        let mut other = outputs.clone();
+        other[0].text_line_pitch = None;
+        assert!(!outputs[0].close_to(&other[0]));
     }
 }
