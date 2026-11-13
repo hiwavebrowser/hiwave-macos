@@ -2375,6 +2375,67 @@ pub struct LivePump {
     pub next_timer_ms: Option<u64>,
 }
 
+/// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
+/// for Testing 148 renders a same-origin frame's response: only HTML types
+/// are parsed as markup; text and JSON become a text document, an image an
+/// image document, and anything else is downloaded (no document).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameDocumentKind {
+    Html,
+    Text,
+    Json,
+    Image,
+    Download,
+}
+
+impl FrameDocumentKind {
+    /// From the response's MIME essence (`type/subtype`, lowercased).
+    fn of(essence: Option<&str>) -> Self {
+        let Some(essence) = essence else {
+            // No type: sniffed as HTML, as a page with none is.
+            return Self::Html;
+        };
+        let (top, sub) = essence.split_once('/').unwrap_or((essence, ""));
+        match (top, sub) {
+            ("text", "html") | ("application", "xhtml+xml") => Self::Html,
+            ("application", "json") => Self::Json,
+            (_, sub) if sub.ends_with("+json") => Self::Json,
+            ("text", _) => Self::Text,
+            ("application", "javascript" | "ecmascript" | "x-javascript") => Self::Text,
+            // An SVG image is shown as an image here (Chrome renders it as
+            // an SVG document; a stated deviation).
+            ("image", _) => Self::Image,
+            _ => Self::Download,
+        }
+    }
+
+    /// The markup the frame's document is parsed from.
+    fn markup(self, body: String, url: &Url) -> String {
+        fn escape(text: &str) -> String {
+            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        }
+        match self {
+            Self::Html | Self::Download => body,
+            Self::Text => format!(
+                "<html><head></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{}</pre></body></html>",
+                escape(&body)
+            ),
+            Self::Json => format!(
+                "<html><head></head><body><pre>{}</pre><div class=\"json-formatter-container\"></div></body></html>",
+                escape(&body)
+            ),
+            Self::Image => {
+                let name = url.path_segments().and_then(|mut s| s.next_back()).unwrap_or("").to_string();
+                let src = escape(url.as_str()).replace('"', "&quot;");
+                format!(
+                    "<html><head><title>{}</title></head><body><img style=\"display: block;-webkit-user-select: none;\" src=\"{src}\"></body></html>",
+                    escape(&name)
+                )
+            }
+        }
+    }
+}
+
 /// Fold a later turn of the frames into what the frames' turns so far
 /// said: its next timer is the one that stands (the earlier answer's has
 /// run or moved), the rest add up.
@@ -6369,7 +6430,15 @@ impl Engine {
                     }
                     Ok(response) if response.ok() => {
                         let url = response.url.clone();
-                        (response.text().await.unwrap_or_default(), url)
+                        let essence = response.content_type.as_ref().map(|m| m.essence_str().to_ascii_lowercase());
+                        let kind = FrameDocumentKind::of(essence.as_deref());
+                        if kind == FrameDocumentKind::Download {
+                            // Chrome downloads it: the frame keeps its
+                            // initial document and hears no `load`.
+                            continue;
+                        }
+                        let body = response.text().await.unwrap_or_default();
+                        (kind.markup(body, &url), url)
                     }
                     Ok(response) => (String::new(), response.url.clone()),
                     // No response to decide on (the loader refused a
