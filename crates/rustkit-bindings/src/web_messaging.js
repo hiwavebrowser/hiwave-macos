@@ -99,7 +99,7 @@
         var m = s.queue.shift();
         var event = __rk.make('MessageEvent', 'message', { data: m.data, ports: m.ports });
         __rk.trust(event);
-        port.dispatchEvent(event);
+        __rk.dispatchTo(port, event);
     }
 
     MessagePort.prototype.postMessage = function postMessage(message, options) {
@@ -229,7 +229,7 @@
             if (origin !== null && (own === 'null' || origin !== own)) return;
             var event = __rk.make('MessageEvent', 'message', { data: data, origin: own, lastEventId: '', source: g, ports: ports });
             __rk.trust(event);
-            g.dispatchEvent(event);
+            __rk.dispatchTo(g, event);
         }, 0);
     });
 

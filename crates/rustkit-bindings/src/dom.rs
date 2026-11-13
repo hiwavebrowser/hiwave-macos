@@ -2843,12 +2843,33 @@ const WRAPPERS_JS: &str = r#"
     var CTORS = Object.create(null), MADE = new WeakSet();
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
-    __rk.keepCtor = function (name, C) { if (typeof C === 'function') CTORS[name] = C; };
+    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
+    __rk.keepCtor = function (name, C) {
+        if (typeof C !== 'function') return;
+        CTORS[name] = C;
+        PROTOS[name] = C.prototype;
+        // An interface's prototype cannot be replaced (Web IDL).
+        try { defineOwn(C, 'prototype', { writable: false }); } catch (_) {}
+    };
+    // An event's type as its constructor or initEvent set it: what dispatch
+    // and activation read, whatever a page defines on the prototypes.
+    function evType(e) { return mapHas(EVTYPE, e) ? mapGet(EVTYPE, e) : e.type; }
+    // A click made by the engine as a mouse or pointer event, or made by
+    // script with the MouseEvent of install time.
+    function isMouseClick(e) {
+        var k = mapGet(KIND, e);
+        if (k !== undefined) return k === 'MouseEvent' || k === 'PointerEvent';
+        return !!PROTOS.MouseEvent && isProto(PROTOS.MouseEvent, e);
+    }
     __rk.hasCtor = function (name) { return typeof CTORS[name] === 'function'; };
     function made(ev) { setAdd(MADE, ev); return ev; }
     function make(name, type, init) {
-        var C = CTORS[name] || CTORS.Event;
-        return made(new C(type, init));
+        var known = typeof CTORS[name] === 'function';
+        var C = known ? CTORS[name] : CTORS.Event;
+        var ev = new C(type, init);
+        mapSet(KIND, ev, known ? name : 'Event');
+        return made(ev);
     }
     __rk.make = make;
     function trust(ev) {
@@ -6219,20 +6240,21 @@ const WRAPPERS_JS: &str = r#"
         // A listener sees the target as its own tree sees it: a node inside a
         // shadow tree is the host to a listener outside.
         if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
-        var all = LISTENERS.get(t), list = all && all[event.type];
+        var type = evType(event);
+        var all = LISTENERS.get(t), list = all && all[type];
         if (list) {
             list = list.slice();
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
-                if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
+                if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
                 var passiveBefore = passiveNow;
                 passiveNow = l.passive === true ? event : null;
                 try { callListener(t, l.cb, event); } finally { passiveNow = passiveBefore; }
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
+        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
             if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
@@ -6241,7 +6263,7 @@ const WRAPPERS_JS: &str = r#"
     // never reaches window from a node).
     function eventParent(n, event) {
         if (n === g) return null;
-        if (n === doc) return event.type === 'load' ? null : g;
+        if (n === doc) return evType(event) === 'load' ? null : g;
         if (!n[SLOT]) return null;
         var p = n.parentNode;
         // A composed event goes on from a shadow root to its host.
@@ -6254,8 +6276,8 @@ const WRAPPERS_JS: &str = r#"
     // call with "was not cancelled" once the listeners have run, or null.
     var activation = null, SYNTHETIC_CLICK = Symbol('rustkit.click');
     function activationFor(t, event) {
-        if (!activation || event.type !== 'click' || !t[SLOT]) return null;
-        if (!event[SYNTHETIC_CLICK] && !(typeof g.MouseEvent === 'function' && event instanceof g.MouseEvent)) return null;
+        if (!activation || evType(event) !== 'click' || !t[SLOT]) return null;
+        if (!event[SYNTHETIC_CLICK] && !isMouseClick(event)) return null;
         return activation(t, event);
     }
     EventTarget.prototype.dispatchEvent = function (event) {
@@ -6298,6 +6320,7 @@ const WRAPPERS_JS: &str = r#"
     // The engine's own dispatches go through this, whatever a page has put
     // in place of `dispatchEvent` since.
     var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
+    __rk.dispatchTo = dispatchTo;
 
     function Event(type, init) {
         if (!(this instanceof Event)) {
@@ -6307,22 +6330,27 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present.");
         }
         init = init || {};
-        this.type = String(type);
-        this.bubbles = !!init.bubbles;
-        this.cancelable = !!init.cancelable;
-        this.composed = !!init.composed;
-        this.target = null;
-        this.currentTarget = null;
-        this.eventPhase = 0;
+        // Own properties, defined (not assigned): what a page puts on the
+        // prototypes is never run for them. The type is kept here too.
+        mapSet(EVTYPE, this, String(type));
+        defineOwn(this, 'type', { get: TYPE_GET, enumerable: true, configurable: false });
+        own(this, 'bubbles', !!init.bubbles);
+        own(this, 'cancelable', !!init.cancelable);
+        own(this, 'composed', !!init.composed);
+        own(this, 'target', null);
+        own(this, 'currentTarget', null);
+        own(this, 'eventPhase', 0);
         stamp(this);
-        this.timeStamp = Date.now();
+        own(this, 'timeStamp', Date.now());
     }
+    var TYPE_GET = Object.getOwnPropertyDescriptor({ get type() { return mapGet(EVTYPE, this); } }, 'type').get;
+    function own(o, k, v) { defineOwn(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
     // The legacy initializers; they do nothing during dispatch.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {
         if (this.eventPhase !== 0) return;
-        this.type = String(type);
-        this.bubbles = !!bubbles;
-        this.cancelable = !!cancelable;
+        if (mapHas(EVTYPE, this)) mapSet(EVTYPE, this, String(type)); else this.type = String(type);
+        own(this, 'bubbles', !!bubbles);
+        own(this, 'cancelable', !!cancelable);
     };
     function cancel(ev) { if (ev.cancelable && passiveNow !== ev) setAdd(CANCELED, ev); }
     Event.prototype.preventDefault = function () { cancel(this); };
@@ -6372,6 +6400,7 @@ const WRAPPERS_JS: &str = r#"
     g.Event = Event;
     g.CustomEvent = CustomEvent;
     __rk.keepCtor('Event', Event);
+    __rk.keepCtor('CustomEvent', CustomEvent);
 
     // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
     // XML parser, which RustKit does not have yet.

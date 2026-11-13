@@ -505,6 +505,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         if (typeof __rk.make === 'function') {
             event = __rk.make('Event', type);
             __rk.trust(event);
+            __rk.dispatchTo(target, event);
+            return;
         }
         target.dispatchEvent(event);
     };

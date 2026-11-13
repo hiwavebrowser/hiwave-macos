@@ -91,9 +91,9 @@
         // The engine's own reference, on the host object: it builds its
         // events with these whatever a page puts on the window since.
         if (name === 'FocusEvent') __rk.FocusEvent = C;
-        __rk.keepCtor(name, C);
         C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
         Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+        __rk.keepCtor(name, C);
         def(name, C);
     });
     var ME = g.MouseEvent;
