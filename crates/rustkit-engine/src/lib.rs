@@ -6237,13 +6237,36 @@ impl Engine {
                 }
                 continue;
             }
-            let html = if blank {
-                "<html><head></head><body></body></html>".to_string()
+            // The document's URL is the response's, after redirects; it is
+            // same-origin only when every URL of the chain is the page's
+            // origin (one that left and came back is not).
+            let (html, target) = if blank {
+                ("<html><head></head><body></body></html>".to_string(), target)
             } else {
                 let fetched = loader.fetch(referrer.get_for(target.clone(), RequestDestination::Other)).await;
+                let page_origin = page_url.as_ref().map(|page| page.origin());
+                let ours = |url: &Url| page_origin.as_ref().is_some_and(|origin| *origin == url.origin());
                 match fetched {
-                    Ok(response) if response.ok() => response.text().await.unwrap_or_default(),
-                    _ => String::new(),
+                    Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
+                        // The cross-origin floor, as for a cross-origin `src`.
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node);
+                        }
+                        continue;
+                    }
+                    Ok(response) if response.ok() => {
+                        let url = response.url.clone();
+                        (response.text().await.unwrap_or_default(), url)
+                    }
+                    Ok(response) => (String::new(), response.url.clone()),
+                    // No response to decide on (the loader refused a
+                    // redirect, or the request failed): the floor too.
+                    Err(_) => {
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node);
+                        }
+                        continue;
+                    }
                 }
             };
             // With the engine's scripting setting, as the top-level load

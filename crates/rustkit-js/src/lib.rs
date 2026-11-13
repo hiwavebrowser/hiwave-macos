@@ -687,11 +687,27 @@ impl JsRuntime {
     pub fn enter_realm(&mut self, realm: RealmId) -> RealmId {
         let outer = self.current_realm;
         #[cfg(feature = "boa")]
-        if let Some(Some(target)) = self.realms.get(realm.0) {
-            self.context.enter_realm(target.clone());
-            self.current_realm = realm;
+        match self.realms.get(realm.0) {
+            Some(Some(target)) => {
+                self.context.enter_realm(target.clone());
+                self.current_realm = realm;
+            }
+            // A dropped realm is entered as gone: evaluation errors until
+            // the outer realm is entered again (see `realm_gone`).
+            Some(None) => self.current_realm = realm,
+            None => {}
         }
         outer
+    }
+
+    /// The realm entered is one that was dropped: nothing may run in it,
+    /// and nothing of another realm may stand in for it.
+    fn realm_gone(&self) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        if matches!(self.realms.get(self.current_realm.0), Some(None)) {
+            return Err(JsError::ExecutionError("the realm was dropped".into()));
+        }
+        Ok(())
     }
 
     /// The realm evaluation acts in now.
@@ -969,6 +985,7 @@ impl JsRuntime {
     }
 
     fn call_with_host(&mut self, source: &str, args: &[&str], turn: bool) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         if let Some(tap) = self.source_tap.as_ref() {
             tap(source);
         }
@@ -1126,6 +1143,7 @@ impl JsRuntime {
     }
 
     fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         trace!(len = source.len(), "Evaluating script");
         if let Some(tap) = self.source_tap.as_ref() {
             tap(source);
@@ -1362,6 +1380,7 @@ impl JsRuntime {
     /// the page's, and run at the next evaluation); [`ALL`](control::ALL)
     /// still stops it.
     pub fn evaluate_bookkeeping(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         #[cfg(feature = "boa")]
         {
             let armed = self.deadline.armed.get();
