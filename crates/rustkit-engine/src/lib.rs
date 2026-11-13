@@ -487,6 +487,8 @@ mod r1_stack_pins_tests;
 mod whl1_trusted_wheel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod whl2_discrete_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl3_wheel_sequence_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
