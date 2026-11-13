@@ -172,6 +172,38 @@ function shape(doc) { var n = doc.querySelector('noscript'); return n.childNodes
     assert_eq!(page.js("shape(document.getElementById('f').contentDocument)"), r#"String("1|3|0")"#, "the frame's noscript");
 }
 
+/// The documents of a frame tree are one event loop: their timers run in
+/// the order they fall due, whichever document set them. Chrome 148 (probe
+/// page: inside a page timer, the frame's `setTimeout(f, 0)`, then the
+/// page's `setTimeout(g, 0)` and `setTimeout(h, 50)`): `frame0,page0,page50`.
+/// Here a turn that caught the page's clock up (the loop had slept) ran
+/// every page timer due in that span before any frame had a turn
+/// (Speedometer's React-Stockcharts-SVG: the chart's deferred pan-end
+/// `setState`, a frame timer, ran after the zoom and undid it).
+#[test]
+fn a_frame_timer_set_in_a_page_task_runs_before_the_pages_later_timers() {
+    let page = "<!doctype html><body><iframe id=f src=/child.html></iframe><script>
+window.order = []; window.ready = false;
+document.getElementById('f').addEventListener('load', function () { ready = true; });
+function arm() {
+  var w = document.getElementById('f').contentWindow;
+  setTimeout(function () {
+    w.setTimeout(function () { order.push('frame0'); }, 0);
+    setTimeout(function () { order.push('page0'); }, 0);
+    setTimeout(function () { order.push('page50'); }, 50);
+  }, 10);
+}
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.ready", Duration::from_secs(5));
+    page.js("arm()");
+    // One turn for 500 ms that passed (the loop slept: nothing was due
+    // sooner), as the live loop gives an idle page.
+    page.rt.block_on(page.engine.pump_live(page.view, 500));
+    page.rt.block_on(page.engine.pump_live(page.view, 0));
+    assert_eq!(page.js("order.join(',')"), r#"String("frame0,page0,page50")"#);
+}
+
 /// A removed frame is dropped: its window is no longer the element's.
 /// Chrome 148: `contentWindow` and `contentDocument` are null once the
 /// element is out of the document.
