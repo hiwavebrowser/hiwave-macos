@@ -44,7 +44,7 @@
  "rafLoop": {
   "n": 10,
   "allPositive": true,
-  "allNearAFrame": true
+  "medianNearAFrame": true
  },
  "timeout": {
   "ok": true

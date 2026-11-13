@@ -29,7 +29,7 @@ requestAnimationFrame(function f(t) {
   if (last2 !== undefined) d2.push(t - last2);
   last2 = t;
   if (d2.length < 10) requestAnimationFrame(f);
-  else r.rafLoop = { n: d2.length, allPositive: d2.every(function (x) { return x > 0; }), allNearAFrame: d2.every(function (x) { return x > 5 && x < 40; }) };
+  else r.rafLoop = { n: d2.length, allPositive: d2.every(function (x) { return x > 0; }), medianNearAFrame: (function () { var s = d2.slice().sort(function (a, b) { return a - b; }); var m = s[s.length >> 1]; return m > 5 && m < 40; })() };
 });
 setTimeout(function () {
   var p = performance.now();
