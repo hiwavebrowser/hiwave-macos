@@ -389,6 +389,8 @@ use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
 mod canvas_paint;
+#[cfg(test)]
+mod canvas_frame_cost_tests;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
