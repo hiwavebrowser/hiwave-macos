@@ -320,7 +320,15 @@ pub(crate) fn install(
                             }
                             _ => (0, 0),
                         };
-                        store.images.as_ref().and_then(|load| load(url, size)).map(|(bitmap, _hops)| bitmap)
+                        let loaded = store.images.as_ref().and_then(|load| load(url, size));
+                        // Any response URL of another origin than the
+                        // document's (a redirect through one) taints too.
+                        if let Some((_, hops)) = &loaded {
+                            if hops.iter().any(|u| u.scheme() != "data" && store.origin.as_ref() != Some(&u.origin())) {
+                                tainted = true;
+                            }
+                        }
+                        loaded.map(|(bitmap, _)| bitmap)
                     }
                     _ => None,
                 };

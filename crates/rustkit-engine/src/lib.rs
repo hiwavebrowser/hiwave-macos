@@ -1175,6 +1175,11 @@ async fn fetch_raster_image(
             response.status, url
         )));
     }
+    // Where the response came from, for a canvas's origin checks.
+    image_manager.record_response_urls(
+        &url,
+        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+    );
     let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
     let body = match response.bytes().await {
         Ok(body) => body,
@@ -20434,6 +20439,11 @@ impl Engine {
             };
             return match fetched {
                 Ok(response) if response.ok() => {
+                    // Where the response came from, for a canvas's origin checks.
+                    image_manager.record_response_urls(
+                        &url,
+                        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+                    );
                     let received = guard.map(|g| g.received(&response));
                     match response.text().await {
                         Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
