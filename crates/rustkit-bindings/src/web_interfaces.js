@@ -226,7 +226,7 @@
         TextEvent.prototype = Object.create(g.UIEvent.prototype, { constructor: { value: TextEvent, writable: true, configurable: true } });
         Object.defineProperty(TextEvent.prototype, Symbol.toStringTag, { value: 'TextEvent', configurable: true });
         TextEvent.prototype.initTextEvent = function initTextEvent(type, bubbles, cancelable, view, data) {
-            if (this.eventPhase !== 0) return;
+            if (__rk.isDispatching(this)) return;
             this.initEvent(type, !!bubbles, !!cancelable);
             this.view = view || null;
             this.data = data === undefined ? 'undefined' : String(data);

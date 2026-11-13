@@ -189,7 +189,7 @@
     MessageEvent.prototype = Object.create(Event.prototype, { constructor: { value: MessageEvent, writable: true, configurable: true } });
     tag(MessageEvent, 'MessageEvent');
     MessageEvent.prototype.initMessageEvent = function (type, bubbles, cancelable, data, origin, lastEventId, source, ports) {
-        if (this.eventPhase !== 0) return;
+        if (__rk.isDispatching(this)) return;
         this.initEvent(type, bubbles, cancelable);
         this.data = data === undefined ? null : data;
         this.origin = origin === undefined ? '' : String(origin);

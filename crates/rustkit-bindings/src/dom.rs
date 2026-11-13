@@ -2926,6 +2926,12 @@ const WRAPPERS_JS: &str = r#"
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
     var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    // An event's dispatch state, private: `target`, `currentTarget` and
+    // `eventPhase` are read-only getters over these (as in Chrome), and an
+    // event being dispatched is in DISPATCHING, which the initializers
+    // check.
+    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
     var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
     __rk.keepCtor = function (name, C, parent, fields) {
         if (typeof C !== 'function') return;
@@ -2963,9 +2969,6 @@ const WRAPPERS_JS: &str = r#"
         fixed(ev, 'bubbles', !!arg('bubbles'));
         setCancelable(ev, !!arg('cancelable'));
         fixed(ev, 'composed', !!arg('composed'));
-        fixed(ev, 'target', null);
-        fixed(ev, 'currentTarget', null);
-        fixed(ev, 'eventPhase', 0);
         stamp(ev);
         fixed(ev, 'timeStamp', dateNow());
         // The fields, the root interface's first.
@@ -6367,11 +6370,11 @@ const WRAPPERS_JS: &str = r#"
     });
     var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
-        event.currentTarget = t;
-        event.eventPhase = phase;
+        mapSet(EV_CURRENT, event, t);
+        mapSet(EV_PHASE, event, phase);
         // A listener sees the target as its own tree sees it: a node inside a
         // shadow tree is the host to a listener outside.
-        if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
+        if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
         var type = evType(event);
         var all = LISTENERS.get(t), list = all && all[type];
         // The legacy type, at a target with no listener or handler for the
@@ -6430,29 +6433,38 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
         }
+        // An event already being dispatched cannot be dispatched again.
+        if (setHas(DISPATCHING, event)) {
+            throw new DOMException("Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.", 'InvalidStateError');
+        }
         // Only the engine's own event, on its one dispatch, is trusted.
         stamp(event);
         if (setHas(UNDISPATCHED, event)) setDrop(UNDISPATCHED, event); else setDrop(TRUSTED, event);
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
-        event.target = t;
+        mapSet(EV_TARGET, event, t);
         event[ORIGIN] = t;
         event[PATH] = path;
         var activated = activationFor(t, event);
-        for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
-        if (!event[STOP]) invoke(t, event, 2, true);
-        if (!event[STOP]) invoke(t, event, 2, false);
-        if (event.bubbles) {
-            for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+        setAdd(DISPATCHING, event);
+        try {
+            for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
+            if (!event[STOP]) invoke(t, event, 2, true);
+            if (!event[STOP]) invoke(t, event, 2, false);
+            if (event.bubbles) {
+                for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+            }
+        } finally {
+            setDrop(DISPATCHING, event);
+            event[STOP] = event[STOP_NOW] = false;
+            mapSet(EV_CURRENT, event, null);
+            mapSet(EV_PHASE, event, 0);
+            // After dispatch the target is the outermost host (the node
+            // itself when it is in the document), and there is no path.
+            mapSet(EV_TARGET, event, HOOKS.retarget ? HOOKS.retarget(t, g) : t);
+            event[ORIGIN] = null;
+            event[PATH] = null;
         }
-        event[STOP] = event[STOP_NOW] = false;
-        event.currentTarget = null;
-        event.eventPhase = 0;
-        // After dispatch the target is the outermost host (the node itself
-        // when it is in the document), and there is no path.
-        event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
-        event[ORIGIN] = null;
-        event[PATH] = null;
         // The canceled flag, not a property a listener can redefine; an
         // object that is not an Event keeps its own.
         var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
@@ -6480,9 +6492,6 @@ const WRAPPERS_JS: &str = r#"
         own(this, 'bubbles', !!init.bubbles);
         setCancelable(this, !!init.cancelable);
         own(this, 'composed', !!init.composed);
-        own(this, 'target', null);
-        own(this, 'currentTarget', null);
-        own(this, 'eventPhase', 0);
         stamp(this);
         own(this, 'timeStamp', Date.now());
     }
@@ -6492,7 +6501,7 @@ const WRAPPERS_JS: &str = r#"
     // Re-initialising clears the canceled flag (DOM §2.2 "initialize");
     // during dispatch it does nothing.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {
-        if (this.eventPhase !== 0) return;
+        if (setHas(DISPATCHING, this)) return;
         if (mapHas(EVTYPE, this)) mapSet(EVTYPE, this, String(type)); else this.type = String(type);
         own(this, 'bubbles', !!bubbles);
         setCancelable(this, !!cancelable);
@@ -6528,6 +6537,9 @@ const WRAPPERS_JS: &str = r#"
     });
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
+    getter(Event.prototype, 'target', function () { return mapHas(EV_TARGET, this) ? mapGet(EV_TARGET, this) : null; });
+    getter(Event.prototype, 'currentTarget', function () { return mapHas(EV_CURRENT, this) ? mapGet(EV_CURRENT, this) : null; });
+    getter(Event.prototype, 'eventPhase', function () { return mapHas(EV_PHASE, this) ? mapGet(EV_PHASE, this) : 0; });
     Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
     ['NONE', 'CAPTURING_PHASE', 'AT_TARGET', 'BUBBLING_PHASE'].forEach(function (k, i) {
         Event[k] = Event.prototype[k] = i;
@@ -6544,7 +6556,7 @@ const WRAPPERS_JS: &str = r#"
     });
     Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
     CustomEvent.prototype.initCustomEvent = function (type, bubbles, cancelable, detail) {
-        if (this.eventPhase !== 0) return;
+        if (setHas(DISPATCHING, this)) return;
         this.initEvent(type, bubbles, cancelable);
         this.detail = detail === undefined ? null : detail;
     };
