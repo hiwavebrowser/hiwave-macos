@@ -9572,7 +9572,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
-            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone())));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10039,7 +10039,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
-            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone())));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -19750,7 +19750,11 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), image_svg(doc));
+                let doc = image_svg(doc);
+                if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+                    svgs.insert(url.to_string(), std::sync::Arc::new(doc.clone()));
+                }
+                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), doc);
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -20520,6 +20524,9 @@ impl Engine {
             if let Some(view) = self.views.get(&id) {
                 view.lay.loaded_images.borrow_mut().due = true;
             }
+        }
+        if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+            svgs.extend(fetched.svgs.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))));
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {

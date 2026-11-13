@@ -13,7 +13,7 @@ use crate::dom::{DomHost, SharedDomHost};
 use rustkit_canvas::{
     parse_canvas_color, serialize_canvas_color, CanvasBitmap, CanvasFont, CanvasPattern, CanvasRenderingContext2D,
     CanvasStyle, DrawCommand, ImageData, LineCap, LineJoin, LinearGradient, PatternRepetition, RadialGradient,
-    TextAlign, TextBaseline,
+    TextAlign, TextBaseline, Transform2D,
 };
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
@@ -35,7 +35,11 @@ pub type CanvasTextMeasurer = Box<dyn Fn(&CanvasFont, &str) -> CanvasTextExtent>
 
 /// An `<img>`'s decoded pixels by its URL, `None` when not decoded
 /// (installed by the engine, `DomBindings::set_canvas_image_loader`).
-pub type CanvasImageLoader = Box<dyn Fn(&str) -> Option<CanvasBitmap>>;
+///
+/// The size is the device-pixel size the image is drawn at, `(0, 0)` for
+/// its natural size: a vector image (SVG) is rasterized at the size it is
+/// drawn, as Chrome does; a raster image ignores it.
+pub type CanvasImageLoader = Box<dyn Fn(&str, (u32, u32)) -> Option<CanvasBitmap>>;
 
 /// What the engine reads of one canvas: its bitmap size and the drawing
 /// recorded on it since it was last cleared.
@@ -278,7 +282,22 @@ pub(crate) fn install(
                             CanvasBitmap::from_rgba(w, hh, &vec![0; w as usize * hh as usize * 4])
                         })
                     }
-                    (Some("image"), Some(JsValue::String(url))) => store.images.as_ref().and_then(|load| load(url)),
+                    (Some("image"), Some(JsValue::String(url))) => {
+                        // drawImage: the size the whole image is drawn at, from
+                        // the dest/source ratio and the transform's scale.
+                        let size = match (op, number_list::<8>(text(args, 5)), number_list::<2>(text(args, 6))) {
+                            ("drawImage", Some([_, _, sw, sh, _, _, dw, dh]), Some([nw, nh])) if sw != 0.0 && sh != 0.0 => {
+                                let t = store.contexts.get(&node).map(|c| c.get_transform()).unwrap_or_else(Transform2D::identity);
+                                let kx = (dw / sw).abs() * t.a.hypot(t.b);
+                                let ky = (dh / sh).abs() * t.c.hypot(t.d);
+                                let w = (nw * kx).round();
+                                let h = (nh * ky).round();
+                                if w >= 1.0 && h >= 1.0 && w <= 8192.0 && h <= 8192.0 { (w as u32, h as u32) } else { (0, 0) }
+                            }
+                            _ => (0, 0),
+                        };
+                        store.images.as_ref().and_then(|load| load(url, size))
+                    }
                     _ => None,
                 };
                 if found.is_none() {
@@ -402,7 +421,14 @@ pub(crate) fn install(
                 }
                 "drawImage" => {
                     if let (Some(bitmap), Some([sx, sy, sw, sh, dx, dy, dw, dh])) = (source, number_list::<8>(text(args, 5))) {
-                        ctx.draw_bitmap(&bitmap, [sx, sy, sw, sh], [dx, dy, dw, dh]);
+                        // A bitmap rasterized at another size than the
+                        // image's natural one (an SVG): the source rect in
+                        // its pixels.
+                        let (fx, fy) = match number_list::<2>(text(args, 6)) {
+                            Some([nw, nh]) if nw > 0.0 && nh > 0.0 => (bitmap.width() as f32 / nw, bitmap.height() as f32 / nh),
+                            _ => (1.0, 1.0),
+                        };
+                        ctx.draw_bitmap(&bitmap, [sx * fx, sy * fy, sw * fx, sh * fy], [dx, dy, dw, dh]);
                     }
                 }
                 "putImageData" => {

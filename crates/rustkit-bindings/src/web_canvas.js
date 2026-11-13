@@ -470,7 +470,7 @@
         else if (n === 5) r = [0, 0, src[2], src[3], +a, +b, +c, +e];
         else r = [+a, +b, +c, +e, +f, +h, +i, +j];
         if (!r.every(isFinite)) return;
-        call(d, 'drawImage', src[0], src[1], r.join(','));
+        call(d, 'drawImage', src[0], src[1], r.join(','), src[2] + ',' + src[3]);
     });
     method(P, 'createPattern', function createPattern(img, repetition) {
         need(2, arguments, 'CanvasRenderingContext2D', 'createPattern');

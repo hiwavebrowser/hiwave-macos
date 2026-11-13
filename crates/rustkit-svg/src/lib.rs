@@ -3865,3 +3865,196 @@ mod tests {
         assert!(doc.view_box.is_some());
     }
 }
+
+// ==================== Path list (canvas drawImage) ====================
+
+/// One painted shape of an SVG document as a path list: its outline in
+/// device pixels (flattened finely enough that a rasterizer cannot tell it
+/// from the curves) and how it is filled and stroked. For painters that
+/// rasterize the document themselves, such as a canvas's `drawImage` of an
+/// SVG image (STR-7 slice 3), which Chrome rasterizes at the drawn size.
+#[derive(Debug, Clone)]
+pub struct SvgPaintPath {
+    /// Each subpath's points and whether it is closed.
+    pub contours: Vec<(Vec<(f32, f32)>, bool)>,
+    pub even_odd: bool,
+    /// The solid fill, its opacities applied.
+    pub fill: Option<Color>,
+    pub stroke: Option<SvgPaintStroke>,
+}
+
+/// A path list entry's stroke, in device pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct SvgPaintStroke {
+    pub color: Color,
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    pub miter_limit: f32,
+}
+
+/// The flattening tolerance of a path list, in device pixels.
+const PATH_LIST_TOLERANCE_PX: f32 = 0.05;
+
+impl SvgDocument {
+    /// The document as a path list for the rect `(x, y, width, height)`,
+    /// placed as `render` places it. Painted in document order. Not
+    /// included: gradient paint, text, dashes, `<use>`, clipping by a
+    /// nested viewport.
+    pub fn path_list(&self, x: f32, y: f32, width: f32, height: f32, current_color: Color) -> Vec<SvgPaintPath> {
+        if let Some(sized) = self.for_viewport(width, height) {
+            return sized.path_list(x, y, width, height, current_color);
+        }
+        let transform = if let Some(vb) = &self.view_box {
+            let (sx, sy) = (width / vb.width, height / vb.height);
+            let (sx, sy) = if self.stretch { (sx, sy) } else { (sx.min(sy), sx.min(sy)) };
+            Transform2D::identity().translate(x - vb.min_x * sx, y - vb.min_y * sy).scale(sx, sy)
+        } else {
+            Transform2D::identity().translate(x, y)
+        };
+        let base = SvgStyle { current_color, ..SvgStyle::default() };
+        let mut out = Vec::new();
+        self.root.path_list(&transform, &base, &mut out);
+        out
+    }
+}
+
+/// `n` points around an ellipse, closed.
+fn ellipse_points(cx: f32, cy: f32, rx: f32, ry: f32, scale: f32) -> Vec<(f32, f32)> {
+    let r = rx.max(ry) * scale;
+    // Chord error r(1 - cos(pi/n)) under the tolerance.
+    let n = ((PI / (1.0 - PATH_LIST_TOLERANCE_PX / r.max(PATH_LIST_TOLERANCE_PX * 2.0)).acos()).ceil() as usize).clamp(8, 1024);
+    (0..n)
+        .map(|i| {
+            let a = i as f32 / n as f32 * 2.0 * PI;
+            (cx + rx * a.cos(), cy + ry * a.sin())
+        })
+        .collect()
+}
+
+/// A rounded rect's outline (radii already clamped), closed.
+fn round_rect_points(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32, scale: f32) -> Vec<(f32, f32)> {
+    if rx <= 0.0 || ry <= 0.0 {
+        return vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
+    }
+    let quarter = ellipse_points(0.0, 0.0, rx, ry, scale);
+    let q = quarter.len() / 4;
+    let mut pts = Vec::new();
+    // Corners clockwise from the top right; each a quarter of the ellipse.
+    for (corner, (cx, cy)) in [(3, (x + w - rx, y + ry)), (0, (x + w - rx, y + h - ry)), (1, (x + rx, y + h - ry)), (2, (x + rx, y + ry))] {
+        for i in 0..=q {
+            let (px, py) = quarter[(corner * q + i) % quarter.len()];
+            pts.push((cx + px, cy + py));
+        }
+    }
+    pts
+}
+
+impl SvgElement {
+    fn path_list(&self, parent: &Transform2D, parent_style: &SvgStyle, out: &mut Vec<SvgPaintPath>) {
+        let (own, style) = match self {
+            SvgElement::Group(g) => (&g.transform, &g.style),
+            SvgElement::Rect(e) => (&e.transform, &e.style),
+            SvgElement::Circle(e) => (&e.transform, &e.style),
+            SvgElement::Ellipse(e) => (&e.transform, &e.style),
+            SvgElement::Line(e) => (&e.transform, &e.style),
+            SvgElement::Polyline(e) => (&e.transform, &e.style),
+            SvgElement::Polygon(e) => (&e.transform, &e.style),
+            SvgElement::Path(e) => (&e.transform, &e.style),
+            SvgElement::Text(_) | SvgElement::Use(_) => return,
+        };
+        let t = parent.multiply(own);
+        let mut style = style.clone();
+        style.inherit_from(parent_style);
+        if !style.visibility {
+            return;
+        }
+        let scale = t.max_scale().max(1e-6);
+        let contours: Vec<(Vec<(f32, f32)>, bool)> = match self {
+            SvgElement::Group(g) => {
+                for child in &g.children {
+                    child.path_list(&t, &style, out);
+                }
+                return;
+            }
+            SvgElement::Rect(r) => {
+                if r.width <= 0.0 || r.height <= 0.0 {
+                    return;
+                }
+                let (rx, ry) = match (r.rx > 0.0, r.ry > 0.0) {
+                    (true, true) => (r.rx, r.ry),
+                    (true, false) => (r.rx, r.rx),
+                    (false, true) => (r.ry, r.ry),
+                    _ => (0.0, 0.0),
+                };
+                let (rx, ry) = (rx.min(r.width / 2.0), ry.min(r.height / 2.0));
+                vec![(round_rect_points(r.x, r.y, r.width, r.height, rx, ry, scale), true)]
+            }
+            SvgElement::Circle(c) if c.r > 0.0 => vec![(ellipse_points(c.cx, c.cy, c.r, c.r, scale), true)],
+            SvgElement::Ellipse(e) if e.rx > 0.0 && e.ry > 0.0 => vec![(ellipse_points(e.cx, e.cy, e.rx, e.ry, scale), true)],
+            SvgElement::Line(l) => vec![(vec![(l.x1, l.y1), (l.x2, l.y2)], false)],
+            SvgElement::Polyline(p) => vec![(p.points.clone(), false)],
+            SvgElement::Polygon(p) => vec![(p.points.clone(), true)],
+            SvgElement::Path(p) => {
+                // A subpath is closed when it ends with a closepath (the
+                // flattener returns to its start point).
+                let closes: Vec<bool> = {
+                    let mut v = Vec::new();
+                    let mut open = false;
+                    for c in &p.commands {
+                        match c {
+                            PathCommand::MoveTo(..) | PathCommand::MoveToRel(..) => {
+                                if open {
+                                    v.push(false);
+                                }
+                                open = true;
+                            }
+                            PathCommand::Close => {
+                                if open {
+                                    v.push(true);
+                                    open = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if open {
+                        v.push(false);
+                    }
+                    v
+                };
+                p.to_line_segments_within(PATH_LIST_TOLERANCE_PX / scale)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, pts)| (pts, closes.get(i).copied().unwrap_or(false)))
+                    .collect()
+            }
+            _ => return,
+        };
+        let contours: Vec<(Vec<(f32, f32)>, bool)> = contours
+            .into_iter()
+            .filter(|(pts, _)| pts.len() >= 2)
+            .map(|(pts, closed)| (pts.iter().map(|&(x, y)| t.apply(x, y)).collect(), closed))
+            .collect();
+        if contours.is_empty() {
+            return;
+        }
+        let open_shape = matches!(self, SvgElement::Line(_) | SvgElement::Polyline(_));
+        let fill = if open_shape && matches!(self, SvgElement::Line(_)) {
+            None
+        } else {
+            style.fill_color().map(|c| Color { a: (c.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0), ..c })
+        };
+        let stroke = style.stroke_color().filter(|_| style.stroke_width > 0.0).map(|c| SvgPaintStroke {
+            color: Color { a: (c.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0), ..c },
+            width: style.stroke_width * scale,
+            cap: style.stroke_linecap,
+            join: style.stroke_linejoin,
+            miter_limit: style.stroke_miterlimit,
+        });
+        if fill.is_none() && stroke.is_none() {
+            return;
+        }
+        out.push(SvgPaintPath { contours, even_odd: style.fill_rule == FillRule::EvenOdd, fill, stroke });
+    }
+}

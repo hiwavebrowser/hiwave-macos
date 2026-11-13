@@ -62,16 +62,76 @@ pub(crate) fn text_measurer() -> CanvasTextMeasurer {
     })
 }
 
+/// The SVG images a canvas can draw, by URL (`LayoutCtx::canvas_svgs`).
+pub(crate) type CanvasSvgs =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<rustkit_svg::SvgDocument>>>>;
+
 /// The image cache as canvas `drawImage`/`createPattern` reads it: an
 /// `<img>`'s decoded pixels by URL (its first frame), `None` when the
-/// image is not decoded.
-pub(crate) fn image_loader(images: std::sync::Arc<rustkit_image::ImageManager>) -> rustkit_bindings::CanvasImageLoader {
-    Box::new(move |url: &str| {
+/// image is not decoded. An SVG image is rasterized at `size` (its natural
+/// size for `(0, 0)`), as Chrome rasterizes it at the size it is drawn.
+pub(crate) fn image_loader(images: std::sync::Arc<rustkit_image::ImageManager>, svgs: CanvasSvgs) -> rustkit_bindings::CanvasImageLoader {
+    Box::new(move |url: &str, size: (u32, u32)| {
+        let doc = svgs.lock().ok().and_then(|m| m.get(url).cloned());
+        if let Some(doc) = doc {
+            return svg_bitmap(&doc, size);
+        }
         let url = url::Url::parse(url).ok()?;
         let image = images.get_cached(&url)?;
         let frame = image.current_frame(std::time::Duration::ZERO);
         rustkit_bindings::canvas::CanvasBitmap::from_rgba(frame.width(), frame.height(), frame.data())
     })
+}
+
+/// `doc` rasterized at `size` (its natural size for `(0, 0)`, 300x150
+/// with none): its path list filled and stroked by a scratch canvas
+/// context, so an SVG drawn into a canvas uses the canvas's own raster.
+fn svg_bitmap(doc: &rustkit_svg::SvgDocument, size: (u32, u32)) -> Option<rustkit_bindings::canvas::CanvasBitmap> {
+    use rustkit_bindings::canvas::{CanvasRenderingContext2D, CanvasStyle, LineCap, LineJoin};
+    let (w, h) = if size.0 > 0 && size.1 > 0 {
+        size
+    } else {
+        let (w, h) = doc.get_size(300.0, 150.0);
+        (w.round().max(1.0) as u32, h.round().max(1.0) as u32)
+    };
+    let mut ctx = CanvasRenderingContext2D::new(w, h);
+    let color = CanvasStyle::Color;
+    for item in doc.path_list(0.0, 0.0, w as f32, h as f32, Color::BLACK) {
+        ctx.begin_path();
+        for (points, closed) in &item.contours {
+            let mut it = points.iter();
+            if let Some(&(x, y)) = it.next() {
+                ctx.move_to(x, y);
+            }
+            for &(x, y) in it {
+                ctx.line_to(x, y);
+            }
+            if *closed {
+                ctx.close_path();
+            }
+        }
+        if let Some(fill) = item.fill {
+            ctx.set_fill_style(color(fill));
+            ctx.fill_with_rule(item.even_odd);
+        }
+        if let Some(stroke) = item.stroke {
+            ctx.set_stroke_style(color(stroke.color));
+            ctx.set_line_width(stroke.width);
+            ctx.set_line_cap(match stroke.cap {
+                rustkit_svg::LineCap::Butt => LineCap::Butt,
+                rustkit_svg::LineCap::Round => LineCap::Round,
+                rustkit_svg::LineCap::Square => LineCap::Square,
+            });
+            ctx.set_line_join(match stroke.join {
+                rustkit_svg::LineJoin::Miter => LineJoin::Miter,
+                rustkit_svg::LineJoin::Round => LineJoin::Round,
+                rustkit_svg::LineJoin::Bevel => LineJoin::Bevel,
+            });
+            ctx.set_miter_limit(stroke.miter_limit);
+            ctx.stroke();
+        }
+    }
+    ctx.bitmap().or_else(|| rustkit_bindings::canvas::CanvasBitmap::from_rgba(w, h, &vec![0; w as usize * h as usize * 4]))
 }
 
 fn measure(font: &CanvasFont, text: &str) -> rustkit_layout::TextMetrics {
