@@ -293,7 +293,7 @@
         // FocusEvent is made after this script (web_interfaces.js); the
         // engine's reference is on the host object.
         var FocusEventCtor = __rk.FocusEvent || EventCtor;
-        dispatchNow.call(el, new FocusEventCtor(type, { bubbles: type === 'focusin' || type === 'focusout',
+        __rk.dispatchTo(el, new FocusEventCtor(type, { bubbles: type === 'focusin' || type === 'focusout',
                                                        composed: true, relatedTarget: related }));
     }
     // A field the user edited commits when it loses the focus: `change`
@@ -304,7 +304,7 @@
         // time and dispatched as the engine dispatches.
         var e = __rk.make('Event', 'change', { bubbles: true });
         __rk.trust(e);
-        dispatchNow.call(el, e);
+        __rk.dispatchTo(el, e);
     }
     // A composition in the element losing the focus ends first (CH2.E3).
     function finishComposing(el) {

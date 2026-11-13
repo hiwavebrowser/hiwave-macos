@@ -50,7 +50,7 @@
         queued = true;
         g.setTimeout(function () {
             queued = false;
-            try { dispatchNow.call(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
+            try { __rk.dispatchTo(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
         }, 0);
     }
 
@@ -90,7 +90,7 @@
         eventsDue.add(el);
         g.setTimeout(function () {
             eventsDue.delete(el);
-            try { dispatchNow.call(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
+            try { __rk.dispatchTo(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
         }, 0);
     }
     function setOwn(el, x, y) {
@@ -214,13 +214,13 @@
     // The engine calls this when the USER scrolled (wheel, keys, scrollbar):
     // the scroll event fires at once, not from a timer.
     __rk.userScrolled = function () {
-        try { dispatchNow.call(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
+        try { __rk.dispatchTo(document, new EventCtor('scroll', { bubbles: true })); } catch (_) {}
     };
 
     // The same when the user scrolled an element: at once, at the element.
     __rk.userScrolledElement = function (id) {
         var el = table.byId(id);
-        try { if (el) dispatchNow.call(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
+        try { if (el) __rk.dispatchTo(el, new EventCtor('scroll', { bubbles: false })); } catch (_) {}
     };
 
     var D = g.Document && g.Document.prototype;

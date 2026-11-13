@@ -48,7 +48,7 @@
             isComposing: !!isComposing
         });
         __rk.trust(ev);
-        return dispatchNow.call(el, ev);
+        return __rk.dispatchTo(el, ev);
     }
 
     // ---- document.execCommand (the Editing API's text-control subset) ----
@@ -120,7 +120,7 @@
             bubbles: true, cancelable: true, composed: true, view: g, data: data
         });
         __rk.trust(ev);
-        dispatchNow.call(el, ev);
+        __rk.dispatchTo(el, ev);
     }
     function replaceMarked(c, text) {
         compose(c.el, 'compositionupdate', text);

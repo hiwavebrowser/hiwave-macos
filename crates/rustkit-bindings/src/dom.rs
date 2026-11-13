@@ -6082,9 +6082,13 @@ const WRAPPERS_JS: &str = r#"
     };
     // A listener's exception goes to the engine's error log, not to the
     // dispatcher (as in a browser, where it reaches window.onerror).
+    var callNow = uncurry(Function.prototype.call);
     function callListener(t, cb, event) {
         try {
-            return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
+            // The call of install time: a page that replaces
+            // Function.prototype.call does not stand between the engine's
+            // dispatch and a listener.
+            return typeof cb === 'function' ? callNow(cb, t, event) : cb.handleEvent(event);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
         }
