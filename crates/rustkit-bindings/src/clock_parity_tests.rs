@@ -20,6 +20,13 @@ fn page() -> DomBindings {
     b
 }
 
+fn ev(b: &DomBindings, script: &str) -> String {
+    match b.evaluate(script).unwrap() {
+        JsValue::String(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
 fn observed(b: &DomBindings) -> serde_json::Value {
     match b.evaluate("window.__out").unwrap() {
         JsValue::String(s) => serde_json::from_str(&s).unwrap(),
@@ -100,4 +107,43 @@ fn date_now_and_performance_now_advance_at_wall_rate_inside_a_busy_turn() {
             "{what} advanced {seen} ms in a turn that took {wall_ms:.1} ms of wall time (ratio {ratio:.2})"
         );
     }
+}
+
+/// A rAF loop in a load: every frame is its own time. All ten frames used to get the first frame's
+/// stamp (a delta of 0 where Chrome's is about 16.7) because the stamp was fixed per `runTimers` call.
+#[test]
+fn consecutive_frames_in_a_load_have_distinct_timestamps_one_frame_apart() {
+    let b = page();
+    b.evaluate(
+        "var last, d = []; requestAnimationFrame(function f(t) { if (last !== undefined) d.push(t - last);          last = t; if (d.length < 10) requestAnimationFrame(f); });",
+    )
+    .unwrap();
+    b.run_timers(1000, 1000).unwrap();
+    let got = ev(&b, "d.map(function (x) { return Math.round(x); }).join()");
+    let deltas: Vec<i64> = got.split(',').map(|x| x.parse().unwrap()).collect();
+    assert_eq!(deltas.len(), 10, "{got}");
+    assert!(deltas.iter().all(|d| (15..=25).contains(d)), "frame deltas {got} (Chrome: about 16.7)");
+}
+
+/// Capture mode: the page clock has no real time in it, so two runs of one page see the same
+/// timestamps however long each took, and a busy loop on `performance.now()` still ends.
+#[test]
+fn in_capture_mode_the_page_clock_reproduces_across_runs() {
+    let run = || {
+        let b = page();
+        b.set_deterministic_clock(true);
+        b.evaluate(
+            "var log = []; log.push(performance.now()); var s = performance.now();              while (performance.now() - s < 5) {} log.push(performance.now());              var n = 0; requestAnimationFrame(function f(t) { log.push(t); log.push(new Event('x').timeStamp);              if (++n < 4) requestAnimationFrame(f); }); setTimeout(function () { log.push(performance.now()); }, 40);",
+        )
+        .unwrap();
+        // however long this run takes in real time
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        b.run_timers(1000, 1000).unwrap();
+        ev(&b, "JSON.stringify(log)")
+    };
+    let first = run();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let second = run();
+    assert_eq!(first, second);
+    assert!(first.starts_with('['), "{first}");
 }

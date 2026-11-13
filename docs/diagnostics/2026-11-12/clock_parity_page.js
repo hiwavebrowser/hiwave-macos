@@ -23,6 +23,14 @@ document.getElementById('b').click();
 r.ev.dispatchedClick = (function () { var got; document.getElementById('b').addEventListener('x2', function (e) { got = e.timeStamp; }); document.getElementById('b').dispatchEvent(new Event('x2')); return got < 1e9 && got >= 0; })();
 r.dateNowVsOrigin = Math.abs((performance.timeOrigin + performance.now()) - Date.now()) < 50;
 r.nowSteps = (function () { var a = performance.now(), b = performance.now(); return b >= a; })();
+// a frame loop: every frame is its own time, about one frame apart
+var last2, d2 = [];
+requestAnimationFrame(function f(t) {
+  if (last2 !== undefined) d2.push(t - last2);
+  last2 = t;
+  if (d2.length < 10) requestAnimationFrame(f);
+  else r.rafLoop = { n: d2.length, allPositive: d2.every(function (x) { return x > 0; }), allNearAFrame: d2.every(function (x) { return x > 5 && x < 40; }) };
+});
 setTimeout(function () {
   var p = performance.now();
   r.timeout = { ok: p >= t0 };

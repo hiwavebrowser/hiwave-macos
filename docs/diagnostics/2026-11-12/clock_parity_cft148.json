@@ -41,6 +41,11 @@
   true,
   "number"
  ],
+ "rafLoop": {
+  "n": 10,
+  "allPositive": true,
+  "allNearAFrame": true
+ },
  "timeout": {
   "ok": true
  }

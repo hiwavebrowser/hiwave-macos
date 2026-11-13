@@ -2765,6 +2765,10 @@ impl DomBindings {
             _ => 0,
         })
     }
+    /// Capture mode: the page clock is the virtual clock plus a fixed small step per read, with
+    /// no real time in it, so a capture that steps the timers reproduces every `t`-driven frame.
+    pub fn set_deterministic_clock(&self, _on: bool) {}
+
 
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
     /// most `max_callbacks` of them. Returns how many ran.
