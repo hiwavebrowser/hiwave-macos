@@ -488,24 +488,34 @@ const STEPPED_SETTLE_MS: u64 = 5_000;
 /// answers, then the steps go on. So the answer lands at the same virtual time whatever the server's
 /// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
 /// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
-fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) {
+///
+/// Returns how many requests were still open once the cap ran out (0 when none was): a page with a
+/// request that never answers (a long poll, an event stream) pays the cap once, and the result says so.
+fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) -> usize {
     const STEP_MS: u64 = 50;
     const REQUEST_WAIT: Duration = Duration::from_millis(5);
     const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
     let mut left = STEPPED_SETTLE_MS;
+    // Real time spent waiting, measured: a 5 ms sleep can last about 15 ms (Windows), and the pump counts.
     let mut waited = Duration::ZERO;
+    let mut held_open = 0;
     // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
     let mut in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
     while left > 0 {
         while in_flight > 0 && waited < REQUEST_WAIT_CAP {
+            let began = Instant::now();
             std::thread::sleep(REQUEST_WAIT);
-            waited += REQUEST_WAIT;
             in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
+            waited += began.elapsed();
+        }
+        if in_flight > 0 {
+            held_open = held_open.max(in_flight);
         }
         let step = STEP_MS.min(left);
         in_flight = rt.block_on(engine.pump_live(view_id, step)).in_flight;
         left -= step;
     }
+    held_open
 }
 
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
@@ -823,7 +833,8 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 // The real clock: the same span as live loop turns, in real time.
                 run_live(&rt, &mut engine, view_id, STEPPED_SETTLE_MS);
             } else {
-                settle_stepped(&rt, &mut engine, view_id);
+                let held_open = settle_stepped(&rt, &mut engine, view_id);
+                result.settle_held_open = (held_open > 0).then_some(held_open);
             }
         }
         if let Some(log) = engine.script_log(view_id) {
