@@ -357,10 +357,17 @@ pub(crate) struct DomHost {
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
-    /// Script has registered a `wheel` listener (or set `onwheel`): the
-    /// engine dispatches a `wheel` event before it scrolls. Until then a
-    /// scroll runs no script at all.
-    wants_wheel: bool,
+    /// Something on the page can hear the user's wheel: a `wheel` or
+    /// `mousewheel` listener, or an `onwheel` / `onmousewheel` handler
+    /// (assigned, or an attribute). Without one a scroll runs no script.
+    wants_wheel: std::cell::Cell<bool>,
+    /// One of those can cancel it: a listener that is not passive, or a
+    /// handler (never passive). Without one the engine does not ask which
+    /// listeners are on the path; the wheel goes after the scroll.
+    wheel_blocking: std::cell::Cell<bool>,
+    /// A wheel handler attribute (`onwheel`, `onmousewheel`) was parsed or
+    /// written in this document: it can hear and cancel the wheel.
+    wheel_handler_attribute: std::cell::Cell<bool>,
     /// The layout's text geometry (`TextRects`), installed with a layout.
     text_rects: Option<TextRects>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
@@ -673,7 +680,21 @@ impl DomHost {
     }
 
     pub(crate) fn wants_wheel(&self) -> bool {
-        self.wants_wheel
+        self.wants_wheel.get()
+    }
+
+    pub(crate) fn wheel_blocking(&self) -> bool {
+        self.wheel_blocking.get()
+    }
+
+    /// A wheel handler attribute was written or parsed: something can hear
+    /// and cancel the wheel.
+    pub(crate) fn note_wheel_handler_attribute(&self, name: &str) {
+        if name.eq_ignore_ascii_case("onwheel") || name.eq_ignore_ascii_case("onmousewheel") {
+            self.wheel_handler_attribute.set(true);
+            self.wants_wheel.set(true);
+            self.wheel_blocking.set(true);
+        }
     }
 
     pub(crate) fn set_text_rects(&mut self, rects: Option<TextRects>) {
@@ -682,6 +703,20 @@ impl DomHost {
 
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
+        // A new document: what can hear the wheel is learned again, from
+        // its handler attributes now and its listeners as they come.
+        self.wants_wheel.set(false);
+        self.wheel_blocking.set(false);
+        self.wheel_handler_attribute.set(false);
+        let mut pending = vec![document.root().clone()];
+        while let Some(node) = pending.pop() {
+            if let NodeType::Element { attributes, .. } = &node.node_type {
+                for name in attributes.keys() {
+                    self.note_wheel_handler_attribute(name);
+                }
+            }
+            pending.extend(node.children());
+        }
         let templates = self.templates.get_mut();
         templates.clear();
         // The page's own document owns itself and every node it has; what
@@ -1272,6 +1307,11 @@ fn write_record(host: &DomHost, args: &[JsValue]) -> Option<MutationRecord> {
     match (string_arg(args, 1)?, &node.node_type) {
         ("setAttr" | "removeAttr", NodeType::Element { .. }) => {
             let name = string_arg(args, 3)?;
+            // Every attribute write passes here: a wheel handler attribute
+            // can hear and cancel the wheel (`note_wheel_handler_attribute`).
+            if string_arg(args, 1) == Some("setAttr") {
+                host.note_wheel_handler_attribute(name);
+            }
             let name = if is_html_element(&node) {
                 name.to_ascii_lowercase()
             } else {
@@ -2437,15 +2477,28 @@ pub(crate) fn install(
         }),
     )?;
 
-    // noteWheel(): script registered its first `wheel` listener.
+    // noteWheel(listening, blocking): whether a wheel or mousewheel
+    // listener or handler is registered now, and whether one of them is
+    // not passive. Kept up to date as listeners come and go.
     let h = host.clone();
     runtime.register_host_function(
         "__rustkit_dom_note_wheel",
-        0,
-        Box::new(move |_| {
-            h.borrow_mut().wants_wheel = true;
+        2,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let attribute = host.wheel_handler_attribute.get();
+            host.wants_wheel.set(matches!(args.first(), Some(JsValue::Boolean(true))) || attribute);
+            host.wheel_blocking.set(matches!(args.get(1), Some(JsValue::Boolean(true))) || attribute);
             JsValue::Null
         }),
+    )?;
+
+    // wheelAttribute(): a wheel handler attribute was parsed or written.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_wheel_attribute",
+        0,
+        Box::new(move |_| JsValue::Boolean(h.borrow().wheel_handler_attribute.get())),
     )?;
 
     // rangeTextRects(gen, "node from to;node from to;..."): where the
@@ -2794,6 +2847,7 @@ const WRAPPERS_JS: &str = r#"
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
         hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, noteWheel: __rustkit_dom_note_wheel,
+        wheelAttribute: __rustkit_dom_wheel_attribute,
         rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
@@ -2801,7 +2855,7 @@ const WRAPPERS_JS: &str = r#"
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2818,7 +2872,8 @@ const WRAPPERS_JS: &str = r#"
     // `defaultPrevented` is read-only and only `preventDefault()` (or
     // `returnValue = false`, or an on<type> handler returning false) by a
     // listener that may cancel sets it: a passive listener cannot.
-    var CANCELED = new WeakSet();
+    var CANCELED = new WeakSet(), CANCELABLE = new WeakSet();
+    function setCancelable(ev, on) { if (on) setAdd(CANCELABLE, ev); else setDrop(CANCELABLE, ev); }
     var isProto = uncurry(Object.prototype.isPrototypeOf);
     var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
     // Give an event object its `isTrusted`: an own accessor with no setter
@@ -5787,16 +5842,24 @@ const WRAPPERS_JS: &str = r#"
     // before it scrolls: with only passive listeners it scrolls first and
     // tells them afterwards.
     // On the host object, like the key dispatch: not the page's to call.
+    // The path is walked with the dispatch's own parent links and plain
+    // loops: nothing a page can replace (an array method, a parentNode
+    // getter) runs here.
+    function blocks(list) {
+        if (!list) return false;
+        for (var i = 0; i < list.length; i++) if (!list[i].removed && !list[i].passive) return true;
+        return false;
+    }
     __rk.wheelBlocks = function (id) {
-            var n = typeof id === 'number' ? wrap(id) : null;
+            var n = typeof id === 'number' ? wrap(id) : null, probe = { type: 'wheel' };
+            // The legacy type is looked for only when something could hear
+            // it: each handler lookup reads the node's attributes.
+            var legacy = mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute();
             while (n) {
                 var all = LISTENERS.get(n);
-                var lists = all ? [all.wheel, all.mousewheel] : [];
-                for (var i = 0; i < lists.length; i++) {
-                    if (lists[i] && lists[i].some(function (l) { return !l.removed && !l.passive; })) return true;
-                }
-                if (typeof handlerOf(n, 'wheel') === 'function') return true;
-                n = n === g ? null : (n === doc ? g : (n.parentNode || (n.nodeType === 9 ? g : null)));
+                if (all && (blocks(all.wheel) || (legacy && blocks(all.mousewheel)))) return true;
+                if (typeof handlerOf(n, 'wheel') === 'function' || (legacy && typeof handlerOf(n, 'mousewheel') === 'function')) return true;
+                n = eventParent(n, probe);
             }
             return false;
     };
@@ -5822,6 +5885,10 @@ const WRAPPERS_JS: &str = r#"
             init.wheelDeltaY = notches(init.deltaY);
             var ev = new g.WheelEvent('wheel', init);
             trust(ev);
+            // A target with no `wheel` listener or handler hears the legacy
+            // `mousewheel` instead (Chrome for Testing 148; the user's
+            // wheel only).
+            if (mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute()) ev[LEGACY] = 'mousewheel';
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY
@@ -5983,12 +6050,22 @@ const WRAPPERS_JS: &str = r#"
     var passiveNow = null;
     // The engine dispatches `wheel` only once something can hear it, so a
     // page with no wheel listener scrolls without running any script.
-    var wheelNoted = false;
+    // How many wheel and mousewheel listeners there are, and how many of
+    // them are not passive, plus whether a handler was ever set; the
+    // engine is told when either answer changes (`noteWheel`).
+    var wheelListeners = 0, wheelBlocking = 0, wheelHandler = false, wheelSaid = '';
+    // Whether anything could hear the legacy `mousewheel`: only then does a
+    // wheel carry the legacy type, so a page without one pays nothing for
+    // it at each node of the path.
+    var mousewheelListeners = 0, mousewheelHandler = false;
     function noteWheel() {
-        if (wheelNoted) return;
-        wheelNoted = true;
-        N.noteWheel();
+        var now = (wheelListeners > 0 || wheelHandler) + ':' + (wheelBlocking > 0 || wheelHandler);
+        if (now === wheelSaid) return;
+        wheelSaid = now;
+        N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
     }
+    function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
+    var LEGACY = Symbol('rustkit.legacyType');
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -6008,7 +6085,7 @@ const WRAPPERS_JS: &str = r#"
         var passive = opts && typeof opts === 'object' && opts.passive !== undefined ? !!opts.passive
             : PASSIVE_BY_DEFAULT[type] === true && (t === g || t === doc || t === doc.documentElement || t === doc.body);
         list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), passive: passive, removed: false });
-        if (type === 'wheel' || type === 'mousewheel') noteWheel();
+        if (wheelType(type)) { wheelListeners++; if (!passive) wheelBlocking++; if (type === 'mousewheel') mousewheelListeners++; noteWheel(); }
         if (signal != null && typeof signal.addEventListener === 'function') {
             signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
         }
@@ -6027,6 +6104,7 @@ const WRAPPERS_JS: &str = r#"
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) {
                 list[i].removed = true;
+                if (wheelType(String(type))) { wheelListeners--; if (!list[i].passive) wheelBlocking--; if (String(type) === 'mousewheel') mousewheelListeners--; noteWheel(); }
                 list.splice(i, 1);
                 return;
             }
@@ -6179,7 +6257,7 @@ const WRAPPERS_JS: &str = r#"
         return typeof v === 'function' || (typeof v === 'object' && v !== null) ? v : null;
     }
     function elementHandlerSet(t, type, v) {
-        if (type === 'wheel' && typeof v === 'function') noteWheel();
+        if (wheelType(type) && typeof v === 'function') { wheelHandler = true; if (type === 'mousewheel') mousewheelHandler = true; noteWheel(); }
         var a = ASSIGNED.get(t);
         if (!a) { a = Object.create(null); ASSIGNED.set(t, a); }
         a[type] = handlerValue(v);
@@ -6243,6 +6321,15 @@ const WRAPPERS_JS: &str = r#"
         // shadow tree is the host to a listener outside.
         if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
         var all = LISTENERS.get(t), list = all && all[event.type];
+        // The legacy type, at a target with no listener or handler for the
+        // event's own (the user's wheel as `mousewheel`).
+        var legacy = event[LEGACY], own = event.type;
+        if (legacy && !(list && list.length) && typeof handlerOf(t, own) !== 'function' &&
+            ((all && all[legacy] && all[legacy].length) || typeof handlerOf(t, legacy) === 'function')) {
+            event.type = legacy;
+            try { invoke(t, event, phase, capture); } finally { event.type = own; }
+            return;
+        }
         if (list) {
             list = list.slice();
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
@@ -6329,7 +6416,7 @@ const WRAPPERS_JS: &str = r#"
         init = init || {};
         this.type = String(type);
         this.bubbles = !!init.bubbles;
-        this.cancelable = !!init.cancelable;
+        setCancelable(this, !!init.cancelable);
         this.composed = !!init.composed;
         this.target = null;
         this.currentTarget = null;
@@ -6339,13 +6426,21 @@ const WRAPPERS_JS: &str = r#"
         this.timeStamp = typeof g.__rustkit_perf_now === 'function' ? g.__rustkit_perf_now() : Date.now();
     }
     // The legacy initializers; they do nothing during dispatch.
+    // Re-initialising clears the canceled flag (DOM §2.2 "initialize");
+    // during dispatch it does nothing.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {
         if (this.eventPhase !== 0) return;
         this.type = String(type);
         this.bubbles = !!bubbles;
-        this.cancelable = !!cancelable;
+        setCancelable(this, !!cancelable);
+        setDrop(CANCELED, this);
     };
     function cancel(ev) { if (ev.cancelable && passiveNow !== ev) setAdd(CANCELED, ev); }
+    // `cancelable` is read-only, as in Chrome for Testing 148 (assignment
+    // does nothing; strict code throws).
+    Object.defineProperty(Event.prototype, 'cancelable', {
+        get: function () { return setHas(CANCELABLE, this); }, enumerable: true, configurable: true
+    });
     Event.prototype.preventDefault = function () { cancel(this); };
     // Read-only (no setter: an assignment does nothing, and throws in
     // strict code); the canceled flag above (Chrome for Testing 148).
