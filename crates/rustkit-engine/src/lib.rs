@@ -752,6 +752,8 @@ mod form_setter_calls_tests;
 mod document_title_tests;
 #[cfg(all(test, feature = "headless"))]
 mod dispatch_event_argument_tests;
+#[cfg(all(test, feature = "headless"))]
+mod submit_toggle_trusted_tests;
 
 #[cfg(test)]
 thread_local! {
