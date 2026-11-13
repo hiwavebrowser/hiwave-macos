@@ -273,6 +273,10 @@ struct CaptureResult {
     /// holding virtual time for them (its real-time cap ran out). A count only, never a URL; absent when none.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     settle_held_open: Option<usize>,
+    /// A stepped capture's settle, what it cost in real time (shapes only): turns, wall and wait time,
+    /// the slowest turn, timer callbacks and relayouts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    settle_stats: Option<SettleStats>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     elapsed_ms: Option<u64>,
     error: Option<String>,
@@ -387,6 +391,7 @@ impl CaptureResult {
             script_stats: None,
             live_stats: None,
             settle_held_open: None,
+            settle_stats: None,
             elapsed_ms: None,
             error: None,
             captures: None,
@@ -483,39 +488,70 @@ impl LiveWake {
 /// every run: the page clock in a stepped capture is virtual.
 const STEPPED_SETTLE_MS: u64 = 5_000;
 
+/// What a stepped settle cost (`CaptureResult::settle_stats`).
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+struct SettleStats {
+    /// Turns pumped (steps and 0 ms waiting turns).
+    turns: u32,
+    /// Real time the settle took, all of it.
+    wall_ms: u64,
+    /// Real time spent waiting for open requests (bounded by the cap).
+    wait_ms: u64,
+    /// The slowest single turn.
+    max_turn_ms: u64,
+    /// Turns that relaid the page out.
+    relayouts: u32,
+    /// Timer callbacks that ran.
+    timer_callbacks: u64,
+    /// Requests still open once the cap ran out.
+    held_open: usize,
+}
+
 /// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. While a request the page started is open,
 /// virtual time stands still: turns of 0 ms (real waiting, bounded by a cap across the settle) until it
 /// answers, then the steps go on. So the answer lands at the same virtual time whatever the server's
 /// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
 /// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
 ///
-/// Returns how many requests were still open once the cap ran out (0 when none was): a page with a
-/// request that never answers (a long poll, an event stream) pays the cap once, and the result says so.
-fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) -> usize {
+/// Returns what it cost (`SettleStats`), including how many requests were still open once the cap ran
+/// out: a page with a request that never answers (a long poll, an event stream) pays the cap once.
+fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) -> SettleStats {
     const STEP_MS: u64 = 50;
     const REQUEST_WAIT: Duration = Duration::from_millis(5);
     const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
+    let began = Instant::now();
+    let mut stats = SettleStats::default();
     let mut left = STEPPED_SETTLE_MS;
     // Real time spent waiting, measured: a 5 ms sleep can last about 15 ms (Windows), and the pump counts.
     let mut waited = Duration::ZERO;
-    let mut held_open = 0;
+    let mut turn = |stats: &mut SettleStats, elapsed_ms: u64| {
+        let t = Instant::now();
+        let out = rt.block_on(engine.pump_live(view_id, elapsed_ms));
+        stats.turns += 1;
+        stats.max_turn_ms = stats.max_turn_ms.max(t.elapsed().as_millis() as u64);
+        stats.relayouts += out.relaid_out as u32;
+        stats.timer_callbacks += out.timers_ran as u64;
+        out.in_flight
+    };
     // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
-    let mut in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
+    let mut in_flight = turn(&mut stats, 0);
     while left > 0 {
         while in_flight > 0 && waited < REQUEST_WAIT_CAP {
-            let began = Instant::now();
+            let t = Instant::now();
             std::thread::sleep(REQUEST_WAIT);
-            in_flight = rt.block_on(engine.pump_live(view_id, 0)).in_flight;
-            waited += began.elapsed();
+            in_flight = turn(&mut stats, 0);
+            waited += t.elapsed();
         }
         if in_flight > 0 {
-            held_open = held_open.max(in_flight);
+            stats.held_open = stats.held_open.max(in_flight);
         }
         let step = STEP_MS.min(left);
-        in_flight = rt.block_on(engine.pump_live(view_id, step)).in_flight;
+        in_flight = turn(&mut stats, step);
         left -= step;
     }
-    held_open
+    stats.wait_ms = waited.as_millis() as u64;
+    stats.wall_ms = began.elapsed().as_millis() as u64;
+    stats
 }
 
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
@@ -833,8 +869,9 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 // The real clock: the same span as live loop turns, in real time.
                 run_live(&rt, &mut engine, view_id, STEPPED_SETTLE_MS);
             } else {
-                let held_open = settle_stepped(&rt, &mut engine, view_id);
-                result.settle_held_open = (held_open > 0).then_some(held_open);
+                let stats = settle_stepped(&rt, &mut engine, view_id);
+                result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
+                result.settle_stats = Some(stats);
             }
         }
         if let Some(log) = engine.script_log(view_id) {
