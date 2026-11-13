@@ -393,3 +393,68 @@ fn draw_image_of_a_loaded_img_matches_chrome() {
         assert!(max <= 16, "{name}: max channel difference {max}\n ours   {ours}\n chrome {chrome}");
     }
 }
+
+/// The frame the engine draws for `view`, captured through the renderer
+/// (render_view, then capture_frame): `w` x `h` RGB from the top left.
+fn frame_rgb(engine: &mut Engine, id: EngineViewId, w: usize, h: usize) -> Vec<u8> {
+    engine.render_view(id).expect("render");
+    let path = std::env::temp_dir().join(format!("rustkit-canvas-screen-{}-{id:?}.ppm", std::process::id()));
+    engine.capture_frame(id, path.to_str().unwrap()).expect("capture");
+    let ppm = std::fs::read(&path).expect("frame");
+    let _ = std::fs::remove_file(&path);
+    let mut fields = Vec::new();
+    let mut pos = 0;
+    while fields.len() < 4 {
+        let start = pos;
+        while !ppm[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap().to_string());
+        pos += 1;
+    }
+    assert_eq!(fields[0], "P6");
+    let width: usize = fields[1].parse().unwrap();
+    let mut out = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        out.extend_from_slice(&ppm[pos + y * width * 3..][..w * 3]);
+    }
+    out
+}
+
+/// STR-7b: the canvas on screen is its bitmap. Each page draws into a
+/// canvas at the origin; the engine's captured frame is compared with
+/// Chrome for Testing 148's screenshot of the same region
+/// (tools/parity_oracle/canvas_screen_cases.json, canvas_screen_log.mjs).
+/// putImageData and drawImage of a canvas reach the screen only through
+/// the bitmap; "css-scaled-2x" is a 30x30 bitmap in a 60x60 CSS box, the
+/// backing-store-to-CSS scale Chrome applies (bilinear).
+#[test]
+fn canvas_frames_match_chrome_screenshots() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_screen_cases.json")).unwrap();
+    let w = data["size"][0].as_u64().unwrap() as usize;
+    let h = data["size"][1].as_u64().unwrap() as usize;
+    let mut failures = Vec::new();
+    for case in data["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let (mut engine, id) = view(case["html"].as_str().unwrap());
+        pump(&mut engine, id, 50);
+        let ours = frame_rgb(&mut engine, id, w, h);
+        let hex = case["chrome_rgb"].as_str().unwrap();
+        let chrome: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap()).collect();
+        assert_eq!(ours.len(), chrome.len(), "{name}: length");
+        let diffs: Vec<u8> = ours.chunks(3).zip(chrome.chunks(3))
+            .map(|(a, b)| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap())
+            .collect();
+        let max = *diffs.iter().max().unwrap();
+        let mean = diffs.iter().map(|&d| d as f64).sum::<f64>() / diffs.len() as f64;
+        let over = diffs.iter().filter(|&&d| d > 2).count();
+        println!("{name}: max {max} mean {mean:.2} pixels>2 {over}/{}", diffs.len());
+        // Anti-aliased edges differ (tiny-skia supersamples, Skia's coverage
+        // is analytic: the STR-7c row); everything else is within rounding.
+        if max > 80 || mean > 2.0 {
+            failures.push(format!("{name}: max {max} mean {mean:.2}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
