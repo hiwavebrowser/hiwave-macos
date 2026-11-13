@@ -11,6 +11,8 @@
     if (typeof g.__rustkit_worker_spawn !== 'function') return;
     var spawn = g.__rustkit_worker_spawn, post = g.__rustkit_worker_post,
         poll = g.__rustkit_worker_poll, reply = g.__rustkit_worker_reply, terminate = g.__rustkit_worker_terminate;
+    // Captured once; page script does not get the bridge (`__rustkit_worker_running` stays: the engine reads it).
+    ['spawn', 'post', 'poll', 'reply', 'terminate'].forEach(function (n) { delete g['__rustkit_worker_' + n]; });
     var states = new WeakMap();
     var live = {};
     var MAX_QUEUED = 1024;
