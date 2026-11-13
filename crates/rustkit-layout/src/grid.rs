@@ -5548,7 +5548,12 @@ fn apply_align_self(
         // cell height the percentage arm uses. Left on the `_` arm it would
         // be called explicit and then sized as if it were `auto`.
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
-        _ => cell_height,
+        // GR4: every other length is the item's own too: `100vh`, `20rem`,
+        // `min(100vh, 500px)`. They fell to the cell height, so a sticky
+        // `100vh` pane beside a 3000px column was 3000 tall (Chrome 148:
+        // 800). `fit-content` and the sizing keywords stay with the cell.
+        Length::FitContent => cell_height,
+        ref l => child.length_to_px(l, cell_height),
     };
     // A definite `max-height` and `min-height` bound an explicit height (max
     // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
