@@ -130,3 +130,31 @@ fn passive_only_listeners_hear_it_after_and_a_handler_attribute_can_cancel() {
     engine.wheel_at(view, 50.0, 100.0, 0.0, -100.0, false).expect("wheel");
     assert_eq!(js(&mut engine, view, "String(window.heard) + ' ' + scrollY"), "true 0");
 }
+
+/// A second swipe that the platform says begins (AppKit's `Began`) is a
+/// first wheel even when it follows the last swipe's steps inside the
+/// hold, so it can be cancelled, and the rest of it with it (R1 on #1121).
+#[test]
+fn a_swipe_that_begins_inside_the_hold_is_a_first_wheel() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    engine
+        .load_html(
+            view,
+            "<!doctype html><body style=\"margin:0\"><div id=b style=\"height:200px;overflow:auto\"><div style=\"height:2000px\"></div></div>\
+             <script>var seen = []; document.getElementById('b').addEventListener('wheel', function (e) { seen.push(e.cancelable); }, { passive: false });</script>",
+        )
+        .expect("load");
+    engine.wheel_phase_at(view, 50.0, 100.0, 0.0, -50.0, true, true).expect("wheel");
+    for _ in 0..2 {
+        engine.wheel_phase_at(view, 50.0, 100.0, 0.0, -50.0, true, false).expect("wheel");
+    }
+    assert_eq!(js(&mut engine, view, "seen.join(' ') + ' ' + document.getElementById('b').scrollTop"), "true false false 150");
+    js(&mut engine, view, "seen = []; document.getElementById('b').addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false }); 0");
+    // At once: well inside the hold of the first swipe's last step.
+    engine.wheel_phase_at(view, 50.0, 100.0, 0.0, -50.0, true, true).expect("wheel");
+    for _ in 0..2 {
+        engine.wheel_phase_at(view, 50.0, 100.0, 0.0, -50.0, true, false).expect("wheel");
+    }
+    assert_eq!(js(&mut engine, view, "seen.join(' ') + ' ' + document.getElementById('b').scrollTop"), "true true true 150");
+}

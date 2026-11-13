@@ -4140,6 +4140,24 @@ impl Engine {
         delta_y: f32,
         gesture: bool,
     ) -> Result<bool, EngineError> {
+        self.wheel_phase_at(id, x, y, delta_x, delta_y, gesture, false)
+    }
+
+    /// [`Engine::wheel_at`] for a wheel the platform says begins a gesture
+    /// (`began`): the first wheel of a new scroll sequence, however soon
+    /// it follows the last one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wheel_phase_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+        began: bool,
+    ) -> Result<bool, EngineError> {
+        let _ = began;
         // The page hears the wheel when it has a listener for one
         // (`DomBindings::wants_wheel`); a page with none runs no script
         // here. A listener that is not passive hears it first and may
