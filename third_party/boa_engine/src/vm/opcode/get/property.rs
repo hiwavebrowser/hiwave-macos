@@ -69,6 +69,15 @@ fn get_by_name<const LENGTH: bool>(
 
     // Cache the property.
     let slot = *context.slot();
+    // HIWAVE PATCH (vm-stats): an inline-cache miss, by receiver kind and name.
+    if crate::vm::stats::enabled() {
+        crate::vm::stats::miss(
+            crate::vm::stats::Site::GetByName,
+            &key.to_string(),
+            crate::vm::stats::receiver_kind(receiver),
+            slot.is_cacheable(),
+        );
+    }
     if slot.is_cacheable() {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();

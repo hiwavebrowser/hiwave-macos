@@ -1147,6 +1147,15 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        // HIWAVE PATCH (vm-stats): the counting loop only when `RUSTKIT_VM_STATS` asks for it.
+        if stats::enabled() {
+            self.run_impl::<true>()
+        } else {
+            self.run_impl::<false>()
+        }
+    }
+
+    fn run_impl<const STATS: bool>(&mut self) -> CompletionRecord {
         // HIWAVE PATCH (interrupt): no bytecode runs in a stopped turn, even
         // when an engine reaction let in by `new_promise_reaction_job`
         // resumes a body or runs a module: it fails as its first opcode
@@ -1171,6 +1180,9 @@ impl Context {
             .get(self.vm.frame().pc as usize)
         {
             let opcode = Opcode::decode(*byte);
+            if STATS {
+                stats::op(*byte); // HIWAVE PATCH (vm-stats)
+            }
 
             match self.execute_one(
                 |context, opcode| {
