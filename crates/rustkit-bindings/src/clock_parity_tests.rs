@@ -74,3 +74,30 @@ fn same(got: &serde_json::Value, want: &serde_json::Value) {
     assert!(out.is_empty(), "{}", out.join("
 "));
 }
+
+/// Inside one script turn the page's clocks run at the rate of the wall clock. CodeMirror's parser
+/// reads `Date.now()` for its slice deadline: a clock that ran 2.6x fast expired it early and it
+/// yielded after 21 of 86 tokens (Speedometer 3). A guard, not a fix: on the Windows build the
+/// clocks already track wall time, so this passes on the code before the page-clock change too.
+#[test]
+fn date_now_and_performance_now_advance_at_wall_rate_inside_a_busy_turn() {
+    for (clock, what) in [("Date.now()", "Date.now"), ("performance.now()", "performance.now")] {
+        let b = page();
+        let wall = std::time::Instant::now();
+        let seen = match b
+            .evaluate(&format!(
+                "var s = {clock}, n = 0; while ({clock} - s < 200) {{ n++; }} String({clock} - s)"
+            ))
+            .unwrap()
+        {
+            JsValue::String(s) => s.parse::<f64>().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
+        let ratio = seen / wall_ms;
+        assert!(
+            (0.85..=1.2).contains(&ratio),
+            "{what} advanced {seen} ms in a turn that took {wall_ms:.1} ms of wall time (ratio {ratio:.2})"
+        );
+    }
+}
