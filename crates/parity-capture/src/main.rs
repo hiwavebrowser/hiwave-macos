@@ -2193,6 +2193,8 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     if args.animations {
         config.disable_animations = false;
     }
+    // The stepped clock is for a stepped capture; a live run reads a clock that flows.
+    config.deterministic_page_clock = args.live_ms.is_none();
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;

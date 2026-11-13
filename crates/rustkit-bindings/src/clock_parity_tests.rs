@@ -133,7 +133,7 @@ fn in_capture_mode_the_page_clock_reproduces_across_runs() {
         let b = page();
         b.set_deterministic_clock(true);
         b.evaluate(
-            "var log = []; log.push(performance.now()); var s = performance.now();              while (performance.now() - s < 5) {} log.push(performance.now());              var n = 0; requestAnimationFrame(function f(t) { log.push(t); log.push(new Event('x').timeStamp);              if (++n < 4) requestAnimationFrame(f); }); setTimeout(function () { log.push(performance.now()); }, 40);",
+            "var log = []; var btn = document.getElementById('b'); btn.addEventListener('click', function (e) { log.push(e.timeStamp); }); btn.click(); log.push(performance.now()); var s = performance.now();              while (performance.now() - s < 5) {} log.push(performance.now());              var n = 0; requestAnimationFrame(function f(t) { log.push(t); log.push(new Event('x').timeStamp);              if (++n < 4) requestAnimationFrame(f); }); setTimeout(function () { log.push(performance.now()); }, 40);",
         )
         .unwrap();
         // however long this run takes in real time
