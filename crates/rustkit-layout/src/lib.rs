@@ -2075,6 +2075,71 @@ pub struct LayoutBox {
     /// line-height. Set by the block that places the run; the run's content
     /// height is then `line_height + (lines - 1) * pitch`.
     pub text_line_pitch: Option<f32>,
+    /// Whether anything under this box can be hit outside its border box,
+    /// as `mark_hit_overflow` found it for this layout: 0 not known (the
+    /// hit test looks), 1 nothing (the hit test stops here), 2 something.
+    pub hit_overflow: HitOverflowMark,
+}
+
+thread_local! {
+    /// How many `position: fixed` boxes this thread's layouts have placed.
+    /// A root layout reads it before and after: a tree that placed none
+    /// has none to re-anchor, and skips that walk (`reanchor_fixed_boxes`).
+    static FIXED_BOXES_PLACED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `LayoutBox::hit_overflow`. A note the hit test keeps beside the layout,
+/// not part of it: two trees that lay out the same are the same tree
+/// whether or not a point was ever asked of them, so it prints as nothing.
+#[derive(Default)]
+pub struct HitOverflowMark(std::cell::Cell<u8>);
+
+/// A copy starts with no mark: the engine copies a laid-out tree to move
+/// boxes on it (an animation frame answered to a forced read), and a mark
+/// made before the move would stop the hit test at a box something now
+/// reaches out of.
+impl Clone for HitOverflowMark {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl HitOverflowMark {
+    fn get(&self) -> u8 {
+        self.0.get()
+    }
+
+    fn set(&self, mark: u8) {
+        self.0.set(mark);
+    }
+}
+
+impl std::fmt::Debug for HitOverflowMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// What a box and the boxes under it reach, for `mark_hit_overflow`: one
+/// rectangle each for the boxes its ancestors' clips apply to, the absolute
+/// boxes still looking for their containing block, and the fixed ones.
+struct HitReach {
+    flow: Option<Rect>,
+    absolute: Option<Rect>,
+    fixed: Option<Rect>,
+    /// Something here moves without a layout (a transform, a sticky box):
+    /// where it reaches is not known from the layout alone.
+    moves: bool,
+}
+
+fn union_reach(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            Some(Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y))
+        }
+        (a, b) => a.or(b),
+    }
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -2136,6 +2201,7 @@ impl LayoutBox {
             pseudo_animation_key: None,
             formatting_root: false,
             text_line_pitch: None,
+            hit_overflow: HitOverflowMark::default(),
         }
     }
 
@@ -2382,7 +2448,7 @@ impl LayoutBox {
             ScrollerGap::ToContainingBlock if self.holds_absolute_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
-            ScrollerGap::ToTransform if self.transforms_descendants() => {
+            ScrollerGap::ToTransform if self.carries_fixed_boxes() => {
                 hit.scroller_gap = ScrollerGap::None;
             }
             _ => {}
@@ -2716,8 +2782,87 @@ impl LayoutBox {
     /// callers lay out a child with `layout_with_definite_height`, which is
     /// the same thing without the pass, so the pass runs once per tree.
     pub fn layout(&mut self, containing_block: &Dimensions) {
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_definite_height(containing_block, containing_block.content.height);
         self.apply_relative_offsets(containing_block);
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
+    }
+
+    /// Whether this box is the containing block of the `position: fixed`
+    /// boxes inside it, which then move with it instead of staying in the
+    /// viewport (css-transforms-1 §3, filter-effects-1 §5, css-contain-2
+    /// §3; the list is Chrome for Testing 148's, LAY2): any transform, an
+    /// identity one included (`transform`, `translate`, `rotate`, `scale`),
+    /// `perspective`, `transform-style: preserve-3d`, a `filter` or
+    /// `backdrop-filter`, `will-change` naming one of those, `contain:
+    /// layout | paint | strict | content`, `content-visibility: auto |
+    /// hidden`. Not an inline box, which no transform applies to.
+    pub fn holds_fixed_boxes(&self) -> bool {
+        let style = &self.style;
+        !matches!(
+            self.box_type,
+            BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak | BoxType::AnonymousBlock
+        ) && (!style.transform.ops.is_empty()
+            || style.translate.is_some()
+            || style.rotate.is_some()
+            || style.scale.is_some()
+            || style.stacks
+                & (rustkit_css::STACKS_PERSPECTIVE
+                    | rustkit_css::STACKS_PRESERVE_3D
+                    | rustkit_css::STACKS_CONTENT_VISIBILITY)
+                != 0
+            || !style.filter.is_empty()
+            || !style.backdrop_filter.is_empty()
+            || style.will_change_holds_fixed
+            || style.contain_holds_fixed)
+    }
+
+    /// Put every `position: fixed` box under this one where its insets say,
+    /// against its real containing block: the viewport, or the padding box
+    /// of the nearest ancestor that `holds_fixed_boxes` (`holder`).
+    ///
+    /// A fixed box is first placed against the viewport while its parent is
+    /// laid out, at the parent's position of that moment. Every later move
+    /// of an ancestor (an absolute box going from its static position to
+    /// its insets, a flex or grid item being placed, a relative offset)
+    /// carries the whole subtree, the fixed box with it: one inside
+    /// `position: absolute; left: 400px; top: 10px` whose static position
+    /// was (0, 20) ended up (400, -10) away from its own `left` / `top`.
+    /// So the insets are applied again once nothing above moves. An axis
+    /// with no inset keeps the static position, which does move with the
+    /// ancestors.
+    /// A `position: fixed` box somewhere under this one.
+    pub(crate) fn has_fixed_box_below(&self) -> bool {
+        self.children.iter().any(|c| c.position == Position::Fixed || c.has_fixed_box_below())
+    }
+
+    fn reanchor_fixed_boxes(&mut self, holder: Option<&Dimensions>) {
+        let own = self.holds_fixed_boxes().then(|| self.abspos_containing_block());
+        let holder = own.as_ref().or(holder);
+        for child in &mut self.children {
+            if child.position == Position::Fixed {
+                let containing_block = match holder {
+                    Some(holder) => Some(holder.clone()),
+                    None => (child.viewport.0 > 0.0 && child.viewport.1 > 0.0).then(|| Dimensions {
+                        content: Rect::new(0.0, 0.0, child.viewport.0, child.viewport.1),
+                        ..Default::default()
+                    }),
+                };
+                if let Some(containing_block) = containing_block {
+                    let (x, y) = (child.dimensions.content.x, child.dimensions.content.y);
+                    child.apply_position_offsets_absolute(&containing_block);
+                    let (dx, dy) = (child.dimensions.content.x - x, child.dimensions.content.y - y);
+                    if dx != 0.0 || dy != 0.0 {
+                        for below in &mut child.children {
+                            Self::shift_subtree(below, dx, dy);
+                        }
+                    }
+                }
+            }
+            child.reanchor_fixed_boxes(holder);
+        }
     }
 
     /// Perform layout with an explicit definite height for percentage resolution.
@@ -4606,8 +4751,13 @@ impl LayoutBox {
         float_context: &mut FloatContext,
     ) {
         layout_memo::bump_epoch();
+        let fixed_before = FIXED_BOXES_PLACED.with(std::cell::Cell::get);
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        // Only a tree that placed a fixed box has one to place again.
+        if FIXED_BOXES_PLACED.with(std::cell::Cell::get) != fixed_before {
+            self.reanchor_fixed_boxes(None);
+        }
         // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
         if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
             layout_memo::clear_memos(self);
@@ -5390,6 +5540,7 @@ impl LayoutBox {
                 self.apply_position_offsets_absolute(containing_block);
             }
             Position::Fixed => {
+                FIXED_BOXES_PLACED.with(|n| n.set(n.get().wrapping_add(1)));
                 // CSS2 §10.1: a fixed element's containing block is the
                 // VIEWPORT, not the block that laid it out. Resolving
                 // bottom:0 against the root's flow height painted
@@ -8523,7 +8674,8 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, (0.0, 0.0), 0, false)
+        self.ensure_hit_overflow();
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false, (false, false))
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -8536,6 +8688,7 @@ impl LayoutBox {
     /// fixed box with a negative `z-index` is under the page; the others
     /// are over it, the highest `z-index` and then the latest first.
     pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
         self.top_held_or_page(held, viewport_x, viewport_y, scroll)
@@ -8552,6 +8705,7 @@ impl LayoutBox {
         scroll: (f32, f32),
         held_fixed: &[Vec<usize>],
     ) -> Option<HitTestResult> {
+        self.ensure_hit_overflow();
         let mut held = Vec::new();
         for path in held_fixed {
             let mut ancestors = Vec::with_capacity(path.len());
@@ -8573,7 +8727,7 @@ impl LayoutBox {
                 .iter()
                 .find(|a| a.position == Position::Fixed)
                 .map_or(at.z_index, |outer| outer.z_index);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true, (false, false)) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -8595,7 +8749,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true, (false, false));
         match top {
             Some((z_index, hit)) if z_index >= 0 => {
                 // Pages with no sticky box pay for nothing here.
@@ -8746,6 +8900,12 @@ impl LayoutBox {
         !self.style.effective_transform().is_identity()
     }
 
+    /// The fixed boxes under this box move with it and with the page: it
+    /// transforms them, or is their containing block (`holds_fixed_boxes`).
+    fn carries_fixed_boxes(&self) -> bool {
+        self.transforms_descendants() || self.holds_fixed_boxes()
+    }
+
     /// Whether a point in this box can land on it: not when it is not
     /// shown, and not when it is `pointer-events: none`. Both inherit and
     /// a descendant can undo either, so its children are tested all the same.
@@ -8766,7 +8926,7 @@ impl LayoutBox {
     }
 
     fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         for (index, child) in self.children.iter().enumerate() {
@@ -8799,14 +8959,14 @@ impl LayoutBox {
         outer_z: Option<i32>,
         hits: &mut Vec<(i32, HitTestResult)>,
     ) {
-        if self.transforms_descendants() {
+        if self.carries_fixed_boxes() {
             return;
         }
         let first = hits.len();
         for child in &self.children {
             let fixed = child.position == Position::Fixed;
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true, (false, false)) {
                     hit.viewport_fixed = true;
                     hits.push((outer_z.unwrap_or(child.z_index), hit));
                 }
@@ -8842,11 +9002,98 @@ impl LayoutBox {
         }
     }
 
+    /// Whether this box clips what it holds for hit testing, as it clips
+    /// the painting: any `overflow` but `visible`. The root and the body
+    /// hand theirs to the viewport.
+    fn clips_hit_overflow(&self) -> bool {
+        use rustkit_css::Overflow;
+        (self.style.overflow_x != Overflow::Visible || self.style.overflow_y != Overflow::Visible)
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::LineBreak)
+            && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
+    }
+
+    /// Find, for every box of this layout, whether anything under it can
+    /// be hit outside its border box (`hit_overflow`). A box outside its
+    /// ancestor's box is still hit (an absolutely positioned menu under a
+    /// short header, a float in a zero-height parent, content taller than
+    /// an `overflow: visible` box), so the hit test cannot stop at a box
+    /// the point is outside of unless it knows nothing of it reaches
+    /// there. Made at the first hit test of a layout (the engine calls
+    /// `forget_hit_overflow` when it stores or patches one).
+    ///
+    /// A clipping box keeps its in-flow content in; an absolute box under
+    /// it gets out when its containing block is further up. A transformed
+    /// or sticky box moves without a layout, so the boxes above one are
+    /// always looked into.
+    pub fn mark_hit_overflow(&self) {
+        self.hit_reach();
+    }
+
+    /// The boxes of this layout changed (a new layout, a patched one, an
+    /// animation frame): the next hit test from this root marks them
+    /// again. The marks cost one walk, so they are made when a point asks.
+    pub fn forget_hit_overflow(&self) {
+        self.hit_overflow.set(0);
+    }
+
+    /// The marks, made if this root has none.
+    fn ensure_hit_overflow(&self) {
+        if self.hit_overflow.get() == 0 {
+            self.mark_hit_overflow();
+        }
+    }
+
+    fn hit_reach(&self) -> HitReach {
+        let own = self.dimensions.border_box();
+        let (mut flow, mut absolute, mut fixed, mut below_moves) = (None, None, None, false);
+        for child in &self.children {
+            let reach = child.hit_reach();
+            below_moves |= reach.moves;
+            match child.position {
+                Position::Absolute => absolute = union_reach(absolute, reach.flow),
+                Position::Fixed => fixed = union_reach(fixed, reach.flow),
+                _ => flow = union_reach(flow, reach.flow),
+            }
+            absolute = union_reach(absolute, reach.absolute);
+            fixed = union_reach(fixed, reach.fixed);
+        }
+        let clips = self.clips_hit_overflow();
+        let mut reach = Some(own);
+        if !clips {
+            reach = union_reach(reach, flow);
+        }
+        // The absolute (fixed) boxes this box is the containing block of
+        // are its own overflow from here up, or clipped by it.
+        if self.holds_absolute_boxes() {
+            if !clips {
+                reach = union_reach(reach, absolute);
+            }
+            absolute = None;
+        }
+        if self.carries_fixed_boxes() {
+            if !clips {
+                reach = union_reach(reach, fixed);
+            }
+            fixed = None;
+        }
+        let outside = |r: Option<Rect>| {
+            r.is_some_and(|r| r.x < own.x || r.y < own.y || r.right() > own.right() || r.bottom() > own.bottom())
+        };
+        let reaches_out = below_moves || outside(reach) || outside(absolute) || outside(fixed);
+        self.hit_overflow.set(if reaches_out { 2 } else { 1 });
+        let moves = self.own_transform().is_some() || self.sticky_rule.get().is_some();
+        HitReach { flow: reach, absolute, fixed, moves: below_moves || moves }
+    }
+
     /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
     /// those with the viewport point). `escaped` is what static scrollers
     /// since the nearest containing block of absolute boxes added to the
     /// point: an absolute box under them is not in their scrolling box.
+    /// `clipped` says the point is outside a clipping ancestor: for this
+    /// box, and for the absolute boxes under it whose containing block is
+    /// above it. A clipped box is not hit; an absolute box under it whose
+    /// containing block is outside the clip still is.
     fn hit_test_internal(
         &self,
         x: f32,
@@ -8854,6 +9101,7 @@ impl LayoutBox {
         escaped: (f32, f32),
         depth: u32,
         skip_held_fixed: bool,
+        clipped: (bool, bool),
     ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
         // (`PushTransform`): the point is taken back to where they are
@@ -8880,13 +9128,19 @@ impl LayoutBox {
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
-        // Check if the point is within our border box
-        if !border_box.contains(x, y) {
+        // Outside our border box the point can still be on something we
+        // hold: a box that overflows us. `mark_hit_overflow` says when
+        // nothing does.
+        let inside = border_box.contains(x, y);
+        if !inside && self.hit_overflow.get() == 1 {
             return None;
         }
+        let flow_clipped =
+            clipped.0 || (self.clips_hit_overflow() && !self.dimensions.padding_box().contains(x, y));
+        let absolute_clipped = if self.holds_absolute_boxes() { flow_clipped } else { clipped.1 };
 
         // Check children in reverse paint order (topmost first)
-        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
+        let skip_held_fixed = skip_held_fixed && !self.carries_fixed_boxes();
         let paint_order = self.get_paint_order();
         // What this box's own scroll adds to the point, for its children.
         let scroll = self.element_scroll.get();
@@ -8906,7 +9160,14 @@ impl LayoutBox {
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
-            if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
+            let child_clipped = match child.position {
+                Position::Absolute => (absolute_clipped, absolute_clipped),
+                Position::Fixed => (false, false),
+                _ => (flow_clipped, absolute_clipped),
+            };
+            if let Some(mut result) =
+                child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed, child_clipped)
+            {
                 self.note_scroller_of_hit(child, &mut result);
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
@@ -8917,7 +9178,7 @@ impl LayoutBox {
         // No child was hit, so we are the target, if we can be one: a
         // see-through overlay or a closed menu leaves the point to
         // whatever is under it.
-        if !self.is_hit_target() {
+        if !inside || clipped.0 || !self.is_hit_target() {
             return None;
         }
 
@@ -10763,9 +11024,10 @@ pub struct DisplayList {
     open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
-    /// How many ancestors of the box being painted have a `transform`. A
-    /// transformed box is the containing block of the fixed boxes inside
-    /// it (css-transforms-1 §3), so those move with it and with the page.
+    /// How many ancestors of the box being painted have a `transform` or
+    /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
+    /// box is the containing block of the fixed boxes inside it
+    /// (css-transforms-1 §3), so those move with it and with the page.
     transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
@@ -11114,6 +11376,12 @@ impl DisplayList {
         // Check if this box has a transform
         let transform = layout_box.style.effective_transform();
         let has_transform = !transform.is_identity();
+        // Counted with the transformed ancestors: the fixed boxes under a
+        // box that holds them move with the page too.
+        let holds_fixed = !has_transform && layout_box.holds_fixed_boxes();
+        if holds_fixed {
+            self.transformed_ancestors += 1;
+        }
         if has_transform {
             let border_box = layout_box.dimensions.border_box();
             // Compute transform matrix
@@ -11330,6 +11598,9 @@ impl DisplayList {
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
+        }
+        if holds_fixed {
             self.transformed_ancestors -= 1;
         }
 
@@ -22789,6 +23060,28 @@ mod overlay_hit_tests {
         let nodes = |x, y| root.hit_test_all(x, y).iter().map(|h| h.node_id).collect::<Vec<_>>();
         assert_eq!(nodes(150.0, 150.0), vec![Some(1), Some(2)]);
         assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
+    }
+
+    /// R1 MED 3: a copy of a layout must not inherit its hit marks. The
+    /// engine answers a forced read from a clone of the painted tree and
+    /// then moves boxes on it (an animation frame); a mark that said
+    /// "nothing under this box reaches outside it" before the move would
+    /// stop the walk at the parent.
+    #[test]
+    fn a_copy_of_a_layout_makes_its_own_hit_marks() {
+        let mut root = page();
+        let mut parent = boxed(2, 0.0, 0.0, 100.0, 100.0);
+        parent.children.push(boxed(3, 10.0, 10.0, 50.0, 50.0));
+        root.children.push(parent);
+        // Marks the painted tree: nothing reaches outside the parent.
+        assert_eq!(root.hit_test(20.0, 20.0).and_then(|h| h.node_id), Some(3));
+        let mut copy = root.clone();
+        copy.children[0].children[0].dimensions.content.x += 300.0;
+        assert_eq!(
+            copy.hit_test(320.0, 20.0).and_then(|h| h.node_id),
+            Some(3),
+            "the moved box is hit where the copy has it"
+        );
     }
 
     #[test]

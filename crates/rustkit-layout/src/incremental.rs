@@ -181,6 +181,13 @@ fn lay_out_root(
     // stay inside it, as the container's own layout of it has them.
     margins.children_are_formatting_roots =
         parent.style.display.is_flex() || parent.style.display.is_grid();
+    // A fixed box under here is placed again by the root pass
+    // (`reanchor_fixed_boxes`), against a containing block that may be
+    // above this subtree: the whole tree is laid out instead. Asked before
+    // this subtree is laid out, so it is not laid out to be thrown away.
+    if nb.has_fixed_box_below() {
+        return Err("fixed_box");
+    }
     let before = layout_visits();
     nb.layout_with_collapse_in(&cb, &mut margins, &mut FloatContext::new(), None);
     // The root pass's relative offsets, for what is under the box (its own
@@ -605,6 +612,7 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         sticky_shift: _,
         sticky_paths: _,
         scrollbar_thumb_hovered: _,
+        hit_overflow: _,
         scrollbar_overflows,
         pseudo_animation_key,
         formatting_root,

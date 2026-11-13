@@ -11,6 +11,7 @@
 //! 4. **Mutation support**: Node insertion, removal, attribute modification
 //! 5. **Event dispatch**: DOM Events with capture/bubble phases
 
+pub mod attr_map;
 pub mod events;
 pub mod clipboard;
 pub mod forms;
@@ -31,6 +32,7 @@ pub use images::{
     CrossOrigin, FaviconLink, ImageDecoding, ImageElement, ImageElementManager, ImageLoading,
     ImageLoadingState, PictureElement, PictureSource,
 };
+pub use attr_map::AttrMap;
 pub use shadow::{is_valid_custom_element_name, ShadowRootInit, ShadowRootMode};
 
 use std::cell::{Cell, RefCell};
@@ -141,7 +143,7 @@ pub enum NodeType {
     Element {
         tag_name: String,
         namespace: String,
-        attributes: HashMap<String, String>,
+        attributes: AttrMap,
     },
     Text(String),
     Comment(String),
@@ -458,6 +460,10 @@ pub struct Document {
     /// means no node has a shadow root, so tree walks can skip the shadow
     /// checks entirely.
     shadow_roots: Cell<usize>,
+    /// The scripting flag the document was parsed with (HTML §13.2.3.5):
+    /// its scripts run, so `<noscript>` holds text. Fragments parsed for
+    /// its elements (`innerHTML`) follow it.
+    scripting: Cell<bool>,
     /// Custom element names `customElements.define` has defined, for
     /// `:defined` (see `shadow.rs`, `define_custom_element`).
     defined_custom_elements: RefCell<std::collections::HashSet<String>>,
@@ -551,7 +557,7 @@ impl DocumentSink {
         name: String,
         attrs: Vec<(String, String)>,
         in_svg: bool,
-    ) -> (String, &'static str, HashMap<String, String>) {
+    ) -> (String, &'static str, AttrMap) {
         let svg = name == "svg" || (in_svg && !svg_names::breaks_out_of_svg(&name, &attrs));
         if svg {
             let attributes = attrs
@@ -754,6 +760,7 @@ impl Document {
             elements_by_id: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             shadow_roots: Cell::new(0),
+            scripting: Cell::new(false),
             defined_custom_elements: RefCell::new(std::collections::HashSet::new()),
             custom_element_definitions_settled: Cell::new(false),
             settled_custom_elements: RefCell::new(std::collections::HashSet::new()),
@@ -786,12 +793,29 @@ impl Document {
         map.get(&element.id) == Some(&element.sheet_generation())
     }
 
-    /// Parse HTML and create a document (new rustkit-html parser).
+    /// Parse HTML and create a document (new rustkit-html parser), with
+    /// scripting off: what `DOMParser` and a page whose scripts do not run
+    /// get, where `<noscript>` content is elements.
     pub fn parse_html(html: &str) -> Result<Self, DomError> {
+        Self::parse_html_scripted(html, false)
+    }
+
+    /// Whether the document's scripts run (see `parse_html_scripted`).
+    pub fn scripting(&self) -> bool {
+        self.scripting.get()
+    }
+
+    /// `parse_html` with the scripting flag (HTML §13.2.3.5). On for a page
+    /// whose scripts run: the contents of every `<noscript>` are then one
+    /// text node, in the head and in the body, and nothing in them is an
+    /// element (so nothing in them loads, runs or matches a selector).
+    pub fn parse_html_scripted(html: &str, scripting: bool) -> Result<Self, DomError> {
         debug!(len = html.len(), "Parsing HTML (rustkit-html)");
 
         let sink = DocumentSink::new();
-        let mut sink = rustkit_html::parse(html, sink).map_err(|e| DomError::ParseError(e.to_string()))?;
+        let mut sink = rustkit_html::parse_scripted(html, sink, scripting)
+            .map_err(|e| DomError::ParseError(e.to_string()))?;
+        sink.doc.scripting.set(scripting);
         sink.apply_attr_merges();
 
         debug!(node_count = sink.doc.nodes.borrow().len(), "HTML parsed");
@@ -985,6 +1009,20 @@ impl Document {
         html_context: bool,
         svg_context: bool,
     ) -> Result<Vec<Rc<Node>>, DomError> {
+        self.parse_fragment_scripted(html, context, html_context, svg_context, self.scripting.get())
+    }
+
+    /// `parse_fragment_in` with the scripting flag given: off for a context
+    /// element in a document whose scripts do not run (a `DOMParser`
+    /// document, a template's contents) even when this one's do.
+    pub fn parse_fragment_scripted(
+        &self,
+        html: &str,
+        context: &str,
+        html_context: bool,
+        svg_context: bool,
+        scripting: bool,
+    ) -> Result<Vec<Rc<Node>>, DomError> {
         // HTML §13.4 step 4: a fragment whose context is a raw text element
         // starts the tokenizer in RAWTEXT or script data state, one in title
         // or textarea in RCDATA, and one in plaintext in PLAINTEXT. No tag is
@@ -997,8 +1035,8 @@ impl Document {
         let context_lower = context.to_ascii_lowercase();
         let verbatim = match context_lower.as_str() {
             _ if !html_context => None,
-            "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript"
-            | "plaintext" => Some(html.to_string()),
+            "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext" => Some(html.to_string()),
+            "noscript" if scripting => Some(html.to_string()),
             "title" | "textarea" => Some(rustkit_html::entities::decode(html)),
             _ => None,
         };
@@ -1010,7 +1048,7 @@ impl Document {
         }
         let mut sink = DocumentSink::new();
         sink.svg_fragment = svg_context;
-        let sink = rustkit_html::parse_fragment(html, sink, context)
+        let sink = rustkit_html::parse_fragment_scripted(html, sink, context, scripting)
             .map_err(|e| DomError::ParseError(e.to_string()))?;
         Ok(sink
             .doc
@@ -1501,13 +1539,15 @@ mod windows_parser_pins {
 
 #[cfg(test)]
 mod svg_name_case_tests;
+#[cfg(test)]
+mod attr_cost_bench;
 
 /// Script writes to a node's own data (js-ladder mutation surface).
 #[cfg(test)]
 mod node_write_tests {
     use super::*;
 
-    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn attrs(pairs: &[(&str, &str)]) -> AttrMap {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 

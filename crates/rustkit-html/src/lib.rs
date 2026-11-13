@@ -209,6 +209,27 @@ pub fn parse<S: TreeSink>(html: &str, mut sink: S) -> ParseResult<S> {
     Ok(sink)
 }
 
+/// `parse` with the scripting flag (HTML §13.2.3.5): on for a document
+/// whose scripts run, where `<noscript>` holds raw text and nothing in it
+/// becomes an element.
+pub fn parse_scripted<S: TreeSink>(html: &str, sink: S, scripting: bool) -> ParseResult<S> {
+    let tokens = tokenizer::tokenize_scripted(html, scripting)?;
+    tree_builder::build_tree_scripted(tokens, sink, scripting)
+}
+
+/// `parse_fragment` with the scripting flag of the context element's
+/// document.
+pub fn parse_fragment_scripted<S: TreeSink>(
+    html: &str,
+    sink: S,
+    context_element: &str,
+    scripting: bool,
+) -> ParseResult<S> {
+    let tokens = tokenizer::tokenize_scripted(html, scripting)?;
+    let context = FragmentContext::new(context_element);
+    tree_builder::build_tree_fragment_scripted(tokens, sink, context, scripting)
+}
+
 /// Parse HTML from bytes using the provided sink.
 pub fn parse_bytes<S: TreeSink>(html: &[u8], sink: S) -> ParseResult<S> {
     let html_str = std::str::from_utf8(html)
