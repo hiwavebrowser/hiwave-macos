@@ -412,3 +412,52 @@ fn structured_clone_through_post_message_matches_chrome() {
 fn short(v: &serde_json::Value) -> String {
     v.to_string().chars().take(160).collect()
 }
+
+/// Which script URLs `new Worker(url)` refuses, and how, as the pinned Chrome (CfT 148.0.7778.216) does
+/// (`docs/diagnostics/2026-11-13/str4_worker_origin_chrome.mjs`, output `str4_worker_origin_cft148.json`;
+/// the two loopback ports are `MAIN` and `OTHER` there). A script from another origin (another port,
+/// host or scheme, with or without CORS headers) and a `javascript:` URL throw a `SecurityError` at the
+/// call, before any request: pages catch it to fall back to a `blob:` worker. A URL that does not parse
+/// is a `SyntaxError` with its own message. R1 on #1105.
+#[test]
+fn a_worker_script_from_another_origin_throws_at_construction_as_in_chrome() {
+    const ORIGIN: &str = include_str!("../../../docs/diagnostics/2026-11-13/str4_worker_origin_cft148.json");
+    let b = bound();
+    b.set_location(&url::Url::parse("http://127.0.0.1:7001/").unwrap()).unwrap();
+    let want: serde_json::Value = serde_json::from_str(&ORIGIN.replace("MAIN", "7001").replace("OTHER", "7002")).unwrap();
+    let cases = [
+        ("sameOriginRelative", "/w.js"),
+        ("sameOriginAbsolute", "http://127.0.0.1:7001/w.js"),
+        ("otherPort", "http://127.0.0.1:7002/w.js"),
+        ("otherPortWithCors", "http://127.0.0.1:7002/cors.js"),
+        ("otherHost", "http://localhost:7001/w.js"),
+        ("otherScheme", "https://127.0.0.1:7001/w.js"),
+        ("dataUrl", "data:text/javascript,postMessage(1)"),
+        ("javascriptUrl", "javascript:postMessage(1)"),
+        ("malformed", "http://"),
+        ("emptyString", ""),
+    ];
+    let mut wrong = Vec::new();
+    let mut try_url = |key: &str, url_expr: &str| {
+        let script = format!(
+            "(function (u) {{ var r = {{ threw: false }}, w; \
+               try {{ w = new Worker(u); }} catch (e) {{ r = {{ threw: true, name: e && e.name, code: e && e.code, \
+                 isDOMException: e instanceof DOMException, message: String(e && e.message) }}; }} \
+               if (w) {{ try {{ w.terminate(); }} catch (_) {{}} }} \
+               return JSON.stringify(r); }})({url_expr})"
+        );
+        let got: serde_json::Value = serde_json::from_str(&ev(&b, &script)).unwrap();
+        let asked = b.take_net_requests().len();
+        if got != want[key] {
+            wrong.push(format!("{key}: chrome {}, here {}", short(&want[key]), short(&got)));
+        }
+        if got["threw"] == true && asked != 0 {
+            wrong.push(format!("{key}: threw, but {asked} request(s) were made first"));
+        }
+    };
+    for (key, url) in cases {
+        try_url(key, &serde_json::to_string(url).unwrap());
+    }
+    try_url("blobSameOrigin", "URL.createObjectURL(new Blob(['postMessage(1)'], { type: 'text/javascript' }))");
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
