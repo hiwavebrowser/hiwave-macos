@@ -179,6 +179,7 @@
             });
         });
         g.WheelEvent = WheelEventWithLegacy;
+        __rk.keepCtor('WheelEvent', WheelEventWithLegacy);
     }
     // UIEvent.which (UI Events §7.3, legacy): a key event's keyCode, a mouse
     // event's button + 1, else 0. Chrome for Testing 148 has it on
@@ -252,6 +253,7 @@
             });
         };
         g.InputEvent = InputEventWithRanges;
+        __rk.keepCtor('InputEvent', InputEventWithRanges);
     }
     var KE = g.KeyboardEvent;
     if (KE) {
