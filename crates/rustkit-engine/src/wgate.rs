@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(InputClass::of(&click(false, PointerInput::Move)), InputClass::Move);
         assert_eq!(InputClass::of(&click(false, PointerInput::Leave)), InputClass::Move);
         assert_eq!(
-            InputClass::of(&InputKind::Wheel(PendingScroll { x: 0.0, y: 0.0, dx: 0.0, dy: 1.0 })),
+            InputClass::of(&InputKind::Wheel(PendingScroll { x: 0.0, y: 0.0, dx: 0.0, dy: 1.0, gesture: true })),
             InputClass::Wheel
         );
         assert_eq!(InputClass::of(&InputKind::Edit(rustkit_viewhost::EditAction::Copy)), InputClass::Edit);
