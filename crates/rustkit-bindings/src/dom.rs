@@ -2752,6 +2752,12 @@ const WRAPPERS_JS: &str = r#"
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
     var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
+    // `defaultPrevented` is read-only and only `preventDefault()` (or
+    // `returnValue = false`, or an on<type> handler returning false) by a
+    // listener that may cancel sets it: a passive listener cannot.
+    var CANCELED = new WeakSet();
+    var isProto = uncurry(Object.prototype.isPrototypeOf);
     var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
@@ -6088,7 +6094,7 @@ const WRAPPERS_JS: &str = r#"
         // The on<type> handler runs with the non-capture listeners.
         var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
-            event.defaultPrevented = true;
+            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
@@ -6140,8 +6146,11 @@ const WRAPPERS_JS: &str = r#"
         event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
         event[ORIGIN] = null;
         event[PATH] = null;
-        if (activated) activated(!event.defaultPrevented);
-        return !event.defaultPrevented;
+        // The canceled flag, not a property a listener can redefine; an
+        // object that is not an Event keeps its own.
+        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        if (activated) activated(!canceled);
+        return !canceled;
     };
 
     // The engine's own dispatches go through this, whatever a page has put
@@ -6160,7 +6169,6 @@ const WRAPPERS_JS: &str = r#"
         this.bubbles = !!init.bubbles;
         this.cancelable = !!init.cancelable;
         this.composed = !!init.composed;
-        this.defaultPrevented = false;
         this.target = null;
         this.currentTarget = null;
         this.eventPhase = 0;
@@ -6174,7 +6182,19 @@ const WRAPPERS_JS: &str = r#"
         this.bubbles = !!bubbles;
         this.cancelable = !!cancelable;
     };
-    Event.prototype.preventDefault = function () { if (this.cancelable && passiveNow !== this) this.defaultPrevented = true; };
+    function cancel(ev) { if (ev.cancelable && passiveNow !== ev) setAdd(CANCELED, ev); }
+    Event.prototype.preventDefault = function () { cancel(this); };
+    // Read-only (no setter: an assignment does nothing, and throws in
+    // strict code); the canceled flag above (Chrome for Testing 148).
+    Object.defineProperty(Event.prototype, 'defaultPrevented', {
+        get: function () { return setHas(CANCELED, this); }, enumerable: true, configurable: true
+    });
+    // The legacy alias (DOM §2.2): false cancels, as preventDefault() does.
+    Object.defineProperty(Event.prototype, 'returnValue', {
+        get: function () { return !setHas(CANCELED, this); },
+        set: function (v) { if (!v) cancel(this); },
+        enumerable: true, configurable: true
+    });
     // The nodes the event is going through, target first; empty outside dispatch.
     Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
