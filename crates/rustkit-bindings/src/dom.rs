@@ -912,17 +912,42 @@ fn is_template(node: &Node) -> bool {
 /// the moved content) a content fragment and moves its children there.
 /// Run on freshly parsed nodes only: children script appends to a
 /// template later stay real children, as in the spec.
+/// Where the table of template contents keeps the inert document that
+/// owns them all (HTML §4.12.3 "template contents owner document"). No
+/// node has NodeId 0.
+const TEMPLATE_OWNER: usize = 0;
+
+/// The document that owns every template's contents, made on first use.
+fn template_owner(document: &Document, templates: &mut HashMap<usize, Rc<Node>>) -> usize {
+    templates
+        .entry(TEMPLATE_OWNER)
+        .or_insert_with(|| {
+            let doc = document.create_node(NodeType::Document);
+            doc.set_owner(doc.id.raw());
+            doc
+        })
+        .id
+        .raw()
+}
+
 fn adopt_template_contents(
     document: &Document,
     root: &Rc<Node>,
     templates: &mut HashMap<usize, Rc<Node>>,
 ) {
+    let owner = template_owner(document, templates);
     let mut pending = vec![root.clone()];
     while let Some(node) = pending.pop() {
         if is_template(&node) {
             let content = templates
                 .entry(node.id.raw())
-                .or_insert_with(|| document.create_node(NodeType::DocumentFragment))
+                .or_insert_with(|| {
+                    // A template's contents are in the inert document that
+                    // holds every template's contents (its owner document).
+                    let fragment = document.create_node(NodeType::DocumentFragment);
+                    fragment.set_owner(owner);
+                    fragment
+                })
                 .clone();
             for child in node.children() {
                 child.remove_from_parent();
@@ -1003,6 +1028,8 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "document" {
             let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
             let doc = document.create_node(NodeType::Document);
+            // Scripting is off in it: what is put in it is its.
+            doc.set_owner(doc.id.raw());
             let templates = &mut host.templates.borrow_mut();
             for child in parsed.root().children() {
                 // The parsed tree's NodeIds are its own: clone with an
@@ -1137,10 +1164,24 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("clone", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
             let templates = &mut host.templates.borrow_mut();
-            Ok((
-                node_id(Some(clone_node(document, &node, deep, templates))),
-                DomDirty::Clean,
-            ))
+            let copy = clone_node(document, &node, deep, templates);
+            // A clone is in the original's document.
+            copy.set_owner(node.owner_document_id());
+            Ok((node_id(Some(copy)), DomDirty::Clean))
+        }
+        // `adoptTo(doc)`: the node (just made by, adopted by or imported
+        // into the document `doc`) takes that document's scripting state.
+        ("adoptTo", _) => {
+            let owner = number_arg(args, 3)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .ok_or("NotFoundError")?;
+            if !matches!(owner.node_type, NodeType::Document) {
+                return Err("NotSupportedError");
+            }
+            // The page's own Document node has owner 0; another's owns itself.
+            node.set_owner(if Rc::ptr_eq(&owner, document.root()) { 0 } else { owner.id.raw() });
+            Ok((JsValue::Null, DomDirty::Clean))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
@@ -1157,6 +1198,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
                 top = parent;
             }
             let inert = tag_name.eq_ignore_ascii_case("template")
+                || node.is_inert()
                 || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
                 .parse_fragment_scripted(
@@ -1724,23 +1766,25 @@ const VOID_ELEMENTS: &[&str] = &[
 const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
 
 /// Whether a `<noscript>` under `node` writes its text children as they
-/// are (HTML §13.3: when scripting is enabled for the node). That is in
-/// the page's own document, when the page runs script. Everywhere else
-/// the text is escaped like any other: in a document `DOMParser` or
-/// `createHTMLDocument` made (a Document node of its own), in template
-/// contents, and in a tree that is in no document, where nothing records
-/// which document made it. Chrome writes a detached node of the page's
-/// document raw; escaped is the safe answer when that is not known, since
-/// raw text read out of an inert tree is markup once it is parsed again.
+/// are (HTML §13.3: when scripting is enabled for the node). That is when
+/// the node's document is the page's own and the page runs script, in the
+/// tree or not (HTML2, Chrome for Testing 148). Its text is escaped like
+/// any other when its document is one `DOMParser` or `createHTMLDocument`
+/// made, or a template's contents: `Node::is_inert`, which follows the
+/// node through creation, insertion, adoption, import and cloning.
 fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
     let Some(page) = page.filter(|d| d.scripting()) else {
         return false;
     };
+    if node.is_inert() {
+        return false;
+    }
+    // Under a Document node, that one must be the page's.
     let mut top = node.clone();
     while let Some(parent) = top.parent() {
         top = parent;
     }
-    Rc::ptr_eq(&top, page.root())
+    !matches!(top.node_type, NodeType::Document) || Rc::ptr_eq(&top, page.root())
 }
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
@@ -1905,6 +1949,8 @@ fn node_info(
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
+        // The NodeId of the node's Document node, 0 for the page's (HTML2).
+        "owner" => JsValue::Number(node.owner_document_id() as f64),
         _ => JsValue::Undefined,
     }
 }
@@ -3003,6 +3049,9 @@ const WRAPPERS_JS: &str = r#"
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
         if (info(this, 'type') === 9) return null;
+        // A node of another document, in a tree or not (HTML2).
+        var owner = info(this, 'owner');
+        if (typeof owner === 'number' && owner > 0) { var od = wrap(owner); if (od) return od; }
         var n = this;
         while (n.parentNode) n = n.parentNode;
         return n.nodeType === 9 ? n : g.document;
@@ -4468,17 +4517,28 @@ const WRAPPERS_JS: &str = r#"
         }
         return null;
     };
+    // A node a document makes is that document's (`adoptTo`): one made by
+    // a DOMParser document is in a document with scripting off.
+    function ownedBy(node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen && doc.nodeType === 9) N.write(gen, 'adoptTo', s.id, d.id);
+        return node;
+    }
+    __rk.adoptTo = function (node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen) N.write(gen, 'adoptTo', s.id, d.id);
+    };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
-        var el = create('element', tag, 'createElement');
+        var el = ownedBy(create('element', tag, 'createElement'), this);
         if (HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
     };
     Document.prototype.createTextNode = function (data) {
-        return create('text', String(data), 'createTextNode');
+        return ownedBy(create('text', String(data), 'createTextNode'), this);
     };
     Document.prototype.createComment = function (data) {
-        return create('comment', String(data), 'createComment');
+        return ownedBy(create('comment', String(data), 'createComment'), this);
     };
     // DOM §4.5 importNode: a copy for this document. Nodes here all share
     // the one Rust Document, so importing is cloning.
@@ -4488,10 +4548,10 @@ const WRAPPERS_JS: &str = r#"
             throw new DOMException("Failed to execute 'importNode' on 'Document': " +
                 'The node provided is a document, which may not be imported.', 'NotSupportedError');
         }
-        return node.cloneNode(!!deep);
+        return ownedBy(node.cloneNode(!!deep), this);
     };
     Document.prototype.createDocumentFragment = function () {
-        return create('fragment', '', 'createDocumentFragment');
+        return ownedBy(create('fragment', '', 'createDocumentFragment'), this);
     };
     // DOM Range (DOM §5) and createContextualFragment (DOM Parsing). A new
     // range is collapsed at the start of its document. createContextualFragment

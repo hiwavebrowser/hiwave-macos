@@ -81,6 +81,8 @@
             throw new g.DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.", 'NotSupportedError');
         }
         if (node.parentNode) node.parentNode.removeChild(node);
+        // The node is this document's now (its scripting state with it).
+        if (typeof __rk.adoptTo === 'function') __rk.adoptTo(node, this);
         return node;
     });
 

@@ -197,6 +197,15 @@ pub struct Node {
     /// How many times `adoptedStyleSheets` was set on this document or
     /// shadow root: equal readings, the same adopted texts.
     adopted_generation: Cell<u64>,
+    /// The node's document (DOM "node document"), as the NodeId of its
+    /// Document node, or 0 for the page's own document. The other
+    /// documents here are inert, scripting off (HTML §8.1.3.4): one
+    /// `DOMParser` or `createHTMLDocument` made, and the one that holds
+    /// template contents. Set where such a document's nodes are made,
+    /// taken from the new parent whenever a node is inserted (the move
+    /// adopts it), kept on removal (a removed node keeps its document),
+    /// copied by a clone. See `set_owner`.
+    owner: Cell<usize>,
 }
 
 impl Node {
@@ -215,7 +224,45 @@ impl Node {
             sheet_generation: Cell::new(0),
             connection_generation: Cell::new(0),
             adopted_generation: Cell::new(0),
+            owner: Cell::new(0),
         })
+    }
+
+    /// Whether this node's document has scripting off: any document but
+    /// the page's (`owner` above).
+    pub fn is_inert(&self) -> bool {
+        self.owner.get() != 0
+    }
+
+    /// The NodeId of this node's Document node, 0 for the page's document.
+    pub fn owner_document_id(&self) -> usize {
+        self.owner.get()
+    }
+
+    /// Give this node and everything under it the document `owner` (a
+    /// subtree always has one document). Shadow trees follow their host.
+    pub fn set_owner(&self, owner: usize) {
+        if self.owner.get() == owner {
+            return;
+        }
+        self.owner.set(owner);
+        let mut pending: Vec<Rc<Node>> = self.children.borrow().iter().cloned().collect();
+        pending.extend(self.shadow_root());
+        while let Some(node) = pending.pop() {
+            node.owner.set(owner);
+            pending.extend(node.children.borrow().iter().cloned());
+            pending.extend(node.shadow_root());
+        }
+    }
+
+    /// The document whose nodes a node inserted under this one joins: this
+    /// node's own id for a Document node that is not the page's (it owns
+    /// what is in it), else this node's document.
+    fn document_for_children(&self) -> usize {
+        match self.node_type {
+            NodeType::Document if self.owner.get() == self.id.raw() => self.id.raw(),
+            _ => self.owner.get(),
+        }
     }
 
     /// The current lifetime of this element's sheet: changes whenever the
@@ -356,6 +403,8 @@ impl Node {
         note_mutation();
         self.end_sheet();
         child.moved();
+        // An inserted node takes its new parent's document.
+        child.set_owner(self.document_for_children());
         // Update child's parent
         *child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -423,6 +472,7 @@ impl Node {
         if let Some(idx) = ref_idx {
             self.end_sheet();
             new_child.moved();
+            new_child.set_owner(self.document_for_children());
             // Update new_child's parent
             *new_child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
