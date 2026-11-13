@@ -3316,7 +3316,26 @@ const WRAPPERS_JS: &str = r#"
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
-    getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
+    // DOM Parsing §2.3 outerHTML setter: the markup, parsed in the context
+    // of the element's parent (a body for a fragment parent) by a holder of
+    // the element's document, replaces the element. No parent: nothing; a
+    // Document parent: NoModificationAllowedError.
+    accessor(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); }, function (v) {
+        var parent = this.parentNode;
+        if (!parent) return;
+        if (parent.nodeType === 9) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document', which is not an element node.", 'NoModificationAllowedError');
+        }
+        var ctx = parent.nodeType === 1 ? parent.localName : 'body';
+        var holder = parent.nodeType === 1 && parent.namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(parent.namespaceURI, ctx)
+            : create('element', ctx, 'outerHTML');
+        ownedBy(holder, this.ownerDocument);
+        holder.innerHTML = text(v);
+        var self = this;
+        Array.prototype.slice.call(holder.childNodes).forEach(function (n) { parent.insertBefore(n, self); });
+        parent.removeChild(self);
+    });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
@@ -3688,6 +3707,9 @@ const WRAPPERS_JS: &str = r#"
         var holder = spot[0].namespaceURI === 'http://www.w3.org/2000/svg'
             ? document.createElementNS(spot[0].namespaceURI, ctx)
             : create('element', ctx, 'insertAdjacentHTML');
+        // The holder is the target's document's, so the markup parses with
+        // that document's scripting flag (Chrome for Testing 148).
+        ownedBy(holder, spot[0].nodeType === 9 ? spot[0] : spot[0].ownerDocument);
         holder.innerHTML = String(html);
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
             spot[0].insertBefore(n, spot[1]);
