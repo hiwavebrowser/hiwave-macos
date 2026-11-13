@@ -549,7 +549,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Capture mode (set_deterministic_clock): no real time at all. The clock is the virtual time
     // plus a fixed step per read since the virtual clock last moved, so a capture that steps the
     // timers reproduces every `t`-driven frame, and a busy loop on performance.now() still ends.
-    var seenNow = 0, anchor = 0, lastPerf = 0, det = false, reads = 0, startedAt = realNow();
+    // Real-flowing mode: real time plus a SKEW that only ever grows, when the timers' virtual clock
+    // gets ahead of real time (a load that ran a 300 ms timeout at once). So the clock flows with real
+    // time always (no wait is lost), is never behind virtual time, and never goes backwards.
+    var skew = 0, lastPerf = 0, det = false, reads = 0, seenNow = 0, startedAt = realNow();
     var DET_STEP = 0.1;
     function perfNow() {
         var t;
@@ -563,9 +566,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // Without the host clock (it is installed after this script): elapsed since this script
             // began, never an epoch value (the never-backwards rule would pin it there).
             var real = typeof f === 'function' ? f() : realNow() - startedAt;
-            if (now !== seenNow) { seenNow = now; anchor = real; }
-            t = now + (real - anchor);
-            if (t < lastPerf) t = lastPerf;
+            t = real + skew;
+            if (t < now) { skew += now - t; t = now; }
+            if (t < lastPerf) { skew += lastPerf - t; t = lastPerf; }
         }
         lastPerf = t;
         return t;
