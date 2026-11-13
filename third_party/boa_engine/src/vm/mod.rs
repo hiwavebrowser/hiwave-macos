@@ -331,6 +331,19 @@ impl Stack {
         self.stack.split_off(index)
     }
 
+    /// HIWAVE PATCH (js-perf2): the same as `calling_convention_pop_arguments`, without a heap
+    /// allocation for up to `CallArgs::INLINE` arguments (nearly every call).
+    pub(crate) fn calling_convention_pop_call_args(&mut self, argument_count: usize) -> CallArgs {
+        let index = self.stack.len() - argument_count;
+        if argument_count <= CallArgs::INLINE {
+            let mut args = arrayvec::ArrayVec::new();
+            args.extend(self.stack.drain(index..));
+            CallArgs::Inline(args)
+        } else {
+            CallArgs::Heap(self.stack.split_off(index))
+        }
+    }
+
     /// Push the function arguments according to the calling convention.
     /// This will push the given values onto the stack.
     pub(crate) fn calling_convention_push_arguments(&mut self, values: &[JsValue]) {
@@ -1480,4 +1493,26 @@ fn yield_now() -> impl Future<Output = ()> {
     }
 
     YieldNow(false)
+}
+
+/// HIWAVE PATCH (js-perf2): the arguments of a native call, inline up to `INLINE` of them.
+pub(crate) enum CallArgs {
+    Inline(arrayvec::ArrayVec<JsValue, { CallArgs::INLINE }>),
+    Heap(Vec<JsValue>),
+}
+
+impl CallArgs {
+    pub(crate) const INLINE: usize = 8;
+}
+
+impl std::ops::Deref for CallArgs {
+    type Target = [JsValue];
+
+    #[inline(always)]
+    fn deref(&self) -> &[JsValue] {
+        match self {
+            Self::Inline(args) => args,
+            Self::Heap(args) => args,
+        }
+    }
 }

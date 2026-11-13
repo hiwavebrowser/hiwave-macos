@@ -491,3 +491,22 @@ function environment, and the inner arrow read the wrong one (strict and sloppy;
 showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: native call arguments without a heap allocation (`js-perf2`, item 3)
+
+**Why.** `native_function_call` and `native_function_construct` popped the arguments into a `Vec`
+(`calling_convention_pop_arguments` -> `Vec::split_off`): one malloc and free per call to a native
+function (`Math.floor`, `s.charCodeAt`, `parseInt`, every builtin method), none for a call between
+script functions. Measured: 1.14 allocations per iteration of `s += Math.floor(i / 2)` against 0.12
+for `s += id(i)`.
+
+**What.** `CallArgs` and `Vm::calling_convention_pop_call_args` in `src/vm/mod.rs` (marked
+`HIWAVE PATCH (js-perf2)`): up to 8 arguments are held inline (`arrayvec`, already a dependency),
+more fall back to the `Vec`. Both native entry points use it. Pin:
+`crates/rustkit-js/tests/native_call_allocs.rs` (red first: 1.14 before, 0.14 after).
+
+**Measured speed (release, Linux, glibc malloc): none.** 2M iterations of `Math.floor`, `Math.max`
+and a script call, min of 15 runs, new against old, in either order: within about 2% either way, and
+the unchanged script-call loop moved by the same amount. The allocation is gone; the time did not
+move here. macOS's allocator is slower than glibc's, so the Mac CodeMirror probe decides whether
+this is worth landing.

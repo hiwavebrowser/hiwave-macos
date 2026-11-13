@@ -333,10 +333,8 @@ pub(crate) fn native_function_call(
     argument_count: usize,
     context: &mut InternalMethodCallContext<'_>,
 ) -> JsResult<CallValue> {
-    let args = context
-        .vm
-        .stack
-        .calling_convention_pop_arguments(argument_count);
+    // HIWAVE PATCH (js-perf2): no heap allocation for the argument list.
+    let args = context.vm.stack.calling_convention_pop_call_args(argument_count);
     let _func = context.vm.stack.pop();
     let this = context.vm.stack.pop();
 
@@ -438,10 +436,8 @@ fn native_function_construct(
     context.vm.native_active_function = Some(this_function_object);
 
     let new_target = context.vm.stack.pop();
-    let args = context
-        .vm
-        .stack
-        .calling_convention_pop_arguments(argument_count);
+    // HIWAVE PATCH (js-perf2): no heap allocation for the argument list.
+    let args = context.vm.stack.calling_convention_pop_call_args(argument_count);
     let _func = context.vm.stack.pop();
     let _this = context.vm.stack.pop();
 
