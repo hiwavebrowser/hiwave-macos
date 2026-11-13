@@ -5630,6 +5630,7 @@ dependencies = [
 name = "rustkit-js"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "boa_engine",
  "boa_gc",
  "serde_json",

@@ -3162,6 +3162,12 @@ pub struct ComputedStyle {
     /// `z-index: auto` both leave `z_index` at 0, and only the computed
     /// style reads them apart (`0` / `auto`).
     pub z_index_declared: bool,
+    /// A style rule declared `width` / `height` on THIS element, `auto`
+    /// included. A declared `auto` reads the same as no declaration in
+    /// `width`/`height`, and only an undeclared axis takes an `<img>`'s
+    /// `width=`/`height=` attribute as its size (IMG1): `height: auto`
+    /// over `height="100"` is the image's ratio, not 100.
+    pub size_declared: [bool; 2],
     /// An author rule set a vertical padding (`padding`, `padding-top`/`-bottom`, a logical
     /// form), zero included. A form control with no author padding keeps the UA's (CB3).
     pub padding_v_declared: bool,
@@ -3270,6 +3276,9 @@ pub struct ComputedStyle {
     /// `Length` cannot carry the keyword, so this says which one `width_keywords` bit 1 stands for.
     /// Not inherited.
     pub width_max_content: bool,
+    /// The winning `width` is `min-content` (prefixed or any case), as `width_max_content` is for
+    /// max-content (CB3d). Not inherited.
+    pub width_min_content: bool,
     /// A `writing-mode` other than `horizontal-tb` was declared. Layout
     /// does not honour it yet, but `@container` treats the box's width as
     /// unknown (its inline size is the physical height). Not inherited.

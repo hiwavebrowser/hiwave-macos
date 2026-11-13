@@ -405,6 +405,8 @@ mod script_net_tests;
 #[cfg(test)]
 mod script_net_t7_tests;
 #[cfg(test)]
+mod script_net_body_size_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -462,9 +464,19 @@ mod float_in_items_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod cleared_float_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod grid_item_final_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod stretched_row_height_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod select_height_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod input_height_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod input_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod inline_line_pitch_tests;
 #[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
@@ -652,6 +664,8 @@ mod live_timer_slice_tests;
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
+#[cfg(all(test, feature = "headless"))]
+mod layout_once_tests;
 #[cfg(test)]
 mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -757,6 +771,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_maximize_tracks_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8462,6 +8478,7 @@ impl Engine {
                                 &mut count,
                                 inspector,
                                 requests,
+                                post_load_live,
                             ),
                         )
                         .await;
@@ -13119,14 +13136,20 @@ impl layout_ctx::LayoutCtx {
 
                     // width=/height= attributes are presentational hints: they set
                     // the used size like CSS width/height (lowest priority), they do
-                    // NOT describe the image's natural dimensions. Author CSS wins.
+                    // NOT describe the image's natural dimensions. Author CSS wins,
+                    // and a declared `auto` is author CSS too (IMG1): `<img
+                    // width=300 height=100 style="width:100%; height:auto">` is
+                    // as tall as the image's ratio makes it (Chrome 148:
+                    // 500x250 for a 2:1 image in a 500px box), not 100. An
+                    // `auto` nobody declared is the absence of a size and
+                    // takes the hint.
                     if let Some(w) = explicit_width {
-                        if matches!(style.width, rustkit_css::Length::Auto) {
+                        if matches!(style.width, rustkit_css::Length::Auto) && !style.size_declared[0] {
                             style.width = rustkit_css::Length::Px(w);
                         }
                     }
                     if let Some(h) = explicit_height {
-                        if matches!(style.height, rustkit_css::Length::Auto) {
+                        if matches!(style.height, rustkit_css::Length::Auto) && !style.size_declared[1] {
                             style.height = rustkit_css::Length::Px(h);
                         }
                     }
@@ -16219,8 +16242,14 @@ impl Engine {
             // result cards are `a { width: inherit; height: inherit }` under
             // a `width: 100%; height: 100%` box; the keyword used to leave the
             // child at `auto`.
-            "width" => style.width = inherited_size(&parent.width, parent),
-            "height" => style.height = inherited_size(&parent.height, parent),
+            "width" => {
+                style.width = inherited_size(&parent.width, parent);
+                style.size_declared[0] = true;
+            }
+            "height" => {
+                style.height = inherited_size(&parent.height, parent);
+                style.size_declared[1] = true;
+            }
             "min-width" => style.min_width = inherited_size(&parent.min_width, parent),
             "min-height" => style.min_height = inherited_size(&parent.min_height, parent),
             "max-width" => style.max_width = inherited_size(&parent.max_width, parent),
@@ -17283,6 +17312,7 @@ impl layout_ctx::LayoutCtx {
                 container_query::note_width_value(style, 1, length.is_some(), value);
                 if let Some(length) = length {
                     style.width = length;
+                    style.size_declared[0] = true;
                 }
             }
             "writing-mode" | "-webkit-writing-mode" => {
@@ -17296,6 +17326,7 @@ impl layout_ctx::LayoutCtx {
             "height" => {
                 if let Some(length) = parse_size_length(value) {
                     style.height = length;
+                    style.size_declared[1] = true;
                 }
             }
             "min-width" => {
@@ -18105,11 +18136,17 @@ impl layout_ctx::LayoutCtx {
             "border-right-style" => style.border_right_style = rustkit_css::BorderStyle::None,
             "border-bottom-style" => style.border_bottom_style = rustkit_css::BorderStyle::None,
             "border-left-style" => style.border_left_style = rustkit_css::BorderStyle::None,
-            "width" => style.width = rustkit_css::Length::Auto,
+            "width" => {
+                style.width = rustkit_css::Length::Auto;
+                style.size_declared[0] = true;
+            }
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "cursor" => style.cursor = rustkit_css::Cursor::Auto,
-            "height" => style.height = rustkit_css::Length::Auto,
+            "height" => {
+                style.height = rustkit_css::Length::Auto;
+                style.size_declared[1] = true;
+            }
             // The initial `display` is `inline` (CSS Display 3 §2); it read
             // `block`, so `div { display: unset }` stayed a block.
             "display" => {
@@ -20457,6 +20494,21 @@ impl Engine {
             } else if loaded.heard.get(&node) == Some(&layout_ctx::LoadedImages::key(&name)) {
                 still_loaded.insert(node);
             } else if let Some((width, height)) = self.loaded_image_size(&url) {
+                // IMG1: `naturalWidth`/`naturalHeight` are the density-
+                // corrected size (HTML §4.8.4.4): a 400px image picked for
+                // a 150px slot is 150 wide, a `2x` one half its pixels.
+                let density = view
+                    .lay
+                    .shown_images
+                    .borrow()
+                    .get(&node)
+                    .filter(|image| image.wanted == name)
+                    .map_or(1.0, |image| image.wanted_density)
+                    .max(f32::MIN_POSITIVE);
+                let (width, height) = (
+                    (width as f32 / density).round() as u32,
+                    (height as f32 / density).round() as u32,
+                );
                 still_loaded.insert(node);
                 loaded.heard.insert(node, layout_ctx::LoadedImages::key(&name));
                 // A `data:` URL is the element's own `src`: script reads
@@ -32555,7 +32607,10 @@ mod tests {
         assert_eq!(heights.len(), 5, "five control boxes expected: {:?}", heights);
 
         let expect = [
-            ("bare text input", 19.0, 1.0),
+            // SET3: Chrome for Testing 148.0.7778.216 builds a bare text input 21 tall
+            // (15 px line + 1 px padding and 2 px border each side), with or without a
+            // placeholder or a value. The 19 pinned here before was not Chrome's.
+            ("bare text input", 21.0, 0.0),
             ("bare button", 21.0, 0.0),
             ("checkbox", 13.0, 1.0),
             ("default textarea (2 rows)", 32.0, 1.0),

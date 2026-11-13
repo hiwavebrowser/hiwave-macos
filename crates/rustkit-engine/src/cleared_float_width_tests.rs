@@ -16,16 +16,12 @@ use super::*;
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-11/cleared_floats_max_content.html");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-11/cleared_floats_max_content_cft148.txt");
 
-/// Boxes whose WIDTH is Chrome's and whose height is not yet: a grid item's
-/// floats are placed at an earlier, narrower width and stay stacked
-/// (`gr_none`: the second float at 0,10 in a 200-wide item), so the item is
-/// one row too tall. Not the max-content rule; a row of its own (GR3).
-/// (The four flex items that were listed here kept the height of an
-/// earlier, narrower pass; CB6c's stretched-row change, #1080, closed them.)
-/// Their widths are asserted, and their heights are asserted to DIFFER: the
-/// test fails when a listed height starts matching, so the entry is removed
-/// with the fix that closes it.
-const KNOWN_HEIGHT: &[&str] = &["gr_none", "gr_lr2", "gr_l_r_cl", "gr_three"];
+/// Boxes whose WIDTH is Chrome's and whose height is not yet. Empty: the
+/// four flex items closed with CB6c's stretched-row change (#1080), and the
+/// four grid items (`gr_none`, `gr_lr2`, `gr_l_r_cl`, `gr_three`, floats
+/// stacked by an earlier, narrower pass) with GR3. A box that regresses
+/// fails the width/height check below; a listed one must still DIFFER.
+const KNOWN_HEIGHT: &[&str] = &[];
 
 #[test]
 fn a_cleared_float_ends_the_run_of_floats_on_its_side() {
