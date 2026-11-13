@@ -65,7 +65,10 @@ fn cyclic_conversions_match_chrome() {
         // Chrome overflows its stack with a RangeError. Here the host re-entry cap ends the same
         // runaway with an uncatchable RuntimeLimitError (STR-10 left host re-entry uncatchable):
         // different, but loud, which is what matters; a silent "" or "value:" is the bug.
-        let loud_instead_of_range_error = expected.contains("ERR:RangeError")
+        // Only a user function's runaway recursion may end that way: a loop made only of built-ins never
+        // enters the interpreter, so it must reach the native-stack guard and throw a catchable RangeError.
+        let loud_instead_of_range_error = name.starts_with("user_")
+            && expected.contains("ERR:RangeError")
             && got.starts_with("UNCAUGHT:")
             && got.contains("RuntimeLimitError");
         if &got != expected && !loud_instead_of_range_error {
