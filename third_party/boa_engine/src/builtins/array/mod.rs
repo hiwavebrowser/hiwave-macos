@@ -37,6 +37,18 @@ use std::cmp::{Ordering, min};
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
 mod array_iterator;
+mod v8_timsort;
+
+/// Which of V8's two sort algorithms `SortIndexedProperties` follows (HIWAVE PATCH (sort-v8)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SortAlgorithm {
+    /// `Array.prototype.sort`: TimSort, with plain binary insertion below 8 elements.
+    Array,
+    /// `Array.prototype.toSorted`: the same TimSort without the short-array shortcut.
+    ArrayToSorted,
+    /// `%TypedArray%.prototype.sort` and `toSorted` with a comparator: a top-down merge sort.
+    TypedArray,
+}
 use crate::value::JsVariant;
 pub(crate) use array_iterator::ArrayIterator;
 
@@ -2633,6 +2645,7 @@ impl Array {
         len: u64,
         sort_compare: F,
         skip_holes: bool,
+        algorithm: SortAlgorithm,
         context: &mut Context,
     ) -> JsResult<Vec<JsValue>>
     where
@@ -2671,7 +2684,24 @@ impl Array {
         // (Rust 1.81+), and a page's comparator can be anything (`a > b`, `Math.random() - 0.5`).
         // This merge sort calls the comparator the same way for any answers, never panics, and
         // stops at the first abrupt completion.
-        merge_sort_fallible(&mut items, &mut |x, y| sort_compare(x, y, context))?;
+        // HIWAVE PATCH (sort-v8): V8's algorithm, so an inconsistent comparator gives V8's order.
+        // `undefined`s are never passed to the comparator and go last, in their original count.
+        let (mut defined, undefined): (Vec<JsValue>, Vec<JsValue>) =
+            items.into_iter().partition(|v| !v.is_undefined());
+        match algorithm {
+            SortAlgorithm::Array | SortAlgorithm::ArrayToSorted => {
+                v8_timsort::v8_timsort(
+                    &mut defined,
+                    &mut |x, y| sort_compare(x, y, context),
+                    algorithm == SortAlgorithm::Array,
+                )?;
+            }
+            SortAlgorithm::TypedArray => {
+                v8_timsort::v8_typed_merge_sort(&mut defined, &mut |x, y| sort_compare(x, y, context))?;
+            }
+        }
+        let mut items = defined;
+        items.extend(undefined);
 
         // 5. Return items.
         Ok(items)
@@ -2719,7 +2749,7 @@ impl Array {
             };
 
         // 5. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, skip-holes).
-        let sorted = Self::sort_indexed_properties(&obj, len, sort_compare, true, context)?;
+        let sorted = Self::sort_indexed_properties(&obj, len, sort_compare, true, SortAlgorithm::Array, context)?;
 
         let sorted_len = sorted.len() as u64;
 
@@ -2785,7 +2815,7 @@ impl Array {
             };
 
         // 6. Let sortedList be ? SortIndexedProperties(O, len, SortCompare, read-through-holes).
-        let sorted = Self::sort_indexed_properties(&o, len, sort_compare, false, context)?;
+        let sorted = Self::sort_indexed_properties(&o, len, sort_compare, false, SortAlgorithm::ArrayToSorted, context)?;
 
         // 7. Let j be 0.
         // 8. Repeat, while j < len,
@@ -3692,69 +3722,4 @@ fn array_set_length(
 
     // 19. Return true.
     Ok(true)
-}
-
-/// HIWAVE PATCH (sort): a stable merge sort whose comparator may be inconsistent (not a total
-/// order) and may fail. Never panics; on `Err` it stops calling the comparator and returns it.
-/// For an inconsistent comparator the order is unspecified, as ECMA-262 allows.
-/// On `Err`, `items` is unspecified (it has been taken or partly merged); the caller returns the
-/// error without using it, so nothing is written back to the array.
-fn merge_sort_fallible<T: Clone>(
-    items: &mut Vec<T>,
-    compare: &mut dyn FnMut(&T, &T) -> JsResult<Ordering>,
-) -> JsResult<()> {
-    let len = items.len();
-    if len < 2 {
-        return Ok(());
-    }
-    // Already in order (the common case for a re-sorted list): n - 1 comparator calls, as
-    // driftsort's run detection gave, instead of n log n. Stops at the first out-of-order pair, so
-    // unsorted input pays at most one extra call per element.
-    let mut sorted = true;
-    for i in 1..len {
-        if compare(&items[i - 1], &items[i])? == Ordering::Greater {
-            sorted = false;
-            break;
-        }
-    }
-    if sorted {
-        return Ok(());
-    }
-    let mut from = std::mem::take(items);
-    let mut to = from.clone();
-    let mut width = 1;
-    while width < len {
-        let mut start = 0;
-        while start < len {
-            let mid = (start + width).min(len);
-            let end = (start + 2 * width).min(len);
-            let (mut left, mut right, mut out) = (start, mid, start);
-            while left < mid && right < end {
-                // Take the right element only when it is strictly smaller: that keeps it stable.
-                if compare(&from[left], &from[right])? == Ordering::Greater {
-                    to[out] = from[right].clone();
-                    right += 1;
-                } else {
-                    to[out] = from[left].clone();
-                    left += 1;
-                }
-                out += 1;
-            }
-            while left < mid {
-                to[out] = from[left].clone();
-                left += 1;
-                out += 1;
-            }
-            while right < end {
-                to[out] = from[right].clone();
-                right += 1;
-                out += 1;
-            }
-            start = end;
-        }
-        std::mem::swap(&mut from, &mut to);
-        width *= 2;
-    }
-    *items = from;
-    Ok(())
 }

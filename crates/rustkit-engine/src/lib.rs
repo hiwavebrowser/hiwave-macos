@@ -749,6 +749,24 @@ mod svg_paint_state_tests;
 #[cfg(all(test, feature = "headless"))]
 mod focus_pseudo_tests;
 #[cfg(all(test, feature = "headless"))]
+mod form_setter_calls_tests;
+#[cfg(all(test, feature = "headless"))]
+mod document_title_tests;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's engines read a document for its title
+    /// after a script turn (`Engine::follow_script_title`).
+    static TITLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`TITLE_READS`], for the test that a page pays nothing for the title
+/// unless a write touched one.
+#[cfg(test)]
+pub(crate) fn title_reads() -> u64 {
+    TITLE_READS.with(|reads| reads.get())
+}
+#[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
@@ -801,6 +819,8 @@ mod grid_in_flex_tests;
 mod grid_auto_repeat_percent_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_flex_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_viewport_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -865,6 +885,8 @@ mod feed_fill_paint_tests;
 mod backdrop_filter_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_global_lexical_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -1372,6 +1394,9 @@ struct DocState {
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// Script wrote to the DOM since the title was last compared with the
+    /// document's (`Engine::follow_script_title`).
+    title_stale: bool,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
@@ -3612,6 +3637,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
                 restyle_only: false,
@@ -3738,6 +3764,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
                 restyle_only: false,
@@ -3881,6 +3908,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
                 restyle_only: false,
@@ -7365,6 +7393,18 @@ impl Engine {
             }
             return !not_cancelled;
         };
+        // A focused checkbox or radio button takes no text: Space's keydown
+        // is taken and clicks it at the keyup, like a button's.
+        if key_code != 0x0D && self.is_checkable_input(id, focused.raw()) {
+            let not_cancelled = self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt);
+            if key == " " && !ctrl && !alt {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.space_armed = not_cancelled.then_some(focused.raw());
+                }
+                return true;
+            }
+            return false;
+        }
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
@@ -25227,7 +25267,66 @@ impl Engine {
         if self.follow_script_selection(id) {
             self.repaint_selection(id);
         }
+        self.follow_script_title(id);
         Ok(laid)
+    }
+
+    /// Could this write have changed the document's title: it is to a
+    /// `<title>` or its text, or it inserted, removed or replaced nodes
+    /// with a `<title>` among them. A write that replaced an element's
+    /// children says nothing of what was there, so with a title on record
+    /// (`had_title`) it counts: finding that title again is a short walk.
+    /// A page with no `<title>` is never walked for one.
+    fn touches_title(document: Option<&Document>, had_title: bool, record: &rustkit_bindings::MutationRecord) -> bool {
+        use rustkit_bindings::MutationKind;
+        let Some(document) = document else {
+            return false;
+        };
+        let node = |raw: usize| document.get_node(rustkit_dom::NodeId::new(raw));
+        match record.kind {
+            MutationKind::Text => node(record.node)
+                .is_some_and(|n| n.is_title_element() || n.parent().is_some_and(|p| p.is_title_element())),
+            MutationKind::ChildList => {
+                let Some(parent) = node(record.node) else {
+                    return had_title;
+                };
+                if parent.is_title_element() {
+                    return true;
+                }
+                match record.child {
+                    Some(child) => node(child).map_or(had_title, |child| child.holds_title_element()),
+                    None => had_title || parent.holds_title_element(),
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The tab's title follows the document's: when the script that just
+    /// settled wrote to the DOM and the document's title is no longer the
+    /// one last reported, report it (`EngineEvent::TitleChanged`, the empty
+    /// string when the document has none now). Once per settle, however
+    /// many writes there were.
+    fn follow_script_title(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if !std::mem::take(&mut view.doc.title_stale) {
+            return;
+        }
+        #[cfg(test)]
+        TITLE_READS.with(|reads| reads.set(reads.get() + 1));
+        let Some(title) = view.document.as_ref().map(|document| document.title()) else {
+            return;
+        };
+        if title == view.title {
+            return;
+        }
+        view.title = title.clone();
+        let _ = self.event_tx.send(EngineEvent::TitleChanged {
+            view_id: id,
+            title: title.unwrap_or_default(),
+        });
     }
 
     fn flush_script_dom_writes_once(
@@ -25245,6 +25344,10 @@ impl Engine {
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
+        let had_title = view.doc.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.doc.document.as_deref(), had_title, record)) {
+            view.doc.title_stale = true;
+        }
         Self::note_forced_layouts(id, &mut view.doc.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.doc.lay.edit_states.borrow_mut(), &mut view.doc.lay.checked_states.borrow_mut(), bindings);
         let max = Self::script_scroll_clamp(view.doc.max_scroll_offset, dirty);
