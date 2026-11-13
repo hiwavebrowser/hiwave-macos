@@ -540,20 +540,42 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // busy loop on performance.now() ends). The animation timeline stays on the virtual clock
     // itself, so a capture that steps it is reproducible. The host clock is looked up at call
     // time: it is installed after this script runs.
-    var seenNow = 0, anchor = 0, lastPerf = 0;
+    //
+    // Capture mode (set_deterministic_clock): no real time at all. The clock is the virtual time
+    // plus a fixed step per read since the virtual clock last moved, so a capture that steps the
+    // timers reproduces every `t`-driven frame, and a busy loop on performance.now() still ends.
+    var seenNow = 0, anchor = 0, lastPerf = 0, det = false, reads = 0, startedAt = realNow();
+    var DET_STEP = 0.1;
     function perfNow() {
-        var f = window.__rustkit_now_ms;
-        var real = typeof f === 'function' ? f() : realNow();
-        if (now !== seenNow) { seenNow = now; anchor = real; }
-        var t = now + (real - anchor);
-        if (t < lastPerf) t = lastPerf;
+        var t;
+        if (det) {
+            if (now !== seenNow) { seenNow = now; reads = 0; }
+            t = now + reads * DET_STEP;
+            reads++;
+            if (t <= lastPerf) t = lastPerf + DET_STEP;
+        } else {
+            var f = window.__rustkit_now_ms;
+            // Without the host clock (it is installed after this script): elapsed since this script
+            // began, never an epoch value (the never-backwards rule would pin it there).
+            var real = typeof f === 'function' ? f() : realNow() - startedAt;
+            if (now !== seenNow) { seenNow = now; anchor = real; }
+            t = now + (real - anchor);
+            if (t < lastPerf) t = lastPerf;
+        }
         lastPerf = t;
         return t;
     }
+    // The previous frame's stamp and virtual time: each frame is at least the virtual step after it,
+    // whatever the real clock did (a load runs frames back to back in microseconds), and the page
+    // clock is never behind a frame stamp it handed out.
+    var prevFrameTs = -1, prevFrameAt = 0;
     window.__rustkit_perf_now = perfNow;
-    // The timestamp every animation frame callback of one pass gets, as in a browser's frame.
-    // Taken when the pass's first frame callback runs (the clock has moved to its time by then).
-    var frameTs = -1;
+    window.__rustkit_set_det_clock = function (on) { det = !!on; reads = 0; };
+    // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
+    // taken when the first callback at a virtual time runs (the clock has moved to it by then), so
+    // the frames of a load, which one runTimers call runs one after the other, are each their own
+    // time, a frame apart.
+    var frameTs = 0, frameTsAt = -1;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
@@ -587,7 +609,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
         return schedule(function () {
-            if (frameTs < 0) frameTs = perfNow();
+            if (frameTsAt !== now) {
+                frameTsAt = now;
+                frameTs = perfNow();
+                if (prevFrameTs >= 0 && frameTs < prevFrameTs + (now - prevFrameAt)) frameTs = prevFrameTs + (now - prevFrameAt);
+                if (frameTs > lastPerf) lastPerf = frameTs;
+                prevFrameTs = frameTs; prevFrameAt = now;
+            }
             cb(frameTs);
         }, 16, [], false, true);
     };
@@ -611,7 +639,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
-        frameTs = -1;
         var ran = 0;
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
@@ -2767,7 +2794,12 @@ impl DomBindings {
     }
     /// Capture mode: the page clock is the virtual clock plus a fixed small step per read, with
     /// no real time in it, so a capture that steps the timers reproduces every `t`-driven frame.
-    pub fn set_deterministic_clock(&self, _on: bool) {}
+    pub fn set_deterministic_clock(&self, on: bool) {
+        let _ = self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping(&format!("window.__rustkit_set_det_clock({on})"));
+    }
 
 
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
