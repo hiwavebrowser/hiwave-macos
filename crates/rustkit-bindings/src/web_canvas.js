@@ -397,6 +397,8 @@
         if (w < 0) { x += w; w = -w; }
         if (h < 0) { y += h; h = -h; }
         var hex = String(call(d, 'getImageData', x, y, w, h) || '');
+        if (hex === 'SecurityError') throw domError('SecurityError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.");
+        if (hex === 'RangeError') throw new RangeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation");
         var bytes = new Uint8ClampedArray(w * h * 4);
         for (var k = 0, n = Math.min(bytes.length, hex.length >> 1); k < n; k++) {
             bytes[k] = parseInt(hex.substr(k * 2, 2), 16);

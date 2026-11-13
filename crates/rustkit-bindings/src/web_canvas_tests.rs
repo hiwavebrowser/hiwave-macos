@@ -179,7 +179,8 @@ fn ten_thousand_frames_of_gradients_hold_one_frame() {
     let node = document.get_element_by_id("c").unwrap().id.raw();
     let source = b.canvas_source();
     assert_eq!(b.canvas_snapshot(node).unwrap().commands.len(), 1);
-    assert!(source.retained_bytes() <= 4096, "{} bytes after 10k frames", source.retained_bytes());
+    // The recording, plus the 300x150 bitmap now counted with it.
+    assert!(source.retained_bytes() <= 4096 + 300 * 150 * 4, "{} bytes after 10k frames", source.retained_bytes());
     b.evaluate("x.clearRect(0, 0, 300, 150); x.fillStyle = kept; x.fillRect(0, 0, 10, 10);").unwrap();
     let snap = b.canvas_snapshot(node).unwrap();
     match &snap.commands[..] {

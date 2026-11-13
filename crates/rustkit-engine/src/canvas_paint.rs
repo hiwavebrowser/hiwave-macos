@@ -240,8 +240,9 @@ impl CanvasPaint {
             Some(key) => key,
             None => {
                 let (width, height, rgba) = source.pixels(node)?;
-                if width == 0 || height == 0 {
-                    // Nothing to show; a zero-size texture is invalid.
+                if width == 0 || height == 0 || rgba.len() as u64 != width as u64 * height as u64 * 4 {
+                    // Nothing to show: a zero-size texture is invalid, and a
+                    // canvas past the size limits has no bitmap.
                     return Some(CanvasPaint { generation, dest, content, key: String::new(), commands: Vec::new() });
                 }
                 let key = format!(

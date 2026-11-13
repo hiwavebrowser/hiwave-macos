@@ -2194,6 +2194,7 @@ impl DomBindings {
 
         // Update state
         self.window.borrow_mut().location = location.clone();
+        self.canvases.borrow_mut().origin = Some(url.origin());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();

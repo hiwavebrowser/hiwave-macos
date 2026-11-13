@@ -62,6 +62,9 @@ pub(crate) struct CanvasStore {
     painted: bool,
     measurer: Option<CanvasTextMeasurer>,
     pub(crate) images: Option<CanvasImageLoader>,
+    /// The document's origin (`DomBindings::set_location`): an image of
+    /// any other origin leaves a canvas that draws it not origin-clean.
+    pub(crate) origin: Option<url::Origin>,
 }
 
 pub(crate) type SharedCanvases = Rc<RefCell<CanvasStore>>;
@@ -118,7 +121,7 @@ impl CanvasStore {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.contexts.values().map(|c| c.recorded_bytes()).sum()
+        self.contexts.values().map(|c| c.recorded_bytes() + c.bitmap_bytes()).sum()
     }
 
     pub(crate) fn take_painted(&mut self) -> bool {
@@ -273,7 +276,23 @@ pub(crate) fn install(
             }
             // A source bitmap named by ("canvas", node) or ("image", url),
             // read before the context is borrowed for writing.
+            // Whether the source is not origin-clean: a canvas that is not,
+            // or an image of another origin than the document's (a data:
+            // URL is the document's own). There is no CORS-mode image
+            // fetch, so a crossorigin image counts as another origin.
+            let mut tainted = false;
             let source = if matches!(op, "drawImage" | "fillPattern" | "strokePattern") {
+                tainted = match (text(args, 3), args.get(4)) {
+                    (Some("canvas"), Some(JsValue::Number(n))) => {
+                        store.contexts.get(&(*n as usize)).is_some_and(|c| !c.is_origin_clean())
+                    }
+                    (Some("image"), Some(JsValue::String(url))) => match url::Url::parse(url) {
+                        Ok(u) if u.scheme() == "data" => false,
+                        Ok(u) => store.origin.as_ref() != Some(&u.origin()) || !u.origin().is_tuple(),
+                        Err(_) => true,
+                    },
+                    _ => false,
+                };
                 let found = match (text(args, 3), args.get(4)) {
                     (Some("canvas"), Some(JsValue::Number(n))) => {
                         let (w, hh) = store.contexts.get(&(*n as usize)).map(|c| (c.width, c.height)).unwrap_or((0, 0));
@@ -313,6 +332,9 @@ pub(crate) fn install(
             let Some(ctx) = contexts.get_mut(&node) else {
                 return JsValue::Undefined;
             };
+            if tainted {
+                ctx.taint();
+            }
             let mut drew = true;
             let mut result = JsValue::Undefined;
             match op {
@@ -603,7 +625,13 @@ pub(crate) fn install(
                 }
                 "getImageData" => {
                     drew = false;
+                    if !ctx.is_origin_clean() {
+                        return JsValue::String("SecurityError".into());
+                    }
                     if let Some([x, y, w, hh]) = nums::<4>(args, 3) {
+                        if rustkit_canvas::rgba_len(w as u32, hh as u32).is_none() || w > u32::MAX as f32 || hh > u32::MAX as f32 {
+                            return JsValue::String("RangeError".into());
+                        }
                         let d = ctx.get_image_data(x as i32, y as i32, w as u32, hh as u32);
                         let mut hex = String::with_capacity(d.data.len() * 2);
                         for b in &d.data {

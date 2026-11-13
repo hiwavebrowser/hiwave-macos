@@ -31,6 +31,29 @@ use thiserror::Error;
 mod raster;
 pub use raster::CanvasBitmap;
 
+/// The largest canvas bitmap, in pixels: Chrome 148 draws on a 16384 x 16384
+/// canvas and not on one pixel more (it reads back zeros).
+pub const MAX_CANVAS_AREA: u64 = 16384 * 16384;
+/// The longest canvas bitmap side. Chrome 148 draws on 32768 x 1 and not on
+/// 100000 x 1; tiny-skia and Skia both stop at this side.
+pub const MAX_CANVAS_SIDE: u32 = 65535;
+
+/// Whether a `width` x `height` bitmap is within the canvas limits.
+pub fn bitmap_fits(width: u32, height: u32) -> bool {
+    width <= MAX_CANVAS_SIDE && height <= MAX_CANVAS_SIDE && width as u64 * height as u64 <= MAX_CANVAS_AREA
+}
+
+/// The RGBA byte length of a `width` x `height` pixel read, `None` past
+/// [`MAX_CANVAS_AREA`] pixels (getImageData then throws RangeError, as
+/// Chrome does) or on overflow.
+pub fn rgba_len(width: u32, height: u32) -> Option<usize> {
+    let pixels = (width as u64).checked_mul(height as u64)?;
+    if pixels > MAX_CANVAS_AREA {
+        return None;
+    }
+    usize::try_from(pixels.checked_mul(4)?).ok()
+}
+
 /// What the raster takes from a context's state for a draw (a macro, so
 /// that it borrows the state's fields and leaves `raster` free).
 macro_rules! raster_ctx {
@@ -693,7 +716,8 @@ pub struct ImageData {
 impl ImageData {
     /// Create new image data.
     pub fn new(width: u32, height: u32) -> Self {
-        let len = (width * height * 4) as usize;
+        // Past the limit (or on overflow) the data is empty.
+        let len = rgba_len(width, height).unwrap_or(0);
         Self {
             width,
             height,
@@ -703,8 +727,8 @@ impl ImageData {
 
     /// Create from existing data.
     pub fn from_data(width: u32, height: u32, data: Vec<u8>) -> Result<Self, CanvasError> {
-        let expected_len = (width * height * 4) as usize;
-        if data.len() != expected_len {
+        let expected_len = (width as u64) * (height as u64) * 4;
+        if data.len() as u64 != expected_len {
             return Err(CanvasError::InvalidArgument(format!(
                 "Data length {} doesn't match expected {}",
                 data.len(), expected_len
@@ -809,6 +833,8 @@ pub struct CanvasRenderingContext2D {
     generation: u64,
     /// The bitmap every draw is rasterized into (`getImageData`).
     raster: raster::Raster,
+    /// See `is_origin_clean`.
+    origin_clean: bool,
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -831,6 +857,7 @@ impl CanvasRenderingContext2D {
             bytes: 0,
             generation: next_generation(),
             raster: raster::Raster::default(),
+            origin_clean: true,
         }
     }
 
@@ -1581,6 +1608,23 @@ impl CanvasRenderingContext2D {
     /// [`RECORDING_BYTE_BUDGET`]).
     pub fn recorded_bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// The bytes the bitmap holds (none before the first draw).
+    pub fn bitmap_bytes(&self) -> usize {
+        self.raster.bytes()
+    }
+
+    /// Whether the bitmap is origin-clean (HTML §4.12.5.1: no image of
+    /// another origin, nor a canvas or pattern that was not clean, has been
+    /// drawn on it). Resizing does not clean it.
+    pub fn is_origin_clean(&self) -> bool {
+        self.origin_clean
+    }
+
+    /// Mark the bitmap as not origin-clean, for good.
+    pub fn taint(&mut self) {
+        self.origin_clean = false;
     }
 
     /// Get recorded draw commands.

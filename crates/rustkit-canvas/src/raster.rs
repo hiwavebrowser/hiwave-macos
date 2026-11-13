@@ -30,7 +30,7 @@ pub struct CanvasBitmap(pub(crate) Pixmap);
 impl CanvasBitmap {
     /// From unpremultiplied RGBA rows; `None` when empty or the wrong length.
     pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
-        if rgba.len() != width as usize * height as usize * 4 {
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 {
             return None;
         }
         let mut pm = Pixmap::new(width, height)?;
@@ -217,7 +217,7 @@ impl Raster {
     }
 
     fn pixmap(&mut self, width: u32, height: u32) -> Option<&mut Pixmap> {
-        if self.pixmap.is_none() {
+        if self.pixmap.is_none() && crate::bitmap_fits(width, height) {
             self.pixmap = Pixmap::new(width, height);
         }
         self.pixmap.as_mut()
@@ -402,12 +402,24 @@ impl Raster {
     pub(crate) fn premultiplied(&self, size: (u32, u32)) -> Vec<u8> {
         match &self.pixmap {
             Some(pm) => pm.data().to_vec(),
-            None => vec![0u8; size.0 as usize * size.1 as usize * 4],
+            None => match crate::rgba_len(size.0, size.1) {
+                Some(len) => vec![0u8; len],
+                None => Vec::new(),
+            },
         }
     }
 
+    /// The bytes the bitmap holds (none before the first draw).
+    pub(crate) fn bytes(&self) -> usize {
+        self.pixmap.as_ref().map_or(0, |pm| pm.data().len())
+    }
+
     pub(crate) fn read(&self, x: i32, y: i32, w: u32, h: u32) -> Vec<u8> {
-        let mut out = vec![0u8; w as usize * h as usize * 4];
+        // Past the read limit: nothing (the bindings throw RangeError first).
+        let Some(len) = crate::rgba_len(w, h) else {
+            return Vec::new();
+        };
+        let mut out = vec![0u8; len];
         let Some(pm) = &self.pixmap else {
             return out;
         };

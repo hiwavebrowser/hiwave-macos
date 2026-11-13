@@ -328,7 +328,8 @@ fn ten_thousand_animation_frames_stay_bounded() {
             let n = source.snapshot(node).expect("a context").commands.len();
             assert!(n <= 16, "recording of {n} commands after {} frames", lengths.len() * 1000);
         }
-        assert!(source.retained_bytes() <= 64 * 1024, "{} bytes", source.retained_bytes());
+        // The recordings, plus the two 300x150 bitmaps counted with them.
+        assert!(source.retained_bytes() <= 64 * 1024 + 2 * 300 * 150 * 4, "{} bytes", source.retained_bytes());
     }
     assert!(lengths.windows(2).all(|w| w[0] == w[1]), "display list lengths {lengths:?}");
 }
