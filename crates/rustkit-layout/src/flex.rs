@@ -4885,6 +4885,7 @@ mod tests {
                 value: String::new(),
                 placeholder: String::new(),
                 input_type: "text".to_string(),
+                size: 20,
             }),
             control_style,
         ));
@@ -4938,6 +4939,7 @@ mod tests {
                 value: String::new(),
                 placeholder: String::new(),
                 input_type: "text".to_string(),
+                size: 20,
             }),
             control_style,
         ));

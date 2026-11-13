@@ -475,6 +475,8 @@ mod lay2_fixed_containing_block_tests;
 mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless"))]
 mod html1_noscript_serialize_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -497,6 +499,8 @@ mod select_height_tests;
 mod input_height_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod input_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod set5_input_content_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod inline_line_pitch_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -793,6 +797,8 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_flex_percent_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -13570,6 +13576,8 @@ impl layout_ctx::LayoutCtx {
                             value,
                             placeholder,
                             input_type,
+                            // SET5: how many characters wide the field is.
+                            size: input_size_attribute(attributes.get("size").map(String::as_str)),
                         },
                     };
 
@@ -29150,6 +29158,22 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
         .map(|b| &*b.box_.style)
         .unwrap_or(&*layout.style);
     computed_read::set_root_font(root_style);
+}
+
+/// An `<input>`'s `size` attribute as a number of characters (HTML
+/// §4.10.5.3.2, the rules for parsing non-negative integers): leading ASCII
+/// whitespace, an optional "+", then the digits up to the first other
+/// character ("10px" is 10, "3.9" is 3, "1e2" is 1); 20 unless that is 1 to
+/// 2147483647. `HTMLInputElement.size` reads it the same way (dom.rs).
+fn input_size_attribute(value: Option<&str>) -> u32 {
+    let text = value.unwrap_or("").trim_start_matches(['\t', '\n', '\u{c}', '\r', ' ']);
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let digits: &str = &text[..text.bytes().take_while(u8::is_ascii_digit).count()];
+    match digits.trim_start_matches('0').len() {
+        0 if digits.is_empty() => 20,
+        n if n > 10 => 20,
+        _ => digits.parse::<u64>().ok().filter(|n| (1..=2_147_483_647).contains(n)).map_or(20, |n| n as u32),
+    }
 }
 
 /// How long after a step of a gesture the next step still belongs to it. A

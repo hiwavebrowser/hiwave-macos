@@ -3510,6 +3510,25 @@ const WRAPPERS_JS: &str = r#"
             }, function (v) { this.setAttribute(p[1], String(v)); });
         });
     });
+    // HTML §4.10.5.3.2: how many characters wide the field is; 20 unless
+    // the attribute is a number above zero.
+    // The attribute is read by the rules for parsing non-negative integers
+    // (leading whitespace, an optional "+", then digits up to the first
+    // other character) and is 20 unless that gives 1 to 2147483647; layout
+    // reads it the same way (engine `input_size_attribute`). Setting the
+    // property converts to unsigned long: 0 throws, and a value above
+    // 2147483647 writes 20 (Chrome for Testing 148).
+    accessor(HTMLInputElement.prototype, 'size', function () {
+        var m = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(this.getAttribute('size') || '');
+        var n = m ? Number(m[1]) : 0;
+        return n >= 1 && n <= 2147483647 ? n : 20;
+    }, function (v) {
+        v = v >>> 0;
+        if (v === 0) {
+            throw new g.DOMException("Failed to set the 'size' property on 'HTMLInputElement': The value provided is 0, which is an invalid size.", 'IndexSizeError');
+        }
+        this.setAttribute('size', String(v > 2147483647 ? 20 : v));
+    });
     [['rows', 2], ['cols', 20]].forEach(function (p) {
         accessor(HTMLTextAreaElement.prototype, p[0], function () {
             var n = parseInt(this.getAttribute(p[0]), 10);
