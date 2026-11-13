@@ -475,6 +475,8 @@ mod lay2_fixed_containing_block_tests;
 mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless"))]
 mod html1_noscript_serialize_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
