@@ -4372,8 +4372,15 @@ pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_heig
 fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
     match l {
         Length::Px(v) => Some(*v),
+        Length::Zero => Some(0.0),
         Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
         l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        // GR4: `min()`/`max()`/`clamp()` with no percentage resolve through
+        // the same `length_to_px` that places the item, so the row and the
+        // item agree (`height: min(100vh, 500px)` alone made a 0 row).
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) if !crate::flex::has_percentage(l) => {
+            Some(b.length_to_px(l, 0.0))
+        }
         _ => None,
     }
 }
@@ -5574,7 +5581,12 @@ fn apply_align_self(
         // cell height the percentage arm uses. Left on the `_` arm it would
         // be called explicit and then sized as if it were `auto`.
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
-        _ => cell_height,
+        // GR4: every other length is the item's own too: `100vh`, `20rem`,
+        // `min(100vh, 500px)`. They fell to the cell height, so a sticky
+        // `100vh` pane beside a 3000px column was 3000 tall (Chrome 148:
+        // 800). `fit-content` and the sizing keywords stay with the cell.
+        Length::FitContent => cell_height,
+        ref l => child.length_to_px(l, cell_height),
     };
     // A definite `max-height` and `min-height` bound an explicit height (max
     // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
@@ -5583,8 +5595,7 @@ fn apply_align_self(
     // An `auto` height is left to the stretch and min/max passes that follow.
     let definite = |l: &Length| match l {
         Length::Auto | Length::FitContent | Length::Percent(_) => None,
-        Length::Calc(sum) if sum.percent != 0.0 => None,
-        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l if crate::flex::has_percentage(l) => None,
         l => Some(child.length_to_px(l, 0.0)),
     };
     let mut child_height = child_height;
