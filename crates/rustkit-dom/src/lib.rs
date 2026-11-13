@@ -197,6 +197,16 @@ pub struct Node {
     /// How many times `adoptedStyleSheets` was set on this document or
     /// shadow root: equal readings, the same adopted texts.
     adopted_generation: Cell<u64>,
+    /// The node's document (DOM "node document"), as the NodeId of its
+    /// Document node; 0 when no path has said (unknown). The page's own
+    /// Document node owns itself, and so does each other document here
+    /// (one `DOMParser` or `createHTMLDocument` made, and the one that
+    /// holds template contents). Set where a document makes a node, taken
+    /// from the new parent whenever a node is inserted (the move adopts
+    /// it), kept on removal and on a data write, copied by a clone. A
+    /// reader that needs to know must treat 0 as "not the page's". See
+    /// `set_owner`.
+    owner: Cell<usize>,
 }
 
 impl Node {
@@ -215,7 +225,35 @@ impl Node {
             sheet_generation: Cell::new(0),
             connection_generation: Cell::new(0),
             adopted_generation: Cell::new(0),
+            owner: Cell::new(0),
         })
+    }
+
+    /// The NodeId of this node's Document node, 0 when unknown.
+    pub fn owner_document_id(&self) -> usize {
+        self.owner.get()
+    }
+
+    /// Give this node and everything under it the document `owner` (a
+    /// subtree always has one document). Shadow trees follow their host.
+    pub fn set_owner(&self, owner: usize) {
+        if self.owner.get() == owner {
+            return;
+        }
+        self.owner.set(owner);
+        let mut pending: Vec<Rc<Node>> = self.children.borrow().iter().cloned().collect();
+        pending.extend(self.shadow_root());
+        while let Some(node) = pending.pop() {
+            node.owner.set(owner);
+            pending.extend(node.children.borrow().iter().cloned());
+            pending.extend(node.shadow_root());
+        }
+    }
+
+    /// The document whose nodes a node inserted under this one joins:
+    /// this node's own document (a Document node owns itself).
+    fn document_for_children(&self) -> usize {
+        self.owner.get()
     }
 
     /// The current lifetime of this element's sheet: changes whenever the
@@ -356,6 +394,8 @@ impl Node {
         note_mutation();
         self.end_sheet();
         child.moved();
+        // An inserted node takes its new parent's document.
+        child.set_owner(self.document_for_children());
         // Update child's parent
         *child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -423,6 +463,7 @@ impl Node {
         if let Some(idx) = ref_idx {
             self.end_sheet();
             new_child.moved();
+            new_child.set_owner(self.document_for_children());
             // Update new_child's parent
             *new_child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -948,6 +989,8 @@ impl Document {
         // child ends its parent's.
         new.sheet_generation.set(old.sheet_generation.get());
         new.connection_generation.set(old.connection_generation.get());
+        // A data write keeps the node's document.
+        new.owner.set(old.owner.get());
         if let Some(p) = old.parent() {
             p.end_sheet();
         }

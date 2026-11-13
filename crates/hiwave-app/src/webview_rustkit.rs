@@ -923,9 +923,11 @@ impl RustKitView {
 
     /// A wheel over a point of the content view: the box under it may take it.
     /// Like `scroll_by` on the page thread: true, and the commit shows it.
-    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32) -> bool {
+    /// `gesture`: a step of a gesture (a trackpad's scroll), which stays on
+    /// what the gesture began on; a wheel on its own does not.
+    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32, gesture: bool) -> bool {
         if self.content.is_some() {
-            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y }));
+            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y, gesture }));
             return true;
         }
         self.scroll_by(delta_x, delta_y)
