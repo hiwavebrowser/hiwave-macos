@@ -334,7 +334,7 @@ fn a_revoked_blob_url_and_another_documents_name_nothing() {
 #[test]
 fn the_queue_bounds_parked_body_bytes() {
     let b = bindings();
-    b.enable_net_bridge().unwrap();
+    bridge(&b);
     assert_eq!(
         ev(
             &b,
