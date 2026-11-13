@@ -555,6 +555,10 @@ compiler could not know). Pins: `crates/rustkit-js/tests/global_lexical_scope.rs
 per global-object name read once any script has a top-level lexical declaration; a 1M-iteration loop
 of three global reads with 300 top-level consts went 1.41 s to 1.6 s (release, Linux).
 
+`GetNameOrUndefined` (`src/vm/opcode/get/name.rs`) takes its "undeclared global, so `undefined`" decision
+after the locator has been re-pointed, so `typeof` of a later script's binding before its declaration
+has run is a ReferenceError as in Chrome, not `"undefined"` (#1101 follow-up).
+
 ## Patch: sort in V8's order (`sort-v8`)
 
 **Why.** With a comparator that is not a consistent total order (`(a, b) => a > b`, a NaN or
