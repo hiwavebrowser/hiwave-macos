@@ -119,7 +119,12 @@ where
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
         let mut lhs = self.call;
 
+        let mut chain = 0usize;
         while let Some(token) = cursor.peek(0, interner)?.cloned() {
+            chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
+            if chain > crate::parser::MAX_CHAIN {
+                return Err(Error::stack_overflow());
+            }
             let lhs_span_start = lhs.span().start();
             match token.kind() {
                 TokenKind::Punctuator(Punctuator::OpenParen) => {

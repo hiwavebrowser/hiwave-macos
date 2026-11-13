@@ -125,6 +125,12 @@ pub struct Parser<'a, R> {
     cursor: Cursor<R>,
 }
 
+/// HIWAVE PATCH (native recursion): the longest left-nested chain (`1+1+1+...`, `a.b.c...`, `f()()()...`)
+/// the parser builds. The tree is dropped, scope-analysed and compiled recursively, which a 30 000-link
+/// chain overflowed a 2 MiB thread with; 10 000 did not (debug build). V8 answers at 200 000 links, so a
+/// page that long gets a RangeError here, not a crash.
+pub(crate) const MAX_CHAIN: usize = 8192;
+
 impl<'a, R: ReadChar> Parser<'a, R> {
     /// Create a new `Parser` with a `Source` as the input to parse.
     pub fn new(source: Source<'a, R>) -> Self {
