@@ -164,3 +164,29 @@ fn the_users_edit_events_are_dispatched_by_the_engine_alone() {
     let got = text(b.evaluate("'hooked=' + hooked + ' ' + got.join(',')").unwrap());
     assert!(got.starts_with("hooked=0 beforeinput:true,input:true"), "{got}");
 }
+
+const PAGE6: &str = r#"<!DOCTYPE html><html><body><div id="d"><span id="s">s</span></div></body></html>"#;
+
+const PAGE6_SCRIPT: &str = r#"
+var log = [];
+var s = document.getElementById('s'), d = document.getElementById('d');
+s.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    try { e.eventPhase = 0; } catch (_) {}
+    try { e.initEvent('click', true, true); } catch (_) {}
+});
+d.addEventListener('wheel', function (e) { log.push('wheel:' + e.type + ':' + e.isTrusted + ':' + e.defaultPrevented); });
+d.addEventListener('click', function (e) { log.push('click:' + e.isTrusted); });
+"#;
+
+#[test]
+fn an_engine_event_is_not_reinitialised_during_its_dispatch() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PAGE6).unwrap());
+    let id = doc.get_element_by_id("s").unwrap().id.raw();
+    b.set_document(doc).unwrap();
+    b.evaluate(PAGE6_SCRIPT).unwrap();
+    let _ = b.host_turn(&format!("return __rk.fireWheel({id}, {{ clientX: 1, clientY: 1, deltaX: 0, deltaY: 10 }}, true);"), &[]);
+    let got = text(b.evaluate("log.join(',')").unwrap());
+    assert_eq!(got, "wheel:wheel:true:true");
+}
