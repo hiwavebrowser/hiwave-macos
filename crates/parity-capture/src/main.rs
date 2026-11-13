@@ -2899,6 +2899,75 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
     }
 
+    /// The settle's virtual span must not depend on how fast the server answers (R1 on #1104). A page
+    /// starts a fetch just after the load's 5000 ms timer pass (a timer the pass sets for 5190 ms, so the request is open during the settle) and sets its reveal from the answer
+    /// (`fetch config`, then `setTimeout(reveal, c.delay)`). While the request is open the settle
+    /// held no virtual time still: it advanced 50 ms a turn and waited 5 ms of real time, so a server
+    /// that took 1.5 s put the answer thousands of ms into the settle (a 5 ms wait a turn is 50 ms of
+    /// virtual time per 5 ms, and a Windows sleep of 5 ms lasts about 15 ms), the reveal past its 5000 ms
+    /// span, and the capture differed from the one against a fast server. The reveal is due 3000 ms
+    /// after the answer; with virtual time held until the answer it is always inside the span.
+    #[test]
+    fn the_settle_holds_virtual_time_while_a_request_is_open() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (kind, body) = if line.contains("/cfg") {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        ("application/json", "{\"delay\":3000}".to_string())
+                    } else {
+                        (
+                            "text/html",
+                            "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { fetch('/cfg').then(function (r) { return r.json(); }).then(function (c) { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-config'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, c.delay); }); }, 200); }, 4990);</script></body></html>"
+                                .to_string(),
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-slow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(
+            dumped.contains("revealed-by-config"),
+            "the answer landed too late in virtual time for its timer: {}",
+            &dumped[..dumped.len().min(400)]
+        );
+    }
+
     /// `--live-ms` end to end: the window's end is the capture's end. A request
     /// still open at the end is pinned in `report.rs`: here a fetch started
     /// inside the load holds the load, so it answers before the window opens.
