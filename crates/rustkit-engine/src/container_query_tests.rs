@@ -736,3 +736,51 @@ body { margin: 0 } .c { container-type: inline-size; width: 400px }
         .unwrap();
     assert!(k.contains("11"), "the query still holds: {k}");
 }
+
+const IN_FLOAT_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-13/css_container_query_in_float.html");
+
+/// CQ3 leftover (#1081 "Not done"): a size container in or beside a float
+/// answers with its laid-out width. Twelve shapes: a container under an
+/// auto-width float (contained, so 10 / 8 wide), under a length, percentage
+/// or `max-width` float, beside a float in a new formatting context, and a
+/// float that is itself the container. Each `.q` is as tall as the number of
+/// eight `min-width` thresholds (1..500px) its container meets. Chrome for
+/// Testing 148.0.7778.216 gives the expected string (width:count), apart
+/// from the two containers beside a float (see the assertion).
+#[test]
+fn a_container_in_or_beside_a_float_answers_with_its_width() {
+    let server = serve_routes(vec![("/", "text/html", IN_FLOAT_PAGE.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let got = engine
+        .execute_script(
+            view,
+            "(function(){var o=[];for(var i=1;i<=12;i++){var c=document.getElementById('c'+i);\
+             o.push('c'+i+':'+c.offsetWidth+':'+c.querySelector('.q').offsetHeight);}\
+             return o.join(' ');})()",
+        )
+        .unwrap();
+    // Chrome: c10 1080:8 and c11 550:8. Both sit beside a float, which stays
+    // on the fail-safe (count 0): c11 is laid out 640 wide here, not 550.
+    assert!(
+        got.contains(
+            "c1:10:0 c2:250:5 c3:220:5 c4:384:7 c5:140:3 c6:238:5 c7:280:6 c8:300:6 \
+             c9:8:0 c10:1080:0 c11:640:0 c12:180:4"
+        ),
+        "width:thresholds met per container (Chrome 148, c10/c11 fail-safe): {got}"
+    );
+}
