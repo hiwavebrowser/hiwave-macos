@@ -236,7 +236,7 @@
     // a bare `#` has an empty one, whose `hash` reads as none).
     g.__rustkit_scroll_to_location_fragment = function () {
         var at = loc.href.indexOf('#');
-        if (at >= 0 && typeof g.__rkScrollToFragment === 'function') g.__rkScrollToFragment(loc.href.slice(at + 1));
+        if (at >= 0 && typeof __rk.scrollToFragment === 'function') __rk.scrollToFragment(loc.href.slice(at + 1));
     };
 
     // What script's `link.click()` does once no listener cancelled it: the

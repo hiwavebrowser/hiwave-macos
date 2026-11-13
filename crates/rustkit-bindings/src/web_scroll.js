@@ -200,35 +200,26 @@
         try { fragment = decodeURIComponent(fragment); } catch (_) {}
         return fragment ? find(fragment) : null;
     }
-    Object.defineProperty(g, '__rkScrollToFragment', {
-        value: function (fragment) {
-            var el = indicated(fragment);
-            if (el) { intoView(el, 'start', 'nearest'); return; }
-            if (fragment !== '' && fragment.toLowerCase() !== 'top') return;
-            var p = pos();
-            to(0, 0);
-            scrolled(p);
-        },
-        configurable: true, writable: true, enumerable: false
-    });
+    __rk.scrollToFragment = function (fragment) {
+        var el = indicated(fragment);
+        if (el) { intoView(el, 'start', 'nearest'); return; }
+        if (fragment !== '' && fragment.toLowerCase() !== 'top') return;
+        var p = pos();
+        to(0, 0);
+        scrolled(p);
+    };
 
     // The engine calls this when the USER scrolled (wheel, keys, scrollbar):
     // the scroll event fires at once, not from a timer.
-    Object.defineProperty(g, '__rkUserScrolled', {
-        value: function () {
-            try { document.dispatchEvent(new g.Event('scroll', { bubbles: true })); } catch (_) {}
-        },
-        configurable: true, writable: true, enumerable: false
-    });
+    __rk.userScrolled = function () {
+        try { document.dispatchEvent(new g.Event('scroll', { bubbles: true })); } catch (_) {}
+    };
 
     // The same when the user scrolled an element: at once, at the element.
-    Object.defineProperty(g, '__rkUserScrolledElement', {
-        value: function (id) {
-            var el = table.byId(id);
-            try { if (el) el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
-        },
-        configurable: true, writable: true, enumerable: false
-    });
+    __rk.userScrolledElement = function (id) {
+        var el = table.byId(id);
+        try { if (el) el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
+    };
 
     var D = g.Document && g.Document.prototype;
     if (D && D.scrollingElement === undefined) {

@@ -1,6 +1,6 @@
 // Edit commands (see editing.rs): document.execCommand and
 // queryCommandSupported/Enabled, navigator.clipboard, and the user's edit
-// commands (`__rkUserEdit`, which DomBindings::user_edit calls).
+// commands (`__rk.userEdit`, which DomBindings::user_edit calls).
 (function (g) {
     var I = g.__rkEditInternals, EDIT = __rustkit_edit, SEL = __rustkit_text_sel,
         READ = __rustkit_clip_read, WRITE = __rustkit_clip_write;
@@ -86,7 +86,7 @@
     var INPUT_TYPES = { cut: 'deleteByCut', paste: 'insertFromPaste', undo: 'historyUndo',
                         redo: 'historyRedo', insertText: 'insertText',
                         deleteWordBackward: 'deleteWordBackward', deleteWordForward: 'deleteWordForward' };
-    hidden(Document.prototype, '__rkUserEdit', function (id, cmd, value) {
+    __rk.userEdit = function (id, cmd, value) {
         var el = typeof id === 'number' ? I.wrap(id) : null;
         if (!el) return null;
         var inputType = INPUT_TYPES[cmd];
@@ -102,7 +102,7 @@
         if (!r) return null;
         if (r.changed) fire(el, 'input', r.inputType, r.data);
         return JSON.stringify(r);
-    });
+    };
 
     // ---- the platform's marked text (CH2.E3, macOS NSTextInputClient) ----
     // One composition at a time, in UTF-16 offsets of its control's value.
@@ -131,7 +131,7 @@
     function marked() {
         return composing ? { marked: [composing.start, composing.end], text: composing.text } : { marked: null };
     }
-    hidden(Document.prototype, '__rkCompose', function (id, action, text) {
+    __rk.compose = function (id, action, text) {
         if (composing && (composing.gen !== I.gen() || composing.id !== id)) composing = null;
         var el = typeof id === 'number' ? I.wrap(id) : null;
         if (!el || !/^(input|textarea)$/.test(el.localName)) return null;
@@ -164,17 +164,17 @@
             compose(el, 'compositionend', '');
         }
         return JSON.stringify(marked());
-    });
+    };
 
     // Focus leaving `el` mid-composition (node_apis.js focus()/blur(), a
     // click elsewhere): Chrome 143 keeps the marked text and fires
     // compositionend before blur (tools/parity_oracle/ime_gate_log.mjs).
-    hidden(Document.prototype, '__rkFinishComposing', function (el) {
+    __rk.finishComposing = function (el) {
         var c = composing;
         if (!c || c.el !== el) return;
         composing = null;
         if (c.gen === I.gen()) compose(el, 'compositionend', c.text);
-    });
+    };
 
     // ---- navigator.clipboard (Clipboard API §6, text only) ----
     function Clipboard() { throw new TypeError('Illegal constructor'); }

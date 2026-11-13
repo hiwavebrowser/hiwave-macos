@@ -1,7 +1,7 @@
 // HTML drag and drop (HTML §6.11): a constructible DataTransfer over a drag
 // data store with its protection modes, a minimal DataTransferItemList, and
 // the hook the engine's drag-and-drop processing model drives
-// (`__rkDragStore`, read by dom.rs's `__rkFireDrag`). Evaluated after
+// (`__rkDragStore`, read by dom.rs's `__rk.fireDrag`). Evaluated after
 // web_interfaces.js, whose interface-only DataTransfer this replaces.
 //
 // Modes (§6.11.2.2): 'rw' in dragstart (and for `new DataTransfer()`), 'ro'

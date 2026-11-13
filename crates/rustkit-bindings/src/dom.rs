@@ -3700,8 +3700,8 @@ const WRAPPERS_JS: &str = r#"
     // updated at once, not on the next event.
     function imageWritten(el, name) {
         var n = String(name).toLowerCase();
-        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && document.__rkImageWritten) {
-            document.__rkImageWritten(el);
+        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
+            __rk.imageWritten(el);
         }
     }
     Element.prototype.setAttribute = function (name, value) {
@@ -5089,8 +5089,8 @@ const WRAPPERS_JS: &str = r#"
 
     // The document's selection (Selection API §2): at most one range, and a
     // direction that says which end is the anchor. The engine paints it and
-    // moves it with the mouse: `__rkSetSelection` is how a drag reaches
-    // script, `__rkTakeSelection` how a script's change reaches the engine.
+    // moves it with the mouse: `__rk.setSelection` is how a drag reaches
+    // script, `__rk.takeSelection` how a script's change reaches the engine.
     var SELN = { range: null, backward: false, gen: -1, sent: '', pending: false };
     function selRange() {
         if (SELN.gen !== gen) {
@@ -5229,16 +5229,13 @@ const WRAPPERS_JS: &str = r#"
     Document.prototype.getSelection = function () { return selection; };
     // The engine moved the selection (a drag, a double-click): ids and
     // UTF-16 offsets, or null to clear it.
-    Object.defineProperty(Document.prototype, '__rkSetSelection', {
-        value: function (aId, aOff, fId, fOff) {
-            var a = typeof aId === 'number' ? wrap(aId) : null;
-            var f = typeof fId === 'number' ? wrap(fId) : null;
-            if (!a || !f) setSel(null);
-            else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
-            SELN.sent = selKey();
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setSelection = function (aId, aOff, fId, fOff) {
+        var a = typeof aId === 'number' ? wrap(aId) : null;
+        var f = typeof fId === 'number' ? wrap(fId) : null;
+        if (!a || !f) setSel(null);
+        else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
+        SELN.sent = selKey();
+    };
     function selKey() {
         var e = selEnds();
         if (!e) return '';
@@ -5306,141 +5303,135 @@ const WRAPPERS_JS: &str = r#"
         var ws = g.getComputedStyle ? String(g.getComputedStyle(host).whiteSpace || '') : '';
         return /^(pre|pre-wrap|pre-line|break-spaces)$/.test(ws);
     }
-    Object.defineProperty(Document.prototype, '__rkEditKey', {
-        value: function (hostId, op, text) {
-            var host = typeof hostId === 'number' ? wrap(hostId) : null;
-            if (!host) return false;
-            var r = selRange();
-            if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
-                caretAt(host, host.childNodes.length);
-                r = selRange();
-            }
-            if (op === 'all') {
-                setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
-                return true;
-            }
-            var p = r[RANGE].start, leaf;
-            if (op === 'left' || op === 'right') {
-                if (!r.collapsed) {
-                    var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
-                    caretAt(end.node, end.offset);
-                    return true;
-                }
-                if (op === 'left') {
-                    if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
-                    leaf = leafBefore(host, p);
-                    if (!leaf) return false;
-                    if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
-                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
-                } else {
-                    if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
-                    leaf = leafAfter(host, p);
-                    if (!leaf) return false;
-                    if (leaf.nodeType === 3) caretAt(leaf, 1);
-                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
-                }
-                return true;
-            }
-            var inputType, data = null, changed = false;
-            if (!r.collapsed) {
-                r.deleteContents();
-                p = r[RANGE].start;
-                caretAt(p.node, p.offset);
-                changed = true;
-            }
-            if (op === 'insert') {
-                inputType = 'insertText';
-                data = String(text);
-                // A typed space at an edge or beside another space would
-                // collapse away: it goes in as a no-break space, as in Chrome.
-                if (data === ' ' && !preformatted(host)) {
-                    var t = p.node.nodeType === 3 ? p.node.data : '';
-                    var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
-                    if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
-                }
-                insertText(host, p, data);
-                changed = true;
-            } else if (op === 'enter') {
-                inputType = 'insertParagraph';
-                if (preformatted(host)) {
-                    insertText(host, p, '\n');
-                } else {
-                    var br = g.document.createElement('br');
-                    var after = null;
-                    if (p.node.nodeType === 3) {
-                        var rest = p.node.data.slice(p.offset);
-                        p.node.data = p.node.data.slice(0, p.offset);
-                        p.node.parentNode.insertBefore(br, p.node.nextSibling);
-                        after = g.document.createTextNode(rest);
-                        br.parentNode.insertBefore(after, br.nextSibling);
-                    } else {
-                        p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
-                    }
-                    // A line break at the very end needs a second one to
-                    // show the new empty line.
-                    if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
-                        br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
-                    }
-                    if (after) caretAt(after, 0);
-                    else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
-                }
-                changed = true;
-            } else if (op === 'back' || op === 'del') {
-                inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
-                if (!changed) {
-                    if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
-                        var cut = p.offset - 1;
-                        var code = p.node.data.charCodeAt(cut);
-                        if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
-                        p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
-                        caretAt(p.node, cut);
-                        changed = true;
-                    } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
-                        var stop = p.offset + 1;
-                        var hi = p.node.data.charCodeAt(p.offset);
-                        if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
-                        p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
-                        caretAt(p.node, p.offset);
-                        changed = true;
-                    } else {
-                        leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
-                        if (leaf && leaf.nodeType === 3) {
-                            if (op === 'back') {
-                                leaf.data = leaf.data.slice(0, -1);
-                                caretAt(leaf, leaf.data.length);
-                            } else {
-                                leaf.data = leaf.data.slice(1);
-                                caretAt(leaf, 0);
-                            }
-                            changed = true;
-                        } else if (leaf) {
-                            var parent = leaf.parentNode, at = childIndex(parent, leaf);
-                            parent.removeChild(leaf);
-                            if (p.node.nodeType !== 3) caretAt(parent, at);
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if (!changed) return false;
-            var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
-            trust(ev);
-            dispatchTo(host, ev);
+    __rk.editKey = function (hostId, op, text) {
+        var host = typeof hostId === 'number' ? wrap(hostId) : null;
+        if (!host) return false;
+        var r = selRange();
+        if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
+            caretAt(host, host.childNodes.length);
+            r = selRange();
+        }
+        if (op === 'all') {
+            setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
             return true;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+        }
+        var p = r[RANGE].start, leaf;
+        if (op === 'left' || op === 'right') {
+            if (!r.collapsed) {
+                var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
+                caretAt(end.node, end.offset);
+                return true;
+            }
+            if (op === 'left') {
+                if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
+                leaf = leafBefore(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
+            } else {
+                if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
+                leaf = leafAfter(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
+            }
+            return true;
+        }
+        var inputType, data = null, changed = false;
+        if (!r.collapsed) {
+            r.deleteContents();
+            p = r[RANGE].start;
+            caretAt(p.node, p.offset);
+            changed = true;
+        }
+        if (op === 'insert') {
+            inputType = 'insertText';
+            data = String(text);
+            // A typed space at an edge or beside another space would
+            // collapse away: it goes in as a no-break space, as in Chrome.
+            if (data === ' ' && !preformatted(host)) {
+                var t = p.node.nodeType === 3 ? p.node.data : '';
+                var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
+                if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
+            }
+            insertText(host, p, data);
+            changed = true;
+        } else if (op === 'enter') {
+            inputType = 'insertParagraph';
+            if (preformatted(host)) {
+                insertText(host, p, '\n');
+            } else {
+                var br = g.document.createElement('br');
+                var after = null;
+                if (p.node.nodeType === 3) {
+                    var rest = p.node.data.slice(p.offset);
+                    p.node.data = p.node.data.slice(0, p.offset);
+                    p.node.parentNode.insertBefore(br, p.node.nextSibling);
+                    after = g.document.createTextNode(rest);
+                    br.parentNode.insertBefore(after, br.nextSibling);
+                } else {
+                    p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
+                }
+                // A line break at the very end needs a second one to
+                // show the new empty line.
+                if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
+                    br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
+                }
+                if (after) caretAt(after, 0);
+                else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
+            }
+            changed = true;
+        } else if (op === 'back' || op === 'del') {
+            inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
+            if (!changed) {
+                if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
+                    var cut = p.offset - 1;
+                    var code = p.node.data.charCodeAt(cut);
+                    if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
+                    p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
+                    caretAt(p.node, cut);
+                    changed = true;
+                } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
+                    var stop = p.offset + 1;
+                    var hi = p.node.data.charCodeAt(p.offset);
+                    if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
+                    p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
+                    caretAt(p.node, p.offset);
+                    changed = true;
+                } else {
+                    leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
+                    if (leaf && leaf.nodeType === 3) {
+                        if (op === 'back') {
+                            leaf.data = leaf.data.slice(0, -1);
+                            caretAt(leaf, leaf.data.length);
+                        } else {
+                            leaf.data = leaf.data.slice(1);
+                            caretAt(leaf, 0);
+                        }
+                        changed = true;
+                    } else if (leaf) {
+                        var parent = leaf.parentNode, at = childIndex(parent, leaf);
+                        parent.removeChild(leaf);
+                        if (p.node.nodeType !== 3) caretAt(parent, at);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (!changed) return false;
+        var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
+        trust(ev);
+        dispatchTo(host, ev);
+        return true;
+    };
     // The selection as the engine last heard it changed: null when it did
     // not, else '' (none) or "anchorId anchorOffset focusId focusOffset".
-    Object.defineProperty(Document.prototype, '__rkTakeSelection', {
-        value: function () {
-            var key = selKey();
-            if (key === SELN.sent) return null;
-            SELN.sent = key;
-            return key;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.takeSelection = function () {
+        var key = selKey();
+        if (key === SELN.sent) return null;
+        SELN.sent = key;
+        return key;
+    };
     // An `<svg>` is one box in the layout. The shape of it a client point
     // is on, else the `<svg>`: found host-side, from the shapes' geometry
     // (svg_geometry.rs `shape_at`), with nothing a page can replace on the
@@ -5574,43 +5565,34 @@ const WRAPPERS_JS: &str = r#"
     // `publicPath` detection (`document.currentScript.src`). With it
     // missing, both threw "cannot convert null or undefined to object" and
     // the rest of the script never ran. The engine names the element
-    // through `__rkSetCurrentScript(id)` before each script and clears it
+    // through `__rk.setCurrentScript(id)` before each script and clears it
     // after; the hook is not enumerable.
     var currentScript = null;
     getter(Document.prototype, 'currentScript', function () {
         var s = slotOf(this); return s.gen === gen ? currentScript : null;
     });
-    Object.defineProperty(Document.prototype, '__rkSetCurrentScript', {
-        value: function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setCurrentScript = function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; };
     // The engine reports a script's outcome to its element: `load` or
     // `error`, which do not bubble (HTML "execute the script element").
-    Object.defineProperty(Document.prototype, '__rkFireOn', {
-        value: function (id, type) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (target) dispatchTo(target, new Event(type));
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireOn = function (id, type) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (target) dispatchTo(target, new Event(type));
+    };
     // The engine reports that an `<img>`'s image failed to load (a 404, a
     // failed connection, bytes that do not decode, its budget spent): the
     // element is marked with the `src`/`srcset` that failed, which is what
     // `img.complete` reads (web_reflect.js), and hears `error`.
     var failedImages = new WeakMap();
-    Object.defineProperty(Document.prototype, '__rkImageFailed', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            loadedImages.delete(target);
-            failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            var ev = new Event('error');
-            trust(ev);
-            dispatchTo(target, ev);
-            settleDecodes(target, false);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageFailed = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        loadedImages.delete(target);
+        failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        var ev = new Event('error');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, false);
+    };
     // The engine reports that an `<img>`'s image is in (E54): the element
     // is marked with the `src`/`srcset` that loaded, the image's own size
     // and the URL it came from, which `complete`, `naturalWidth`,
@@ -5619,20 +5601,17 @@ const WRAPPERS_JS: &str = r#"
     // are one step, so a handler never runs for an image that reads as
     // still loading.
     var loadedImages = new WeakMap();
-    Object.defineProperty(Document.prototype, '__rkImageLoaded', {
-        value: function (id, width, height, url) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            failedImages.delete(target);
-            // No URL: a `data:` image, which is its own `src`.
-            loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
-            var ev = new Event('load');
-            trust(ev);
-            dispatchTo(target, ev);
-            settleDecodes(target, true);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageLoaded = function (id, width, height, url) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        failedImages.delete(target);
+        // No URL: a `data:` image, which is its own `src`.
+        loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+        var ev = new Event('load');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, true);
+    };
     // `decode()` promises waiting on an `<img>` (web_reflect.js): each with
     // the `src`/`srcset` it waits for. They settle with the image's event,
     // and resolve when the engine gives up on it (E54 R1: a slow image the
@@ -5653,133 +5632,109 @@ const WRAPPERS_JS: &str = r#"
         pendingDecodes.delete(img);
         list.forEach(function (p) { if (ok) p[2](); else p[3](decodeError()); });
     }
-    Object.defineProperty(Document.prototype, '__rkDecodeWait', {
-        value: function (img, resolve, reject) {
-            if (sameSource(img, gaveUpImages.get(img))) return resolve();
-            var list = pendingDecodes.get(img) || [];
-            list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
-            pendingDecodes.set(img, list);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageGaveUp', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            settleDecodes(target, true);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageWritten', {
-        value: function (img) {
-            // A failure is not held against the restarted load, nor is a
-            // give-up; a successful image stays readable while the same
-            // `src` reloads (its mark is checked against `src`).
-            failedImages.delete(img);
-            gaveUpImages.delete(img);
-            var list = pendingDecodes.get(img);
-            if (!list) return;
-            var keep = list.filter(function (p) { return sameSource(img, p); });
-            list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
-            if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.decodeWait = function (img, resolve, reject) {
+        if (sameSource(img, gaveUpImages.get(img))) return resolve();
+        var list = pendingDecodes.get(img) || [];
+        list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
+        pendingDecodes.set(img, list);
+    };
+    __rk.imageGaveUp = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        settleDecodes(target, true);
+    };
+    __rk.imageWritten = function (img) {
+        // A failure is not held against the restarted load, nor is a
+        // give-up; a successful image stays readable while the same
+        // `src` reloads (its mark is checked against `src`).
+        failedImages.delete(img);
+        gaveUpImages.delete(img);
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        var keep = list.filter(function (p) { return sameSource(img, p); });
+        list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
+        if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
+    };
     // The mark of the image an `<img>` shows now: null while its current
     // `src`/`srcset` has not loaded.
-    Object.defineProperty(Document.prototype, '__rkImageLoadedFor', {
-        value: function (img) {
-            var mark = loadedImages.get(img);
-            if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
-            return mark;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageFailedFor', {
-        value: function (img) { return failedImages.get(img) || null; },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageLoadedFor = function (img) {
+        var mark = loadedImages.get(img);
+        if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+        return mark;
+    };
+    __rk.imageFailedFor = function (img) { return failedImages.get(img) || null; };
     // The engine's CSS transitions report their phases (css-transitions-2
     // §4): a trusted TransitionEvent that bubbles; `transitionend` can be
     // cancelled, the others not. An element taken out of the document
     // still hears its `transitioncancel`.
-    Object.defineProperty(Document.prototype, '__rkFireTransition', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            init.bubbles = true;
-            init.cancelable = type === 'transitionend';
-            var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
-            trust(ev);
-            dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireTransition = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init.bubbles = true;
+        init.cancelable = type === 'transitionend';
+        var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     // Likewise the engine's `@keyframes` animations (css-animations-1 §5):
     // a trusted AnimationEvent that bubbles and cannot be cancelled.
-    Object.defineProperty(Document.prototype, '__rkFireAnimation', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            init.bubbles = true;
-            init.cancelable = false;
-            var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
-            trust(ev);
-            dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireAnimation = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init.bubbles = true;
+        init.cancelable = false;
+        var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     // The engine delivers the user's mouse input: a trusted event that
     // bubbles and can be cancelled (UI Events §3.4), except the enter and
     // leave events, which do neither and go to one element each.
     // `pointer*` and `click` are PointerEvents of the mouse (Pointer
     // Events §4, §12); `mousedown`, `mouseup` and `click` carry the click
     // count. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireMouse', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return true;
-            // The pointer is on a shape of an `<svg>`, which the layout
-            // sees as one box: the event's target is the shape.
-            if (target.localName === 'svg' && typeof init.clientX === 'number') {
-                target = svgShapeAt(target, init.clientX, init.clientY);
-            }
-            // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
-            var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
-                type.indexOf('pointer') === 0;
-            var edge = /(enter|leave)$/.test(type);
-            var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
-            init.bubbles = !edge;
-            init.cancelable = !edge && type !== 'pointercancel';
-            init.composed = !edge;
-            init.view = g;
-            init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
-            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
-            if (pointer) {
-                init.pointerId = 1;
-                init.pointerType = 'mouse';
-                init.isPrimary = true;
-                init.pressure = init.buttons ? 0.5 : 0;
-            }
-            var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
-            trust(ev);
-            // Where the point is in the document and in the target's box.
-            var at = {
-                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-                offsetX: init.offsetX, offsetY: init.offsetY,
-                movementX: init.movementX, movementY: init.movementY
-            };
-            // A move or a boundary event has no button of its own: `which`
-            // is the primary button while it is held.
-            if (!press && !pointer) at.which = init.buttons & 1;
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
-            return dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireMouse = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return true;
+        // The pointer is on a shape of an `<svg>`, which the layout
+        // sees as one box: the event's target is the shape.
+        if (target.localName === 'svg' && typeof init.clientX === 'number') {
+            target = svgShapeAt(target, init.clientX, init.clientY);
+        }
+        // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
+        var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
+            type.indexOf('pointer') === 0;
+        var edge = /(enter|leave)$/.test(type);
+        var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
+        init.bubbles = !edge;
+        init.cancelable = !edge && type !== 'pointercancel';
+        init.composed = !edge;
+        init.view = g;
+        init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        if (pointer) {
+            init.pointerId = 1;
+            init.pointerType = 'mouse';
+            init.isPrimary = true;
+            init.pressure = init.buttons ? 0.5 : 0;
+        }
+        var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
+        trust(ev);
+        // Where the point is in the document and in the target's box.
+        var at = {
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY,
+            movementX: init.movementX, movementY: init.movementY
+        };
+        // A move or a boundary event has no button of its own: `which`
+        // is the primary button while it is held.
+        if (!press && !pointer) at.which = init.buttons & 1;
+        Object.keys(at).forEach(function (k) {
+            Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+        });
+        return dispatchTo(target, ev);
+    };
 
     // Whether a wheel at this element can be cancelled: something on its
     // way up to the window listens for `wheel` and is not passive (an
@@ -5838,40 +5793,37 @@ const WRAPPERS_JS: &str = r#"
     // is the current drag operation. Returns 'notCancelled:operation',
     // the operation being what the dataTransfer's effects allow after the
     // listeners ran.
-    Object.defineProperty(Document.prototype, '__rkFireDrag', {
-        value: function (id, type, init, op) {
-            var store = g.__rkDragStore;
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!store || !target) return '1:none';
-            if (type === 'dragstart') store.begin(target);
-            var dt = store.prepare(type, op);
-            var cancelable = type !== 'dragleave' && type !== 'dragend';
-            init.bubbles = true;
-            init.cancelable = cancelable;
-            init.composed = true;
-            init.view = g;
-            init.detail = 0;
-            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
-            init.dataTransfer = dt;
-            var ev = new (g.DragEvent || g.MouseEvent)(type, init);
-            if (!(ev.dataTransfer instanceof Object)) {
-                Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
-            }
-            trust(ev);
-            var at = {
-                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-                offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
-            };
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
-            var notCancelled = dispatchTo(target, ev);
-            // A cancelled dragstart ends the drag before it began.
-            var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
-            return (notCancelled ? '1:' : '0:') + settled;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireDrag = function (id, type, init, op) {
+        var store = g.__rkDragStore;
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!store || !target) return '1:none';
+        if (type === 'dragstart') store.begin(target);
+        var dt = store.prepare(type, op);
+        var cancelable = type !== 'dragleave' && type !== 'dragend';
+        init.bubbles = true;
+        init.cancelable = cancelable;
+        init.composed = true;
+        init.view = g;
+        init.detail = 0;
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        init.dataTransfer = dt;
+        var ev = new (g.DragEvent || g.MouseEvent)(type, init);
+        if (!(ev.dataTransfer instanceof Object)) {
+            Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
+        }
+        trust(ev);
+        var at = {
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
+        };
+        Object.keys(at).forEach(function (k) {
+            Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+        });
+        var notCancelled = dispatchTo(target, ev);
+        // A cancelled dragstart ends the drag before it began.
+        var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
+        return (notCancelled ? '1:' : '0:') + settled;
+    };
 
     // The engine delivers the user's key press or release to the focused
     // element: a trusted KeyboardEvent that bubbles and can be cancelled

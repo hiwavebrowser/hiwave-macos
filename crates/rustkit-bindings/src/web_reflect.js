@@ -230,12 +230,12 @@
         enm(I, 'referrerPolicy', 'referrerpolicy', ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'], '', '');
         enm(I, 'fetchPriority', 'fetchpriority', ['high', 'low', 'auto'], 'auto');
         // What the engine reported of the image this `src`/`srcset` names
-        // (`document.__rkImageLoaded` / `__rkImageFailed`, dom.rs): the
+        // (`__rk.imageLoaded` / `__rk.imageFailed`, dom.rs): the
         // loaded mark `[src, srcset, width, height, url]`, or whether the
         // load failed. Neither while the image is in flight.
-        function loaded(img) { return document.__rkImageLoadedFor ? document.__rkImageLoadedFor(img) : null; }
+        function loaded(img) { return __rk.imageLoadedFor ? __rk.imageLoadedFor(img) : null; }
         function failed(img) {
-            var mark = document.__rkImageFailedFor ? document.__rkImageFailedFor(img) : null;
+            var mark = __rk.imageFailedFor ? __rk.imageFailedFor(img) : null;
             return !!mark && mark[0] === img.getAttribute('src') && mark[1] === img.getAttribute('srcset');
         }
         // No image is named: nothing to wait for (HTML §4.8.4.3).
@@ -270,7 +270,7 @@
                 if (sourceless(img) || failed(img)) return broken();
                 // The image's own event settles it (dom.rs), and so does the
                 // engine giving up on it; a `src` change rejects it.
-                if (document.__rkDecodeWait) document.__rkDecodeWait(img, settled, function () { broken(); });
+                if (__rk.decodeWait) __rk.decodeWait(img, settled, function () { broken(); });
             });
         });
     }
