@@ -3236,6 +3236,51 @@ Connection: close
         assert!(took < Duration::from_millis(9_000), "the settle ran past its budget: the capture took {took:?} ({stats:?})");
     }
 
+    /// The settle does not start a turn that would likely end past its budget: it stops when the time spent
+    /// plus the slowest turn so far would pass it (R1 LOW on #1104: a turn is not interrupted, so a slow
+    /// one started just inside the budget overran it). Here every turn costs about 900 ms: the sixth
+    /// would start at about 4.5 s and end near 5.4 s, past the 5 s budget.
+    #[test]
+    fn the_settle_does_not_start_a_turn_that_would_end_past_its_budget() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setInterval(function () { var t = Date.now(); while (Date.now() - t < 900) {} }, 16); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
+        assert!(stats.cut_short, "{stats:?}");
+        assert!(
+            stats.wall_ms <= SETTLE_REAL_BUDGET.as_millis() as u64,
+            "a turn started that ended past the budget: {stats:?}"
+        );
+    }
+
     /// When the load has used the capture's timeout down to the margin the frame needs, the settle does not
     /// start at all, not even its first turn: a heavy page (walmart's load is most of the 30 s on the Mac)
     /// must not be pushed past its timeout by the settle.
