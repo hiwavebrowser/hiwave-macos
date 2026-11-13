@@ -69,3 +69,67 @@ fn engine_events_keep_their_own_type() {
     let got = text(b.evaluate("'clicks=' + clicks.join(',') + ' checked=' + c.checked").unwrap());
     assert_eq!(got, "clicks= checked=false");
 }
+
+const PAGE3: &str = r#"<!DOCTYPE html><html><body><a id="l" href="next.html">l</a></body></html>"#;
+
+const PAGE3_SCRIPT: &str = r#"
+var moves = [], clicks = [];
+var l = document.getElementById('l');
+l.addEventListener('mousemove', function (e) { moves.push(String(e.isTrusted)); });
+l.addEventListener('click', function (e) { clicks.push(String(e.isTrusted)); e.preventDefault(); });
+var realCall = Function.prototype.call, realConstruct = Reflect.construct, hasOwn = Object.prototype.hasOwnProperty;
+function bend(o) {
+    if (o && typeof o === 'object' && Event.prototype.isPrototypeOf(o) && !hasOwn.apply(o, ['type'])) {
+        Object.defineProperty(o, 'type', { value: 'click', writable: true, configurable: true });
+        return true;
+    }
+    return false;
+}
+Function.prototype.call = function (self) {
+    if (bend(self)) return undefined;
+    return realCall.apply(this, arguments);
+};
+Reflect.construct = function (T, args, nt) {
+    var o = realConstruct(T, args, nt);
+    bend(o);
+    return o;
+};
+function unhook() { Function.prototype.call = realCall; Reflect.construct = realConstruct; }
+"#;
+
+#[test]
+fn engine_events_are_built_without_page_reachable_code() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PAGE3).unwrap());
+    let id = doc.get_element_by_id("l").unwrap().id.raw();
+    b.set_document(doc).unwrap();
+    b.evaluate(PAGE3_SCRIPT).unwrap();
+    let _ = b.host_turn(&format!("return __rk.fireMouse({id}, 'mousemove', {{ clientX: 1, clientY: 1, button: 0, buttons: 0 }});"), &[]);
+    let _ = b.host_turn(&format!("return __rk.fireWheel({id}, {{ clientX: 1, clientY: 1, deltaX: 0, deltaY: 10 }}, true);"), &[]);
+    b.evaluate("unhook()").unwrap();
+    let got = text(b.evaluate("'moves=' + moves.join(',') + ' clicks=' + clicks.join(',')").unwrap());
+    assert_eq!(got, "moves=true clicks=");
+}
+
+const PAGE4_SCRIPT: &str = r#"
+var replaced = 0, got = [];
+var realDispatch = EventTarget.prototype.dispatchEvent;
+EventTarget.prototype.dispatchEvent = function () { replaced++; return realDispatch.apply(this, arguments); };
+window.addEventListener('message', function (e) { got.push('window:' + e.data + ':' + e.isTrusted); });
+window.addEventListener('ping', function (e) { got.push('ping:' + e.isTrusted); });
+var ch = new MessageChannel();
+ch.port1.onmessage = function (e) { got.push('port:' + e.data + ':' + e.isTrusted); };
+window.postMessage('w', '*');
+ch.port2.postMessage('p');
+"#;
+
+#[test]
+fn engine_dispatches_do_not_go_through_the_pages_dispatch_event() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    b.evaluate(PAGE4_SCRIPT).unwrap();
+    b.host_turn("return __rk.fire('window', 'ping');", &[]).unwrap();
+    b.run_timers(0, 1_000).unwrap();
+    let got = text(b.evaluate("'replaced=' + replaced + ' ' + got.slice().sort().join(' ')").unwrap());
+    assert_eq!(got, "replaced=0 ping:true port:p:true window:w:true");
+}
