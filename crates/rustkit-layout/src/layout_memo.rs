@@ -617,4 +617,23 @@ mod restore_tests {
         assert!(restore(&mut parent, &outputs));
         assert_eq!(parent.children[0].children_laid_at, Some((321.0, 45.0)));
     }
+
+    /// `set_wrapped_pitch` (#1090) writes `text_line_pitch` on a wrapped text run and reads it back
+    /// on the next visit to take the pitch out of the run's height again, so a restore that left it
+    /// stale would make the next visit compute the wrong line height. Verify mode found the gap on
+    /// a live page ("a field the snapshot does not hold differs").
+    #[test]
+    fn a_restore_writes_back_the_text_line_pitch() {
+        let style = rustkit_css::ComputedStyle::default();
+        let mut parent = LayoutBox::new(BoxType::Block, style.clone());
+        let mut run = LayoutBox::new(BoxType::Text("a b".to_string()), style);
+        run.text_line_pitch = Some(40.0);
+        parent.children.push(run);
+        let outputs = snapshot(&parent).expect("snapshot");
+        for stale in [None, Some(7.0)] {
+            parent.children[0].text_line_pitch = stale;
+            assert!(restore(&mut parent, &outputs));
+            assert_eq!(parent.children[0].text_line_pitch, Some(40.0), "stale {stale:?}");
+        }
+    }
 }
