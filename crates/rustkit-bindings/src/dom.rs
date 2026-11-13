@@ -6242,7 +6242,10 @@ const WRAPPERS_JS: &str = r#"
         return activation(t, event);
     }
     EventTarget.prototype.dispatchEvent = function (event) {
-        if (event == null || typeof event !== 'object' || event.type === undefined) {
+        // An Event: made by one of the Event constructors or by the engine
+        // (both stamp it). Anything else, a look-alike or a Proxy of an
+        // event included, is a TypeError, as in Chrome.
+        if (event == null || typeof event !== 'object' || !setHas(STAMPED, event)) {
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
         }
