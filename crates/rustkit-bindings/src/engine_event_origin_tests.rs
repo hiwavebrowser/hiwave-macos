@@ -46,3 +46,26 @@ fn engine_events_come_from_install_time_constructors() {
     let page_trusted = text(b.evaluate("String(pageMade.filter(function (e) { return e.isTrusted; }).length)").unwrap());
     assert_eq!(page_trusted, "0", "page-made events read trusted");
 }
+
+const PAGE2: &str = r#"<!DOCTYPE html><html><body><input id="c" type="checkbox"></body></html>"#;
+
+const PAGE2_SCRIPT: &str = r#"
+var clicks = [];
+var c = document.getElementById('c');
+c.addEventListener('click', function (e) { clicks.push(String(e.isTrusted)); });
+Object.defineProperty(Event.prototype, 'type', { get: function () { return 'click'; }, set: function () {}, configurable: true });
+window.MouseEvent = window.KeyboardEvent;
+"#;
+
+#[test]
+fn engine_events_keep_their_own_type() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PAGE2).unwrap());
+    let id = doc.get_element_by_id("c").unwrap().id.raw();
+    b.set_document(doc).unwrap();
+    b.evaluate(PAGE2_SCRIPT).unwrap();
+    b.host_turn(&format!("return __rk.fireKey({id}, 'keydown', {{ key: 'a', code: 'KeyA' }});"), &[]).unwrap();
+    b.host_turn(&format!("return __rk.fireKey({id}, 'keyup', {{ key: 'a', code: 'KeyA' }});"), &[]).unwrap();
+    let got = text(b.evaluate("'clicks=' + clicks.join(',') + ' checked=' + c.checked").unwrap());
+    assert_eq!(got, "clicks= checked=false");
+}
