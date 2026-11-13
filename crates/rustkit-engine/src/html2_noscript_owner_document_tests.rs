@@ -81,7 +81,7 @@ fn owner_is_carried_on_data_writes_ns_creation_contextual_fragments_and_template
 }
 
 /// Every node's document, through 200 random sequences (fixed seed) of
-/// 400 steps of create, insert,
+/// 400 steps of create, insert, parse-then-move,
 /// adopt, import, clone, attribute write, text write and remove across the
 /// page's document, a DOMParser document, a createHTMLDocument document and
 /// template contents. The expected document of each node is worked out
@@ -107,10 +107,10 @@ const OWNER_SEQUENCES: &str = r#"(function () {
   var P = new DOMParser().parseFromString('<body></body>', 'text/html');
   var H = document.implementation.createHTMLDocument('');
   var docs = { page: document, P: P, H: H };
-  var TEXT = 'a<b>&';
+  var TEXT = 'a<b>&', SRC = '<noscript>&lt;i&gt;x</noscript>';
   for (var round = 0; round < 200; round++) {
     var tpl = document.createElement('template'); document.getElementById('host').appendChild(tpl);
-    var label = new Map(), nodes = [], tDoc = null;
+    var label = new Map(), nodes = [], tDoc = null, parsedIn = new Map();
     function track(n, l) { if (!label.has(n)) nodes.push(n); label.set(n, l); }
     function each(n, f) { f(n); for (var c = n.firstChild; c; c = c.nextSibling) each(c, f); }
     function relabel(n, l) { each(n, function (x) { track(x, l); }); }
@@ -127,6 +127,12 @@ const OWNER_SEQUENCES: &str = r#"(function () {
         } else if (od !== docs[l]) {
           return step + ': a node of ' + l + ' reads ' + (od === document ? 'page' : od === P ? 'P' : od === H ? 'H' : 'another');
         }
+        if (parsedIn.has(n) && n.firstChild && n.firstChild.nodeType === 3) {
+          var want = parsedIn.get(n), got = n.firstChild.data;
+          if (got !== want) return step + ': a parsed noscript holds ' + JSON.stringify(got) + ', not ' + JSON.stringify(want);
+          var shown = l === 'page' ? want : want.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          if (n.innerHTML !== shown) return step + ': a parsed noscript of ' + l + ' serializes its text as ' + n.innerHTML;
+        }
         if (n.nodeType === 1 && n.localName === 'noscript' && n.namespaceURI === 'http://www.w3.org/1999/xhtml') {
           var raw = n.outerHTML.indexOf('a<b>') >= 0;
           if (n.textContent === TEXT && raw !== (l === 'page')) return step + ': a noscript of ' + l + ' is ' + (raw ? 'raw' : 'escaped');
@@ -137,7 +143,7 @@ const OWNER_SEQUENCES: &str = r#"(function () {
     var names = ['page', 'P', 'H', 'T'];
     function docOf(l) { return l === 'T' ? tpl.content.ownerDocument : docs[l]; }
     for (var step = 0; step < 400; step++) {
-      var op = next(9), pick = nodes.length ? nodes[next(nodes.length)] : null, what;
+      var op = next(10), pick = nodes.length ? nodes[next(nodes.length)] : null, what;
       // Bound the run: past 60 tracked nodes no more are made.
       if ((op === 0 || op === 3 || op === 4) && nodes.length > 60) op = 1 + 4 * next(2);
       if (op === 0 || !pick) {
@@ -155,24 +161,46 @@ const OWNER_SEQUENCES: &str = r#"(function () {
       } else if (op === 3) {
         if (pick.nodeType !== 1 || containers.some(function (x) { return x[0] === pick; })) continue;
         var l3 = names[next(3)]; var copy = docs[l3].importNode(pick, true); relabel(copy, l3); what = 'import into ' + l3;
+        var is = [], id = []; each(pick, function (x) { is.push(x); }); each(copy, function (x) { id.push(x); });
+        for (var q = 0; q < id.length; q++) if (parsedIn.has(is[q])) parsedIn.set(id[q], parsedIn.get(is[q]));
       } else if (op === 4) {
         if (pick.nodeType !== 1 || containers.some(function (x) { return x[0] === pick; })) continue;
         var cl = pick.cloneNode(true), src = [], dst = [];
         each(pick, function (x) { src.push(x); }); each(cl, function (x) { dst.push(x); });
-        for (var k = 0; k < dst.length; k++) track(dst[k], label.get(src[k]) || label.get(pick));
+        for (var k = 0; k < dst.length; k++) {
+          track(dst[k], label.get(src[k]) || label.get(pick));
+          if (parsedIn.has(src[k])) parsedIn.set(dst[k], parsedIn.get(src[k]));
+        }
         what = 'clone';
       } else if (op === 5) {
         if (pick.nodeType !== 1) continue;
         pick.setAttribute('data-x', String(step)); what = 'set an attribute';
       } else if (op === 6) {
         if (pick.nodeType !== 1 || pick.localName !== 'noscript') continue;
-        pick.textContent = TEXT; relabel(pick, label.get(pick)); what = 'set text';
+        pick.textContent = TEXT; parsedIn.delete(pick); relabel(pick, label.get(pick)); what = 'set text';
       } else if (op === 7) {
         if (pick.nodeType !== 1 || !pick.firstChild || pick.firstChild.nodeType !== 3) continue;
-        pick.firstChild.data = TEXT; what = 'set text data';
-      } else {
+        pick.firstChild.data = TEXT; parsedIn.delete(pick); what = 'set text data';
+      } else if (op === 8) {
         if (!pick.parentNode || containers.some(function (x) { return x[0] === pick; })) continue;
         pick.parentNode.removeChild(pick); what = 'remove';
+      } else {
+        // Parse then move: markup parsed in one document (innerHTML on a
+        // holder that document made, or insertAdjacentHTML next to a node
+        // of it), then the result moved into a container. The text is the
+        // parsing document's (literal with scripting on, decoded with it
+        // off); the document is the container's.
+        var pl = names[next(3)], c = containers[next(containers.length)], made;
+        if (next(2) === 0) {
+          var holder = docs[pl].createElement('div'); holder.innerHTML = SRC; made = holder.firstChild;
+          c[0].appendChild(made); what = 'parse in ' + pl + ', move into ' + c[1];
+        } else {
+          var mark = docOf(c[1]).createElement('div'); c[0].appendChild(mark); track(mark, c[1]);
+          mark.insertAdjacentHTML('beforeend', SRC); made = mark.firstChild; pl = c[1];
+          what = 'insertAdjacentHTML in ' + c[1];
+        }
+        relabel(made, c[1]);
+        parsedIn.set(made, pl === 'page' ? '&lt;i&gt;x' : '<i>x');
       }
       var bad = check('round ' + round + ' step ' + step + ' (' + what + ')');
       if (bad) return bad;
@@ -180,3 +208,25 @@ const OWNER_SEQUENCES: &str = r#"(function () {
   }
   return 'ok';
 })()"#;
+
+const MOVE_PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/html2_parse_then_move.html");
+const MOVE_CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html2_parse_then_move_cft148.txt");
+
+/// R1 on #1108 (second): markup parsed in one document and moved into
+/// another: `insertAdjacentHTML` at each position and in another document,
+/// innerHTML and outerHTML setters, parse then import or adopt, template
+/// contents, shadow root innerHTML, a contextual fragment.
+#[test]
+fn parse_then_move_parses_with_the_parsing_documents_scripting_flag() {
+    let got = report_lines(MOVE_PAGE);
+    let expected: Vec<&str> = MOVE_CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
+    assert_eq!(expected.len(), 16, "the Chrome report has 16 lines");
+    assert_eq!(got.len(), expected.len(), "{got:#?}");
+    let wrong: Vec<String> = got
+        .iter()
+        .zip(&expected)
+        .filter(|(g, e)| g != e)
+        .map(|(g, e)| format!("  {g}\n    Chromium: {e}"))
+        .collect();
+    assert!(wrong.is_empty(), "{} of {} lines differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
+}
