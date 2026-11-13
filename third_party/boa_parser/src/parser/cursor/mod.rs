@@ -37,6 +37,9 @@ pub(super) struct Cursor<R> {
 
     /// Tracks the number of tagged templates that are currently being parsed.
     tagged_templates_count: u32,
+
+    /// Where the native stack stood when this cursor was made (HIWAVE PATCH, native recursion).
+    stack_origin: usize,
 }
 
 impl<R> Cursor<R>
@@ -51,7 +54,18 @@ where
             json_parse: false,
             identifier: 0,
             tagged_templates_count: 0,
+            stack_origin: crate::stack_addr(),
         }
+    }
+
+    /// HIWAVE PATCH (native recursion): fails once the parse has recursed too deep for the native
+    /// stack, as V8 does with a RangeError, instead of overflowing it.
+    #[inline]
+    pub(super) fn check_depth(&self) -> ParseResult<()> {
+        if crate::over_stack_budget(self.stack_origin) {
+            return Err(Error::stack_overflow());
+        }
+        Ok(())
     }
 
     /// Sets the goal symbol of the cursor to `Module`.
