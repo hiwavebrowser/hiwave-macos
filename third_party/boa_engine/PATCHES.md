@@ -506,8 +506,15 @@ array's dense element, a typed array's element or a string's code unit straight 
 dense element and for a typed array when the receiver is the base itself. Anything else (holes,
 sparse arrays, accessors, a proxy, `arguments`, another receiver) takes the general path as before.
 `typed_array_get_element` and `typed_array_set_element` are `pub(crate)` for it. Pins:
-`crates/rustkit-js/tests/index_fast_paths.rs` (25 cases from Chrome 148.0.7778.216 in
+`crates/rustkit-js/tests/index_fast_paths.rs` (30 cases from Chrome 148.0.7778.216 in
 `tools/parity_oracle/index_fast_path_cases.json`, which pass before the change too, and a speed pin
 that does not). Measured (release, Linux, cost of the operation relative to an empty loop
 iteration, median of 7): array read 0.87 to 0.67, array write 0.77 to 0.50, Uint16Array read 1.38
 to 1.01, Uint16Array write 1.86 to 0.93.
+
+`js-perf2` follow-up (R1 on #1112): an index past the end of a string primitive is answered by
+`String.prototype` (`String.prototype[5] = 'P'; 'abc'[5]` is 'P'), and a dense-array store only
+happens when the receiver is the array itself (`super[i] = v` on an array home object and
+`Reflect.set(arr, i, v, other)` define the element on the receiver). Both holes were in the general
+path before this patch too (its string shortcut answered `undefined` past the end, its array store
+ignored the receiver); fixed in both paths, with the five cases added to the Chrome-148 set.

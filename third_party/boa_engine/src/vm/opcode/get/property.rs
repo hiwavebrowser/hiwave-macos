@@ -111,11 +111,11 @@ fn fast_get_by_index(base: &JsValue, index: u32) -> JsResult<Option<JsValue>> {
         return Ok(None);
     }
     if let Some(string) = base.as_string() {
-        return Ok(Some(
-            string
-                .code_unit_at(index as usize)
-                .map_or_else(JsValue::undefined, |char| js_string!([char].as_slice()).into()),
-        ));
+        // Past the end the answer comes from `String.prototype` (`String.prototype[5] = 'P'` makes
+        // `'abc'[5]` 'P'), so only an index inside the string is answered here.
+        return Ok(string
+            .code_unit_at(index as usize)
+            .map(|char| js_string!([char].as_slice()).into()));
     }
     Ok(None)
 }
@@ -166,12 +166,12 @@ fn get_by_value<const PUSH_KEY: bool>(
                     context.vm.set_register(dst.into(), element);
                     return Ok(());
                 }
-            } else if let Some(string) = base.as_string() {
-                let value = string
-                    .code_unit_at(index.get() as usize)
-                    .map_or_else(JsValue::undefined, |char| {
-                        js_string!([char].as_slice()).into()
-                    });
+            } else if let Some(string) = base.as_string()
+                && let Some(char) = string.code_unit_at(index.get() as usize)
+            {
+                // HIWAVE PATCH (js-perf2): only an index inside the string; past the end the
+                // answer comes from `String.prototype` (general path below).
+                let value: JsValue = js_string!([char].as_slice()).into();
 
                 if PUSH_KEY {
                     context.vm.set_register(key.into(), key_value.into());

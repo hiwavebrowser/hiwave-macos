@@ -161,7 +161,15 @@ impl SetPropertyByValue {
         if let Some(index) = crate::vm::opcode::get::fast_index(context.vm.get_register(key.into()))
             && let Some(base) = context.vm.get_register(object.into()).as_object()
         {
-            if base.is_array() {
+            // The receiver must be the base itself: `super[i] = v` on an array home object, or
+            // `Reflect.set(arr, i, v, other)`, defines the element on the receiver instead.
+            if base.is_array()
+                && context
+                    .vm
+                    .get_register(receiver.into())
+                    .as_object()
+                    .is_some_and(|r| JsObject::equals(&r, &base))
+            {
                 let mut base_borrowed = base.borrow_mut();
                 if base_borrowed.extensible
                     && base_borrowed
@@ -198,7 +206,9 @@ impl SetPropertyByValue {
 
         // Fast Path:
         'fast_path: {
+            // HIWAVE PATCH (js-perf2): only when the receiver is the array itself.
             if object.is_array()
+                && receiver.as_object().is_some_and(|r| JsObject::equals(&r, &object))
                 && let PropertyKey::Index(index) = &key
             {
                 let mut object_borrowed = object.borrow_mut();
