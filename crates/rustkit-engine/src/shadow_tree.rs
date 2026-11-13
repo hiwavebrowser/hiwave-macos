@@ -751,7 +751,7 @@ fn host_matches(
     selector: &str,
     context: bool,
     tag: &str,
-    attributes: &HashMap<String, String>,
+    attributes: &rustkit_dom::AttrMap,
     ancestors: &[Ancestor],
     sib: SiblingContext,
 ) -> bool {
@@ -777,7 +777,7 @@ impl HostScope {
     pub(crate) fn enter(
         node: &Rc<Node>,
         tag: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         sib: SiblingContext,
         light_chain: &[Ancestor],
     ) -> Self {
@@ -862,7 +862,7 @@ impl SlotScope {
     /// `None` for anything but a slot showing assigned nodes.
     pub(crate) fn enter(
         slot: &Rc<Node>,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         sib: SiblingContext,
         flat: &[Rc<Node>],
@@ -931,7 +931,7 @@ impl OwnRules {
     pub(crate) fn install(
         node: &Rc<Node>,
         tag: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         sib: SiblingContext,
     ) -> Self {

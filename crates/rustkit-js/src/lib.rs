@@ -507,6 +507,8 @@ pub struct JsRuntime {
     /// Page script text, only while an embedder has asked to quote it in
     /// an error log. See [`JsRuntime::set_capture_script_sources`].
     sources: source_context::ScriptSources,
+    /// A test's view of every source handed to the engine (`tap_sources`).
+    source_tap: Option<std::rc::Rc<dyn Fn(&str)>>,
 }
 
 /// M2: dropping a runtime lets its realm go. The realm's natives (console,
@@ -597,6 +599,7 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             blobs,
             sources: source_context::ScriptSources::default(),
+            source_tap: None,
         };
 
         // Set up built-in APIs
@@ -814,10 +817,32 @@ impl JsRuntime {
     /// object is reachable only from the closures such a script builds, so
     /// page script cannot report, forge or read through it.
     pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.call_with_host(source, &[], false)
+    }
+
+    /// Run a function body that holds the host object (`__rk`, as
+    /// [`evaluate_with_host`](Self::evaluate_with_host)) as a turn of page
+    /// script: for the engine's own dispatches (a key, typed text), in
+    /// which the page's listeners run. What `evaluate` does around page
+    /// script is done here too: the deadline stop is consumed, a job-queue
+    /// limit or timeout fails the turn, and an error is reported.
+    ///
+    /// `args` are strings the body reads as `__a[0]`, `__a[1]`, ...: text
+    /// that must not be written into the source (what the user typed),
+    /// which is compiled, may be quoted in an error and may be captured
+    /// for a log.
+    pub fn evaluate_host_turn(&mut self, source: &str, args: &[&str]) -> Result<JsValue, JsError> {
+        self.call_with_host(source, args, true)
+    }
+
+    fn call_with_host(&mut self, source: &str, args: &[&str], turn: bool) -> Result<JsValue, JsError> {
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let wrapped = format!("(function (__rk) {{\n{source}\n}})");
+            let wrapped = format!("(function (__rk, __a) {{\n{source}\n}})");
             let function = self
                 .context
                 .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
@@ -827,17 +852,50 @@ impl JsRuntime {
                 .filter(|f| f.is_callable())
                 .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
             let host = boa_engine::JsValue::from(self.host.clone());
-            let result = function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context);
-            let _ = self.context.run_jobs();
+            let strings = boa_engine::object::builtins::JsArray::from_iter(
+                args.iter().map(|a| boa_engine::JsValue::from(boa_engine::JsString::from(*a))),
+                &mut self.context,
+            );
+            if turn {
+                self.context.reset_recursion_max();
+            }
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into()], &mut self.context);
+            if turn {
+                self.consume_interrupt();
+            }
+            let job_result = self.context.run_jobs();
+            if turn {
+                self.consume_interrupt();
+            }
             self.flush_console_logs();
             match result {
-                Ok(value) => Ok(self.convert_boa_value(&value)),
-                Err(err) => Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context))),
+                Ok(value) => {
+                    if let (true, Err(job_err)) = (turn, job_result) {
+                        // As `evaluate`: only a job-queue limit or timeout
+                        // fails a turn whose own value completed.
+                        let msg = job_err.to_string();
+                        if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                            if self.diag.on.get() {
+                                let report = self.diag.describe_error(&job_err, &mut self.context);
+                                self.diag.push(report);
+                            }
+                            return Err(JsError::ExecutionError(msg));
+                        }
+                    }
+                    Ok(self.convert_boa_value(&value))
+                }
+                Err(err) => {
+                    if turn && self.diag.on.get() {
+                        let report = self.diag.describe_error(&err, &mut self.context);
+                        self.diag.push(report);
+                    }
+                    Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context)))
+                }
             }
         }
         #[cfg(not(feature = "boa"))]
         {
-            let _ = source;
+            let _ = (source, args, turn);
             Err(JsError::NotInitialized)
         }
     }
@@ -921,8 +979,20 @@ impl JsRuntime {
         self.evaluate(source, Some(path))
     }
 
+    /// Hand every source this runtime evaluates from now on to `tap`, the
+    /// embedder's own scripts included (`None` stops). For tests that pin
+    /// what may never be written into script source, such as text the user
+    /// typed; nothing else should hold on to what it is shown.
+    #[doc(hidden)]
+    pub fn tap_sources(&mut self, tap: Option<std::rc::Rc<dyn Fn(&str)>>) {
+        self.source_tap = tap;
+    }
+
     fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
         trace!(len = source.len(), "Evaluating script");
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
 
         #[cfg(feature = "boa")]
         {
