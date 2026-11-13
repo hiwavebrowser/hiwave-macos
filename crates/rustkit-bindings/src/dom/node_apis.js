@@ -65,6 +65,8 @@
         var r = NS(I.gen(), 'create', ns == null ? '' : String(ns), String(qualified));
         if (typeof r === 'string') fail('createElementNS', 'Document', r);
         var el = I.wrap(r);
+        // The element is this document's (its scripting state with it).
+        if (typeof __rk.adoptTo === 'function') __rk.adoptTo(el, this);
         // An HTML `script` made this way is a script like createElement's.
         if (HOOKS && HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
