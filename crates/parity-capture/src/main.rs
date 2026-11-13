@@ -556,6 +556,11 @@ fn settle_stepped(
         stats.timer_callbacks += out.timers_ran as u64;
         out.in_flight
     };
+    // No budget (the load used the capture's timeout down to the margin): no turn at all.
+    if budget.is_zero() {
+        stats.cut_short = true;
+        return stats;
+    }
     // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
     let mut in_flight = turn(&mut stats, 0);
     while left > 0 {
@@ -895,15 +900,18 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         // With no live window the page gets the reference's settle time after the load: virtual steps in a
         // stepped capture, a real live phase when animations run on the real clock.
         if args.live_ms.is_none() {
+            // The reference's 5 s, or what the capture's timeout leaves after a margin for the frame.
+            let left_in_timeout = Duration::from_millis(args.timeout_ms)
+                .saturating_sub(capture_began.elapsed())
+                .saturating_sub(SETTLE_TIMEOUT_MARGIN);
+            let budget = SETTLE_REAL_BUDGET.min(left_in_timeout);
             if args.animations {
-                // The real clock: the same span as live loop turns, in real time.
-                run_live(&rt, &mut engine, view_id, STEPPED_SETTLE_MS);
+                // The real clock: live loop turns for the same span, in real time, within the same budget.
+                if !budget.is_zero() {
+                    run_live(&rt, &mut engine, view_id, budget.as_millis() as u64);
+                }
             } else {
-                // The reference's 5 s, or what the capture's timeout leaves after a margin for the frame.
-                let left_in_timeout = Duration::from_millis(args.timeout_ms)
-                    .saturating_sub(capture_began.elapsed())
-                    .saturating_sub(SETTLE_TIMEOUT_MARGIN);
-                let stats = settle_stepped(&rt, &mut engine, view_id, SETTLE_REAL_BUDGET.min(left_in_timeout));
+                let stats = settle_stepped(&rt, &mut engine, view_id, budget);
                 result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
                 result.settle_stats = Some(stats);
             }
