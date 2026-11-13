@@ -91,6 +91,7 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 pub mod interrupt_diag; // HIWAVE PATCH (interrupt diagnostics)
+pub mod stats; // HIWAVE PATCH (vm-stats)
 pub mod host_stack; // HIWAVE PATCH (host stack)
 
 #[cfg(feature = "flowgraph")]

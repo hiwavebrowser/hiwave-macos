@@ -180,6 +180,13 @@ impl Drop for DiagJob {
 /// Install the function Boa calls when an interrupt path fires. A null hook
 /// leaves those paths silent. The hook itself decides whether to write.
 #[cfg(feature = "boa")]
+/// HIWAVE PATCH (vm-stats): the interpreter's counters as text (opcode counts, inline-cache misses
+/// by site, receiver kind and property name), collected when `RUSTKIT_VM_STATS=1` is set in the
+/// environment; empty otherwise. Diagnostic only.
+pub fn vm_stats_report() -> String {
+    boa_engine::vm_stats::report()
+}
+
 pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag>) {
     boa_engine::interrupt_diag::set_interrupt_diag(hook);
 }
