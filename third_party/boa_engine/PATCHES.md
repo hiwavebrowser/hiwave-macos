@@ -491,3 +491,23 @@ function environment, and the inner arrow read the wrong one (strict and sloppy;
 showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: `a[i]` and `a[i] = v` without the general path (`js-perf2`, item 2)
+
+**Why.** `get_by_value` cloned the key and the base, then converted the key, and only then reached
+its dense-array path; typed arrays and strings read through `__get__`; `SetPropertyByValue` cloned
+four registers before its dense-array store, and typed arrays had no shortcut at all. A parser's
+inner loops are mostly `table[i]` on a typed array or array.
+
+**What.** Marked `HIWAVE PATCH (js-perf2)`: `fast_index` and `fast_get_by_index` in
+`src/vm/opcode/get/property.rs` take a whole-number key (int32 or whole double, `0..=2^32-2`) on an
+array's dense element, a typed array's element or a string's code unit straight off the registers;
+`SetPropertyByValue` in `src/vm/opcode/set/property.rs` does the same for an extensible array's
+dense element and for a typed array when the receiver is the base itself. Anything else (holes,
+sparse arrays, accessors, a proxy, `arguments`, another receiver) takes the general path as before.
+`typed_array_get_element` and `typed_array_set_element` are `pub(crate)` for it. Pins:
+`crates/rustkit-js/tests/index_fast_paths.rs` (25 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/index_fast_path_cases.json`, which pass before the change too, and a speed pin
+that does not). Measured (release, Linux, cost of the operation relative to an empty loop
+iteration, median of 7): array read 0.87 to 0.67, array write 0.77 to 0.50, Uint16Array read 1.38
+to 1.01, Uint16Array write 1.86 to 0.93.

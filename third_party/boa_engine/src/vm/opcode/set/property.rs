@@ -1,5 +1,6 @@
 use crate::JsExpect;
 use crate::JsValue;
+use crate::object::JsObject;
 use crate::value::JsVariant;
 use crate::vm::opcode::{IndexOperand, RegisterOperand};
 use crate::{
@@ -154,6 +155,39 @@ impl SetPropertyByValue {
         ),
         context: &mut Context,
     ) -> JsResult<()> {
+        // HIWAVE PATCH (js-perf2): `a[i] = v` on an extensible array's dense element, or a typed
+        // array's element (an ordinary assignment, where the receiver is the base itself), before
+        // anything is cloned and the key converted.
+        if let Some(index) = crate::vm::opcode::get::fast_index(context.vm.get_register(key.into()))
+            && let Some(base) = context.vm.get_register(object.into()).as_object()
+        {
+            if base.is_array() {
+                let mut base_borrowed = base.borrow_mut();
+                if base_borrowed.extensible
+                    && base_borrowed
+                        .properties_mut()
+                        .set_dense_property(index, context.vm.get_register(value.into()))
+                {
+                    return Ok(());
+                }
+            } else if base.is::<crate::builtins::typed_array::TypedArray>()
+                && context
+                    .vm
+                    .get_register(receiver.into())
+                    .as_object()
+                    .is_some_and(|r| JsObject::equals(&r, &base))
+            {
+                let value = context.vm.get_register(value.into()).clone();
+                crate::builtins::typed_array::object::typed_array_set_element(
+                    &base,
+                    f64::from(index),
+                    &value,
+                    &mut context.into(),
+                )?;
+                return Ok(());
+            }
+        }
+
         let value = context.vm.get_register(value.into()).clone();
         let key = context.vm.get_register(key.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
