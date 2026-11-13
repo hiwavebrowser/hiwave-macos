@@ -1826,6 +1826,10 @@ impl<'ctx> ByteCompiler<'ctx> {
                 self.compile_update(update, &tmp, true);
                 self.register_allocator.dealloc(tmp);
             }
+            // HIWAVE PATCH (js-perf2 item 6): `local op= rhs` whose value is not used, on a
+            // mutable local: one instruction on the local's own register after the right side,
+            // instead of a copy in, the operation, and a copy out.
+            Expression::Assign(assign) if self.compile_local_compound_assign(assign) => {}
             Expression::Parenthesized(parenthesized) => {
                 self.compile_expr_for_side_effects(parenthesized.expression());
             }
@@ -1835,6 +1839,77 @@ impl<'ctx> ByteCompiler<'ctx> {
                 self.register_allocator.dealloc(tmp);
             }
         }
+    }
+
+    /// HIWAVE PATCH (js-perf2 item 6): compiles `x op= rhs` for its side effects only, in place on
+    /// the register of a mutable local `x`, and returns true; or returns false and emits nothing
+    /// when the statement is not that shape (the general path then compiles it). Requires that
+    /// `rhs` cannot assign any variable (`x += (x = 5)` reads the OLD `x` first) and that `x` is a
+    /// register local that may be written (not a `const`, not the name of a named function
+    /// expression), exactly as the in-place `x++` does.
+    fn compile_local_compound_assign(&mut self, assign: &boa_ast::expression::operator::Assign) -> bool {
+        use boa_ast::expression::operator::assign::AssignOp;
+        use boa_ast::expression::Identifier;
+        use boa_ast::expression::operator::assign::AssignTarget;
+
+        let op = assign.op();
+        if !matches!(
+            op,
+            AssignOp::Add
+                | AssignOp::Sub
+                | AssignOp::Mul
+                | AssignOp::Div
+                | AssignOp::Mod
+                | AssignOp::Exp
+                | AssignOp::And
+                | AssignOp::Or
+                | AssignOp::Xor
+                | AssignOp::Shl
+                | AssignOp::Shr
+                | AssignOp::Ushr
+        ) || Self::may_assign(assign.rhs())
+        {
+            return false;
+        }
+        let AssignTarget::Identifier(ident) = assign.lhs() else {
+            return false;
+        };
+        let ident: &Identifier = ident;
+        let name = ident.to_js_string(self.interner());
+        let binding = self.lexical_scope.get_identifier_reference(name.clone());
+        let is_lexical = binding.is_lexical();
+        let index = self.get_binding(&binding);
+        let BindingKind::Local(Some(local_reg)) = &index else {
+            return false;
+        };
+        let writable = if is_lexical {
+            self.lexical_scope.set_mutable_binding(name.clone()).is_ok()
+        } else {
+            self.lexical_scope.is_binding_mutable(&name) == Some(true)
+        };
+        if !writable {
+            return false;
+        }
+        let local: RegisterOperand = (*local_reg).into();
+        self.compile_expr_operand(assign.rhs(), |this, rhs| {
+            let bytecode = &mut this.bytecode;
+            match op {
+                AssignOp::Add => bytecode.emit_add(local, local, rhs),
+                AssignOp::Sub => bytecode.emit_sub(local, local, rhs),
+                AssignOp::Mul => bytecode.emit_mul(local, local, rhs),
+                AssignOp::Div => bytecode.emit_div(local, local, rhs),
+                AssignOp::Mod => bytecode.emit_mod(local, local, rhs),
+                AssignOp::Exp => bytecode.emit_pow(local, local, rhs),
+                AssignOp::And => bytecode.emit_bit_and(local, local, rhs),
+                AssignOp::Or => bytecode.emit_bit_or(local, local, rhs),
+                AssignOp::Xor => bytecode.emit_bit_xor(local, local, rhs),
+                AssignOp::Shl => bytecode.emit_shift_left(local, local, rhs),
+                AssignOp::Shr => bytecode.emit_shift_right(local, local, rhs),
+                AssignOp::Ushr => bytecode.emit_unsigned_shift_right(local, local, rhs),
+                _ => unreachable!("checked above"),
+            }
+        });
+        true
     }
 
     /// Compile an expression and leave the result on the stack.

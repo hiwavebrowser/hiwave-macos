@@ -29,3 +29,28 @@ fn generated_evaluation_order_programs_match_chrome() {
     }
     assert!(wrong.is_empty(), "{} of {} differ\n{}", wrong.len(), cases.len(), wrong.iter().take(4).cloned().collect::<Vec<_>>().join("\n"));
 }
+
+/// Hand-written scoping hazards for the same change (`tools/parity_oracle/compiled_locals_cases.json`):
+/// mapped and unmapped `arguments`, the name of a named function expression, `const`, the temporal
+/// dead zone, closures, generators, `eval`, `with`, destructured parameters, every compound
+/// operator, mixed types, and members whose object or key is reassigned.
+#[test]
+fn scoping_hazards_for_register_locals_match_chrome() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/compiled_locals_cases.json")).expect("cases");
+    let cases = data["cases"].as_array().expect("cases");
+    let mut wrong = Vec::new();
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let chrome = c["chrome"].as_str().expect("run js_cases_log.mjs --write");
+        let mut rt = JsRuntime::new().unwrap();
+        let got = match rt.evaluate_script(c["js"].as_str().unwrap()) {
+            Ok(JsValue::String(s)) => s,
+            other => format!("{other:?}"),
+        };
+        if got != chrome {
+            wrong.push(format!("{name}:\n  rustkit {got}\n  chrome  {chrome}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} differ\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+}
