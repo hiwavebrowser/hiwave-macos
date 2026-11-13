@@ -661,6 +661,8 @@ mod chrome_bridge_tests;
 mod waapi_layer_tests;
 #[cfg(test)]
 mod clock_live_timer_tests;
+#[cfg(test)]
+mod clock_flag_tests;
 mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
@@ -1768,6 +1770,10 @@ pub struct EngineConfig {
     /// Disable animations and transitions for deterministic parity captures.
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
+    /// The page clock has no real time in it (virtual time plus a fixed step per read), so a capture
+    /// that steps the timers reproduces every `t`-driven frame. Off by default: a live page reads a
+    /// clock that flows. Its own switch, not a side effect of `disable_animations`.
+    pub deterministic_page_clock: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -1863,6 +1869,7 @@ impl Default for EngineConfig {
             cookies_enabled: true,
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
+            deterministic_page_clock: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,

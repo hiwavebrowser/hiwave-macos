@@ -2417,6 +2417,10 @@ mod tests {
         assert!(capture_config(&parsed(&[]), None).disable_animations);
         assert!(capture_config(&parsed(&["--live-ms", "1000"]), None).disable_animations);
         assert!(!capture_config(&parsed(&["--animations"]), None).disable_animations);
+        // The stepped page clock is for a stepped capture; a live-ms run reads a clock that flows.
+        assert!(capture_config(&parsed(&[]), None).deterministic_page_clock);
+        assert!(!capture_config(&parsed(&["--live-ms", "1000"]), None).deterministic_page_clock);
+        assert!(capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
     }
 
     /// LAT14: the prelude page and how long it runs live before the
