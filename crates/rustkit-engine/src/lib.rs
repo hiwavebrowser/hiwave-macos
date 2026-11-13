@@ -463,6 +463,30 @@ mod inline_content_area_tests;
 mod float_in_items_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod cleared_float_width_tests;
+#[cfg(all(test, feature = "headless"))]
+mod dom1_attr_order_hit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod str8_web_api_tests;
+#[cfg(all(test, feature = "headless"))]
+mod spd1_key_click_tests;
+#[cfg(all(test, feature = "headless"))]
+mod lay2_fixed_containing_block_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html1_noscript_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html1_noscript_serialize_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html2_noscript_owner_document_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod spd3_range_rects_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod svg2_svg_geometry_events_tests;
+#[cfg(all(test, feature = "headless"))]
+mod r1_stack_pins_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl1_trusted_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl2_discrete_wheel_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -475,6 +499,8 @@ mod select_height_tests;
 mod input_height_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod input_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod set5_input_content_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod inline_line_pitch_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -721,6 +747,24 @@ mod svg_paint_state_tests;
 #[cfg(all(test, feature = "headless"))]
 mod focus_pseudo_tests;
 #[cfg(all(test, feature = "headless"))]
+mod form_setter_calls_tests;
+#[cfg(all(test, feature = "headless"))]
+mod document_title_tests;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's engines read a document for its title
+    /// after a script turn (`Engine::follow_script_title`).
+    static TITLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`TITLE_READS`], for the test that a page pays nothing for the title
+/// unless a write touched one.
+#[cfg(test)]
+pub(crate) fn title_reads() -> u64 {
+    TITLE_READS.with(|reads| reads.get())
+}
+#[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
@@ -771,6 +815,10 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_flex_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_viewport_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1404,6 +1452,9 @@ struct ViewState {
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// Script wrote to the DOM since the title was last compared with the
+    /// document's (`Engine::follow_script_title`).
+    title_stale: bool,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
@@ -1455,6 +1506,10 @@ struct ViewState {
     press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
+    /// The view host said the view lost the system focus and has not said
+    /// it came back: `document.hasFocus()` is false. A view that was never
+    /// told either way (a headless one) reads as focused.
+    view_blurred: bool,
     /// Current scroll offset (x, y) in pixels.
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
@@ -3455,6 +3510,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3473,6 +3529,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -3576,6 +3633,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3594,6 +3652,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -3714,6 +3773,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3732,6 +3792,7 @@ impl Engine {
             doc_selection: None,
             select_drag: None,
             view_focused: false,
+            view_blurred: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
@@ -4046,6 +4107,13 @@ impl Engine {
     /// becomes the held target: a box at its end hands on at once, as
     /// Chromium does.
     ///
+    /// The hold is for the steps of a gesture only (WHL2): a trackpad's
+    /// scroll, which the platform marks with a phase. A wheel on its own (a
+    /// mouse's notch) goes to what is under the pointer however soon after
+    /// the last one, as in Chrome, and so does the first step of a gesture
+    /// after such a wheel. `scroll_at` is a step of a gesture; `wheel_at`
+    /// takes which it is.
+    ///
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
     pub fn scroll_at(
@@ -4056,25 +4124,121 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        self.wheel_at(id, x, y, delta_x, delta_y, true)
+    }
+
+    /// A wheel over a viewport point (`scroll_at` has the rules); `gesture`
+    /// says whether it is a step of a gesture or a wheel on its own.
+    pub fn wheel_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
+        // The page hears the wheel when it has a listener for one
+        // (`DomBindings::wants_wheel`); a page with none runs no script
+        // here. A listener that is not passive hears it first and may
+        // cancel it, and then nothing scrolls. Passive ones hear it after
+        // the scroll, at whatever is then under the pointer (WHL1; Chrome
+        // for Testing 148). An open `<select>` drop-down keeps the wheel.
+        let listening = !self.select_popup_open(id)
+            && self
+                .views
+                .get(&id)
+                .and_then(|v| v.bindings.as_ref())
+                .is_some_and(|bindings| bindings.wants_wheel());
+        if !listening {
+            return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
+        }
+        let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
+            self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+        });
+        if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
+            return Ok(false);
+        }
+        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture)?;
+        if !cancelable {
+            self.fire_wheel(id, x, y, delta_x, delta_y, false);
+        }
+        Ok(changed)
+    }
+
+    /// `scroll_at` without the page's `wheel` event.
+    fn scroll_by_wheel(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
         // An open `<select>` drop-down takes the wheel.
         if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
             return Ok(moved);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        let recent = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        // Only a step of a gesture stays on what the step before it moved.
+        let held = recent.filter(|g| gesture && g.gesture);
         let held_target = held
             .map(|g| g.target)
             .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
         let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
-        let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
+        let rest = recent.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
         let (changed, rest) = match target {
             WheelTarget::Window => (self.scroll_view(id, delta_x, delta_y)?, (0.0, 0.0)),
             WheelTarget::Element(node) => self.wheel_element(id, node, delta_x, delta_y, rest)?,
         };
         if let Some(view) = self.views.get_mut(&id) {
-            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
+            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest, gesture });
         }
         Ok(changed)
+    }
+
+    /// The element under a viewport point (raw NodeId), for a `wheel`.
+    fn wheel_target(&self, id: EngineViewId, x: f32, y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let raw = Self::hit_at(view, x, y)?.node_id?;
+        let doc = view.document.as_ref()?;
+        let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// Dispatch `wheel` at the element under a viewport point, with the
+    /// engine's scroll deltas as DOM ones (down and right are positive).
+    /// Returns false when a listener cancelled it.
+    fn fire_wheel(&mut self, id: EngineViewId, x: f32, y: f32, delta_x: f32, delta_y: f32, cancelable: bool) -> bool {
+        let Some(target) = self.wheel_target(id, x, y) else {
+            return true;
+        };
+        let (offset_x, offset_y) = self
+            .views
+            .get(&id)
+            .and_then(|view| Self::hit_at(view, x, y))
+            .map_or((0.0, 0.0), |hit| (hit.local_x as f64, hit.local_y as f64));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: x as f64,
+            client_y: y as f64,
+            screen_x: x as f64,
+            screen_y: y as f64,
+            offset_x,
+            offset_y,
+            ..Default::default()
+        };
+        let not_cancelled = self.run_listeners(id, target, "wheel", true, |bindings| {
+            bindings.fire_wheel_event(target, &data, delta_x as f64, -(delta_y as f64), cancelable)
+        });
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after wheel event failed");
+        }
+        not_cancelled
     }
 
     /// What a new wheel over a point moves: the innermost scroller under the
@@ -6653,8 +6817,13 @@ impl Engine {
             }
             return true;
         }
+        // A key that types a character (and Enter) is followed by `keypress`
+        // when its keydown was not cancelled (UI Events §7.3; Chrome for
+        // Testing 148: Escape, Backspace and the arrows have none).
+        let types_character = key_code == 0x0D || (!ctrl && Self::is_typed_character(key));
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
-            let not_cancelled = self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
+            let not_cancelled = self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt)
+                && (!types_character || self.fire_key(id, None, "keypress", key_code, key, ctrl, shift, alt));
             // A focused button: Enter clicks it at the keydown; Space's
             // keydown is taken (no scroll) and clicks it at the keyup
             // (Chromium 143, CH2.E22).
@@ -6674,6 +6843,18 @@ impl Engine {
             }
             return !not_cancelled;
         };
+        // A focused checkbox or radio button takes no text: Space's keydown
+        // is taken and clicks it at the keyup, like a button's.
+        if key_code != 0x0D && self.is_checkable_input(id, focused.raw()) {
+            let not_cancelled = self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt);
+            if key == " " && !ctrl && !alt {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.space_armed = not_cancelled.then_some(focused.raw());
+                }
+                return true;
+            }
+            return false;
+        }
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
@@ -6682,7 +6863,24 @@ impl Engine {
         {
             return false;
         }
+        // Then `keypress`, and in a text field or an editing host
+        // `textInput` with the text; cancelling either types nothing.
+        if key_code != 0x0D && types_character {
+            if !self.fire_key(id, Some(focused.raw()), "keypress", key_code, key, ctrl, shift, alt) {
+                return false;
+            }
+            let editable = self.focused_is_text_control(id) || self.is_editing_host(id, focused.raw());
+            if editable && !self.fire_key(id, Some(focused.raw()), "textInput", key_code, key, ctrl, shift, alt) {
+                return false;
+            }
+        }
         self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
+    }
+
+    /// `key` is one typed character (not a named key such as `Escape`).
+    fn is_typed_character(key: &str) -> bool {
+        let mut chars = key.chars();
+        matches!((chars.next(), chars.next()), (Some(c), None) if !c.is_control())
     }
 
     /// What a key does in the focused element `focused` once its keydown
@@ -6868,6 +7066,11 @@ impl Engine {
         }
         let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
+            return None;
+        }
+        // Enter is a character key: its `keypress` follows, and cancelling
+        // that stops the submission too.
+        if !self.fire_key(id, Some(focused), "keypress", 0x0D, "", false, false, false) {
             return None;
         }
         let Some(bindings) = self.views.get(&id)?.bindings.as_ref() else {
@@ -7171,7 +7374,7 @@ impl Engine {
 
     /// Whether a checkbox or radio button in a SPECIFIC view is checked:
     /// what a click or script last set, else its `checked` attribute.
-    fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &HashMap<String, String>) -> bool {
+    fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &rustkit_dom::AttrMap) -> bool {
         self.views
             .get(&id)
             .and_then(|v| v.lay.checked_states.borrow().get(&node_raw).copied())
@@ -7192,8 +7395,8 @@ impl layout_ctx::LayoutCtx {
         &self,
         node_raw: usize,
         tag_lower: &str,
-        attributes: &'a HashMap<String, String>,
-    ) -> std::borrow::Cow<'a, HashMap<String, String>> {
+        attributes: &'a rustkit_dom::AttrMap,
+    ) -> std::borrow::Cow<'a, rustkit_dom::AttrMap> {
         let read = self.with_building_lay(|lay| {
             let checked = match tag_lower {
                 "input" | "option" => lay
@@ -7993,6 +8196,9 @@ impl Engine {
         let inspector = view.inspector.clone();
         let view_document = view.document.clone();
         bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
+        if view.view_blurred {
+            let _ = bindings.set_view_focused(false);
+        }
         bindings.set_loop_iteration_limit(loop_limit);
         bindings.set_max_job_iterations(microtask_job_cap(&self.config));
         bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
@@ -8110,6 +8316,8 @@ impl Engine {
         // make stay with the load's own pump.
         let mut offered = false;
         let mut rest = order.into_iter();
+        // `readyState` has moved on from `loading`.
+        let mut parsing_ended = false;
         // Counts the scripts that reach their run, as before LAT17.
         let mut index = 0usize;
         while let Some(position) = rest.next() {
@@ -8190,6 +8398,15 @@ impl Engine {
                 facts.cancelled(&inspector, &label);
                 cancel_rest(feed, &mut rest);
                 return;
+            }
+            // The parser is done once the classic scripts have run: the
+            // deferred and module scripts (and the async ones this load runs
+            // after them) see `interactive` (HTML §13.2.7 "the end"; Chrome
+            // for Testing 148 fires `readystatechange` before the first of
+            // them). The DOMContentLoaded step's own update is then a no-op.
+            if !parsing_ended && feed.entries[position].2 >= 1 {
+                parsing_ended = true;
+                let _ = bindings.set_ready_state("interactive");
             }
             let text = match source {
                 Ok(text) => text,
@@ -9271,7 +9488,8 @@ impl Engine {
         }
         let parsing = wgate::bucket(wgate::HoldBucket::Parse);
         let document =
-            Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
+            Document::parse_html_scripted(&html, self.config.javascript_enabled)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
         drop(parsing);
         let document = Rc::new(document);
         load_phase("parse");
@@ -9756,8 +9974,8 @@ impl Engine {
         });
 
         // Parse HTML
-        let document =
-            Document::parse_html(html).map_err(|e| EngineError::RenderError(e.to_string()))?;
+        let document = Document::parse_html_scripted(html, self.config.javascript_enabled)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
         let document = Rc::new(document);
 
         // Get title
@@ -10392,6 +10610,9 @@ impl Engine {
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         view.held_fixed = Some(root_box.held_fixed_paths());
+        // Which boxes hold something outside their own box is found again
+        // at the next hit test (`LayoutBox::forget_hit_overflow`).
+        root_box.forget_hit_overflow();
         view.layout = Some(Rc::new(root_box));
         if let Some(layout) = view.layout.as_ref() {
             incremental_layout::adopt(&view.lay, layout);
@@ -10836,6 +11057,7 @@ impl Engine {
             }
         }
         let patched = started.elapsed();
+        laid.forget_hit_overflow();
         let display_list = self.display_list_for(id, &laid);
         let listed = started.elapsed();
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -11416,6 +11638,8 @@ impl Engine {
                 return Ok(false);
             };
             apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
+            // A frame can move a box (a transform) with no layout.
+            laid.forget_hit_overflow();
             apply_pseudo_frame(&view.lay, &changes);
             let display_list = self.display_list_for(id, &laid);
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -12722,7 +12946,7 @@ impl Engine {
     /// behavioral difference on any current case.
     fn selector_segment(
         tag_lower: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         same_tag_index: usize,
         same_tag_total: usize,
         is_foreign: bool,
@@ -12768,7 +12992,7 @@ impl Engine {
     fn attach_identity(
         layout_box: &mut LayoutBox,
         selector_path: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         tag_lower: &str,
         element_ids: &Cell<usize>,
     ) {
@@ -12794,7 +13018,7 @@ impl Engine {
     /// Neither affects descendant paths — a child of an id'd element still
     /// reports the full tag/class path — which is why the reported selector and
     /// the path used to build children are computed separately.
-    fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
+    fn reported_selector(selector_path: &str, attributes: &rustkit_dom::AttrMap) -> String {
         match attributes.get("id") {
             Some(id) if !id.is_empty() => format!("#{}", id),
             // Body's own segment carries its class (`html > body.focus-mode`);
@@ -13390,6 +13614,8 @@ impl layout_ctx::LayoutCtx {
                             value,
                             placeholder,
                             input_type,
+                            // SET5: how many characters wide the field is.
+                            size: input_size_attribute(attributes.get("size").map(String::as_str)),
                         },
                     };
 
@@ -14377,7 +14603,7 @@ impl Engine {
     fn create_pseudo_element(
         &self,
         tag_name: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
         ancestors: &[Ancestor],
@@ -14408,7 +14634,7 @@ impl layout_ctx::LayoutCtx {
     fn first_letter_floats(
         &self,
         tag_name: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         stylesheets: &[Stylesheet],
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
@@ -14460,7 +14686,7 @@ impl layout_ctx::LayoutCtx {
     fn webkit_scrollbar_style(
         &self,
         tag_name: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         stylesheets: &[Stylesheet],
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
@@ -14584,7 +14810,7 @@ impl layout_ctx::LayoutCtx {
     fn pseudo_element_style(
         &self,
         tag_name: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         stylesheets: &[Stylesheet],
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
@@ -14926,7 +15152,7 @@ impl layout_ctx::LayoutCtx {
     fn compute_style_for_element(
         &self,
         tag_name: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
         ancestors: &[Ancestor],
@@ -18788,7 +19014,7 @@ impl Engine {
     /// `sizes`, then `src`, as `image_source::select_source` decides for this viewport and DPR.
     fn pick_image_source(
         node: &Node,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         env: &image_source::Env,
     ) -> Option<image_source::Pick> {
         // The `<source>` elements before the `<img>` in its `<picture>`.
@@ -18890,13 +19116,15 @@ impl Engine {
                         }
                         None => attributes,
                     };
-                    let mut keys: Vec<&String> = attributes.keys().collect();
-                    keys.sort();
-                    for k in keys {
+                    // The pairs themselves, by name: nothing is looked up
+                    // again, so nothing can be missing.
+                    let mut pairs: Vec<(&String, &String)> = attributes.iter().collect();
+                    pairs.sort_by(|a, b| a.0.cmp(b.0));
+                    for (name, value) in pairs {
                         out.push(' ');
-                        out.push_str(k);
+                        out.push_str(name);
                         out.push_str("=\"");
-                        out.push_str(&attributes[k].replace('"', "&quot;"));
+                        out.push_str(&value.replace('"', "&quot;"));
                         out.push('"');
                     }
                     out.push('>');
@@ -21462,7 +21690,7 @@ impl layout_ctx::LayoutCtx {
         &self,
         selector: &str,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
     ) -> bool {
         Engine::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
     }
@@ -21475,7 +21703,7 @@ impl Engine {
     fn keys_may_match(
         keys: &[SubjectKey],
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
     ) -> bool {
         Self::keys_may_match_keyed(keys, &KeyedElement::of(tag_name, attributes))
     }
@@ -21668,7 +21896,7 @@ impl SelectorMatcher {
         // has left its attribute is matched with the attribute as it would
         // be (the cascade does the same, `Engine::live_attributes`).
         let attr = checkedness_attribute(&tag);
-        let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
+        let live = |raw: usize, attributes: &rustkit_dom::AttrMap| match checked.get(&raw) {
             Some(&on) if on != attributes.contains_key(attr) => {
                 let mut attributes = attributes.clone();
                 if on {
@@ -21712,14 +21940,14 @@ impl SelectorMatcher {
         // An ancestor's earlier siblings are read from the DOM, with this
         // checkedness (`dom_sibling_key`).
         let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()), None);
-        let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
+        let classes = |attributes: &rustkit_dom::AttrMap| -> Vec<String> {
             attributes
                 .get("class")
                 .map(|c| c.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default()
         };
         // An ancestor's or an earlier sibling's classes, with its marks.
-        let marked_classes = |raw: usize, attributes: &HashMap<String, String>| -> Vec<String> {
+        let marked_classes = |raw: usize, attributes: &rustkit_dom::AttrMap| -> Vec<String> {
             let mut out = classes(attributes);
             out.extend(walk_marks(raw).into_iter().map(str::to_string));
             out
@@ -21818,7 +22046,7 @@ impl SelectorMatcher {
         &self,
         selector: &str,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
@@ -21840,7 +22068,7 @@ impl SelectorMatcher {
         &self,
         prepared: &PreparedSelector,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
@@ -22215,7 +22443,7 @@ impl SelectorMatcher {
         &self,
         selector: &str,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         sib: SiblingContext,
     ) -> bool {
         // Universal selector
@@ -22334,7 +22562,7 @@ impl SelectorMatcher {
     fn match_attribute_selector(
         &self,
         attr_selector: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
     ) -> bool {
         let attr_name = SelectorMatcher::attr_selector_name(attr_selector);
         match Self::attr_selector_test(attr_selector) {
@@ -22828,7 +23056,7 @@ impl SelectorMatcher {
         &self,
         list: &str,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         sib: SiblingContext,
     ) -> bool {
         SelectorMatcher::split_top_level_commas(list).into_iter().any(|member| {
@@ -22869,7 +23097,7 @@ impl SelectorMatcher {
         arg: Option<&str>,
         tag_name: &str,
         sib: SiblingContext,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
     ) -> bool {
         // DOM tag names are already lowercase; allocate only when not.
         let tag: std::borrow::Cow<str> = if tag_name.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -23100,7 +23328,7 @@ impl SelectorMatcher {
         member_specificity: &[(usize, (usize, usize, usize))],
         whole: (usize, usize, usize),
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
@@ -24413,7 +24641,66 @@ impl Engine {
         if self.follow_script_selection(id) {
             self.repaint_selection(id);
         }
+        self.follow_script_title(id);
         Ok(laid)
+    }
+
+    /// Could this write have changed the document's title: it is to a
+    /// `<title>` or its text, or it inserted, removed or replaced nodes
+    /// with a `<title>` among them. A write that replaced an element's
+    /// children says nothing of what was there, so with a title on record
+    /// (`had_title`) it counts: finding that title again is a short walk.
+    /// A page with no `<title>` is never walked for one.
+    fn touches_title(document: Option<&Document>, had_title: bool, record: &rustkit_bindings::MutationRecord) -> bool {
+        use rustkit_bindings::MutationKind;
+        let Some(document) = document else {
+            return false;
+        };
+        let node = |raw: usize| document.get_node(rustkit_dom::NodeId::new(raw));
+        match record.kind {
+            MutationKind::Text => node(record.node)
+                .is_some_and(|n| n.is_title_element() || n.parent().is_some_and(|p| p.is_title_element())),
+            MutationKind::ChildList => {
+                let Some(parent) = node(record.node) else {
+                    return had_title;
+                };
+                if parent.is_title_element() {
+                    return true;
+                }
+                match record.child {
+                    Some(child) => node(child).map_or(had_title, |child| child.holds_title_element()),
+                    None => had_title || parent.holds_title_element(),
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The tab's title follows the document's: when the script that just
+    /// settled wrote to the DOM and the document's title is no longer the
+    /// one last reported, report it (`EngineEvent::TitleChanged`, the empty
+    /// string when the document has none now). Once per settle, however
+    /// many writes there were.
+    fn follow_script_title(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if !std::mem::take(&mut view.title_stale) {
+            return;
+        }
+        #[cfg(test)]
+        TITLE_READS.with(|reads| reads.set(reads.get() + 1));
+        let Some(title) = view.document.as_ref().map(|document| document.title()) else {
+            return;
+        };
+        if title == view.title {
+            return;
+        }
+        view.title = title.clone();
+        let _ = self.event_tx.send(EngineEvent::TitleChanged {
+            view_id: id,
+            title: title.unwrap_or_default(),
+        });
     }
 
     fn flush_script_dom_writes_once(
@@ -24431,6 +24718,10 @@ impl Engine {
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
+        let had_title = view.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.document.as_deref(), had_title, record)) {
+            view.title_stale = true;
+        }
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
@@ -24737,6 +25028,10 @@ impl Engine {
                     set_root_font_for(&snapshot_of, root_element, &styled);
                     geometry_only(&snapshot_of, root_element)
                 }),
+                text_rects: Some(layout_text_rects({
+                    let built = built.clone();
+                    move || Some(built.clone())
+                })),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
                 computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
                 max_scroll,
@@ -24870,6 +25165,10 @@ impl Engine {
                     .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = true;
+                    view.view_blurred = false;
+                    if let Some(bindings) = view.bindings.as_ref() {
+                        let _ = bindings.set_view_focused(true);
+                    }
                     let _ = self
                         .event_tx
                         .send(EngineEvent::ViewFocused { view_id: *id });
@@ -24884,6 +25183,10 @@ impl Engine {
                     .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = false;
+                    view.view_blurred = true;
+                    if let Some(bindings) = view.bindings.as_ref() {
+                        let _ = bindings.set_view_focused(false);
+                    }
                     // A drag whose release went to another window ends here.
                     let id = *id;
                     self.cancel_drag(id);
@@ -28879,15 +29182,6 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
     bottom
 }
 
-/// The first box in the layout that names a node: what a hit inside the
-/// viewport that reaches no element answers.
-fn first_named_box_id(layout: &LayoutBox) -> Option<usize> {
-    if layout.node_id.is_some() {
-        return layout.node_id;
-    }
-    layout.children.first().and_then(first_named_box_id)
-}
-
 /// Hand script the geometry of `layout` without measuring it: the snapshot
 /// is built on the first read (`DomBindings::set_geometry_source`). The
 /// source holds the layout weakly, so it never keeps an old tree alive or
@@ -28922,6 +29216,8 @@ fn publish_geometry(
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
+    let text_layout = layout.clone();
+    bindings.set_text_rects(Some(layout_text_rects(move || text_layout.upgrade())));
     let styles_layout = layout.clone();
     let styles = computed_lines_source(move || styles_layout.upgrade(), root_element, lay.clone());
     bindings.set_geometry_source(Box::new(move || {
@@ -28965,9 +29261,26 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
     computed_read::set_root_font(root_style);
 }
 
-/// How long after a wheel the next one still belongs to its gesture. macOS
-/// marks a real gesture's phases, but the input queue does not carry them; a
+/// An `<input>`'s `size` attribute as a number of characters (HTML
+/// §4.10.5.3.2, the rules for parsing non-negative integers): leading ASCII
+/// whitespace, an optional "+", then the digits up to the first other
+/// character ("10px" is 10, "3.9" is 3, "1e2" is 1); 20 unless that is 1 to
+/// 2147483647. `HTMLInputElement.size` reads it the same way (dom.rs).
+fn input_size_attribute(value: Option<&str>) -> u32 {
+    let text = value.unwrap_or("").trim_start_matches(['\t', '\n', '\u{c}', '\r', ' ']);
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let digits: &str = &text[..text.bytes().take_while(u8::is_ascii_digit).count()];
+    match digits.trim_start_matches('0').len() {
+        0 if digits.is_empty() => 20,
+        n if n > 10 => 20,
+        _ => digits.parse::<u64>().ok().filter(|n| (1..=2_147_483_647).contains(n)).map_or(20, |n| n as u32),
+    }
+}
+
+/// How long after a step of a gesture the next step still belongs to it. A
 /// flick's events, inertia included, come much closer together than this.
+/// Which wheels are steps of a gesture is the platform's to say (macOS
+/// marks them with a phase; `PendingScroll::gesture`).
 const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// CH2.E7: a thumb drag in progress. The scroll follows the pointer's
@@ -29001,6 +29314,8 @@ struct WheelGesture {
     last: std::time::Instant,
     /// What rounding the last step to a whole pixel left over.
     rest: (f32, f32),
+    /// Whether that wheel was a step of a gesture (`Engine::wheel_at`).
+    gesture: bool,
 }
 
 /// Copy the view's element scroll offsets onto the scrollers of a layout tree,
@@ -29026,6 +29341,30 @@ fn stamp_element_scrolls(root: &LayoutBox, scrolls: &rustkit_bindings::SharedEle
     }
 }
 
+/// `Range.getClientRects` over the tree `layout` gives: where the
+/// characters of a text node are (`LayoutBox::text_range_rects`).
+fn layout_text_rects(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> rustkit_bindings::TextRects {
+    // Where each text node's runs are in the tree last asked about, found
+    // in one walk (R1 MED 2: a range asks about every text node in it, and
+    // each ask walked the whole tree). Held weakly: while it is, the tree
+    // at that address is not changed in place (`Rc::make_mut` moves it).
+    type Indexed = (std::rc::Weak<LayoutBox>, rustkit_layout::selection::TextRunIndex);
+    let indexed: std::cell::RefCell<Option<Indexed>> = std::cell::RefCell::new(None);
+    std::rc::Rc::new(move |node, span, collapsed| {
+        let Some(layout) = layout() else { return Vec::new() };
+        let mut indexed = indexed.borrow_mut();
+        if !indexed.as_ref().is_some_and(|(of, _)| std::ptr::eq(of.as_ptr(), Rc::as_ptr(&layout))) {
+            *indexed = Some((Rc::downgrade(&layout), layout.text_run_index()));
+        }
+        let index = &indexed.as_ref().expect("just set").1;
+        layout
+            .text_range_rects_in(index, node, span, collapsed)
+            .into_iter()
+            .map(|r| [r.x, r.y, r.width, r.height])
+            .collect()
+    })
+}
+
 /// `elementFromPoint` over the tree `layout` gives, with the offsets script
 /// has written by then: it answers before the engine's next paint.
 fn layout_hit_tester(
@@ -29042,14 +29381,8 @@ fn layout_hit_tester(
         }
         layout.stamp_sticky_shifts(scroll);
         let hit = layout.hit_test_scrolled(x, y, scroll);
-        if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
-            return Some(id);
-        }
-        let bounds = layout.dimensions.border_box();
-        if x >= 0.0 && y >= 0.0 && x < bounds.width && y < bounds.height {
-            return first_named_box_id(&layout);
-        }
-        None
+        // No box under the point: the bindings answer the root element.
+        hit.as_ref().and_then(|hit| hit.node_id)
     })
 }
 
@@ -29267,11 +29600,7 @@ fn geometry_snapshot_with(
         let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
-        let holds_fixed = transformed
-            || !b.style.filter.is_empty()
-            || !b.style.backdrop_filter.is_empty()
-            || b.style.will_change_holds_fixed
-            || b.style.contain_holds_fixed;
+        let holds_fixed = transformed || b.holds_fixed_boxes();
         let under = Scrollers {
             flow: inner,
             absolute: if positioned || holds_fixed { inner } else { scrollers.absolute },
@@ -30148,7 +30477,7 @@ fn path_tight_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f
 /// merely close would be compared and believed.
 fn svg_shape_user_bbox(
     tag: &str,
-    attributes: &HashMap<String, String>,
+    attributes: &rustkit_dom::AttrMap,
 ) -> Option<(f32, f32, f32, f32)> {
     let num = |name: &str, default: f32| -> f32 {
         attributes
@@ -31181,7 +31510,7 @@ mod tests {
             ("M60 20 A 5 5 0 0 1 80 20", [60.0, 10.0, 20.0, 10.0]),
         ];
         for (d, want) in cases {
-            let attrs: HashMap<String, String> =
+            let attrs: rustkit_dom::AttrMap =
                 [("d".to_string(), d.to_string())].into_iter().collect();
             let got = svg_shape_user_bbox("path", &attrs)
                 .unwrap_or_else(|| panic!("{d}: refused, Chrome reports {want:?}"));
@@ -31775,8 +32104,8 @@ mod tests {
     #[test]
     fn selector_nesting_past_the_cap_is_invalid_not_a_stack_overflow() {
         let nested = |n: usize| format!("{}.a{}", ":is(".repeat(n), ")".repeat(n));
-        let a = HashMap::from([("class".to_string(), "a".to_string())]);
-        let none = HashMap::new();
+        let a = rustkit_dom::AttrMap::from([("class".to_string(), "a".to_string())]);
+        let none = rustkit_dom::AttrMap::new();
         let ten = nested(10);
         assert!(SelectorMatcher::selector_list_is_valid(&ten));
         assert_eq!(SelectorMatcher.selector_specificity(&ten), (0, 1, 0));
@@ -33828,7 +34157,7 @@ mod element_identity_tests {
     // instrument failure this campaign exists to end. Everything below runs on
     // any machine.
 
-    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn attrs(pairs: &[(&str, &str)]) -> rustkit_dom::AttrMap {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -33850,7 +34179,7 @@ mod element_identity_tests {
         // green — the compiler's "unreachable pattern" warning was the only
         // witness until Pete asked what the warnings meant.
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let empty = std::collections::HashMap::new();
+        let empty = rustkit_dom::AttrMap::new();
         let vars = HashMap::new();
         let style_of = |tag: &str| {
             engine.lctx.compute_style_for_element(
@@ -33887,7 +34216,7 @@ mod element_identity_tests {
         // to its initial value. Chrome 148 computes `background-color:
         // rgba(0, 0, 0, 0)` after each of these over an earlier colour.
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let attrs: std::collections::HashMap<String, String> =
+        let attrs: rustkit_dom::AttrMap =
             [("class".to_string(), "a".to_string())].into_iter().collect();
         let vars = HashMap::new();
         let style_under = |css: &str| {
@@ -33955,7 +34284,7 @@ mod element_identity_tests {
         // `#0000`; the declaration was dropped, so the colour under it
         // stayed (weather.com's and squarespace's button resets).
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let attrs: std::collections::HashMap<String, String> =
+        let attrs: rustkit_dom::AttrMap =
             [("class".to_string(), "a".to_string())].into_iter().collect();
         let vars = HashMap::new();
         let style_under = |css: &str| {
@@ -33990,7 +34319,7 @@ mod element_identity_tests {
         use rustkit_css::BackgroundPositionValue::{Percent, Px};
         use rustkit_css::{BackgroundImage, BackgroundRepeat, BackgroundSize};
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let attrs: std::collections::HashMap<String, String> =
+        let attrs: rustkit_dom::AttrMap =
             [("class".to_string(), "a".to_string())].into_iter().collect();
         let vars = HashMap::new();
         let style_under = |css: &str| {
@@ -34230,7 +34559,7 @@ mod element_identity_tests {
         parent.font_family = "system-ui".to_string();
         parent.font_size = rustkit_css::Length::Px(14.0);
         parent.border_top_color = rustkit_css::Color::new(1, 2, 3, 1.0);
-        let style = |tag: &str, a: HashMap<String, String>| {
+        let style = |tag: &str, a: rustkit_dom::AttrMap| {
             engine.lctx.compute_style_for_element(
                 tag,
                 &a,
@@ -34455,14 +34784,14 @@ mod element_identity_tests {
 
         let ids = Cell::new(7);
         let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
-        Engine::attach_identity(&mut b, "", &HashMap::new(), "html", &ids);
+        Engine::attach_identity(&mut b, "", &rustkit_dom::AttrMap::new(), "html", &ids);
         assert!(
             b.identity().is_none(),
             "a box with no Chrome-side path was stamped with a join key"
         );
         assert_eq!(ids.get(), 7, "an untracked box consumed an element id");
 
-        Engine::attach_identity(&mut b, "body > div", &HashMap::new(), "div", &ids);
+        Engine::attach_identity(&mut b, "body > div", &rustkit_dom::AttrMap::new(), "div", &ids);
         assert_eq!(b.identity().map(|i| i.selector.clone()), Some("body > div".into()));
         assert_eq!(ids.get(), 8);
     }
@@ -34718,7 +35047,7 @@ mod button_children_tests {
             NodeType::Element {
                 tag_name: "button".into(),
                 namespace: String::new(),
-                attributes: HashMap::new(),
+                attributes: rustkit_dom::AttrMap::new(),
             },
         );
         for c in children {
@@ -34746,7 +35075,7 @@ mod button_children_tests {
             NodeType::Element {
                 tag_name: "svg".into(),
                 namespace: String::new(),
-                attributes: HashMap::new(),
+                attributes: rustkit_dom::AttrMap::new(),
             },
         );
         let layout = build_button(vec![svg]);
@@ -35422,7 +35751,7 @@ mod svg_image_tests {
             .borrow_mut()
             .insert("https://example.com/logo.svg".to_string(), svg);
 
-        let mut attrs = HashMap::new();
+        let mut attrs = rustkit_dom::AttrMap::new();
         attrs.insert("src".to_string(), "https://example.com/logo.svg".to_string());
         let img = Node::new(
             rustkit_dom::NodeId::new(1),
@@ -37399,7 +37728,9 @@ mod node_identity_tests {
 
         assert_eq!(
             js(&mut engine, id, "seen.join(',') + ' | ' + own.join(',')"),
-            format!("{:?}", rustkit_js::JsValue::String("b,i,s | b,i,s".into())),
+            // SVG2: the click on the svg lands on the rect in it, as in
+            // Chrome, and reaches the svg's own listener by bubbling.
+            format!("{:?}", rustkit_js::JsValue::String("b,i,rect | b,i,s".into())),
             "each click's target is the element under it, and that element's own listener runs"
         );
     }
@@ -39399,7 +39730,7 @@ thread_local! {
 mod selector_is_escape_tests {
     use super::*;
 
-    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn attrs(pairs: &[(&str, &str)]) -> rustkit_dom::AttrMap {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -39559,7 +39890,7 @@ mod rule_prefilter_tests {
     use super::*;
 
 
-    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn attrs(pairs: &[(&str, &str)]) -> rustkit_dom::AttrMap {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -39955,7 +40286,7 @@ mod rule_prefilter_tests {
         ];
         selectors.push(&escaped_class);
         selectors.push(&escaped_id);
-        let elements: Vec<(&str, HashMap<String, String>)> = vec![
+        let elements: Vec<(&str, rustkit_dom::AttrMap)> = vec![
             ("div", attrs(&[("class", "card wide"), ("id", "main"), ("data-x", "1")])),
             ("DIV", attrs(&[("class", "card")])),
             ("div", attrs(&[])),
@@ -40348,7 +40679,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
         let section: Vec<Ancestor> = vec![Rc::new(("section".to_string(), vec![], None, None))];
-        let hosts: Vec<(&str, HashMap<String, String>, &[Ancestor])> = vec![
+        let hosts: Vec<(&str, rustkit_dom::AttrMap, &[Ancestor])> = vec![
             ("div", attrs(&[("class", "card wide"), ("id", "main")]), &section),
             ("div", attrs(&[("class", "card")]), &[]),
             ("p", attrs(&[("data-x", "1")]), &section),
@@ -40356,7 +40687,7 @@ mod rule_prefilter_tests {
             ("html", attrs(&[]), &[]),
             ("em", attrs(&[("class", "other")]), &[]),
         ];
-        let pseudo = |host: &(&str, HashMap<String, String>, &[Ancestor]),
+        let pseudo = |host: &(&str, rustkit_dom::AttrMap, &[Ancestor]),
                       which: &str| {
             engine
                 .create_pseudo_element(
@@ -40692,7 +41023,7 @@ mod cascade_wire_tests {
         assert_eq!(SelectorMatcher.parse_pseudo_class("is(a, b(c)"), ("is".into(), Some("a, b(c)".into()), 10));
         assert_eq!(SelectorMatcher.parse_pseudo_class("not(.a) b"), ("not".into(), Some(".a".into()), 7));
         // Through the matchers too: no panic, and no match to invent.
-        let attrs = HashMap::new();
+        let attrs = rustkit_dom::AttrMap::new();
         for sel in ["div:not(", "div:not(.a", ":is(div"] {
             let _ = SelectorMatcher.selector_matches(sel, "div", &attrs, &[], &[], SiblingContext::SOLE);
         }
@@ -42425,7 +42756,7 @@ fn ancestor_compound_keys(compound: &AncestorCompound, out: &mut Vec<u32>) {
 /// an ancestor of everything, so `html[dir=rtl] .x` and `html:not(.js) .x`
 /// would otherwise match on every page. `None` leaves the attribute and
 /// `:not()` parts of a compound permissive, as they were for every ancestor.
-type AncestorKey = (String, Vec<String>, Option<String>, Option<Rc<HashMap<String, String>>>);
+type AncestorKey = (String, Vec<String>, Option<String>, Option<Rc<rustkit_dom::AttrMap>>);
 
 /// Chains share their entries, so building a child's chain (`ancestors[0]`
 /// is the parent) copies one pointer per level instead of every string.
@@ -42675,7 +43006,7 @@ impl SubjectCompound {
         &self,
         engine: &SelectorMatcher,
         tag_name: &str,
-        attributes: &HashMap<String, String>,
+        attributes: &rustkit_dom::AttrMap,
         ancestors: &[Ancestor],
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
@@ -43299,7 +43630,7 @@ fn chain_sibling_node(node: &Rc<Node>, idx: usize, key: &SiblingKey) -> Option<R
 }
 
 /// An element's classes as its descendants and later siblings see them.
-fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
+fn element_classes(attributes: &rustkit_dom::AttrMap) -> Vec<String> {
     let mut classes: Vec<String> = attributes
         .get("class")
         .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
@@ -43338,7 +43669,7 @@ struct ElementState {
 }
 
 impl ElementState {
-    fn of(tag_lower: &str, attributes: &HashMap<String, String>) -> Self {
+    fn of(tag_lower: &str, attributes: &rustkit_dom::AttrMap) -> Self {
         let input_type = attributes.get("type").map(|t| t.trim().to_ascii_lowercase());
         ElementState {
             checked: (tag_lower == "input"
@@ -43654,7 +43985,7 @@ impl AncestorCompound {
         tag: &str,
         classes: &[String],
         id: Option<&String>,
-        attributes: Option<&HashMap<String, String>>,
+        attributes: Option<&rustkit_dom::AttrMap>,
     ) -> bool {
         if !self.matches(tag, classes, id) {
             return false;
@@ -43723,7 +44054,7 @@ impl AncestorCompound {
         tag: &str,
         classes: &[String],
         id: Option<&String>,
-        attributes: Option<&HashMap<String, String>>,
+        attributes: Option<&rustkit_dom::AttrMap>,
         chain: &[Ancestor],
     ) -> bool {
         if self.any_of.iter().all(|alts| !alts.undecidable()) {
@@ -43889,8 +44220,8 @@ impl AnyOf {
 /// The attribute map an ancestor or earlier sibling known by its key tuple
 /// stands for: its classes and id, with the hover and active marks back as
 /// the attributes the subject matcher reads.
-fn key_attributes(classes: &[String], id: Option<&String>) -> HashMap<String, String> {
-    let mut attributes = HashMap::new();
+fn key_attributes(classes: &[String], id: Option<&String>) -> rustkit_dom::AttrMap {
+    let mut attributes = rustkit_dom::AttrMap::new();
     let mut class = String::new();
     for c in classes {
         if STATE_MARKS.contains(&c.as_str()) {
@@ -44010,7 +44341,7 @@ impl RuleBuckets {
     }
 
     /// Candidate global rule indices for an element, ascending, no repeats.
-    fn candidates(&self, tag_name: &str, attributes: &HashMap<String, String>) -> Vec<u32> {
+    fn candidates(&self, tag_name: &str, attributes: &rustkit_dom::AttrMap) -> Vec<u32> {
         let mut out: Vec<u32> = self.universal.clone();
         if let Some(id) = attributes.get("id") {
             if let Some(v) = self.by_id.get(id.as_str()) {
@@ -44047,11 +44378,11 @@ struct KeyedElement<'a> {
     tag_name: &'a str,
     id: Option<&'a str>,
     class: Option<&'a str>,
-    attributes: &'a HashMap<String, String>,
+    attributes: &'a rustkit_dom::AttrMap,
 }
 
 impl<'a> KeyedElement<'a> {
-    fn of(tag_name: &'a str, attributes: &'a HashMap<String, String>) -> Self {
+    fn of(tag_name: &'a str, attributes: &'a rustkit_dom::AttrMap) -> Self {
         KeyedElement {
             tag_name,
             id: attributes.get("id").map(String::as_str),
@@ -44186,7 +44517,7 @@ impl RuleIndex {
     }
 
     /// Candidate global rule indices for an element, ascending, no repeats.
-    fn candidates(&self, tag_name: &str, attributes: &HashMap<String, String>) -> Vec<u32> {
+    fn candidates(&self, tag_name: &str, attributes: &rustkit_dom::AttrMap) -> Vec<u32> {
         self.main.candidates(tag_name, attributes)
     }
 
@@ -44664,7 +44995,7 @@ thread_local! {
 struct TableHintScope(bool);
 
 impl TableHintScope {
-    fn enter(tag: &str, attributes: &HashMap<String, String>) -> Self {
+    fn enter(tag: &str, attributes: &rustkit_dom::AttrMap) -> Self {
         if tag != "table" {
             return TableHintScope(false);
         }
@@ -44721,7 +45052,7 @@ fn html_dimension(value: &str, ignore_zero: bool) -> Option<String> {
 
 /// The `border` attribute of a table: its integer value, or 1 when it is
 /// present but not a number (`<table border>`), as HTML maps it.
-fn table_border_attribute(attributes: &HashMap<String, String>) -> Option<u32> {
+fn table_border_attribute(attributes: &rustkit_dom::AttrMap) -> Option<u32> {
     attributes
         .get("border")
         .map(|v| parse_html_non_negative_integer(v).unwrap_or(1))
@@ -44747,7 +45078,7 @@ fn html_legacy_color(value: &str) -> String {
 /// builder copies them to `LayoutBox::table_span`.
 fn table_presentational_hints(
     tag: &str,
-    attributes: &HashMap<String, String>,
+    attributes: &rustkit_dom::AttrMap,
 ) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
     let attr = |name: &str| attributes.get(name).map(|v| v.trim());
@@ -44827,7 +45158,7 @@ fn table_presentational_hints(
 /// `colspan` / `rowspan` of a cell, `span` of a column or column group
 /// (HTML §4.9.11): non-negative integers; `colspan` and `span` of 0 are 1,
 /// `rowspan="0"` spans to the end of the row group (resolved in layout).
-fn table_span_of(tag: &str, attributes: &HashMap<String, String>) -> Option<rustkit_layout::table::TableSpan> {
+fn table_span_of(tag: &str, attributes: &rustkit_dom::AttrMap) -> Option<rustkit_layout::table::TableSpan> {
     let int = |name: &str| attributes.get(name).and_then(|v| parse_html_non_negative_integer(v));
     match tag {
         "td" | "th" => Some(rustkit_layout::table::TableSpan {
@@ -45359,9 +45690,9 @@ impl SelectorReads {
 
     /// The attributes of `attributes` an ancestor compound can read, for
     /// the element's entry in its descendants' chain.
-    fn ancestor_entry_attributes(&self, attributes: &HashMap<String, String>) -> HashMap<String, String> {
+    fn ancestor_entry_attributes(&self, attributes: &rustkit_dom::AttrMap) -> rustkit_dom::AttrMap {
         if self.ancestor_attributes.is_empty() {
-            return HashMap::new();
+            return rustkit_dom::AttrMap::new();
         }
         attributes
             .iter()
@@ -45372,7 +45703,7 @@ impl SelectorReads {
 
     /// What a chain id holds of its nearest ancestor's attributes: those
     /// an ancestor compound reads, each as far as a selector can read it.
-    fn chain_attributes(&self, attributes: Option<&HashMap<String, String>>) -> Vec<(String, MatchKeyValue)> {
+    fn chain_attributes(&self, attributes: Option<&rustkit_dom::AttrMap>) -> Vec<(String, MatchKeyValue)> {
         let Some(attributes) = attributes.filter(|_| !self.ancestor_attributes.is_empty()) else {
             return Vec::new();
         };
@@ -45500,7 +45831,7 @@ impl SelectorReads {
         }
     }
 
-    fn key(&self, chain: u64, tag_name: &str, attributes: &HashMap<String, String>) -> MatchShareKey {
+    fn key(&self, chain: u64, tag_name: &str, attributes: &rustkit_dom::AttrMap) -> MatchShareKey {
         let mut attributes: Vec<(String, MatchKeyValue)> = attributes
             .iter()
             .map(|(name, value)| (name.clone(), self.keyed_value(name, value)))
@@ -45588,7 +45919,7 @@ impl Drop for MatchShareChain {
 fn match_share_lookup(
     ix: &RuleIndex,
     tag_name: &str,
-    attributes: &HashMap<String, String>,
+    attributes: &rustkit_dom::AttrMap,
     ancestors: &[Ancestor],
 ) -> MatchShared {
     STYLE_SHARE.with(|s| {
@@ -46098,6 +46429,10 @@ fn forced_animation_frame(
             set_root_font_for(&snapshot_of, root_element, &styled);
             geometry_only(&snapshot_of, root_element)
         }),
+        text_rects: Some(layout_text_rects({
+            let built = built.clone();
+            move || Some(built.clone())
+        })),
         hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
         computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
         max_scroll,
@@ -47239,7 +47574,7 @@ mod style_share_tests {
         for id in ["top", "own", "listed", "denied"] {
             assert!(reads.ids.contains(id), "{id} is named");
         }
-        let attributes = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+        let attributes = |pairs: &[(&str, &str)]| -> rustkit_dom::AttrMap {
             pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
         };
         let key = |pairs: &[(&str, &str)]| reads.key(1, "a", &attributes(pairs));
@@ -47281,7 +47616,7 @@ mod style_share_tests {
         let kept = &reads.attribute_tests["data-x"];
         assert_eq!(kept.len(), tests.len() - 1, "`=a` twice is one test");
         for value in ["a", "a b", "b a", "a-b", "ab", "ba", "b", "", "a=b", "x~=a", "A"] {
-            let attributes: HashMap<String, String> =
+            let attributes: rustkit_dom::AttrMap =
                 [("data-x".to_string(), value.to_string())].into();
             let MatchKeyValue::Tests(keyed) = reads.keyed_value("data-x", value) else {
                 panic!("data-x is tested");
@@ -47315,14 +47650,14 @@ mod style_share_tests {
             ("data-x*=a", "bab", true),
             ("data-x*=a", "b", false),
         ] {
-            let attributes: HashMap<String, String> =
+            let attributes: rustkit_dom::AttrMap =
                 [("data-x".to_string(), value.to_string())].into();
             assert_eq!(
                 SelectorMatcher.match_attribute_selector(test, &attributes),
                 passes,
                 "[{test}] on data-x={value:?}"
             );
-            assert!(!SelectorMatcher.match_attribute_selector(test, &HashMap::new()));
+            assert!(!SelectorMatcher.match_attribute_selector(test, &rustkit_dom::AttrMap::new()));
         }
     }
 
@@ -47333,7 +47668,7 @@ mod style_share_tests {
         let _index = RuleIndexScope::install(e.lctx.build_rule_index(&sheets));
         let ix = active_rule_index(&sheets).expect("index");
         let _scope = StyleShareScope::install(StyleShareMode::Share);
-        let none = HashMap::new();
+        let none = rustkit_dom::AttrMap::new();
         let chain = |tag: &str, id: Option<&str>| -> Vec<Ancestor> {
             vec![Rc::new((tag.to_string(), Vec::new(), id.map(str::to_string), None))]
         };
@@ -47601,6 +47936,9 @@ mod incremental_restyle_tests {
         assert_restarts("hover", |key| key.hover = Some(1));
         assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
+        // CQ1 (#1070): measured container sizes fingerprint the memo key so a
+        // kept cascade is never replayed across different @container answers.
+        assert_restarts("containers", |key| key.containers = 1);
     }
 
     #[test]
@@ -48308,7 +48646,7 @@ mod windows_engine_pins {
 
     #[test]
     fn a_descendant_selector_requires_the_ancestor() {
-        let attrs = HashMap::new();
+        let attrs = rustkit_dom::AttrMap::new();
         let inside = [anc("div", "hero")];
         let outside: [Ancestor; 0] = [];
         assert!(SelectorMatcher.selector_matches(".hero p", "p", &attrs, &inside, &[], SiblingContext::SOLE));
@@ -48332,14 +48670,14 @@ mod windows_engine_pins {
 
     #[test]
     fn a_descendant_matches_a_non_adjacent_ancestor() {
-        let attrs = HashMap::new();
+        let attrs = rustkit_dom::AttrMap::new();
         let chain = [anc("div", "hero"), anc("section", "")];
         assert!(SelectorMatcher.selector_matches(".hero p", "p", &attrs, &chain, &[], SiblingContext::SOLE));
     }
 
     #[test]
     fn a_malformed_group_does_not_kill_its_valid_siblings() {
-        let attrs = HashMap::new();
+        let attrs = rustkit_dom::AttrMap::new();
         let ancestors = [anc("ul", "nav")];
         assert!(
             SelectorMatcher.selector_matches("> broken, .nav > li", "li", &attrs, &ancestors, &[], SiblingContext::SOLE),
@@ -48352,7 +48690,7 @@ mod windows_engine_pins {
     #[test]
     fn the_heading_scale_is_monotonically_decreasing() {
         let e = engine();
-        let attrs = HashMap::new();
+        let attrs = rustkit_dom::AttrMap::new();
         let vars = HashMap::new();
         let sizes: Vec<f32> = ["h1", "h2", "h3", "h4", "h5", "h6"]
             .iter()
@@ -52608,7 +52946,7 @@ mod walk_smalls_tests {
         );
         assert_eq!(Engine::child_selector_path("", Some("p")), "");
         assert_eq!(Engine::child_selector_path("body", None), "");
-        let attributes = HashMap::new();
+        let attributes = rustkit_dom::AttrMap::new();
         assert_eq!(Engine::selector_segment("li", &attributes, 12, 30, false), "li:nth-of-type(12)");
         assert_eq!(Engine::selector_segment("li", &attributes, 1, 1, false), "li");
     }

@@ -270,6 +270,8 @@ pub enum PageInput {
         y: f32,
         dx: f32,
         dy: f32,
+        /// A step of a gesture (a trackpad's), not a wheel on its own.
+        gesture: bool,
     },
     FormSubmit {
         reply: oneshot::Sender<Option<String>>,
@@ -817,8 +819,8 @@ impl EndpointSide {
                 let _ = reply.send(changed);
                 self.publish_commit(engine);
             }
-            PageInput::ScrollAt { x, y, dx, dy } => {
-                if let Err(e) = engine.scroll_at(view, x, y, dx, dy) {
+            PageInput::ScrollAt { x, y, dx, dy, gesture } => {
+                if let Err(e) = engine.wheel_at(view, x, y, dx, dy, gesture) {
                     tracing::debug!(error = %e, "scroll_at failed");
                 }
                 self.publish_commit(engine);

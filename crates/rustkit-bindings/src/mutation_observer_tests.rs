@@ -367,7 +367,7 @@ fn a_document_with_no_observer_is_unchanged() {
             document.getElementById('out').textContent = 'o';
             [typeof __rkDomHooks.mutation, root.outerHTML, document.getElementById('out').outerHTML].join('|')"#
         ),
-        "undefined|<div id=\"root\"><i id=\"y\"></i><p class=\"c\" data-q=\"1\" id=\"a\" style=\"color: red;\" title=\"t\">AA</p><i id=\"r\"></i>t<i id=\"z\"></i></div>|<span id=\"out\">o</span>"
+        "undefined|<div id=\"root\"><i id=\"y\"></i><p id=\"a\" title=\"t\" class=\"c\" data-q=\"1\" style=\"color: red;\">AA</p><i id=\"r\"></i>t<i id=\"z\"></i></div>|<span id=\"out\">o</span>"
     );
     assert_eq!(ev(&b, "String(calls)"), "0");
 }

@@ -54,6 +54,10 @@ pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
 mod net_bridge_tests;
 #[cfg(test)]
+mod typed_text_source_tests;
+#[cfg(test)]
+mod noscript_serialize_tests;
+#[cfg(test)]
 mod web_xhr_tests;
 #[cfg(test)]
 mod web_fetch_tests;
@@ -136,11 +140,12 @@ mod web_canvas_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
+mod svg_geometry;
 mod web_url;
 
 pub use dom::{
     AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, ForcedReadProbe, CssAnimationInfo, ElementScrolls,
-    ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, TextRects, SelectorMatchFn, SharedAnimatedStyles,
     SharedElementScrolls,
 };
 pub mod events;
@@ -534,12 +539,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     var realNow = Date.now;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
-        target.dispatchEvent({
+        var event = {
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
             target: target, currentTarget: null, timeStamp: now, isTrusted: true,
             preventDefault: function () { this.defaultPrevented = true; },
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
-        });
+        };
+        // With the DOM wrappers installed, trust is theirs to give (dom.rs).
+        if (typeof __rk.trust === 'function') __rk.trust(event);
+        target.dispatchEvent(event);
     };
 
     function schedule(cb, ms, args, repeat, frame) {
@@ -1167,7 +1175,14 @@ impl DomBindings {
         dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
-        runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        runtime.evaluate_with_host(include_str!("web_interfaces.js"))?;
+        // getBBox, getTotalLength, getPointAtLength on SVG shapes (svg_geometry.rs,
+        // web_svg_geometry.js); needs the SVG interfaces node_apis.js made.
+        svg_geometry::install(&mut runtime)?;
+        // XMLSerializer (web_xml_serializer.js).
+        runtime.evaluate_script(include_str!("web_xml_serializer.js"))?;
+        // FileReader over web_blob.js's Blob (web_file_reader.js); an EventTarget.
+        runtime.evaluate_script(include_str!("web_file_reader.js"))?;
         // A constructible DataTransfer and the drag data store the engine's drag and
         // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
         runtime.evaluate_script(include_str!("web_dnd.js"))?;
@@ -1190,13 +1205,13 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
-        runtime.evaluate_script(include_str!("web_document.js"))?;
+        runtime.evaluate_with_host(include_str!("web_document.js"))?;
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
-        runtime.evaluate_script(include_str!("web_forms.js"))?;
+        runtime.evaluate_with_host(include_str!("web_forms.js"))?;
         // execCommand, navigator.clipboard and the user's edit commands over
         // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
         let edit = Rc::new(dom::editing::EditContext::default());
@@ -1483,11 +1498,10 @@ impl DomBindings {
             C::DeleteWordBackward => ("deleteWordBackward", None),
             C::DeleteWordForward => ("deleteWordForward", None),
         };
-        let value = value.map_or("null".to_string(), |v| {
-            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
-        });
-        let script = format!("document.__rkUserEdit({node}, {name:?}, {value})");
-        let report = match self.runtime.borrow_mut().evaluate_script(&script)? {
+        // The text is an argument, never script source (`fire_key_event`).
+        let (value, text) = value.map_or(("null", ""), |v| ("__a[0]", v));
+        let script = format!("return document.__rkUserEdit({node}, {name:?}, {value});");
+        let report = match self.runtime.borrow_mut().evaluate_host_turn(&script, &[text])? {
             JsValue::String(json) => json,
             _ => return Ok(Default::default()),
         };
@@ -1514,9 +1528,9 @@ impl DomBindings {
         action: &str,
         text: &str,
     ) -> Result<Option<serde_json::Value>, BindingError> {
-        let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
-        let script = format!("document.__rkCompose({node}, {action:?}, {text})");
-        Ok(match self.runtime.borrow_mut().evaluate_script(&script)? {
+        // The text is an argument, never script source (`fire_key_event`).
+        let script = format!("return document.__rkCompose({node}, {action:?}, __a[0]);");
+        Ok(match self.runtime.borrow_mut().evaluate_host_turn(&script, &[text])? {
             JsValue::String(json) => serde_json::from_str(&json).ok(),
             _ => None,
         })
@@ -1682,7 +1696,6 @@ impl DomBindings {
             // getElementsBy*, documentElement/head/body) is Rust-backed and
             // installed by `dom::install`.
             var document = {
-                title: '',
                 readyState: 'loading',
                 cookie: '',
                 domain: '',
@@ -2021,6 +2034,7 @@ impl DomBindings {
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
         host.set_hit_tester(None);
+        host.set_text_rects(None);
         host.geometry = geometry;
     }
 
@@ -2028,6 +2042,11 @@ impl DomBindings {
     /// the published boxes. A point answers null until a layout exists.
     pub fn set_hit_tester(&self, tester: Option<HitTester>) {
         self.dom_host.borrow_mut().set_hit_tester(tester);
+    }
+
+    /// The layout's text geometry, which `Range.getClientRects` reads.
+    pub fn set_text_rects(&self, rects: Option<TextRects>) {
+        self.dom_host.borrow_mut().set_text_rects(rects);
     }
 
     /// Publish a new layout without measuring it: `source` builds the maps
@@ -2159,9 +2178,8 @@ impl DomBindings {
         self.mutation_log.take();
 
         // Sync to JS
-        let title = document.title().unwrap_or_default();
+        // (`document.title` reads the new document's <title> itself.)
         let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&format!("document.title = {:?};", title))?;
         runtime.evaluate_script("document.readyState = 'complete';")?;
 
         // Rebind the DOM wrappers. Wrappers handed out for a previous
@@ -2564,11 +2582,83 @@ impl DomBindings {
             self.notify_user_activation();
         }
         let node = node.map_or("null".to_string(), |n| n.to_string());
-        let result = self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
-             ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }})",
-            data.key, data.code, data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
-        ))?;
+        // What was typed goes in as an argument (`__a`), never in the
+        // source: script source is compiled, can be quoted in an error and
+        // can be captured for a log. The dispatchers are on the host
+        // object, where no page script can call or replace them.
+        // `textInput` rides the key path: the text a key is about to insert.
+        if event_type == "textInput" {
+            let result = self
+                .runtime
+                .borrow_mut()
+                .evaluate_host_turn(&format!("return __rk.fireTextInput({node}, __a[0]);"), &[&data.key])?;
+            return Ok(!matches!(result, JsValue::Boolean(false)));
+        }
+        let result = self.runtime.borrow_mut().evaluate_host_turn(
+            &format!(
+                "return __rk.fireKey({node}, {event_type:?}, {{ key: __a[0], code: __a[1], repeat: {}, \
+                 ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {} }});",
+                data.repeat, data.ctrl_key, data.alt_key, data.shift_key, data.meta_key,
+            ),
+            &[&data.key, &data.code],
+        )?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// The view lost or regained the system focus: `document.hasFocus()`
+    /// answers it. A page that was never told reads as focused.
+    pub fn set_view_focused(&self, focused: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_with_host(&format!("__rk.viewFocused = {focused};"))?;
+        Ok(())
+    }
+
+    /// Whether script has registered a `wheel` listener: only then does
+    /// the engine dispatch `wheel` before a scroll (`fire_wheel_event`).
+    pub fn wants_wheel(&self) -> bool {
+        self.dom_host.borrow().wants_wheel()
+    }
+
+    /// Whether a wheel at an element (by node id) can be cancelled: a
+    /// listener on its way up is not passive. Then the event goes out
+    /// before the scroll; otherwise after it.
+    pub fn wheel_blocks(&self, node: usize) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_with_host(&format!("return __rk.wheelBlocks({node});"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
+    /// Dispatch the user's wheel at an element (by node id): `delta_x` /
+    /// `delta_y` are DOM deltas in pixels (positive is right and down).
+    /// `cancelable` before the scroll it would cause, and then false comes
+    /// back when a listener cancelled it.
+    pub fn fire_wheel_event(
+        &self,
+        node: usize,
+        data: &MouseEventBindingData,
+        delta_x: f64,
+        delta_y: f64,
+        cancelable: bool,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireWheel({node}, {{ clientX: {}, clientY: {}, screenX: {}, screenY: {}, \
+             offsetX: {}, offsetY: {}, buttons: {}, ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {}, \
+             deltaX: {delta_x}, deltaY: {delta_y} }}, {cancelable});",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+        ), &[])?;
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
@@ -2618,7 +2708,7 @@ impl DomBindings {
         let result = self
             .runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkEditKey({host}, {op:?}, {text:?})"))?;
+            .evaluate_host_turn(&format!("return document.__rkEditKey({host}, {op:?}, __a[0]);"), &[text])?;
         Ok(matches!(result, JsValue::Boolean(true)))
     }
 
@@ -2641,10 +2731,11 @@ impl DomBindings {
     /// Fire `input` at a control (by node id) whose value the user's typing
     /// changed. `data` is the inserted text, `None` for a deletion.
     pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
-        let data = data.map_or("null".to_string(), |d| format!("{d:?}"));
+        // The inserted text is an argument, as in `fire_key_event`.
+        let (data, text) = data.map_or(("null", ""), |d| ("__a[0]", d));
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkFireInput({node}, {data});"))?;
+            .evaluate_host_turn(&format!("return __rk.fireInput({node}, {data});"), &[text])?;
         Ok(())
     }
 
@@ -2657,7 +2748,7 @@ impl DomBindings {
         let picked = self
             .runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+            .evaluate_host_turn(&format!("return __rk.pickOption({node}, {index});"), &[])?;
         Ok(matches!(picked, JsValue::Boolean(true)))
     }
 
@@ -2666,7 +2757,7 @@ impl DomBindings {
     pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkImplicitSubmit({node});"))?;
+            .evaluate_host_turn(&format!("return __rk.implicitSubmit({node});"), &[])?;
         Ok(())
     }
 
@@ -2710,10 +2801,11 @@ impl DomBindings {
     /// Set `document.readyState` (`loading` / `interactive` / `complete`)
     /// and fire `readystatechange` on the document. That is the spec's
     /// readiness update: the event comes before `DOMContentLoaded` and
-    /// before `window` `load`.
+    /// before `window` `load`. A state the document is already in changes
+    /// nothing and fires nothing.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            "if (document.readyState !== {0:?}) {{ document.readyState = {0:?}; window.__rustkit_fire('document', 'readystatechange'); }}",
             state
         ))?;
         Ok(())
@@ -5399,7 +5491,7 @@ mod tests {
         );
         assert_eq!(
             eval_string(&b, "document.getElementById('outside').outerHTML"),
-            "<p class=\"x\" id=\"outside\">Out</p>"
+            "<p id=\"outside\" class=\"x\">Out</p>"
         );
         // Escaping: text escapes & < > and NBSP; attributes also escape ".
         // Void elements have no end tag; raw-text elements are not escaped.

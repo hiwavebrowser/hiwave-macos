@@ -68,7 +68,10 @@
     getter('webkitFullscreenElement', function () { return null; });
     getter('pictureInPictureElement', function () { return null; });
     getter('pointerLockElement', function () { return null; });
-    value('hasFocus', function hasFocus() { return true; });
+    // HTML §6.6.3: whether the document's window has the system focus. The
+    // engine says when its view lost or regained it (`set_view_focused`); a
+    // view that was never told is taken as focused, as a headless Chrome is.
+    value('hasFocus', function hasFocus() { return __rk.viewFocused !== false; });
     value('exitFullscreen', function exitFullscreen() { return Promise.resolve(); });
     value('adoptNode', function adoptNode(node) {
         if (node === null || typeof node !== 'object' || typeof node.nodeType !== 'number') {
@@ -78,6 +81,8 @@
             throw new g.DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.", 'NotSupportedError');
         }
         if (node.parentNode) node.parentNode.removeChild(node);
+        // The node is this document's now (its scripting state with it).
+        if (typeof __rk.adoptTo === 'function') __rk.adoptTo(node, this);
         return node;
     });
 
