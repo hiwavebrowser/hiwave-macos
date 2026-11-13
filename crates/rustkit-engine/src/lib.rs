@@ -405,6 +405,8 @@ mod script_net_tests;
 #[cfg(test)]
 mod script_net_t7_tests;
 #[cfg(test)]
+mod script_net_body_size_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -461,6 +463,8 @@ mod inline_content_area_tests;
 mod float_in_items_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod cleared_float_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod icon_box_shrink_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -660,6 +664,8 @@ mod live_timer_slice_tests;
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
+#[cfg(all(test, feature = "headless"))]
+mod layout_once_tests;
 #[cfg(test)]
 mod loop_limit_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8470,6 +8476,7 @@ impl Engine {
                                 &mut count,
                                 inspector,
                                 requests,
+                                post_load_live,
                             ),
                         )
                         .await;

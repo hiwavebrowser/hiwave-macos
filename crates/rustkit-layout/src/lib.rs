@@ -22,6 +22,7 @@ pub mod grid;
 pub mod incremental;
 pub mod images;
 pub mod intrinsic_cache;
+pub mod layout_memo;
 pub mod margin_collapse;
 pub mod multicol;
 pub mod path_data;
@@ -1369,7 +1370,7 @@ pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32
 }
 
 /// Margin collapse context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarginCollapseContext {
     /// Pending positive margin.
     pub positive_margin: f32,
@@ -1432,7 +1433,7 @@ impl MarginCollapseContext {
 }
 
 /// A 2D rectangle.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -1468,7 +1469,7 @@ impl Rect {
 }
 
 /// Edge sizes (margin, padding, border).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EdgeSizes {
     pub top: f32,
     pub right: f32,
@@ -1487,7 +1488,7 @@ impl EdgeSizes {
 }
 
 /// Box dimensions including content, padding, border, and margin.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Dimensions {
     /// Content area.
     pub content: Rect,
@@ -2030,6 +2031,9 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// Recorded results of this box's child layout for the current root layout (LAT21,
+    /// `layout_memo`). Never an input to layout.
+    pub(crate) layout_memo: Option<Box<layout_memo::BoxMemo>>,
     /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
     /// when it is an element scroller. Set through a shared tree by the
     /// engine, from its per-view table, when script scrolls. Layout never
@@ -2120,6 +2124,7 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            layout_memo: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
@@ -2736,6 +2741,7 @@ impl LayoutBox {
         definite_height: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
@@ -3986,6 +3992,11 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size + extra_w,
+            // css-sizing-3 §3.1: a button's `min-content` is its longest word plus the horizontal
+            // padding and border (Chrome 148: "Medium Button" 72.91, where max-content is 123.61).
+            Length::Auto if self.style.width_min_content && matches!(control, FormControlType::Button { .. }) => {
+                crate::grid::form_control_min_content_width(&self.style, &control)
+            }
             Length::Auto | Length::Zero => intrinsic_width,
             // `vw`, `rem`, `calc()` and the rest: only px/%/em were read, so
             // a `width: calc(25vw + 10px)` button kept its intrinsic width
@@ -4065,6 +4076,21 @@ impl LayoutBox {
         let (edges_w, edges_h) = self.control_edge_extent(&control, width_base);
         let width = width.max(edges_w);
         let height = height.max(edges_h);
+
+        // CB3d: a button's label wraps inside its border box when the width is narrower than the
+        // label (a fixed `width`, `min-content`, a flexed or stretched width), one more line height
+        // per line (Chrome 148: "Medium Button" in `width: 120px` is 42 tall, 24 on one line).
+        // `white-space: nowrap`/`pre` keep one line; an author `height` is the author's.
+        let height = match &control {
+            FormControlType::Button { label, .. } if matches!(self.style.height, Length::Auto | Length::Zero) => {
+                let (pad_sides, border_sides) = button_box_sides(&self.style, font_size);
+                let inner = (width - pad_sides[1] - pad_sides[3] - border_sides[1] - border_sides[3]).max(0.0);
+                let lines = crate::grid::wrapped_line_count(label, &self.style, inner);
+                let line = (intrinsic_height - pad_sides[0] - pad_sides[2] - border_sides[0] - border_sides[2]).max(0.0);
+                height.max(intrinsic_height + (lines.saturating_sub(1)) as f32 * line)
+            }
+            _ => height,
+        };
 
         // Author margins are part of the control's margin box: the line box
         // advances by them and its height counts them (css-selectors §4/§6:
@@ -4571,8 +4597,13 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        layout_memo::bump_epoch();
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
         self.apply_relative_offsets(containing_block);
+        // The memo is per root layout: its snapshots must not stay on the tree (LAT21, R1 on #1073).
+        if layout_memo::memo_mode() != layout_memo::MemoMode::Off {
+            layout_memo::clear_memos(self);
+        }
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -4588,6 +4619,7 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         incremental::count_visit();
+        count_layout_visit();
         self.children_laid_at = None;
         // Handle clear property
         if self.clear != Clear::None {
@@ -7232,7 +7264,7 @@ impl LayoutBox {
     }
 
     /// Layout block children with margin collapse.
-    fn layout_block_children_with_collapse(
+    pub(crate) fn layout_block_children_with_collapse_run(
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
@@ -22789,4 +22821,22 @@ mod overlay_hit_tests {
         // Elsewhere on the overlay: the overlay, not the page under it.
         assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
+}
+
+thread_local! {
+    /// Boxes laid out on this thread since the last [`take_layout_visits`]: one per call of
+    /// `layout_with_collapse_in` or `layout_with_percent_base`. A box laid out k times in one pass
+    /// counts k, so `visits / boxes` is the pass's re-layout multiplicity (LAT21: walmart ran
+    /// ~160 visits per box).
+    static LAYOUT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_layout_visit() {
+    LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of box layouts on this thread since the last call, and a fresh count.
+pub fn take_layout_visits() -> u64 {
+    LAYOUT_VISITS.with(|n| n.replace(0))
 }

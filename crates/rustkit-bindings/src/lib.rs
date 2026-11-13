@@ -1356,6 +1356,17 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_navigation_requests()
     }
 
+    /// The text of the Blob behind a `blob:` URL this page made with
+    /// `URL.createObjectURL`, or `None` when nothing stands behind it (never
+    /// made, or revoked). For `<script src="blob:...">`: the engine has no
+    /// network to ask for such a URL.
+    pub fn blob_url_text(&self, url: &str) -> Option<String> {
+        // The host's store, read in Rust: no script runs, so nothing of
+        // the page's can be on this path.
+        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// The external classic scripts script inserted since the last call,
     /// oldest first. The engine fetches each and runs it as that element's
     /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
@@ -1608,7 +1619,7 @@ impl DomBindings {
         web_crypto::install(runtime)?;
 
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
-        runtime.evaluate_script(include_str!("web_encoding.js"))?;
+        runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_with_host(include_str!("web_streams.js"))?;

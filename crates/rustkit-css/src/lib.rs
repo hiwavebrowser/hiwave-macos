@@ -3270,6 +3270,9 @@ pub struct ComputedStyle {
     /// `Length` cannot carry the keyword, so this says which one `width_keywords` bit 1 stands for.
     /// Not inherited.
     pub width_max_content: bool,
+    /// The winning `width` is `min-content` (prefixed or any case), as `width_max_content` is for
+    /// max-content (CB3d). Not inherited.
+    pub width_min_content: bool,
     /// A `writing-mode` other than `horizontal-tb` was declared. Layout
     /// does not honour it yet, but `@container` treats the box's width as
     /// unknown (its inline size is the physical height). Not inherited.
