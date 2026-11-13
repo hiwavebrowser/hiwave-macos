@@ -24,6 +24,11 @@ const cases = {
   user_to_primitive_self: "var o = { [Symbol.toPrimitive]() { return String(o); } }; try { return 'value:' + String(o); } catch (e) { return 'ERR:' + e.name; }",
   user_to_string_counts_calls: "var d = 0; var o = { toString() { d++; if (d > 5) return 'deep'; return String(o); } }; return String(o) + ':' + d;",
   user_inner_once: "var inner = 'unset', o = { toString() { inner = String(o); return 'x'; } }; try { String(o); } catch (e) { return 'ERR:' + e.name; } return 'inner=' + JSON.stringify(inner);",
+  // Loops made only of built-ins (R1 HOLD on #1131): no user function, so nothing enters the interpreter.
+  builtin_error_message_self: "var e = new Error(); e.message = e; try { return 'value:' + String(e); } catch (x) { return 'ERR:' + x.name; }",
+  builtin_tolocale_is_tostring: "var o = {}; o.toString = Object.prototype.toLocaleString; try { return 'value:' + String(o); } catch (x) { return 'ERR:' + x.name; }",
+  builtin_join_is_array_tostring: "var a = []; a.join = Array.prototype.toString; try { return 'value:' + String(a); } catch (x) { return 'ERR:' + x.name; }",
+  builtin_loop_then_runs_on: "var e = new Error(); e.message = e; try { String(e); } catch (x) {} return 'after:' + String([1, 2]);",
 };
 fs.writeFileSync(casesOut, JSON.stringify(cases, null, 1));
 const b = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu"] });
