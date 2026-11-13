@@ -66,6 +66,22 @@
    }
   },
   {
+   "name": "redirect-same-to-other-origin",
+   "script": "img('/to-other', null, function (i) { x.drawImage(i, 0, 0); read(); })",
+   "chrome": {
+    "name": "SecurityError",
+    "message": "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data."
+   }
+  },
+  {
+   "name": "redirect-same-to-same-origin",
+   "script": "img('/to-same', null, function (i) { x.drawImage(i, 0, 0); read(); })",
+   "chrome": {
+    "name": "ok",
+    "message": ""
+   }
+  },
+  {
    "name": "huge-get-image-data",
    "script": "try { x.getImageData(0, 0, 100000, 100000); done('ok', ''); } catch (e) { done(e.name, e.message); }",
    "chrome": {

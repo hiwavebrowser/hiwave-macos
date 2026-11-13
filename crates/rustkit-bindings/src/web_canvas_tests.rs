@@ -237,7 +237,8 @@ fn canvas_origin_checks_match_chrome() {
     let mut failures = Vec::new();
     for case in data["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        if name == "cors-anonymous-img" || name == "huge-get-image-data" {
+        // Redirects are the fetch's (rustkit-engine canvas_context_tests).
+        if name == "cors-anonymous-img" || name == "huge-get-image-data" || name.starts_with("redirect-") {
             continue;
         }
         let doc = Rc::new(Document::parse_html(
@@ -247,7 +248,7 @@ fn canvas_origin_checks_match_chrome() {
         b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
         b.set_document(doc.clone()).unwrap();
         b.set_canvas_image_loader(Some(Box::new(|_url: &str, _size: (u32, u32)| {
-            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255])
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|b| (b, Vec::new()))
         })));
         let id = |e: &str| doc.get_element_by_id(e).unwrap().id.raw();
         b.fire_image_load(id("s"), 1, 1, "https://a.test/img.png").unwrap();
@@ -270,4 +271,36 @@ fn canvas_origin_checks_match_chrome() {
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// Canvas origin checks across redirects, Chrome 148
+/// (canvas_taint_cases.json "redirect-same-to-other-origin" /
+/// "redirect-same-to-same-origin"): an image the page asked for at its own
+/// origin whose response came through another origin leaves the canvas
+/// not origin-clean; one that stayed at the page's origin does not. The
+/// loader reports the response's URLs (each hop and the final one).
+#[test]
+fn canvas_origin_checks_follow_the_response_urls() {
+    for (hops, expected) in [
+        (["https://a.test/to-other", "https://b.test/img.png"], "SecurityError"),
+        (["https://a.test/to-same", "https://a.test/img.png"], "ok"),
+    ] {
+        let doc = Rc::new(Document::parse_html(
+            "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s></body></html>",
+        ).unwrap());
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
+        b.set_document(doc.clone()).unwrap();
+        let urls: Vec<url::Url> = hops.iter().map(|u| url::Url::parse(u).unwrap()).collect();
+        b.set_canvas_image_loader(Some(Box::new(move |_url: &str, _size: (u32, u32)| {
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|bm| (bm, urls.clone()))
+        })));
+        b.fire_image_load(doc.get_element_by_id("s").unwrap().id.raw(), 1, 1, hops[0]).unwrap();
+        let ours = ev(
+            &b,
+            "var x = document.getElementById('c').getContext('2d'); x.drawImage(document.getElementById('s'), 0, 0); \
+             try { x.getImageData(0, 0, 1, 1); 'ok' } catch (e) { e.name }",
+        );
+        assert_eq!(ours, expected, "hops {hops:?}");
+    }
 }

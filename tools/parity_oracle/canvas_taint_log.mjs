@@ -1,7 +1,8 @@
 // Canvas origin and size checks (STR-7): what Chrome does when a canvas
 // reads back pixels after drawing images of other origins, and when
 // getImageData asks for a huge rect. Two local servers (two ports, so two
-// origins) serve a 2x2 PNG; the page is served by the first. Writes
+// origins) serve a 2x2 PNG; the page is served by the first, which also
+// redirects /to-other to the second's image and /to-same to its own. Writes
 // canvas_taint_cases.json: per case, the name of the exception thrown
 // (or "ok") and its message.
 //
@@ -15,6 +16,9 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR
 function serve(page) {
   const s = createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
+    // Redirects (page server): to the other origin, or to its own image.
+    if (u.pathname === '/to-other') { res.writeHead(302, { location: B + '/img.png', 'cache-control': 'no-store' }); res.end(); return; }
+    if (u.pathname === '/to-same') { res.writeHead(302, { location: '/img.png', 'cache-control': 'no-store' }); res.end(); return; }
     if (u.pathname === '/img.png') {
       const h = { 'content-type': 'image/png', 'cache-control': 'no-store' };
       if (u.searchParams.get('cors')) h['access-control-allow-origin'] = '*';
@@ -24,8 +28,9 @@ function serve(page) {
   });
   return new Promise(r => s.listen(0, '127.0.0.1', () => r(s)));
 }
+let B = '';
 const other = await serve();
-const B = 'http://127.0.0.1:' + other.address().port;
+B = 'http://127.0.0.1:' + other.address().port;
 // Each case: how the image is made, then what is read.
 const cases = [
   ['same-origin-img', "img('/img.png', null, function (i) { x.drawImage(i, 0, 0); read(); })"],
@@ -36,6 +41,8 @@ const cases = [
   ['tainted-canvas-drawn', "img(B + '/img.png', null, function (i) { var o = document.createElement('canvas'); o.width = o.height = 4; o.getContext('2d').drawImage(i, 0, 0); x.drawImage(o, 0, 0); read(); })"],
   ['tainted-canvas-pattern', "img(B + '/img.png', null, function (i) { var o = document.createElement('canvas'); o.width = o.height = 4; o.getContext('2d').drawImage(i, 0, 0); x.fillStyle = x.createPattern(o, 'repeat'); x.fillRect(0, 0, 4, 4); read(); })"],
   ['cross-origin-pattern-unused', "img(B + '/img.png', null, function (i) { x.createPattern(i, 'repeat'); read(); })"],
+  ['redirect-same-to-other-origin', "img('/to-other', null, function (i) { x.drawImage(i, 0, 0); read(); })"],
+  ['redirect-same-to-same-origin', "img('/to-same', null, function (i) { x.drawImage(i, 0, 0); read(); })"],
   ['huge-get-image-data', "try { x.getImageData(0, 0, 100000, 100000); done('ok', ''); } catch (e) { done(e.name, e.message); }"],
 ];
 const page = "<!doctype html><body><canvas id=c width=8 height=8></canvas><script>var B = '" + B + "', x = document.getElementById('c').getContext('2d');" +

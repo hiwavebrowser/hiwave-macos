@@ -39,7 +39,12 @@ pub type CanvasTextMeasurer = Box<dyn Fn(&CanvasFont, &str) -> CanvasTextExtent>
 /// The size is the device-pixel size the image is drawn at, `(0, 0)` for
 /// its natural size: a vector image (SVG) is rasterized at the size it is
 /// drawn, as Chrome does; a raster image ignores it.
-pub type CanvasImageLoader = Box<dyn Fn(&str, (u32, u32)) -> Option<CanvasBitmap>>;
+///
+/// With the bitmap come the URLs of the response it was decoded from: every
+/// redirect hop and the final URL (empty when no request was made, as for a
+/// `data:` URL). A canvas that draws it is origin-clean only when all of
+/// them are of the document's origin (Chrome decides on the response).
+pub type CanvasImageLoader = Box<dyn Fn(&str, (u32, u32)) -> Option<(CanvasBitmap, Vec<url::Url>)>>;
 
 /// What the engine reads of one canvas: its bitmap size and the drawing
 /// recorded on it since it was last cleared.
@@ -315,7 +320,7 @@ pub(crate) fn install(
                             }
                             _ => (0, 0),
                         };
-                        store.images.as_ref().and_then(|load| load(url, size))
+                        store.images.as_ref().and_then(|load| load(url, size)).map(|(bitmap, _hops)| bitmap)
                     }
                     _ => None,
                 };

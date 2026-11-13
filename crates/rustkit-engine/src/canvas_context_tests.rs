@@ -505,3 +505,95 @@ fn draw_image_of_an_svg_img_matches_chrome() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+/// A tiny HTTP server for the redirect cases: `routes` maps a path to
+/// (status, extra header lines, content type, body), made from its port.
+fn serve_with_redirects(routes: impl FnOnce(u16) -> Vec<(String, u16, String, &'static str, Vec<u8>)>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let routes = routes(port);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let found = routes.iter().find(|r| r.0 == path);
+            let (status, headers, ctype, body) = match found {
+                Some((_, s, h, c, b)) => (*s, h.clone(), *c, b.clone()),
+                None => (404, String::new(), "text/plain", b"not found".to_vec()),
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{headers}\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    port
+}
+
+/// Canvas origin checks across redirects, Chrome for Testing 148
+/// (tools/parity_oracle/canvas_taint_cases.json "redirect-*"): the page's
+/// own URL that redirects to another origin's image leaves the canvas not
+/// origin-clean (Chrome decides on the response, not the URL asked for);
+/// one that redirects to the page's own image does not. The image cache
+/// keeps the response's URLs (each hop and the final one), which the
+/// canvas decides on. Here a loopback page cannot be redirected to another
+/// origin at all (the fetch refuses the hop, so that image fails to load
+/// and the canvas has nothing to read); the cross-origin outcome is pinned
+/// in rustkit-bindings `canvas_origin_checks_follow_the_response_urls`.
+#[test]
+fn canvas_origin_checks_follow_redirects_like_chrome() {
+    const PNG: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 252, 207, 192, 80, 15, 0, 4, 133, 1, 128, 132, 169, 140, 33, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_taint_cases.json")).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut failures = Vec::new();
+    for case in data["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        if name != "redirect-same-to-same-origin" {
+            continue;
+        }
+        let script = case["script"].as_str().unwrap();
+        let page = format!(
+            "<!doctype html><body><canvas id=c width=8 height=8></canvas><script>var x = document.getElementById('c').getContext('2d'); \
+             function done(n) {{ window.__r = n; }} \
+             function read() {{ try {{ x.getImageData(0, 0, 1, 1); done('ok'); }} catch (e) {{ done(e.name); }} }} \
+             function img(src, co, f) {{ var i = new Image(); i.onload = function () {{ f(i); }}; i.onerror = function () {{ done('load-error'); }}; i.src = src; }} \
+             {script}</script></body>"
+        );
+        let port = serve_with_redirects(|port| vec![
+            ("/".into(), 200, String::new(), "text/html", page.into_bytes()),
+            ("/img.png".into(), 200, String::new(), "image/png", PNG.to_vec()),
+            ("/to-other".into(), 302, format!("Location: http://localhost:{port}/img.png\r\n"), "text/plain", Vec::new()),
+            ("/to-same".into(), 302, "Location: /img.png\r\n".into(), "text/plain", Vec::new()),
+        ]);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine.create_headless_view(Bounds::new(0, 0, 200, 200)).expect("view");
+        rt.block_on(engine.load_url(id, url::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap())).expect("load");
+        let mut ours = String::new();
+        for _ in 0..100 {
+            rt.block_on(engine.pump_live(id, 16));
+            ours = eval(&mut engine, id, "typeof window.__r === 'string' ? window.__r : ''");
+            if !ours.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let chrome = case["chrome"]["name"].as_str().unwrap();
+        println!("{name}: ours {ours:?}, Chrome {chrome:?}");
+        if ours != chrome {
+            failures.push(format!("{name}: ours {ours:?}, Chrome {chrome:?}"));
+        }
+        let at = |path: &str| url::Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
+        let hops = engine.lctx.image_manager.response_urls(&at("/to-same"));
+        if hops != vec![at("/to-same"), at("/img.png")] {
+            failures.push(format!("{name}: response URLs {hops:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

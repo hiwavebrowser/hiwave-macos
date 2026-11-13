@@ -73,13 +73,14 @@ pub(crate) type CanvasSvgs =
 pub(crate) fn image_loader(images: std::sync::Arc<rustkit_image::ImageManager>, svgs: CanvasSvgs) -> rustkit_bindings::CanvasImageLoader {
     Box::new(move |url: &str, size: (u32, u32)| {
         let doc = svgs.lock().ok().and_then(|m| m.get(url).cloned());
-        if let Some(doc) = doc {
-            return svg_bitmap(&doc, size);
-        }
         let url = url::Url::parse(url).ok()?;
+        let hops = images.response_urls(&url);
+        if let Some(doc) = doc {
+            return svg_bitmap(&doc, size).map(|b| (b, hops));
+        }
         let image = images.get_cached(&url)?;
         let frame = image.current_frame(std::time::Duration::ZERO);
-        rustkit_bindings::canvas::CanvasBitmap::from_rgba(frame.width(), frame.height(), frame.data())
+        rustkit_bindings::canvas::CanvasBitmap::from_rgba(frame.width(), frame.height(), frame.data()).map(|b| (b, hops))
     })
 }
 

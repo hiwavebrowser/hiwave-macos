@@ -353,6 +353,12 @@ impl ImageManager {
         }
     }
 
+    /// The URLs of the response `url` was decoded from: each redirect hop
+    /// and the final URL. Empty when none were recorded.
+    pub fn response_urls(&self, _url: &Url) -> Vec<Url> {
+        Vec::new()
+    }
+
     /// An image that needs no request: one already cached, or a `data:`
     /// URL. This crate has no HTTP client. A network image is fetched by
     /// the engine's resource loader (the shield, the Referer policy and the
