@@ -30,6 +30,10 @@ const TURN_BUDGET: Duration = Duration::from_secs(60 * 60 * 24);
 /// At most this many workers a page may have at once.
 const MAX_WORKERS: usize = 64;
 
+/// At most this many of a worker's messages and events reach the page in one turn (Chrome delivers one
+/// a task): a worker that floods the page cannot hold a turn.
+const MAX_ITEMS_PER_POLL: usize = 256;
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Names of workers whose threads have returned (tests read it).
@@ -187,10 +191,16 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
                 // Read "finished" before draining, so nothing sent just
                 // before the end is missed.
                 let done = h.thread.is_finished();
-                while let Ok(m) = h.from.try_recv() {
-                    items.push(item(m));
+                // At most MAX_ITEMS_PER_POLL a turn: a worker that floods the
+                // page leaves the rest, in order, for the next turns.
+                while items.len() < MAX_ITEMS_PER_POLL {
+                    match h.from.try_recv() {
+                        Ok(m) => items.push(item(m)),
+                        Err(_) => break,
+                    }
                 }
-                done
+                // A full batch may have left items behind: the end waits for them.
+                done && items.len() < MAX_ITEMS_PER_POLL
             };
             if finished {
                 if let Some(h) = r.workers.borrow_mut().remove(&id) {
