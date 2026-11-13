@@ -811,9 +811,15 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
             );
         }
-        // A stepped capture (animations off, no live window) gives the page the reference's settle time.
-        if !args.animations && args.live_ms.is_none() {
-            settle_stepped(&rt, &mut engine, view_id);
+        // With no live window the page gets the reference's settle time after the load: virtual steps in a
+        // stepped capture, a real live phase when animations run on the real clock.
+        if args.live_ms.is_none() {
+            if args.animations {
+                // The real clock: the same span as live loop turns, in real time.
+                run_live(&rt, &mut engine, view_id, STEPPED_SETTLE_MS);
+            } else {
+                settle_stepped(&rt, &mut engine, view_id);
+            }
         }
         if let Some(log) = engine.script_log(view_id) {
             result.script_stats = Some(script_stats(log));
