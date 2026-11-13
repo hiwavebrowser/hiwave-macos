@@ -2825,9 +2825,21 @@ const WRAPPERS_JS: &str = r#"
     // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
     // `defaultPrevented` is read-only and only `preventDefault()` (or
     // `returnValue = false`, or an on<type> handler returning false) by a
-    // listener that may cancel sets it: a passive listener cannot.
-    var CANCELED = new WeakSet();
+    // listener that may cancel sets it: a passive listener cannot. Shared
+    // by the frame tree, as the trust sets are: an event cancelled in one
+    // window reads cancelled in the window that made it.
+    var CANCELED = SHARED.canceled || (SHARED.canceled = new WeakSet());
+    // A real event is one whose prototype chain holds the `Event.prototype`
+    // of some window of the frame tree, not only this one's: an event made
+    // in a frame and dispatched here keeps the canceled flag, not a
+    // `defaultPrevented` property. Each realm adds its own prototype when
+    // its `Event` is defined (below).
     var isProto = uncurry(Object.prototype.isPrototypeOf);
+    var EVENT_PROTOS = SHARED.eventProtos || (SHARED.eventProtos = []);
+    function isRealEvent(ev) {
+        for (var k = 0; k < EVENT_PROTOS.length; k++) if (isProto(EVENT_PROTOS[k], ev)) return true;
+        return false;
+    }
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
     // for an object that will not take it.
@@ -6235,7 +6247,7 @@ const WRAPPERS_JS: &str = r#"
         // The on<type> handler runs with the non-capture listeners.
         var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
         if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
-            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
+            if (isRealEvent(event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
@@ -6289,7 +6301,7 @@ const WRAPPERS_JS: &str = r#"
         event[PATH] = null;
         // The canceled flag, not a property a listener can redefine; an
         // object that is not an Event keeps its own.
-        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        var canceled = isRealEvent(event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
         if (activated) activated(!canceled);
         return !canceled;
     };
@@ -6369,6 +6381,7 @@ const WRAPPERS_JS: &str = r#"
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
+    EVENT_PROTOS.push(Event.prototype);
     g.CustomEvent = CustomEvent;
 
     // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
