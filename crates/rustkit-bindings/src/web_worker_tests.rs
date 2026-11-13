@@ -537,14 +537,14 @@ fn a_flooding_worker_cannot_hold_a_page_turn() {
 }
 
 /// The worker bridge's host functions are captured once by the page side and are not left on the
-/// page's global for page script to call (as the other bridges are). `__rustkit_worker_running` stays:
-/// the engine reads it. R1 LOW on #1105.
+/// page's global for page script to call (as the other bridges are). The engine counts running workers
+/// through the bindings' own guard, not through a page global. R1 LOW on #1105.
 #[test]
 fn the_worker_bridge_is_not_left_on_the_page_global() {
     let b = bound();
     let left = ev(
         &b,
-        "JSON.stringify(['spawn', 'post', 'poll', 'reply', 'terminate'].filter(function (n) { \
+        "JSON.stringify(['spawn', 'post', 'poll', 'reply', 'terminate', 'running'].filter(function (n) { \
            return ('__rustkit_worker_' + n) in globalThis; }))",
     );
     assert_eq!(left, "[]");
