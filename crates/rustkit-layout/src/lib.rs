@@ -3714,9 +3714,15 @@ impl LayoutBox {
             vertical_decoration,
             border_box_sizing,
         );
+        // A specified height stays when `max-width` narrows the box: only a
+        // height the page left to the ratio follows the clamp (IMG1; Chrome
+        // 148: `width=300 height=100` under `max-width: 100%` in a 200px
+        // box is 200x100, not 200x67). The `max-height` clamp below still
+        // scales any width: an inline `<svg>` with a viewBox and no size
+        // carries `width: 100%` as its stand-in for `auto`.
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
-                height = if height > 0.0 {
+                height = if height > 0.0 && height_is_auto {
                     mw * height / width
                 } else {
                     height

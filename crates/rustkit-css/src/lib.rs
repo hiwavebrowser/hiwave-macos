@@ -3162,6 +3162,12 @@ pub struct ComputedStyle {
     /// `z-index: auto` both leave `z_index` at 0, and only the computed
     /// style reads them apart (`0` / `auto`).
     pub z_index_declared: bool,
+    /// A style rule declared `width` / `height` on THIS element, `auto`
+    /// included. A declared `auto` reads the same as no declaration in
+    /// `width`/`height`, and only an undeclared axis takes an `<img>`'s
+    /// `width=`/`height=` attribute as its size (IMG1): `height: auto`
+    /// over `height="100"` is the image's ratio, not 100.
+    pub size_declared: [bool; 2],
     /// An author rule set a vertical padding (`padding`, `padding-top`/`-bottom`, a logical
     /// form), zero included. A form control with no author padding keeps the UA's (CB3).
     pub padding_v_declared: bool,
