@@ -471,6 +471,32 @@ impl LiveWake {
     }
 }
 
+/// How long a stepped capture lets the page run after its load, in virtual time. The Chrome reference
+/// waits this long between `load` and its screenshot (`CHROME_SETTLE_MS` in scripts/realsite_board.py, the
+/// default of tools/parity_oracle/realsite.mjs), so a timer the page sets after the load's timer pass (an
+/// A/B test settled by `setTimeout`, an entrance reveal) has run by the time ours is taken. The same span on
+/// every run: the page clock in a stepped capture is virtual.
+const STEPPED_SETTLE_MS: u64 = 5_000;
+
+/// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. No real waiting except while a request the page
+/// started is still open (bounded), so the answer arrives; the virtual span itself never depends on real time.
+fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) {
+    const STEP_MS: u64 = 50;
+    const REQUEST_WAIT: Duration = Duration::from_millis(5);
+    const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
+    let mut left = STEPPED_SETTLE_MS;
+    let mut waited = Duration::ZERO;
+    while left > 0 {
+        let step = STEP_MS.min(left);
+        let turn = rt.block_on(engine.pump_live(view_id, step));
+        left -= step;
+        if turn.in_flight > 0 && waited < REQUEST_WAIT_CAP {
+            std::thread::sleep(REQUEST_WAIT);
+            waited += REQUEST_WAIT;
+        }
+    }
+}
+
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
 /// timer is due, a request is out or the engine wakes the loop. Timer and
 /// request waits are never shorter than the last turn took (nor
@@ -778,6 +804,10 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 "error",
                 format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
             );
+        }
+        // A stepped capture (animations off, no live window) gives the page the reference's settle time.
+        if !args.animations && args.live_ms.is_none() {
+            settle_stepped(&rt, &mut engine, view_id);
         }
         if let Some(log) = engine.script_log(view_id) {
             result.script_stats = Some(script_stats(log));
@@ -2821,6 +2851,7 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
     /// span of virtual time after the load.
     #[test]
     fn a_stepped_load_only_capture_gives_the_page_the_references_settle_time() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
