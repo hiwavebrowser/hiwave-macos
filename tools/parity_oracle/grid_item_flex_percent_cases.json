@@ -45,6 +45,41 @@
    "name": "a-column-flex-card-with-a-percent-pane-in-an-auto-height-grid",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px Arial}*{box-sizing:border-box}p{margin:0}</style></head><body><div id=g style=\"display:grid;grid-template-columns:200px 200px\"><div id=card style=\"display:flex;flex-direction:column\"><div id=pane style=\"height:100%;min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div><div id=other style=\"height:120px\"></div></div><div id=after style=\"height:10px\"></div></body></html>",
    "chrome_boxes": "g:0:0:1280:120 card:0:0:200:120 pane:0:0:200:120 other:200:0:200:120 after:0:120:1280:10"
+  },
+  {
+   "name": "a-percent-pane-in-a-flex-item-of-a-fixed-300px-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-rows:300px\"><div id=col style=\"display:flex;flex-direction:column;height:100%\"><div id=pane style=\"height:100%;min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:300 col:0:0:1280:300 pane:0:0:1280:300 after:0:300:1280:18"
+  },
+  {
+   "name": "a-calc-percent-pane-in-a-flex-item-of-a-fixed-300px-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-rows:300px\"><div id=col style=\"display:flex;flex-direction:column;height:100%\"><div id=pane style=\"height:calc(100% - 20px);min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:300 col:0:0:1280:300 pane:0:0:1280:280 after:0:300:1280:18"
+  },
+  {
+   "name": "a-min-percent-pane-in-a-flex-item-of-a-fixed-300px-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-rows:300px\"><div id=col style=\"display:flex;flex-direction:column;height:100%\"><div id=pane style=\"height:min(100%, 250px);min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:300 col:0:0:1280:300 pane:0:0:1280:250 after:0:300:1280:18"
+  },
+  {
+   "name": "a-percent-pane-in-a-stretched-flex-item-of-an-auto-row",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-columns:1fr 1fr\"><div id=tall style=\"height:500px\"></div><div id=col style=\"display:flex;flex-direction:column\"><div id=pane style=\"height:100%;min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:500 tall:0:0:640:500 col:640:0:640:500 pane:640:0:640:500 after:0:500:1280:18"
+  },
+  {
+   "name": "a-percent-pane-in-a-stretched-flex-item-of-a-1fr-row-in-an-auto-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr\"><div id=tall style=\"height:500px\"></div><div id=col style=\"display:flex;flex-direction:column\"><div id=pane style=\"height:100%;min-height:0;overflow:hidden\"><div style=\"height:40px\"></div></div></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:500 tall:0:0:640:500 col:640:0:640:500 pane:640:0:640:500 after:0:500:1280:18"
+  },
+  {
+   "name": "a-lone-min-height-item-in-an-auto-row-of-a-definite-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:900px;grid-template-rows:auto 1fr\"><div id=a style=\"height:min(100vh, 500px)\"></div><div id=b></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:900 a:0:0:1280:500 b:0:500:1280:400 after:0:900:1280:18"
+  },
+  {
+   "name": "a-lone-clamp-height-item-in-an-auto-row-of-a-definite-grid",
+   "html": "<!doctype html><html><head><style>body{margin:0}*{box-sizing:border-box}</style></head><body><div id=g style=\"display:grid;height:900px;grid-template-rows:auto 1fr\"><div id=a style=\"height:clamp(100px, 50vh, 600px)\"></div><div id=b></div></div><div id=after>x</div></body></html>",
+   "chrome_boxes": "g:0:0:1280:900 a:0:0:1280:400 b:0:400:1280:500 after:0:900:1280:18"
   }
  ]
 }
