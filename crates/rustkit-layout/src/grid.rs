@@ -281,6 +281,22 @@ impl<'a> GridItem<'a> {
                     .length_to_px(&style.height, container_height)
                     + margins;
             }
+            // GR5 (#1114 LOW): `0` and `min()`/`max()`/`clamp()` resolve
+            // through the resolver placement uses, so the first estimate of
+            // an auto row in a definite-height grid is not short (a lone
+            // `min(100vh, 500px)` item made a 0 row; Chrome 148: 500).
+            Length::Zero => return margins,
+            // A percentage form is cyclic while rows are sized (Chrome 148
+            // sizes the row to the content), so only the percentage-free
+            // forms resolve here.
+            Length::Min(_) | Length::Max(_) | Length::Clamp(_)
+                if !crate::flex::has_percentage(&style.height) =>
+            {
+                return self
+                    .layout_box
+                    .length_to_px(&style.height, container_height)
+                    + margins;
+            }
             _ => {}
         }
 
@@ -289,6 +305,11 @@ impl<'a> GridItem<'a> {
             Length::Px(h) => *h,
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
             l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_height),
+            l @ (Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_))
+                if !crate::flex::has_percentage(l) =>
+            {
+                self.layout_box.length_to_px(l, container_height)
+            }
             _ => 0.0,
         };
 
@@ -2216,7 +2237,42 @@ pub fn layout_grid_container(
                 // area, which is definite (css-grid §11.6): the block
                 // pre-pass's `auto` mark for it does not hold here (LAY1).
                 child.percent_height_is_auto = false;
-                crate::flex::layout_flex_container(child, &child_containing);
+                // A column flex item whose height is a percentage of its
+                // area, or that stretches to it, has that height as a
+                // DEFINITE main size (css-grid-1 §11.6, css-sizing-3 §5.1),
+                // so its own `height: 100%` items resolve against it. Laid
+                // out as content-sized, a `height: 100%; min-height: 0`
+                // pane in a product page's gallery column took its
+                // content, 204 tall, where Chrome 148 has the area's 800.
+                // A row container, or a column one with an auto height that
+                // does not stretch, keeps the content-sized pass.
+                //
+                // Only in a grid whose own height is definite: there the
+                // rows are final by now. In an auto-height grid the area is
+                // the track estimate, and Phase 9.5 sizes the row from the
+                // item's CONTENT height recorded below, which the
+                // content-sized pass must give it (#1110 R1: a column-flex
+                // card with wrapping text otherwise stayed at the estimate,
+                // 20 tall where Chrome's row is 100, and overflowed).
+                // GR5: rows of a fixed size are final from track sizing
+                // too, whatever the grid's own height (a 300px row of a
+                // content-sized grid: Chrome 148's `height: 100%` pane is
+                // 300, the content-sized pass gave 40).
+                let in_fixed_rows = row_spans.get(item_idx).is_some_and(|&(r0, r1)| {
+                    r0 < grid.rows.len()
+                        && (r0..r1.clamp(r0 + 1, grid.rows.len()))
+                            .all(|r| track_is_fixed(&grid.rows[r]))
+                });
+                let definite_in_area = (has_definite_height || in_fixed_rows)
+                    && !child.style.flex_direction.is_row()
+                    && (crate::flex::has_percentage(&child.style.height)
+                        || (matches!(child.style.height, rustkit_css::Length::Auto)
+                            && stretches_to_its_row(child, &container_align_items)));
+                if definite_in_area {
+                    crate::flex::layout_flex_container_at_used_height(child, area_height);
+                } else {
+                    crate::flex::layout_flex_container(child, &child_containing);
+                }
                 let content_height = child.dimensions.content.height;
                 if let Some(slot) = real_heights.get_mut(item_idx) {
                     *slot = Some(content_height);
@@ -4346,8 +4402,15 @@ pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_heig
 fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
     match l {
         Length::Px(v) => Some(*v),
+        Length::Zero => Some(0.0),
         Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
         l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        // GR4: `min()`/`max()`/`clamp()` with no percentage resolve through
+        // the same `length_to_px` that places the item, so the row and the
+        // item agree (`height: min(100vh, 500px)` alone made a 0 row).
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) if !crate::flex::has_percentage(l) => {
+            Some(b.length_to_px(l, 0.0))
+        }
         _ => None,
     }
 }
@@ -5548,7 +5611,12 @@ fn apply_align_self(
         // cell height the percentage arm uses. Left on the `_` arm it would
         // be called explicit and then sized as if it were `auto`.
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
-        _ => cell_height,
+        // GR4: every other length is the item's own too: `100vh`, `20rem`,
+        // `min(100vh, 500px)`. They fell to the cell height, so a sticky
+        // `100vh` pane beside a 3000px column was 3000 tall (Chrome 148:
+        // 800). `fit-content` and the sizing keywords stay with the cell.
+        Length::FitContent => cell_height,
+        ref l => child.length_to_px(l, cell_height),
     };
     // A definite `max-height` and `min-height` bound an explicit height (max
     // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
@@ -5557,8 +5625,7 @@ fn apply_align_self(
     // An `auto` height is left to the stretch and min/max passes that follow.
     let definite = |l: &Length| match l {
         Length::Auto | Length::FitContent | Length::Percent(_) => None,
-        Length::Calc(sum) if sum.percent != 0.0 => None,
-        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l if crate::flex::has_percentage(l) => None,
         l => Some(child.length_to_px(l, 0.0)),
     };
     let mut child_height = child_height;

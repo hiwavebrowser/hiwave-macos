@@ -92,6 +92,7 @@ pub mod error;
 pub mod interop;
 pub mod job;
 pub mod module;
+pub(crate) mod native_stack; // HIWAVE PATCH (native recursion)
 pub mod native_function;
 pub mod object;
 /// ECMAScript Abstract Syntax Tree (AST) optimizer.

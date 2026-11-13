@@ -89,11 +89,15 @@ def test_the_receipt_reaches_the_job_summary():
 
 
 def test_the_lane_is_not_skipped_on_pull_requests():
+    # Batch-level CI (Pete 2026-11-13, #1125): the heavy lane runs on push,
+    # schedule, dispatch and on the batch PR (head batch/NN), not on every
+    # member PR. Exactly that condition is allowed; anything else that keeps
+    # the lane off pull_request (or off the batch PR) still fails.
     cond = str(_lane().get("if", "")).strip()
-    assert "pull_request" not in cond, (
-        f"js-suites is conditioned away from PR lane (if: {cond})"
+    allowed = "github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')"
+    assert cond in ("", allowed), (
+        f"lane condition changed from the batch-level rule (if: {cond})"
     )
-
 
 if __name__ == "__main__":
     assert WORKFLOW.exists(), f"no workflow at {WORKFLOW}"

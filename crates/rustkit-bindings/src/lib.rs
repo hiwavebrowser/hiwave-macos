@@ -1684,7 +1684,6 @@ impl DomBindings {
             // getElementsBy*, documentElement/head/body) is Rust-backed and
             // installed by `dom::install`.
             var document = {
-                title: '',
                 readyState: 'loading',
                 cookie: '',
                 domain: '',
@@ -2167,9 +2166,8 @@ impl DomBindings {
         self.mutation_log.take();
 
         // Sync to JS
-        let title = document.title().unwrap_or_default();
+        // (`document.title` reads the new document's <title> itself.)
         let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&format!("document.title = {:?};", title))?;
         runtime.evaluate_script("document.readyState = 'complete';")?;
 
         // Rebind the DOM wrappers. Wrappers handed out for a previous
@@ -2596,6 +2594,61 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Whether script has registered a `wheel` listener: only then does
+    /// the engine dispatch `wheel` before a scroll (`fire_wheel_event`).
+    pub fn wants_wheel(&self) -> bool {
+        self.dom_host.borrow().wants_wheel()
+    }
+
+    /// Whether one of those can cancel the wheel (a listener that is not
+    /// passive, or a handler). When none can, the engine dispatches after
+    /// the scroll without asking which listeners are on the path.
+    pub fn wheel_blocking(&self) -> bool {
+        self.dom_host.borrow().wheel_blocking()
+    }
+
+    /// Whether a wheel at an element (by node id) can be cancelled: a
+    /// listener on its way up is not passive. Then the event goes out
+    /// before the scroll; otherwise after it.
+    pub fn wheel_blocks(&self, node: usize) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_with_host(&format!("return __rk.wheelBlocks({node});"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
+    /// Dispatch the user's wheel at an element (by node id): `delta_x` /
+    /// `delta_y` are DOM deltas in pixels (positive is right and down).
+    /// `cancelable` before the scroll it would cause, and then false comes
+    /// back when a listener cancelled it.
+    pub fn fire_wheel_event(
+        &self,
+        node: usize,
+        data: &MouseEventBindingData,
+        delta_x: f64,
+        delta_y: f64,
+        cancelable: bool,
+    ) -> Result<bool, BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireWheel({node}, {{ clientX: {}, clientY: {}, screenX: {}, screenY: {}, \
+             offsetX: {}, offsetY: {}, buttons: {}, ctrlKey: {}, altKey: {}, shiftKey: {}, metaKey: {}, \
+             deltaX: {delta_x}, deltaY: {delta_y} }}, {cancelable});",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+        ), &[])?;
+        Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
     /// The user's click focused an element (by node id), or landed on
     /// nothing focusable (`None`): the page's focus follows, with `change`,
     /// `blur`/`focusout` and `focus`/`focusin`. The page may refuse (a
@@ -2669,7 +2722,7 @@ impl DomBindings {
         let (data, text) = data.map_or(("null", ""), |d| ("__a[0]", d));
         self.runtime
             .borrow_mut()
-            .evaluate_host_turn(&format!("document.__rkFireInput({node}, {data});"), &[text])?;
+            .evaluate_host_turn(&format!("return __rk.fireInput({node}, {data});"), &[text])?;
         Ok(())
     }
 
@@ -2682,7 +2735,7 @@ impl DomBindings {
         let picked = self
             .runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+            .evaluate_host_turn(&format!("return __rk.pickOption({node}, {index});"), &[])?;
         Ok(matches!(picked, JsValue::Boolean(true)))
     }
 
@@ -2691,7 +2744,7 @@ impl DomBindings {
     pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkImplicitSubmit({node});"))?;
+            .evaluate_host_turn(&format!("return __rk.implicitSubmit({node});"), &[])?;
         Ok(())
     }
 

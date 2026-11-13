@@ -156,9 +156,13 @@
         return Array.prototype.map.call(this.childNodes, serialize).join('');
     }, function (html) {
         rec(this, 'innerHTML');
-        var tpl = document.createElement('template');
-        tpl.innerHTML = String(html);
-        this.replaceChildren.apply(this, Array.prototype.slice.call(tpl.content.childNodes));
+        // Parsed in the host's document, with its scripting flag (a
+        // template's contents would parse with scripting off): a holder of
+        // that document, the host's context being an ordinary element.
+        var home = this.host && this.host.ownerDocument || document;
+        var holder = home.createElement('div');
+        holder.innerHTML = String(html);
+        this.replaceChildren.apply(this, Array.prototype.slice.call(holder.childNodes));
     });
     method(P, 'getHTML', function getHTML() { return this.innerHTML; });
     method(P, 'setHTMLUnsafe', function setHTMLUnsafe(html) { this.innerHTML = html; });
