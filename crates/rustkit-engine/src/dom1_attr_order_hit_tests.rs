@@ -42,7 +42,6 @@ fn report_of(page: &str) -> (Engine, EngineViewId, Vec<String>) {
 ///   (SET3, on the settings stack).
 const KNOWN: &[&str] = &[
     "style set before another attribute: ",
-    "rect field: ",
 ];
 
 fn differences(chrome: &str, got: &[String], lines: usize) -> Vec<String> {
