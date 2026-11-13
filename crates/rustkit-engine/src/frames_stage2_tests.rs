@@ -413,3 +413,103 @@ window.inside = [String(r.querySelector('x-top')), String(r.querySelector('.s'))
         r#"String("[object HTMLElement],[object HTMLSpanElement],3|[object HTMLElement]")"#
     );
 }
+
+/// A server for redirect chains: each route answers `(path, Ok(html))` with
+/// the page or `(path, Err(location))` with a 302 to `location`. `{a}` and
+/// `{b}` in a body or a location are this server's and `other`'s origins.
+fn serve_with_redirects(routes: Vec<(&'static str, Result<String, String>)>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Result<String, String>)>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let routes = std::sync::Arc::new(std::sync::Mutex::new(routes));
+    let shared = routes.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let routes = shared.clone();
+            std::thread::spawn(move || {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 2048];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&request).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let answer = routes.lock().unwrap().iter().find(|(p, _)| *p == path).map(|(_, a)| a.clone());
+                let reply = match answer {
+                    Some(Ok(body)) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    Some(Err(location)) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                };
+                let _ = stream.write_all(reply.as_bytes());
+            });
+        }
+    });
+    (port, routes)
+}
+
+/// Whether a frame is same-origin is decided on the response the document
+/// comes from, after its redirects, not on the requested URL; and a chain
+/// that leaves the page's origin is cross-origin even when it comes back.
+/// Either way it gets the cross-origin floor: no document is reachable, the
+/// frame's scripts do not run, and the element hears one `load`.
+#[test]
+fn a_frames_origin_is_its_responses_after_redirects() {
+    let child = "<!doctype html><title>child</title><script>try { parent.childRan = (parent.childRan || 0) + 1; } catch (e) {}</script>".to_string();
+    let (b, b_routes) = serve_with_redirects(vec![]);
+    let (a, a_routes) = serve_with_redirects(vec![]);
+    let (oa, ob) = (format!("http://127.0.0.1:{a}"), format!("http://127.0.0.1:{b}"));
+    *b_routes.lock().unwrap() = vec![
+        ("/child.html", Ok(child.clone())),
+        ("/back", Err(format!("{oa}/child.html"))),
+    ];
+    let page = format!(
+        "<!doctype html><body><script>
+window.loads = {{}}; window.childRan = 0;
+function frame(id, src) {{
+  var f = document.createElement('iframe'); f.id = id;
+  f.onload = function () {{ loads[id] = (loads[id] || 0) + 1; }};
+  f.src = src; document.body.appendChild(f);
+}}
+frame('away', '/away');
+frame('round', '/round');
+frame('in', '{ob}/in');
+frame('home', '/child.html');
+</script></body>"
+    );
+    *a_routes.lock().unwrap() = vec![
+        ("/", Ok(page)),
+        ("/child.html", Ok(child.clone())),
+        ("/away", Err(format!("{ob}/child.html"))),
+        ("/round", Err(format!("{ob}/back"))),
+    ];
+    b_routes.lock().unwrap().push(("/in", Err(format!("{oa}/child.html"))));
+    let mut engine = Engine::new(config(true)).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("{oa}/")).unwrap())).expect("load_url");
+    let done = "['away','round','in','home'].every(function (k) { return loads[k] >= 1; })";
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+        rt.block_on(engine.pump_live(view, 20));
+        if engine.execute_script(view, done).unwrap() == "Boolean(true)" {
+            break;
+        }
+    }
+    let shape = "['away','round','in','home'].map(function (k) { var f = document.getElementById(k); \
+        return k + ':' + loads[k] + ':' + (f.contentDocument ? f.contentDocument.title : 'null'); }).join(' ') + ' ran:' + childRan";
+    assert_eq!(
+        engine.execute_script(view, shape).unwrap(),
+        r#"String("away:1:null round:1:null in:1:null home:1:child ran:1")"#,
+        "only the frame whose whole chain is the page's origin is same-origin"
+    );
+}
