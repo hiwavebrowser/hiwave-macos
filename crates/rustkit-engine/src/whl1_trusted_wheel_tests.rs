@@ -76,6 +76,52 @@ fn the_users_wheel_reaches_script_before_it_scrolls() {
     assert!(wrong.is_empty(), "{} of {} report lines differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
 
+const DP_PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/whl1_default_prevented.html");
+const DP_CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/whl1_default_prevented_cft148.txt");
+
+/// R1 LOW 1: `defaultPrevented` is a read-only getter on the canceled
+/// flag. Assigning it does nothing (and throws in strict code), and a
+/// passive listener cannot cancel by `preventDefault()`, `returnValue`
+/// or assignment. Lines from Chrome for Testing 148.
+#[test]
+fn default_prevented_is_read_only_and_a_passive_listener_cannot_cancel() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    engine.load_html(view, DP_PAGE).expect("load");
+    let got = engine.execute_script(view, "JSON.stringify(window.report().split('\\n'))").expect("report");
+    let got = got.strip_prefix("String(").and_then(|v| v.strip_suffix(')')).unwrap_or(&got).to_string();
+    let got: String = serde_json::from_str(&got).expect("a JSON string");
+    let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
+    let expected: Vec<&str> = DP_CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
+    assert_eq!(expected.len(), 13);
+    let wrong: Vec<String> = expected
+        .iter()
+        .enumerate()
+        .filter(|(i, e)| got.get(*i).map(String::as_str) != Some(**e))
+        .map(|(i, e)| format!("  {}\n    Chromium: {e}", got.get(i).map_or("(missing)", String::as_str)))
+        .collect();
+    assert!(wrong.is_empty(), "{} of 13 lines differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// The scroll itself: a non-passive listener on the scroller makes the
+/// wheel cancelable, and a passive listener on the document that writes
+/// `defaultPrevented` must not stop the scroll.
+#[test]
+fn a_passive_listener_cannot_stop_the_users_scroll_by_writing_default_prevented() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    engine
+        .load_html(
+            view,
+            "<!doctype html><body style=\"margin:0\"><div id=s style=\"height:120px;overflow:auto\"><div style=\"height:1000px\"></div></div>\
+             <script>document.getElementById('s').addEventListener('wheel', function () {}, { passive: false });\
+             document.addEventListener('wheel', function (e) { e.defaultPrevented = true; try { Object.defineProperty(e, 'defaultPrevented', { value: true }); } catch (_) {} e.returnValue = false; });</script>",
+        )
+        .expect("load");
+    engine.scroll_at(view, 50.0, 50.0, 0.0, -100.0).expect("scroll_at");
+    assert_eq!(engine.execute_script(view, "String(document.getElementById('s').scrollTop)").unwrap(), "String(\"100\")");
+}
+
 /// The wheel dispatch is the engine's: nothing of it is a property a page
 /// can read, call or replace.
 #[test]
