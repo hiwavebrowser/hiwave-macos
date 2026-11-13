@@ -46,6 +46,25 @@ fn ev(b: &DomBindings, script: &str) -> String {
     }
 }
 
+/// The engine's entry points are each document's own: making a child
+/// realm does not replace the parent's. (They are kept on the host object;
+/// with one host object for the runtime, the child's install replaced the
+/// parent's, and the engine's key event for a node of the parent's document
+/// was looked up in the child's.)
+#[test]
+fn the_engines_entry_points_stay_each_documents_own() {
+    let parent = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PARENT).unwrap());
+    parent.set_document(doc.clone()).unwrap();
+    let child = parent.new_child().unwrap();
+    child.set_document(Rc::new(Document::parse_html(CHILD).unwrap())).unwrap();
+    ev(&parent, "window.heard = ''; document.getElementById('p').addEventListener('keydown', function (e) { heard = 'parent p ' + e.key; }); ''");
+    let p = doc.get_element_by_id("p").expect("the parent's p").id.raw();
+    let key = KeyboardEventBindingData { key: "a".to_string(), code: "KeyA".to_string(), ..Default::default() };
+    parent.fire_key_event(Some(p), "keydown", &key).unwrap();
+    assert_eq!(ev(&parent, "heard"), "parent p a");
+}
+
 #[test]
 fn each_page_has_its_own_globals_and_its_own_document() {
     let t = tree();
