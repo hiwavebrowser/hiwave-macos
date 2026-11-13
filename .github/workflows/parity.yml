@@ -5,8 +5,9 @@ on:
   push:
     branches: [master, main]
   # Batch-level CI (Pete 2026-11-13): the heavy macOS suites run once per
-  # batch head via `gh workflow run "Parity Gate" --ref <batch-branch>`, not
-  # on every PR push. PRs keep the cheap checks (selector-key, script-guards,
+  # batch PR (head branch batch/NN -> develop), not on every PR push; merging
+  # the batch PR lands every member PR at once (GitHub marks each merged).
+  # workflow_dispatch on a batch branch still works as a manual fallback. PRs keep the cheap checks (selector-key, script-guards,
   # f1-test-compile) plus baseline-audit.
   workflow_dispatch:
   schedule:
@@ -73,7 +74,7 @@ jobs:
   # the one `continue-on-error` line. The receipt still goes to the job
   # summary, including did-not-run.
   unit-suites:
-    if: github.event_name != 'pull_request'  # batch-level CI: runs on the batch head, not per PR
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')  # batch-level CI: batch PR only
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -121,7 +122,7 @@ jobs:
   # an outside review found the threads-plan work in these crates (P3, D1, M2)
   # was compiled on PRs but never executed. Same did-not-run guard as F2.
   render-suites:
-    if: github.event_name != 'pull_request'  # batch-level CI: runs on the batch head, not per PR
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')  # batch-level CI: batch PR only
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -171,7 +172,7 @@ jobs:
   # again (Yahoo-class blind diagnoses). Same did-not-run guard as F2/F2b.
   # Binary crate: `cargo test -p parity-capture` (no --lib).
   capture-suites:
-    if: github.event_name != 'pull_request'  # batch-level CI: runs on the batch head, not per PR
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')  # batch-level CI: batch PR only
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -220,7 +221,7 @@ jobs:
   # BLOCKING: these crates are headless, fast, and verify the Boa 0.22 engine
   # and web bindings invariants.
   js-suites:
-    if: github.event_name != 'pull_request'  # batch-level CI: runs on the batch head, not per PR
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')  # batch-level CI: batch PR only
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -376,7 +377,7 @@ jobs:
   # PR Gate: Sharded swarm (~30m total)
   # ===========================================================================
   pr-swarm:
-    if: github.event_name == 'workflow_dispatch'  # batch-level CI
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'batch/'))  # batch-level CI
     runs-on: macos-15
     # 20 -> 35 alongside the scout going 1 -> 3 iterations. Per shard that is
     # ~7 scout units -> ~21, against a fixed 12 exploit units: roughly 1.7x
@@ -436,7 +437,7 @@ jobs:
           retention-days: 7
 
   pr-aggregate:
-    if: github.event_name == 'workflow_dispatch'  # batch-level CI
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'batch/'))  # batch-level CI
     needs: pr-swarm
     runs-on: macos-15
     timeout-minutes: 10
