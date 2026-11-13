@@ -2813,6 +2813,61 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert!(!text.contains(LINE), "{text}");
     }
 
+    /// A load-only capture (no `--live-ms`) of a page whose reveal timer is due just past the load's
+    /// timer pass (Squarespace's homepage settles an A/B test with a timer it sets after the pass: the
+    /// timer never ran in a stepped capture, and the hero stayed hidden). The Chrome reference waits
+    /// 5 s after load before its screenshot (`CHROME_SETTLE_MS` in scripts/realsite_board.py, the
+    /// default of tools/parity_oracle/realsite.mjs); the stepped capture gives the page the same
+    /// span of virtual time after the load.
+    #[test]
+    fn a_stepped_load_only_capture_gives_the_page_the_references_settle_time() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    // The last timer the load's pass (5 s of virtual time) runs schedules the reveal
+                    // 200 ms later: due just past the pass, as a timer set after the pass would be.
+                    let body = "<html><body><p>x</p><script>setTimeout(function () { setTimeout(function () { var d = document.createElement('div'); d.id = 'revealed-by-timer'; d.style.height = '77px'; d.textContent = 'revealed'; document.body.appendChild(d); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("revealed-by-timer"), "the timer never ran: {}", &dumped[..dumped.len().min(400)]);
+    }
+
     /// `--live-ms` end to end: the window's end is the capture's end. A request
     /// still open at the end is pinned in `report.rs`: here a fetch started
     /// inside the load holds the load, so it answers before the window opens.
