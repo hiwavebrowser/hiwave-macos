@@ -230,3 +230,25 @@ fn parse_then_move_parses_with_the_parsing_documents_scripting_flag() {
         .collect();
     assert!(wrong.is_empty(), "{} of {} lines differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
 }
+
+const OUTER_PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-12/html2_outer_html_setter.html");
+const OUTER_CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-12/html2_outer_html_setter_cft148.txt");
+
+/// R1 on #1108 (third): the `outerHTML` setter on an element of the page,
+/// of another document, with no parent, under the document, under a
+/// fragment, under an SVG element and in a table, and with an empty or
+/// null value.
+#[test]
+fn outer_html_setter_replaces_the_element_as_chrome_does() {
+    let got = report_lines(OUTER_PAGE);
+    let expected: Vec<&str> = OUTER_CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
+    assert_eq!(expected.len(), 9, "the Chrome report has 9 lines");
+    assert_eq!(got.len(), expected.len(), "{got:#?}");
+    let wrong: Vec<String> = got
+        .iter()
+        .zip(&expected)
+        .filter(|(g, e)| g != e)
+        .map(|(g, e)| format!("  {g}\n    Chromium: {e}"))
+        .collect();
+    assert!(wrong.is_empty(), "{} of {} lines differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
+}
