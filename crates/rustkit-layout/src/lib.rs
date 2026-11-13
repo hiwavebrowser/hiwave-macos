@@ -46,6 +46,8 @@ mod flex_resolve_tests;
 
 #[cfg(test)]
 mod float_line_wrap_tests;
+#[cfg(test)]
+mod float_in_items_unit_tests;
 
 #[cfg(test)]
 mod flex_auto_margin_relayout_tests;

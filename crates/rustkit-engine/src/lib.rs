@@ -47601,6 +47601,9 @@ mod incremental_restyle_tests {
         assert_restarts("hover", |key| key.hover = Some(1));
         assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
+        // CQ1 (#1070): measured container sizes fingerprint the memo key so a
+        // kept cascade is never replayed across different @container answers.
+        assert_restarts("containers", |key| key.containers = 1);
     }
 
     #[test]
