@@ -115,3 +115,49 @@ fn an_item_whose_content_flows_to_zero_is_zero() {
         assert!(row.abs() < 0.5 && items[0].abs() < 0.5, "{align:?}: row {row}, item {items:?}; Chromium 0, 0");
     }
 }
+
+
+/// CB6c follow-up (#1080): a stretched item whose height comes from
+/// `aspect-ratio` keeps that ratio height. Without the exclusion, step 11b
+/// would shrink it to the short child's laid-out height (10) the way a
+/// stretch-without-ratio item does. Portable stand-in for the headless
+/// `flex_aspect_ratio_tests` cases that were 30 tall for Chrome's 294/40.
+#[test]
+fn a_stretched_aspect_ratio_item_keeps_its_ratio_height() {
+    let mut row_style = ComputedStyle::new();
+    row_style.display = Display::Flex;
+    row_style.align_items = AlignItems::Stretch;
+    row_style.font_size = Length::Px(16.0);
+    let mut item_style = ComputedStyle::new();
+    item_style.font_size = Length::Px(16.0);
+    item_style.width = Length::Px(80.0);
+    item_style.aspect_ratio = Some(2.0);
+    let mut kid_style = ComputedStyle::new();
+    kid_style.height = Length::Px(10.0);
+    kid_style.font_size = Length::Px(16.0);
+    let mut item = LayoutBox::new(BoxType::Block, item_style);
+    item.children.push(LayoutBox::new(BoxType::Block, kid_style));
+    let mut row = LayoutBox::new(BoxType::Block, row_style);
+    row.children.push(item);
+    let mut body = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+    body.children.push(row);
+    body.set_viewport(1280.0, 800.0);
+    let cb = Dimensions {
+        content: Rect::new(0.0, 0.0, 400.0, 0.0),
+        ..Default::default()
+    };
+    let mut mc = MarginCollapseContext::new();
+    let mut fc = FloatContext::new();
+    body.layout_with_collapse(&cb, &mut mc, &mut fc);
+    let row = &body.children[0];
+    let item = &row.children[0];
+    let (iw, ih) = (
+        item.dimensions.border_box().width,
+        item.dimensions.border_box().height,
+    );
+    let rh = row.dimensions.border_box().height;
+    assert!(
+        (iw - 80.0).abs() < 0.5 && (ih - 40.0).abs() < 0.5 && (rh - 40.0).abs() < 0.5,
+        "stretched aspect-ratio item {iw}x{ih} (row {rh}); want 80x40 (not shrunk to the 10px child)"
+    );
+}

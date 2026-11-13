@@ -218,6 +218,15 @@ pub type ComputedLines = Rc<dyn Fn(usize) -> Option<String>>;
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
 
+/// Where characters `[start, end)` of a text node (by NodeId, offsets in
+/// characters) are in the layout: `[x, y, width, height]` per line, in
+/// document coordinates (`Range.getClientRects`).
+///
+/// The second pair is the same span counted after white-space collapsing
+/// (each run of white space as one character): the numbering of a run whose
+/// white space collapses.
+pub type TextRects = Rc<dyn Fn(usize, (usize, usize), (usize, usize)) -> Vec<[f32; 4]>>;
+
 /// Control writes script made that the engine has not taken yet. A forced
 /// layout copies them into the engine's edit state before it builds, and
 /// drains what it applied (`ForcedLayout`).
@@ -264,6 +273,8 @@ pub struct ForcedGeometry {
     /// first read that needs them (as `DomBindings::set_geometry_source`).
     pub source: GeometrySource,
     pub hit_tester: Option<HitTester>,
+    /// The layout's text geometry, for `Range` rects.
+    pub text_rects: Option<TextRects>,
     /// Formats one element's computed style of this layout on its first
     /// read (LAT8); `None` keeps whatever `source` returns.
     pub computed_lines: Option<ComputedLines>,
@@ -346,6 +357,8 @@ pub(crate) struct DomHost {
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
+    /// The layout's text geometry (`TextRects`), installed with a layout.
+    text_rects: Option<TextRects>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -590,6 +603,7 @@ impl DomHost {
         h.computed_lines = laid.computed_lines;
         h.geometry_source = Some(laid.source);
         h.hit_tester = laid.hit_tester;
+        h.text_rects = laid.text_rects;
         // The document may have grown or shrunk: scrollTo clamps to the new
         // end, and an offset past it comes back to it.
         let scroll = h.scroll_state.clone();
@@ -652,6 +666,10 @@ impl DomHost {
 
     pub(crate) fn set_hit_tester(&mut self, tester: Option<HitTester>) {
         self.hit_tester = tester;
+    }
+
+    pub(crate) fn set_text_rects(&mut self, rects: Option<TextRects>) {
+        self.text_rects = rects;
     }
 
     /// Bind `document`, returning the new generation.
@@ -1129,8 +1147,25 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         // A template's innerHTML is its content's (HTML §4.12.3).
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
+            // The fragment's scripting flag is its context element's
+            // document's (HTML §13.4): off in a template's contents and in
+            // a document `DOMParser` or `createHTMLDocument` made, whose
+            // nodes live in this Document under a Document node of their
+            // own, so `<noscript>` content there is elements.
+            let mut top = node.clone();
+            while let Some(parent) = top.parent() {
+                top = parent;
+            }
+            let inert = tag_name.eq_ignore_ascii_case("template")
+                || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
-                .parse_fragment_in(html, tag_name, is_in_html_content(&node), node.holds_svg_content())
+                .parse_fragment_scripted(
+                    html,
+                    tag_name,
+                    is_in_html_content(&node),
+                    node.holds_svg_content(),
+                    document.scripting() && !inert,
+                )
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -1574,6 +1609,26 @@ fn id_list(nodes: impl IntoIterator<Item = Rc<Node>>) -> JsValue {
     JsValue::String(ids.join(" "))
 }
 
+/// A UTF-16 offset in a text node's data as the two character counts the
+/// layout numbers a run by: the characters before it, and those characters
+/// after white-space collapsing (each run of white space as one).
+fn text_offsets(data: &str, offset: usize) -> (usize, usize) {
+    let (mut units, mut chars, mut collapsed, mut in_space) = (0, 0, 0, false);
+    for c in data.chars() {
+        if units >= offset {
+            break;
+        }
+        units += c.len_utf16();
+        chars += 1;
+        let space = matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        if !(space && in_space) {
+            collapsed += 1;
+        }
+        in_space = space;
+    }
+    (chars, collapsed)
+}
+
 fn number_arg(args: &[JsValue], index: usize) -> Option<f32> {
     match args.get(index) {
         Some(JsValue::Number(n)) if n.is_finite() => Some(*n as f32),
@@ -1663,15 +1718,37 @@ const VOID_ELEMENTS: &[&str] = &[
     "keygen", "link", "meta", "param", "source", "track", "wbr",
 ];
 
-/// Elements whose Text children serialize unescaped.
-const RAW_TEXT_ELEMENTS: &[&str] = &[
-    "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext",
-];
+/// Elements whose Text children serialize unescaped, wherever they are.
+/// `noscript` is one more only where scripting is on for the node
+/// (`noscript_is_raw`).
+const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
+
+/// Whether a `<noscript>` under `node` writes its text children as they
+/// are (HTML §13.3: when scripting is enabled for the node). That is in
+/// the page's own document, when the page runs script. Everywhere else
+/// the text is escaped like any other: in a document `DOMParser` or
+/// `createHTMLDocument` made (a Document node of its own), in template
+/// contents, and in a tree that is in no document, where nothing records
+/// which document made it. Chrome writes a detached node of the page's
+/// document raw; escaped is the safe answer when that is not known, since
+/// raw text read out of an inert tree is markup once it is parsed again.
+fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
+    let Some(page) = page.filter(|d| d.scripting()) else {
+        return false;
+    };
+    let mut top = node.clone();
+    while let Some(parent) = top.parent() {
+        top = parent;
+    }
+    Rc::ptr_eq(&top, page.root())
+}
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
-/// Attributes come out sorted by name: rustkit-dom keeps them in a
-/// HashMap, so source order is gone.
-fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
+/// Attributes come out in the element's own order (the order they were
+/// written or set in), as Chrome writes them.
+///
+/// `raw_noscript`: `noscript_is_raw` for this tree.
+fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
     match &node.node_type {
         NodeType::Element {
             tag_name,
@@ -1680,18 +1757,16 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         } => {
             out.push('<');
             out.push_str(tag_name);
-            let mut names: Vec<&String> = attributes.keys().collect();
-            names.sort();
-            for name in names {
+            for (name, value) in attributes.iter() {
                 out.push(' ');
                 out.push_str(name);
                 out.push_str("=\"");
-                escape_into(&attributes[name], true, out);
+                escape_into(value, true, out);
                 out.push('"');
             }
             out.push('>');
             if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
-                serialize_children(node, out, templates);
+                serialize_children(node, out, templates, raw_noscript);
                 out.push_str("</");
                 out.push_str(tag_name);
                 out.push('>');
@@ -1700,7 +1775,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         NodeType::Text(data) => {
             let raw = node
                 .parent()
-                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t)))
+                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t) || (raw_noscript && t == "noscript")))
                 .unwrap_or(false);
             if raw {
                 out.push_str(data);
@@ -1725,16 +1800,20 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates, raw_noscript),
     }
 }
 
 /// The children of `node`, serialized (`innerHTML`); a template's are
 /// its content's children.
-fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
-    let source = templates.get(&node.id.raw()).unwrap_or(node);
+fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
+    // A template's contents are in an inert document: scripting is off.
+    let (source, raw_noscript) = match templates.get(&node.id.raw()) {
+        Some(contents) => (contents, false),
+        None => (node, raw_noscript),
+    };
     for child in source.children() {
-        serialize_node(&child, out, templates);
+        serialize_node(&child, out, templates, raw_noscript);
     }
 }
 
@@ -1754,7 +1833,12 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
+fn node_info(
+    node: &Rc<Node>,
+    field: &str,
+    templates: &HashMap<usize, Rc<Node>>,
+    page: Option<&Rc<Document>>,
+) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -1801,24 +1885,23 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
-        // Space-separated (a name never holds whitespace) and sorted:
-        // rustkit-dom keeps attributes in a HashMap, so source order is gone.
+        // Space-separated (a name never holds whitespace), in the element's
+        // own order.
         "attrNames" => match &node.node_type {
             NodeType::Element { attributes, .. } => {
-                let mut names: Vec<&str> = attributes.keys().map(String::as_str).collect();
-                names.sort_unstable();
+                let names: Vec<&str> = attributes.keys().map(String::as_str).collect();
                 JsValue::String(names.join(" "))
             }
             _ => JsValue::Null,
         },
         "innerHTML" => {
             let mut out = String::new();
-            serialize_children(node, &mut out, templates);
+            serialize_children(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "outerHTML" => {
             let mut out = String::new();
-            serialize_node(node, &mut out, templates);
+            serialize_node(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
@@ -2116,7 +2199,9 @@ pub(crate) fn install(
                     };
                     JsValue::String(inner_text::inner_text(&node, &style))
                 }
-                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
+                (Some(node), Some(field)) => {
+                    node_info(&node, field, &host.templates.borrow(), host.document.as_ref())
+                }
                 _ => JsValue::Null,
             }
         }),
@@ -2282,6 +2367,73 @@ pub(crate) fn install(
         }),
     )?;
 
+    // rangeTextRects(gen, "node from to;node from to;..."): where the
+    // characters [from, to) of each of those text nodes are (offsets in
+    // UTF-16 units, as a Range has them), as a JSON array with one flat
+    // [x, y, w, h, ...] array per node, in document coordinates; an empty
+    // one before a layout or for a node with no box. One call for a whole
+    // range: a selection over a long page asks about thousands of nodes.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_range_text_rects",
+        2,
+        Box::new(move |args| {
+            DomHost::ensure_fresh_geometry(&h, &d, "text_rects");
+            let host = h.borrow();
+            let asks = string_arg(args, 1).unwrap_or("");
+            let document = args.first().and_then(|g| host.document_for(g));
+            let answers: Vec<String> = asks
+                .split(';')
+                .filter(|ask| !ask.is_empty())
+                .map(|ask| {
+                    let mut numbers = ask.split(' ').filter_map(|n| n.parse::<usize>().ok());
+                    let (Some(id), Some(from), Some(to)) = (numbers.next(), numbers.next(), numbers.next()) else {
+                        return "[]".to_string();
+                    };
+                    let (Some(rects), Some(node)) =
+                        (host.text_rects.as_ref(), document.and_then(|d| d.get_node(NodeId::new(id))))
+                    else {
+                        return "[]".to_string();
+                    };
+                    let NodeType::Text(data) = &node.node_type else {
+                        return "[]".to_string();
+                    };
+                    let (from, to) = (text_offsets(data, from), text_offsets(data, to));
+                    let flat: Vec<String> = rects(id, (from.0, to.0), (from.1, to.1))
+                        .iter()
+                        .flat_map(|r| r.iter().map(|v| if v.is_finite() { v.to_string() } else { "0".to_string() }))
+                        .collect();
+                    format!("[{}]", flat.join(","))
+                })
+                .collect();
+            JsValue::String(format!("[{}]", answers.join(",")))
+        }),
+    )?;
+
+    // svgHit(gen, svg, x, y, width, height): the shape of an `<svg>` a point
+    // is on (from the top left of its content box, whose size is given),
+    // as its NodeId; -1 when it is on none.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_svg_hit",
+        6,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let number = |i: usize| match args.get(i) {
+                Some(JsValue::Number(n)) if n.is_finite() => Some(*n),
+                _ => None,
+            };
+            let (Some(svg), Some(x), Some(y), Some(w), Some(height)) =
+                (host.node(args), number(2), number(3), number(4), number(5))
+            else {
+                return JsValue::Number(-1.0);
+            };
+            crate::svg_geometry::shape_at(&svg, (x, y), (w, height))
+                .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64))
+        }),
+    )?;
+
     // hit(x, y): the node under a viewport point, or null before a layout
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
@@ -2299,9 +2451,11 @@ pub(crate) fn install(
             let (Some(x), Some(y)) = (number_arg(args, 0), number_arg(args, 1)) else {
                 return JsValue::Null;
             };
+            // With a layout, a point no box is under answers -1: the
+            // root element's, in the wrappers.
             if let Some(tester) = host.hit_tester.clone() {
                 return tester(x, y, host.window_scroll())
-                    .map_or(JsValue::Null, |id| JsValue::Number(id as f64));
+                    .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64));
             }
             box_hit(&host, x, y).map_or(JsValue::Null, |id| JsValue::Number(id as f64))
         }),
@@ -2558,16 +2712,46 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+
+    // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
+    // this closure's and are read with methods taken now, before any page
+    // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
+    // or `Object.defineProperty` afterwards changes nothing here.
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
+        setDrop = uncurry(WeakSet.prototype['delete']);
+    var defineOwn = Object.defineProperty;
+    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    // Give an event object its `isTrusted`: an own accessor with no setter
+    // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
+    // for an object that will not take it.
+    function stamp(ev) {
+        if (setHas(STAMPED, ev)) return;
+        defineOwn(ev, 'isTrusted', { get: TRUST_GET, set: undefined, enumerable: true, configurable: false });
+        setAdd(STAMPED, ev);
+    }
+    // The engine made this event. It reads trusted through its one
+    // dispatch, the next `dispatchEvent` of it; one dispatched again (by
+    // a page that kept it) is not trusted any more.
+    function trust(ev) {
+        stamp(ev);
+        setAdd(TRUSTED, ev);
+        setAdd(UNDISPATCHED, ev);
+        return ev;
+    }
+    // For the embedder's other scripts, which hold the host object.
+    __rk.trust = trust;
 
     if (typeof g.DOMException !== 'function') {
         g.DOMException = function DOMException(message, name) {
@@ -2995,10 +3179,11 @@ const WRAPPERS_JS: &str = r#"
     function equalNodes(a, b) {
         if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
         if (a.nodeType === 1) {
+            // The same attributes, in any order (DOM §4.4 "equals").
             var names = a.getAttributeNames();
-            if (names.join(' ') !== b.getAttributeNames().join(' ')) return false;
+            if (names.length !== b.getAttributeNames().length) return false;
             for (var k = 0; k < names.length; k++) {
-                if (a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
+                if (!b.hasAttribute(names[k]) || a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
             }
         } else if (a.nodeType === 3 || a.nodeType === 7 || a.nodeType === 8) {
             if (a.textContent !== b.textContent) return false;
@@ -4370,6 +4555,50 @@ const WRAPPERS_JS: &str = r#"
     }
     Object.defineProperty(Range.prototype, Symbol.toStringTag, { value: 'Range' });
     g.Range = Range;
+    // AbstractRange and StaticRange (DOM §5.3, §5.4): a StaticRange is four
+    // plain values, never updated and never validated beyond its containers'
+    // types. `InputEvent.getTargetRanges()` answers them.
+    function AbstractRange() { throw new TypeError('Illegal constructor'); }
+    Object.defineProperty(AbstractRange.prototype, Symbol.toStringTag, { value: 'AbstractRange', configurable: true });
+    Object.setPrototypeOf(Range.prototype, AbstractRange.prototype);
+    Object.setPrototypeOf(Range, AbstractRange);
+    g.AbstractRange = AbstractRange;
+    var STATIC = Symbol('rustkit.staticRange');
+    function StaticRange(init) {
+        if (!new.target) throw new TypeError("Failed to construct 'StaticRange': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        if (arguments.length < 1) throw new TypeError("Failed to construct 'StaticRange': 1 argument required, but only 0 present.");
+        if (init === null || typeof init !== 'object') throw new TypeError("Failed to construct 'StaticRange': The provided value is not of type 'StaticRangeInit'.");
+        ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+            if (init[k] === undefined) {
+                throw new TypeError("Failed to construct 'StaticRange': Failed to read the '" + k + "' property from 'StaticRangeInit': Required member is undefined.");
+            }
+        });
+        [init.startContainer, init.endContainer].forEach(function (n) {
+            if (!(n instanceof Node)) throw new TypeError("Failed to construct 'StaticRange': Failed to read a container from 'StaticRangeInit': it is not of type 'Node'.");
+            if (n.nodeType === 10 || n.nodeType === 2) {
+                throw new DOMException("Failed to construct 'StaticRange': Neither startContainer nor endContainer can be a DocumentType or Attribute node.", 'InvalidNodeTypeError');
+            }
+        });
+        Object.defineProperty(this, STATIC, { value: {
+            startContainer: init.startContainer, startOffset: init.startOffset >>> 0,
+            endContainer: init.endContainer, endOffset: init.endOffset >>> 0 } });
+    }
+    StaticRange.prototype = Object.create(AbstractRange.prototype, { constructor: { value: StaticRange, writable: true, configurable: true } });
+    Object.setPrototypeOf(StaticRange, AbstractRange);
+    Object.defineProperty(StaticRange.prototype, Symbol.toStringTag, { value: 'StaticRange', configurable: true });
+    ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+        getter(StaticRange.prototype, k, function () {
+            var s = this[STATIC];
+            if (!s) throw new TypeError('Illegal invocation');
+            return s[k];
+        });
+    });
+    getter(StaticRange.prototype, 'collapsed', function () {
+        var s = this[STATIC];
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.startContainer === s.endContainer && s.startOffset === s.endOffset;
+    });
+    g.StaticRange = StaticRange;
     function slots(range, method) {
         var r = range && range[RANGE];
         if (!r) {
@@ -4607,24 +4836,80 @@ const WRAPPERS_JS: &str = r#"
         return out;
     }
     Range.prototype.toString = function () { return rangeText(slots(this, 'toString')); };
-    // The rect of a range: the union of the boxes of the elements its ends
-    // sit in (no per-character geometry reaches script yet).
-    Range.prototype.getBoundingClientRect = function () {
-        var r = slots(this, 'getBoundingClientRect');
-        function box(node) {
-            var el = node.nodeType === 1 ? node : node.parentElement;
-            return el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    // The rects of a range (CSSOM View §10.1): the client rects of each
+    // element it selects whose parent it does not select, and of the part
+    // of each text node it selects or ends in, in tree order. The text
+    // rects are per line and per character (layout's `text_range_rects`).
+    var DOMRectList = g.DOMRectList;
+    if (typeof DOMRectList !== 'function') {
+        DOMRectList = function DOMRectList() { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(DOMRectList.prototype, Symbol.toStringTag, { value: 'DOMRectList' });
+        DOMRectList.prototype.item = function (i) { i = i >>> 0; return i < this.length ? this[i] : null; };
+        g.DOMRectList = DOMRectList;
+    }
+    function rectList(rects) {
+        var list = Object.create(DOMRectList.prototype);
+        rects.forEach(function (r, i) { Object.defineProperty(list, i, { value: r, enumerable: true }); });
+        Object.defineProperty(list, 'length', { value: rects.length });
+        return list;
+    }
+    function rangeRects(r) {
+        // `out` in tree order, a text node as null until the one host call
+        // below answers for all of them (`asks`).
+        var out = [], asks = [], start = r.start, end = r.end;
+        // The first node at or after the start, and the first one past the end.
+        var node = start.node.nodeType === 1 || start.node.nodeType === 9 || start.node.nodeType === 11
+            ? (start.node.childNodes[start.offset] || nextSkipping(start.node)) : start.node;
+        var stop = end.node.nodeType === 1 || end.node.nodeType === 9 || end.node.nodeType === 11
+            ? (end.node.childNodes[end.offset] || nextSkipping(end.node)) : nextSkipping(end.node);
+        // A node is selected when the range holds all of it: neither end
+        // is in it. (Every node this is asked about is one the walk below
+        // visits, or the parent of one: none is wholly before the start or
+        // wholly after the end.) Looked up in two sets made once, not by
+        // counting siblings for each node: a range over a long list asked
+        // about every item, and counted to it each time.
+        var holdsAnEnd = new Set();
+        [start.node, end.node].forEach(function (n) { for (; n; n = n.parentNode) holdsAnEnd.add(n); });
+        function selected(n) { return !!n.parentNode && !holdsAnEnd.has(n); }
+        for (; node && node !== stop; node = nextInTree(node)) {
+            if (node.nodeType === 3) {
+                var from = node === start.node ? start.offset : 0;
+                var to = node === end.node ? end.offset : node.length;
+                var s = node[SLOT];
+                if (s && s.gen === gen) {
+                    asks.push(s.id + ' ' + from + ' ' + to);
+                    out.push(null);
+                }
+            } else if (node.nodeType === 1 && selected(node) && !(node.parentNode && node.parentNode.nodeType === 1 && selected(node.parentNode))) {
+                var own = node.getClientRects();
+                for (var k = 0; k < own.length; k++) out.push(own[k]);
+            }
         }
-        var a = box(r.start.node), b = r.end.node === r.start.node ? a : box(r.end.node);
-        if (!a) a = b;
-        if (!b) b = a;
-        if (!a) return g.DOMRect ? new g.DOMRect(0, 0, 0, 0) : { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
-        var left = Math.min(a.left, b.left), top = Math.min(a.top, b.top);
-        var right = Math.max(a.right, b.right), bottom = Math.max(a.bottom, b.bottom);
-        return g.DOMRect ? new g.DOMRect(left, top, right - left, bottom - top)
-            : { x: left, y: top, width: right - left, height: bottom - top, top: top, left: left, right: right, bottom: bottom };
+        if (!asks.length) return out;
+        var answers = JSON.parse(N.rangeTextRects(gen, asks.join(';'))), next = 0, all = [];
+        var sx = scrollOffset('x'), sy = scrollOffset('y');
+        out.forEach(function (item) {
+            if (item !== null) { all.push(item); return; }
+            var flat = answers[next++] || [];
+            for (var i = 0; i + 3 < flat.length; i += 4) all.push(rect(flat[i] - sx, flat[i + 1] - sy, flat[i + 2], flat[i + 3]));
+        });
+        return all;
+    }
+    Range.prototype.getClientRects = function () {
+        return rectList(rangeRects(slots(this, 'getClientRects')));
     };
-    Range.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
+    // The smallest rect around those that are not empty in both
+    // directions; all zeros when there are none.
+    Range.prototype.getBoundingClientRect = function () {
+        var rects = rangeRects(slots(this, 'getBoundingClientRect')).filter(function (b) { return b.width !== 0 || b.height !== 0; });
+        if (!rects.length) return rect(0, 0, 0, 0);
+        var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+        rects.forEach(function (b) {
+            left = Math.min(left, b.left); top = Math.min(top, b.top);
+            right = Math.max(right, b.right); bottom = Math.max(bottom, b.bottom);
+        });
+        return rect(left, top, right - left, bottom - top);
+    };
     Range.prototype.cloneRange = function () {
         var r = slots(this, 'cloneRange');
         var made = makeRange(g.document);
@@ -4977,8 +5262,8 @@ const WRAPPERS_JS: &str = r#"
             }
             if (!changed) return false;
             var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
-            ev.isTrusted = true;
-            host.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(host, ev);
             return true;
         },
         configurable: true, enumerable: false, writable: true
@@ -4994,6 +5279,18 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // An `<svg>` is one box in the layout. The shape of it a client point
+    // is on, else the `<svg>`: found host-side, from the shapes' geometry
+    // (svg_geometry.rs `shape_at`), with nothing a page can replace on the
+    // way.
+    var svgClientRect = Element.prototype.getBoundingClientRect;
+    function svgShapeAt(svg, x, y) {
+        var s = svg[SLOT];
+        if (!s || s.gen !== gen) return svg;
+        var r = svgClientRect.call(svg), b = geom(svg, 'client');
+        var id = N.svgHit(s.gen, s.id, x - r.left - (b ? round(b.bl) : 0), y - r.top - (b ? round(b.bt) : 0), r.width, r.height);
+        return id >= 0 ? (wrap(id) || svg) : svg;
+    }
     function pointHit(x, y, method) {
         x = Number(x);
         y = Number(y);
@@ -5005,6 +5302,12 @@ const WRAPPERS_JS: &str = r#"
         var w = g.innerWidth, h = g.innerHeight;
         if (typeof w === 'number' && typeof h === 'number' && (x < 0 || y < 0 || x >= w || y >= h)) return null;
         var id = N.hit(x, y);
+        // A point of the viewport no box is under is the root element's
+        // (Chrome for Testing 148: HTML below a short body, not BODY).
+        if (id === -1) {
+            var root = g.document.documentElement;
+            return root && root[SLOT] ? root[SLOT].id : null;
+        }
         return id == null ? null : id;
     }
     Document.prototype.elementFromPoint = function (x, y) {
@@ -5012,6 +5315,9 @@ const WRAPPERS_JS: &str = r#"
         if (id == null) return null;
         var node = wrap(id);
         while (node && node.nodeType !== 1) node = node.parentElement || node.parentNode;
+        // An `<svg>` is one box in the layout: the shape under the point
+        // is found from its geometry (web_svg_geometry.js).
+        if (node && node.localName === 'svg') node = svgShapeAt(node, Number(x), Number(y));
         return node && node.nodeType === 1 ? node : null;
     };
     Document.prototype.elementsFromPoint = function (x, y) {
@@ -5103,8 +5409,8 @@ const WRAPPERS_JS: &str = r#"
             loadedImages.delete(target);
             failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
             var ev = new Event('error');
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
             settleDecodes(target, false);
         },
         configurable: true, enumerable: false, writable: true
@@ -5125,8 +5431,8 @@ const WRAPPERS_JS: &str = r#"
             // No URL: a `data:` image, which is its own `src`.
             loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
             var ev = new Event('load');
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
             settleDecodes(target, true);
         },
         configurable: true, enumerable: false, writable: true
@@ -5209,8 +5515,8 @@ const WRAPPERS_JS: &str = r#"
             init.bubbles = true;
             init.cancelable = type === 'transitionend';
             var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5223,8 +5529,8 @@ const WRAPPERS_JS: &str = r#"
             init.bubbles = true;
             init.cancelable = false;
             var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
-            try { ev.isTrusted = true; } catch (_) {}
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5238,6 +5544,11 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return true;
+            // The pointer is on a shape of an `<svg>`, which the layout
+            // sees as one box: the event's target is the shape.
+            if (target.localName === 'svg' && typeof init.clientX === 'number') {
+                target = svgShapeAt(target, init.clientX, init.clientY);
+            }
             // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
             var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
                 type.indexOf('pointer') === 0;
@@ -5256,7 +5567,7 @@ const WRAPPERS_JS: &str = r#"
                 init.pressure = init.buttons ? 0.5 : 0;
             }
             var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
-            ev.isTrusted = true;
+            trust(ev);
             // Where the point is in the document and in the target's box.
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
@@ -5269,7 +5580,7 @@ const WRAPPERS_JS: &str = r#"
             Object.keys(at).forEach(function (k) {
                 Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
             });
-            return target.dispatchEvent(ev);
+            return dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5299,7 +5610,7 @@ const WRAPPERS_JS: &str = r#"
             if (!(ev.dataTransfer instanceof Object)) {
                 Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
             }
-            ev.isTrusted = true;
+            trust(ev);
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
@@ -5307,7 +5618,7 @@ const WRAPPERS_JS: &str = r#"
             Object.keys(at).forEach(function (k) {
                 Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
             });
-            var notCancelled = target.dispatchEvent(ev);
+            var notCancelled = dispatchTo(target, ev);
             // A cancelled dragstart ends the drag before it began.
             var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
             return (notCancelled ? '1:' : '0:') + settled;
@@ -5320,20 +5631,58 @@ const WRAPPERS_JS: &str = r#"
     // (UI Events §3.7). With nothing focused in the engine (`id` null) it
     // goes to the page's active element: what script focused, else the
     // body. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireKey', {
-        value: function (id, type, init) {
+    // On the host object, not the document: a page can neither call it
+    // (the event is trusted) nor replace it. The key arrives as an
+    // argument, never in script source (`DomBindings::fire_key_event`).
+    __rk.fireKey = function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : g.document.activeElement;
             if (!target) return true;
             init.bubbles = true;
             init.cancelable = true;
             init.composed = true;
             init.view = g;
+            // The legacy codes (UI Events §7.3; Chrome for Testing 148):
+            // `keydown` and `keyup` carry the key's virtual-key code and no
+            // charCode; `keypress` carries the character in both.
+            if (type === 'keypress') {
+                init.keyCode = init.charCode = init.key === 'Enter' ? 13 : (init.key.codePointAt(0) || 0);
+            } else {
+                init.keyCode = virtualKey(init.key);
+                init.charCode = 0;
+            }
             var ev = new g.KeyboardEvent(type, init);
-            ev.isTrusted = true;
-            return target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
+    // A key's Windows virtual-key code, which is what `keyCode` is on every
+    // platform, for a US layout: a letter is its capital, a shifted digit or
+    // mark is the key it is on.
+    var VK_NAMED = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20,
+        Escape: 27, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
+        ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, NumLock: 144, ScrollLock: 145 };
+    var VK_MARKS = { ' ': 32, ')': 48, '!': 49, '@': 50, '#': 51, '$': 52, '%': 53, '^': 54, '&': 55, '*': 56, '(': 57,
+        ';': 186, ':': 186, '=': 187, '+': 187, ',': 188, '<': 188, '-': 189, '_': 189, '.': 190, '>': 190,
+        '/': 191, '?': 191, '`': 192, '~': 192, '[': 219, '{': 219, '\\': 220, '|': 220, ']': 221, '}': 221,
+        "'": 222, '"': 222 };
+    function virtualKey(key) {
+        if (hasOwn(VK_NAMED, key)) return VK_NAMED[key];
+        if (hasOwn(VK_MARKS, key)) return VK_MARKS[key];
+        if (/^[a-z]$/.test(key)) return key.charCodeAt(0) - 32;
+        if (/^[A-Z0-9]$/.test(key)) return key.charCodeAt(0);
+        var f = /^F([1-9]|1[0-9]|2[0-4])$/.exec(key);
+        return f ? 111 + Number(f[1]) : 0;
+    }
+    // The text a key is about to insert in an editable element: a trusted
+    // `textInput` TextEvent after the keypress, before the insertion and its
+    // `input` (Chrome for Testing 148). Returns false when cancelled.
+    // On the host object, as `fireKey` is.
+    __rk.fireTextInput = function (id, data) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target || typeof __rk.newTextEvent !== 'function') return true;
+            var ev = __rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
     // What the user typed changed the control's value: `input`, which
     // bubbles and cannot be cancelled (Input Events §5.1). `data` is the
     // inserted text, null for a deletion.
@@ -5350,8 +5699,8 @@ const WRAPPERS_JS: &str = r#"
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
             });
-            ev.isTrusted = true;
-            target.dispatchEvent(ev);
+            trust(ev);
+            dispatchTo(target, ev);
         },
         configurable: true, enumerable: false, writable: true
     });
@@ -5675,6 +6024,9 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
         }
+        // Only the engine's own event, on its one dispatch, is trusted.
+        stamp(event);
+        if (setHas(UNDISPATCHED, event)) setDrop(UNDISPATCHED, event); else setDrop(TRUSTED, event);
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
         event.target = t;
@@ -5699,6 +6051,10 @@ const WRAPPERS_JS: &str = r#"
         return !event.defaultPrevented;
     };
 
+    // The engine's own dispatches go through this, whatever a page has put
+    // in place of `dispatchEvent` since.
+    var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
+
     function Event(type, init) {
         if (!(this instanceof Event)) {
             throw new TypeError("Failed to construct 'Event': Please use the 'new' operator.");
@@ -5715,7 +6071,7 @@ const WRAPPERS_JS: &str = r#"
         this.target = null;
         this.currentTarget = null;
         this.eventPhase = 0;
-        this.isTrusted = false;
+        stamp(this);
         // On performance.now()'s clock (ms from the time origin), as Chrome's DOMHighResTimeStamp.
         this.timeStamp = typeof g.__rustkit_perf_now === 'function' ? g.__rustkit_perf_now() : Date.now();
     }
@@ -5730,6 +6086,13 @@ const WRAPPERS_JS: &str = r#"
     // The nodes the event is going through, target first; empty outside dispatch.
     Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
+    // DOM §2.2: the legacy alias. Reading it is the stop-propagation flag;
+    // setting it true is stopPropagation(), setting it false does nothing.
+    Object.defineProperty(Event.prototype, 'cancelBubble', {
+        get: function () { return this[STOP] === true; },
+        set: function (v) { if (v) this[STOP] = true; },
+        enumerable: true, configurable: true
+    });
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
     Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
@@ -5778,8 +6141,16 @@ const WRAPPERS_JS: &str = r#"
     };
     Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
     g.DOMParser = DOMParser;
+    // HTML §6.4.4 "click()": nothing on a disabled form control; otherwise a
+    // synthetic pointer event, which in Chrome for Testing 148 is an
+    // untrusted, composed PointerEvent with detail 0, button 0, pointerId -1
+    // and an empty pointerType, at 0,0, with the window as its view.
     HTMLElement.prototype.click = function () {
-        var e = new Event('click', { bubbles: true, cancelable: true });
+        if (this.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(this.localName)) return;
+        var C = typeof g.PointerEvent === 'function' ? g.PointerEvent : g.MouseEvent;
+        var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
+                     pointerId: -1, pointerType: '' };
+        var e = typeof C === 'function' ? new C('click', init) : new Event('click', init);
         e[SYNTHETIC_CLICK] = true;
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
@@ -5863,6 +6234,7 @@ const WRAPPERS_JS: &str = r#"
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        local: function (id) { return N.info(gen, id, 'local'); },
         setFragmentProto: function (f) { fragmentProto = f; },
         extendElementProto: function (f) {
             var base = elementProto;
@@ -5966,7 +6338,7 @@ mod tests {
                  try { m.isEqualNode({}); } catch (e) { r.push(e.name); } \
                  r.join('|')"
             ),
-            "class,data-z,id|0|false|true|false|true|false|true|false|false|true|false|TypeError"
+            "id,class,data-z|0|false|true|false|true|false|true|false|false|true|false|TypeError"
         );
     }
 

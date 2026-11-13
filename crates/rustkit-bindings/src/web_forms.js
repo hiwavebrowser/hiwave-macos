@@ -107,7 +107,12 @@
         if (el.localName === 'label') {
             return function (ok) {
                 var c = ok ? el.control : null;
-                if (c && !c.hasAttribute('disabled')) c.click();
+                // The labeled control is focused, then clicked (Chrome for
+                // Testing 148: `focus` at the control before its `click`).
+                if (c && !c.hasAttribute('disabled')) {
+                    if (typeof c.focus === 'function') c.focus();
+                    c.click();
+                }
             };
         }
         if (el.localName === 'summary') {
@@ -212,10 +217,10 @@
         if (sel.multiple || sel.selectedIndex === index) return false;
         pick(sel, function (x) { return x === o; });
         var input = new g.Event('input', { bubbles: true, composed: true });
-        input.isTrusted = true;
+        __rk.trust(input);
         sel.dispatchEvent(input);
         var change = new g.Event('change', { bubbles: true });
-        change.isTrusted = true;
+        __rk.trust(change);
         sel.dispatchEvent(change);
         return true;
     });
