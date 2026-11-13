@@ -121,7 +121,7 @@
         },
         enumerable: true, configurable: true
     });
-    g.__rustkit_location_hash_sync = function (hash) { hashValue = hash; };
+    __rk.locationHashSync = function (hash) { hashValue = hash; };
     // Location's stringifier is its href (HTML §7.3). `new URL(path, location)`
     // and `String(location)` use it; without it the base is "[object Object]"
     // and the URL constructor throws Invalid URL.
@@ -148,13 +148,13 @@
         });
     } catch (e) {}
     // The engine's own write of a new document's URL.
-    g.__rustkit_location_sync = function (href) {
+    __rk.locationSync = function (href) {
         syncing = true;
         try { loc.href = href; } finally { syncing = false; }
     };
     // A new document: one entry, the current URL, no state.
     var listening = false;
-    g.__rustkit_history_reset = function () {
+    __rk.historyReset = function () {
         entries = [{ url: loc.href, state: null }];
         index = 0;
         // Listened for once the document is bound: window's listeners
@@ -164,7 +164,7 @@
             g.addEventListener('load', refreshOnLoad);
         }
     };
-    g.__rustkit_history_reset();
+    __rk.historyReset();
 
     // "Can have its URL rewritten": same origin, and for a non-http(s) URL
     // only the fragment may change.
@@ -246,7 +246,7 @@
     // form control between the target and the link has the click's
     // activation itself, so the link is not followed.
     var OWN_ACTIVATION = /^(button|input|select|textarea)$/;
-    g.__rustkit_follow_link = function (el) {
+    __rk.followLink = function (el) {
         var a = el;
         while (a && !(a.nodeType === 1 && (a.localName === 'a' || a.localName === 'area') && a.hasAttribute('href'))) {
             if (a.nodeType === 1 && OWN_ACTIVATION.test(a.localName)) return;

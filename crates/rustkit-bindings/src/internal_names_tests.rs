@@ -2,8 +2,9 @@
 //! calls on the host object (`__rk`, which only they hold), not on
 //! `window`, `document` or a prototype. This test walks what page script
 //! can reach after install and lists every property named `__rk...` or
-//! `__rustkit...`: the list is the inventory, and a new name cannot be
-//! added to a reachable object without failing it.
+//! `__rustkit...` (and `__net`, the name the bridge's own tests give it):
+//! the list is the inventory, and a new name cannot be added to a
+//! reachable object without failing it.
 
 use super::*;
 
@@ -25,7 +26,7 @@ const WALK: &str = r#"(function () {
         seen.add(o);
         var names; try { names = Object.getOwnPropertyNames(o); } catch (e) { names = []; }
         names.forEach(function (k) {
-            if (/^__(rk|rustkit)/i.test(k)) found[k] = true;
+            if (/^__(rk|rustkit)/i.test(k) || k === '__net') found[k] = true;
             var d; try { d = Object.getOwnPropertyDescriptor(o, k); } catch (e) { return; }
             if (d && 'value' in d) visit(d.value, depth + 1);
         });

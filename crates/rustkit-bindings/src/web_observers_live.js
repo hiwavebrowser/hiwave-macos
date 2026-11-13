@@ -55,7 +55,7 @@
             // the geometry is stale, and an element inserted since has no box
             // at all (it would read as an empty rectangle at the origin, "in
             // view"). The engine reports after the layout the write is owed.
-            if (typeof g.__rustkit_dom_dirty === 'function' && g.__rustkit_dom_dirty()) return;
+            if (typeof __rk.domDirty === 'function' && __rk.domDirty()) return;
             tick();
         }, 0);
     }

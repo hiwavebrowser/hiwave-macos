@@ -2779,7 +2779,7 @@ pub(crate) fn install(
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
-/// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+/// surface. `__rk.domReset(gen)` rebinds it to a new document.
 #[cfg(test)]
 pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
 
@@ -2804,6 +2804,10 @@ const WRAPPERS_JS: &str = r#"
         'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+    // The DOM's dirty flag (a native registered as a global), for
+    // web_observers_live.js.
+    __rk.domDirty = g.__rustkit_dom_dirty;
+    delete g.__rustkit_dom_dirty;
 
     // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
     // this closure's and are read with methods taken now, before any page
@@ -6387,7 +6391,7 @@ const WRAPPERS_JS: &str = r#"
         if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
-        if (dispatchTo(el, e) && g.__rustkit_follow_link) g.__rustkit_follow_link(el);
+        if (dispatchTo(el, e) && __rk.followLink) __rk.followLink(el);
     }
     HTMLElement.prototype.click = function click() { clickElement(this, false); };
 
@@ -6481,14 +6485,14 @@ const WRAPPERS_JS: &str = r#"
         }
     };
 
-    g.__rustkit_dom_reset = function (newGen) {
+    __rk.domReset = function (newGen) {
         gen = newGen;
         cache = new Map();
         var root = N.root(gen, 'document');
         Object.defineProperty(doc, SLOT, { value: { id: root, gen: gen }, configurable: true });
         if (typeof root === 'number') cache.set(root, doc);
     };
-    g.__rustkit_dom_reset(0);
+    __rk.domReset(0);
 })(globalThis);
 "#;
 

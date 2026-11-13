@@ -83,9 +83,9 @@
         HOOKS.retarget = retarget;
     }
     // A newly bound document may come with declarative shadow roots.
-    var reset = g.__rustkit_dom_reset;
+    var reset = __rk.domReset;
     if (typeof reset === 'function') {
-        g.__rustkit_dom_reset = function (newGen) {
+        __rk.domReset = function (newGen) {
             var r = reset.apply(this, arguments);
             if (S.call('any', document) === true) installHooks();
             return r;

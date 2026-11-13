@@ -278,7 +278,7 @@
     }
     function idlePeriod() {
         idleTask = null;
-        if (typeof g.__rustkit_next_timer === 'function' && g.__rustkit_next_timer() === 0) {
+        if (typeof __rk.nextTimer === 'function' && __rk.nextTimer() === 0) {
             var now = Date.now();
             idleQueue.slice().forEach(function (entry) {
                 if (entry.expires !== null && now >= entry.expires) invoke(entry, deadline(0, true));

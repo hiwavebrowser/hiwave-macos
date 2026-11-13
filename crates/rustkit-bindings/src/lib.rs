@@ -428,7 +428,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// engine to collect. The one thing that does
 /// propagate is Boa's loop-iteration limit, which a script cannot catch.
 ///
-/// Timers run on a virtual clock the engine advances (`__rustkit_run_timers`),
+/// Timers run on a virtual clock the engine advances (`__rk.runTimers`),
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
@@ -575,13 +575,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     }
-    window.__rustkit_run_timers = function (horizon, max) {
+    __rk.runTimers = function (horizon, max) {
         return runTimers(horizon, max, false);
     };
     // The load's clock, one callback at a time, so the host can publish a
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
-    window.__rustkit_run_timers_framed = function (horizon, max, frameMs) {
+    __rk.runTimersFramed = function (horizon, max, frameMs) {
         var start = Date.now();
         var ran = 0;
         while (ran < max) {
@@ -610,7 +610,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // between its callbacks, rather than once 1000 of them have run
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
-    window.__rustkit_advance_timers = function (delta, max, slice) {
+    __rk.advanceTimers = function (delta, max, slice) {
         var target = now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
@@ -633,12 +633,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     };
-    // Like `__rustkit_advance_timers`, but stop between callbacks once
+    // Like `__rk.advanceTimers`, but stop between callbacks once
     // `frameMs` of wall time has passed so the host can publish a frame.
     // A negative return is `-callbacks` and means timers are still due.
     // Zero frame budget never stops early. Callbacks that finish inside
     // the budget run in this call, and the clock and animation-frame round
-    // match `__rustkit_advance_timers`.
+    // match `__rk.advanceTimers`.
     //
     // The elapsed delta is applied even when a callback ran long enough to
     // stop the turn. Leaving the clock at that callback's due time drops
@@ -649,7 +649,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // A turn that yields still has its frame (#776): its animation-frame
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
-    window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
+    __rk.advanceTimersFramed = function (delta, max, frameMs) {
         var target = now + delta;
         var start = Date.now();
         var ran = 0;
@@ -680,8 +680,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
-    window.__rustkit_now = function () { return now; };
-    window.__rustkit_next_timer = function () {
+    __rk.now = function () { return now; };
+    __rk.nextTimer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
@@ -2129,7 +2129,7 @@ impl DomBindings {
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
         self.canvases.borrow_mut().clear();
-        runtime.evaluate_script(&format!("__rustkit_dom_reset({generation});"))?;
+        runtime.evaluate_host_turn(&format!("return __rk.domReset({generation});"), &[])?;
 
         debug!("Document bound to JS context");
         Ok(())
@@ -2144,9 +2144,9 @@ impl DomBindings {
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&format!(
+        runtime.evaluate_host_turn(&format!(
             r#"
-            if (window.__rustkit_location_sync) window.__rustkit_location_sync({:?});
+            if (__rk.locationSync) __rk.locationSync({:?});
             else window.location.href = {:?};
             window.location.protocol = {:?};
             window.location.host = {:?};
@@ -2154,10 +2154,10 @@ impl DomBindings {
             window.location.port = {:?};
             window.location.pathname = {:?};
             window.location.search = {:?};
-            if (window.__rustkit_location_hash_sync) window.__rustkit_location_hash_sync({:?});
+            if (__rk.locationHashSync) __rk.locationHashSync({:?});
             window.location.origin = {:?};
             document.URL = {:?};
-            if (window.__rustkit_history_reset) window.__rustkit_history_reset();
+            if (__rk.historyReset) __rk.historyReset();
             "#,
             location.href,
             location.href,
@@ -2170,7 +2170,7 @@ impl DomBindings {
             location.hash,
             location.origin,
             location.href
-        ))?;
+        ), &[])?;
 
         Ok(())
     }
@@ -2785,9 +2785,8 @@ impl DomBindings {
     /// document's list of media query lists flipped (a list stays there
     /// once it has listened, as in the spec, listeners or not).
     pub fn fire_media_query_changes(&self) -> Result<u32, BindingError> {
-        let fired = self.runtime.borrow_mut().evaluate_script(
-            "typeof window.__rustkit_media_changes === 'function' ? window.__rustkit_media_changes() : 0",
-        )?;
+        let fired = self.runtime.borrow_mut().evaluate_host_turn(
+            "return typeof __rk.mediaChanges === 'function' ? __rk.mediaChanges() : 0", &[])?;
         Ok(match fired {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2797,10 +2796,10 @@ impl DomBindings {
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
     /// most `max_callbacks` of them. Returns how many ran.
     pub fn run_timers(&self, horizon_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_run_timers({}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.runTimers({}, {})",
             horizon_ms, max_callbacks
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2815,10 +2814,10 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_run_timers_framed({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.runTimersFramed({}, {}, {})",
             horizon_ms, max_callbacks, frame_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
             JsValue::Number(n) => (n as u32, false),
@@ -2843,10 +2842,10 @@ impl DomBindings {
         slice: Option<std::time::Duration>,
     ) -> Result<u32, BindingError> {
         let slice_ms = slice.map_or(0, |slice| slice.as_millis().max(1) as u64);
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.advanceTimers({}, {}, {})",
             delta_ms, max_callbacks, slice_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2861,10 +2860,10 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers_framed({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.advanceTimersFramed({}, {}, {})",
             delta_ms, max_callbacks, frame_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
             JsValue::Number(n) => (n as u32, false),
@@ -2878,7 +2877,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_bookkeeping("window.__rustkit_now()")
+            .evaluate_host_bookkeeping("return __rk.now()")
         {
             Ok(JsValue::Number(n)) if n.is_finite() => n,
             _ => 0.0,
@@ -2933,7 +2932,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_bookkeeping("window.__rustkit_next_timer()")
+            .evaluate_host_bookkeeping("return __rk.nextTimer()")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
             _ => None,
