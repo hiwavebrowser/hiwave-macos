@@ -532,8 +532,8 @@ const CONTAINED_INTRINSIC_PAGE: &str = include_str!(
 /// four content-sized shapes (a `flex: 0 0 auto` item, an `inline-block`,
 /// `width: fit-content`, a block in a float) are 10 wide (Chrome for Testing
 /// 148.0.7778.216), not 310. Their content box is 0, so `(max-width: 1px)`
-/// holds: Chrome gives z1..z4 7. The float's container (z4) stays on the
-/// fail-safe: the walk does not trust a box under a float (`layout_trusted`).
+/// holds: Chrome gives z1..z4 7. The float's container (z4) is trusted
+/// since CQ3.
 #[test]
 fn a_size_containers_intrinsic_width_ignores_its_contents() {
     let server = serve_routes(vec![(
@@ -565,8 +565,8 @@ fn a_size_containers_intrinsic_width_ignores_its_contents() {
         )
         .unwrap();
     assert!(
-        got.contains("10/0/7 10/0/7 10/0/7 10/0/0"),
-        "width/k/z per container, Chrome 10/0/7 each (z4 fail-safe 0): {got}"
+        got.contains("10/0/7 10/0/7 10/0/7 10/0/7"),
+        "width/k/z per container, Chrome 10/0/7 each: {got}"
     );
 }
 
