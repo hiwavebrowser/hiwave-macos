@@ -10719,15 +10719,14 @@ impl Engine {
         for mut cmd in dl.commands.drain(..) {
             // A canvas paints what script drew on it (canvas_paint), again
             // only when its recording or its box changed.
-            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+            if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
                         let paint = canvas_paint::CanvasPaint::reuse_or_paint(
                             last_paints.remove(&node),
                             source,
                             node,
-                            *dest_rect,
-                            *content_box,
+                            &cmd,
                         );
                         if let Some(paint) = paint {
                             expanded.extend(paint.commands.iter().cloned());

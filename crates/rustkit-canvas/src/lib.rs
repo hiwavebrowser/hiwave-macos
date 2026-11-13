@@ -1532,6 +1532,12 @@ impl CanvasRenderingContext2D {
         ImageData { width, height, data: self.raster.read(x, y, width, height) }
     }
 
+    /// The bitmap as premultiplied RGBA rows, `width` x `height`: what the
+    /// engine paints to the screen (STR-7b).
+    pub fn premultiplied_pixels(&self) -> Vec<u8> {
+        self.raster.premultiplied((self.width, self.height))
+    }
+
     /// The bitmap's pixels, for another canvas to draw or repeat; `None`
     /// when nothing was drawn on it.
     pub fn bitmap(&self) -> Option<CanvasBitmap> {

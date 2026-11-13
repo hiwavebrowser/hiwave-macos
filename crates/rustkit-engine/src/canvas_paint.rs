@@ -92,14 +92,54 @@ fn initial_font() -> CanvasFont {
     CanvasFont::parse("10px sans-serif", 16.0).expect("initial canvas font")
 }
 
-/// A canvas's paint as the last display list built it: for the recording
-/// at `generation`, in a box whose fitted image rect was `dest` and content
+/// A canvas bitmap waiting for, or kept beside, its texture: premultiplied
+/// RGBA rows.
+pub(crate) struct CanvasFrame {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
+}
+
+/// The canvas bitmaps the display lists name, by image key
+/// (`rustkit-canvas:<node>@<serial>`): the presenter uploads one when a
+/// list it draws names it (`upload_display_list_images`). A key is new for
+/// every bitmap a canvas paints, so a texture is never stale, and leaves
+/// this map when the paint that made it is dropped.
+static FRAMES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CanvasFrame>>>> =
+    std::sync::LazyLock::new(Default::default);
+static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether `url` is a canvas bitmap's image key (as opposed to the layout
+/// placeholder `canvas_key`).
+pub(crate) fn is_bitmap_key(url: &str) -> bool {
+    url.strip_prefix(KEY_PREFIX).is_some_and(|rest| rest.contains('@'))
+}
+
+/// The bitmap a display list names under `key`, if its paint is alive.
+pub(crate) fn bitmap_frame(key: &str) -> Option<std::sync::Arc<CanvasFrame>> {
+    FRAMES.lock().ok()?.get(key).cloned()
+}
+
+/// A canvas's paint as the last display list built it: for the bitmap at
+/// `generation`, in a box whose fitted image rect was `dest` and content
 /// box `content`.
 pub(crate) struct CanvasPaint {
     generation: u64,
     dest: Rect,
     content: Rect,
+    /// The bitmap's image key in `FRAMES`.
+    key: String,
+    /// What the text overlay drew (text is not in the bitmap yet), with
+    /// the bitmap's image command first.
     pub(crate) commands: Vec<DisplayCommand>,
+}
+
+impl Drop for CanvasPaint {
+    fn drop(&mut self) {
+        if let Ok(mut frames) = FRAMES.lock() {
+            frames.remove(&self.key);
+        }
+    }
 }
 
 fn same(a: Rect, b: Rect) -> bool {
@@ -108,28 +148,80 @@ fn same(a: Rect, b: Rect) -> bool {
 
 impl CanvasPaint {
     /// `last` again when the canvas `node` has not drawn since and its box
-    /// is where it was; otherwise its recording painted afresh. `None`
-    /// with no 2D context.
+    /// is where it was; otherwise the canvas painted afresh into `image`,
+    /// the box's image command. A canvas paints its bitmap (STR-7b) as an
+    /// image under a key of its own, fitted to the box like any replaced
+    /// image (`object-fit`, bilinear scaling from the backing store to the
+    /// CSS size, as Chrome does). The bitmap is read again only when the
+    /// canvas drew. `None` with no 2D context.
     pub(crate) fn reuse_or_paint(
         last: Option<CanvasPaint>,
         source: &CanvasSource,
         node: usize,
-        dest: Rect,
-        content: Rect,
+        image: &DisplayCommand,
     ) -> Option<CanvasPaint> {
+        let DisplayCommand::Image { dest_rect: dest, content_box: content, .. } = image else {
+            return None;
+        };
+        let (dest, content) = (*dest, *content);
         let generation = source.generation(node)?;
-        if let Some(last) = last {
-            if last.generation == generation && same(last.dest, dest) && same(last.content, content) {
-                return Some(last);
+        let reused_key = match last {
+            Some(last) if last.generation == generation => {
+                if same(last.dest, dest) && same(last.content, content) {
+                    return Some(last);
+                }
+                // The same bitmap in a moved box: keep its key and texture.
+                let mut last = last;
+                Some(std::mem::take(&mut last.key))
+            }
+            _ => None,
+        };
+        let key = match reused_key {
+            Some(key) => key,
+            None => {
+                let (width, height, rgba) = source.pixels(node)?;
+                if width == 0 || height == 0 {
+                    // Nothing to show; a zero-size texture is invalid.
+                    return Some(CanvasPaint { generation, dest, content, key: String::new(), commands: Vec::new() });
+                }
+                let key = format!(
+                    "{KEY_PREFIX}{node}@{}",
+                    SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                if let Ok(mut frames) = FRAMES.lock() {
+                    frames.insert(key.clone(), std::sync::Arc::new(CanvasFrame { width, height, rgba }));
+                }
+                key
+            }
+        };
+        let mut commands = Vec::new();
+        let mut bitmap = image.clone();
+        if let DisplayCommand::Image { url, .. } = &mut bitmap {
+            *url = key.clone();
+        }
+        commands.push(bitmap);
+        if let Some(mut snapshot) = source.snapshot(node) {
+            // Text is drawn over the bitmap from the recording, with the
+            // clears and clips that cut it (slice 3 rasterizes text).
+            snapshot.commands.retain(|c| {
+                matches!(
+                    c,
+                    DrawCommand::FillText { .. }
+                        | DrawCommand::StrokeText { .. }
+                        | DrawCommand::Clip { .. }
+                        | DrawCommand::ClearRect { .. }
+                )
+            });
+            if snapshot
+                .commands
+                .iter()
+                .any(|c| matches!(c, DrawCommand::FillText { .. } | DrawCommand::StrokeText { .. }))
+            {
+                commands.extend(paint_commands(&snapshot, dest, content));
             }
         }
-        let snapshot = source.snapshot(node)?;
-        Some(CanvasPaint {
-            generation,
-            dest,
-            content,
-            commands: paint_commands(&snapshot, dest, content),
-        })
+        PAINTS.with(|p| p.set(p.get() + 1));
+        Some(CanvasPaint { generation, dest, content, key, commands })
     }
 }
 
@@ -137,8 +229,8 @@ thread_local! {
     static PAINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many times this thread turned a recording into display commands
-/// (`paint_commands`): a test's window on the paint cache.
+/// How many times this thread painted a canvas afresh
+/// (`CanvasPaint::reuse_or_paint`): a test's window on the paint cache.
 #[cfg(test)]
 pub(crate) fn paints() -> usize {
     PAINTS.with(|p| p.get())
@@ -153,7 +245,6 @@ pub(crate) fn paint_commands(
     dest: Rect,
     content: Rect,
 ) -> Vec<DisplayCommand> {
-    PAINTS.with(|p| p.set(p.get() + 1));
     let mut out = Vec::new();
     if canvas.commands.is_empty() || canvas.width == 0 || canvas.height == 0 {
         return out;

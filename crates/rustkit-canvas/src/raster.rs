@@ -397,6 +397,15 @@ impl Raster {
 
     /// The pixels of the rect `x, y, w, h` (bitmap pixels; outside the
     /// bitmap reads as transparent black), unpremultiplied RGBA.
+    /// The whole bitmap as premultiplied RGBA rows (`size` when nothing
+    /// has drawn yet: transparent black).
+    pub(crate) fn premultiplied(&self, size: (u32, u32)) -> Vec<u8> {
+        match &self.pixmap {
+            Some(pm) => pm.data().to_vec(),
+            None => vec![0u8; size.0 as usize * size.1 as usize * 4],
+        }
+    }
+
     pub(crate) fn read(&self, x: i32, y: i32, w: u32, h: u32) -> Vec<u8> {
         let mut out = vec![0u8; w as usize * h as usize * 4];
         let Some(pm) = &self.pixmap else {

@@ -215,7 +215,14 @@ pub struct CachedTexture {
     pub bind_group: wgpu::BindGroup,
     pub width: u32,
     pub height: u32,
+    /// The texels are premultiplied by alpha (a canvas bitmap), so a quad
+    /// filters them premultiplied and unpremultiplies after (blit.wgsl).
+    pub premultiplied: bool,
 }
+
+/// The vertex colour's red channel that marks a quad's texture as
+/// premultiplied for blit.wgsl (a real colour channel is never negative).
+pub(crate) const PREMULTIPLIED_TEXELS: f32 = -1.0;
 
 /// The screen rect and texture coordinates `[u0, v0, u1, v1]` a replaced
 /// image paints with: `object-fit`/`object-position` (CSS Images 3 §5.5,
@@ -385,6 +392,7 @@ impl TextureCache {
                 bind_group,
                 width,
                 height,
+                premultiplied: false,
             });
         }
 
@@ -409,6 +417,11 @@ impl TextureCache {
     /// Remove a specific texture.
     pub fn remove(&mut self, key: &str) {
         self.textures.remove(key);
+    }
+
+    /// Keep only the textures whose key `keep` accepts.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.textures.retain(|k, _| keep(k));
     }
 }
 
@@ -6844,10 +6857,10 @@ impl Renderer {
         object_position: (f32, f32),
         object_position_offset: (f32, f32),
     ) {
-        let Some(natural) = self
+        let Some((natural, premultiplied)) = self
             .texture_cache
             .get(url)
-            .map(|cached| (cached.width, cached.height))
+            .map(|cached| ((cached.width, cached.height), cached.premultiplied))
         else {
             // If image not loaded, skip (async loading handled elsewhere)
             return;
@@ -6865,7 +6878,8 @@ impl Renderer {
         for ([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex, coverage) in
             self.textured_pieces(rect, uv)
         {
-            let color = [1.0, 1.0, 1.0, coverage];
+            let red = if premultiplied { PREMULTIPLIED_TEXELS } else { 1.0 };
+            let color = [red, 1.0, 1.0, coverage];
             self.push_image_quad(
                 url,
                 [
@@ -7064,6 +7078,24 @@ impl Renderer {
         Ok(())
     }
     
+    /// Upload premultiplied RGBA (a canvas bitmap, STR-7b). Its quads
+    /// filter the premultiplied texels, as Chrome composites a canvas, so a
+    /// scaled bitmap blends an opaque texel with a transparent neighbour
+    /// toward what is behind it, not toward the neighbour's black.
+    pub fn upload_premultiplied_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        self.upload_image(url, width, height, rgba_data)?;
+        if let Some(t) = self.texture_cache.textures.get_mut(url) {
+            t.premultiplied = true;
+        }
+        Ok(())
+    }
+
     /// Upload a decoded raster image (RGBA) for use as a mask image: it is
     /// stored under [`mask_texture_key`] with its colour made white and its
     /// alpha kept (`mask-mode: alpha`, the initial for an image).
@@ -7090,6 +7122,11 @@ impl Renderer {
     /// Remove an image from the cache.
     pub fn remove_image(&mut self, url: &str) {
         self.texture_cache.remove(url);
+    }
+
+    /// Drop the uploaded images whose key `keep` rejects.
+    pub fn retain_images(&mut self, keep: impl FnMut(&str) -> bool) {
+        self.texture_cache.retain(keep);
     }
 
 

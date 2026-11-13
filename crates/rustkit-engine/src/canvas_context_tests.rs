@@ -143,22 +143,24 @@ fn fill_rect_paints_at_page_coordinates() {
     engine
         .execute_script(id, "var x = document.getElementById('c').getContext('2d'); x.fillStyle = '#ff0000'; x.fillRect(10, 5, 20, 10);")
         .expect("script");
-    let red = rustkit_css::Color::from_rgb(255, 0, 0);
-    let fills: Vec<_> = list(&engine, id)
-        .into_iter()
-        .filter_map(|c| match c {
-            DisplayCommand::FillRect { rect, color } if color == red => Some((rect.x, rect.y, rect.width, rect.height)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(fills, vec![(20.0, 20.0, 40.0, 20.0)]);
+    // The bitmap is scaled 2x bilinear (STR-7b), so its edges blend over
+    // a pixel; inside and outside the page rect are exact.
+    let frame = frame_rgb(&mut engine, id, 100, 60);
+    let at = |x: usize, y: usize| [frame[(y * 100 + x) * 3], frame[(y * 100 + x) * 3 + 1], frame[(y * 100 + x) * 3 + 2]];
+    for (x, y) in [(22, 22), (40, 30), (57, 37)] {
+        assert_eq!(at(x, y), [255, 0, 0], "inside page rect (20, 20, 40, 20) at ({x}, {y})");
+    }
+    for (x, y) in [(17, 30), (63, 30), (40, 17), (40, 43)] {
+        assert_eq!(at(x, y), [255, 255, 255], "outside it at ({x}, {y})");
+    }
 }
 
 /// fillText is a text run at the transformed baseline, its font scaled with
-/// the bitmap; a stroked path is a polyline.
+/// the bitmap (drawn over the bitmap until slice 3 rasterizes text); a
+/// stroked path is in the bitmap.
 #[test]
 fn fill_text_and_stroke_paint_text_and_lines() {
-    let (engine, id) = view(
+    let (mut engine, id) = view(
         "<!doctype html><body style='margin:0'><canvas id=c width=200 height=100 style='display:block'></canvas>\
          <script>var x = document.getElementById('c').getContext('2d'); x.font = '20px sans-serif'; x.fillStyle = '#0000ff'; \
          x.fillText('Hi canvas', 10, 50); x.beginPath(); x.moveTo(0, 90); x.lineTo(200, 90); x.lineWidth = 2; x.stroke();</script></body>",
@@ -169,8 +171,13 @@ fn fill_text_and_stroke_paint_text_and_lines() {
         _ => None,
     });
     assert_eq!(text, Some((10.0, 50.0, 20.0, rustkit_css::Color::from_rgb(0, 0, 255))));
-    assert!(commands.iter().any(|c| matches!(c, DisplayCommand::Polyline { points, width, .. }
-        if *width == 2.0 && points.first() == Some(&(0.0, 90.0)) && points.last() == Some(&(200.0, 90.0)))));
+    let frame = frame_rgb(&mut engine, id, 200, 100);
+    for x in [1, 100, 198] {
+        for y in [89, 90] {
+            assert_eq!(&frame[(y * 200 + x) * 3..][..3], &[0, 0, 0], "the 2px line at ({x}, {y})");
+        }
+        assert_eq!(&frame[(87 * 200 + x) * 3..][..3], &[255, 255, 255], "above the line at x {x}");
+    }
 }
 
 /// Chromium 143: measureText('Pages Visited 311') at 20px sans-serif is
@@ -227,54 +234,25 @@ fn report_page_charts_paint_into_their_canvases() {
     for label in ["Trackers", "Ads", "Popups"] {
         assert!(labels.iter().any(|l| l == label), "legend label {label} in {labels:?}");
     }
-    let bars = commands
-        .iter()
-        .filter(|c| match c {
-            DisplayCommand::FillRect { rect, .. } => inside(rect.x, rect.y) && inside(rect.x + rect.width, rect.y + rect.height),
-            DisplayCommand::FillPolygon { points, .. } => points.iter().all(|&(x, y)| inside(x, y)),
-            _ => false,
-        })
+    // The bars are in the canvas bitmap (STR-7b): it is painted inside the
+    // box, and holds coloured (not grey) pixels.
+    assert!(
+        commands.iter().any(|c| matches!(c, DisplayCommand::Image { url, dest_rect, .. }
+            if canvas_paint::is_bitmap_key(url) && inside(dest_rect.x, dest_rect.y))),
+        "the canvas bitmap is painted in its box"
+    );
+    let source = engine.views[&id].canvases.clone().expect("canvases");
+    let node = source_node(&mut engine, id, "protectionChart");
+    let (_, _, px) = source.pixels(node).expect("a context");
+    let coloured = px
+        .chunks(4)
+        .filter(|p| p[3] > 128 && p.iter().take(3).max().unwrap() - p.iter().take(3).min().unwrap() > 60)
         .count();
-    assert!(bars >= 3, "the three datasets' bars (and legend boxes) are filled: {bars}");
+    assert!(coloured >= 200, "the datasets' bars are filled: {coloured} coloured pixels");
 }
 
 // ---- PR #905 R1 HOLD: partial clears paint, the paint is cached, and an
 // animation loop stays bounded.
-
-/// The area of `color` the list paints, each fill rect cut by the clips in
-/// force (the renderer intersects nested clips).
-fn visible_area(commands: &[DisplayCommand], color: rustkit_css::Color) -> f32 {
-    let mut clips: Vec<Rect> = Vec::new();
-    let mut area = 0.0;
-    for c in commands {
-        match c {
-            DisplayCommand::PushClip(r) => {
-                let r = match clips.last() {
-                    Some(top) => {
-                        let x0 = r.x.max(top.x);
-                        let y0 = r.y.max(top.y);
-                        let x1 = (r.x + r.width).min(top.x + top.width);
-                        let y1 = (r.y + r.height).min(top.y + top.height);
-                        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
-                    }
-                    None => *r,
-                };
-                clips.push(r);
-            }
-            DisplayCommand::PopClip => {
-                clips.pop();
-            }
-            DisplayCommand::FillRect { rect, color: c } if *c == color => {
-                let top = clips.last().copied().unwrap_or(*rect);
-                let w = ((rect.x + rect.width).min(top.x + top.width) - rect.x.max(top.x)).max(0.0);
-                let h = ((rect.y + rect.height).min(top.y + top.height) - rect.y.max(top.y)).max(0.0);
-                area += w * h;
-            }
-            _ => {}
-        }
-    }
-    area
-}
 
 /// Chromium 143: fillRect(0, 0, 100, 50) red then clearRect(0, 0, 50, 50)
 /// leaves red only in the right half (2500 px of a 100x50 bitmap); a
@@ -292,10 +270,10 @@ fn a_partial_clear_rect_erases_what_it_covers() {
              x.clearRect(0, 0, 50, 50); x.clearRect(75, 0, 25, 25); x.fillStyle = '#0000ff'; x.fillRect(0, 40, 100, 10);",
         )
         .expect("script");
-    let commands = list(&engine, id);
-    let red = visible_area(&commands, rustkit_css::Color::from_rgb(255, 0, 0));
-    let blue = visible_area(&commands, rustkit_css::Color::from_rgb(0, 0, 255));
-    assert_eq!((red, blue), (2500.0 - 625.0, 1000.0), "{commands:?}");
+    // Counted in the frame: the bitmap is drawn 1:1 (STR-7b).
+    let frame = frame_rgb(&mut engine, id, 100, 50);
+    let count = |c: [u8; 3]| frame.chunks(3).filter(|p| *p == c).count();
+    assert_eq!((count([255, 0, 0]), count([0, 0, 255])), (2500 - 625 - 500, 1000), "red under the blue band is covered");
 }
 
 /// Listing the page again with the canvas unchanged reuses the canvas's
@@ -450,6 +428,12 @@ fn canvas_frames_match_chrome_screenshots() {
         let mean = diffs.iter().map(|&d| d as f64).sum::<f64>() / diffs.len() as f64;
         let over = diffs.iter().filter(|&&d| d > 2).count();
         println!("{name}: max {max} mean {mean:.2} pixels>2 {over}/{}", diffs.len());
+        if std::env::var("STR7_DUMP").is_ok_and(|d| d == name) {
+            for y in 0..h {
+                let row = |px: &[u8]| (0..w).map(|x| format!("{:02x}{:02x}{:02x}", px[(y * w + x) * 3], px[(y * w + x) * 3 + 1], px[(y * w + x) * 3 + 2])).collect::<Vec<_>>().join(" ");
+                println!("y{y} ours   {}\ny{y} chrome {}", row(&ours), row(&chrome));
+            }
+        }
         // Anti-aliased edges differ (tiny-skia supersamples, Skia's coverage
         // is analytic: the STR-7c row); everything else is within rounding.
         if max > 80 || mean > 2.0 {

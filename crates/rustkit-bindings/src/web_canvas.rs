@@ -80,6 +80,14 @@ impl CanvasSource {
         self.0.borrow().contexts.get(&node).map(|c| c.generation())
     }
 
+    /// The canvas element `node`'s bitmap as premultiplied RGBA rows:
+    /// `(width, height, pixels)`. `None` with no 2D context.
+    pub fn pixels(&self, node: usize) -> Option<(u32, u32, Vec<u8>)> {
+        let store = self.0.borrow();
+        let ctx = store.contexts.get(&node)?;
+        Some((ctx.width, ctx.height, ctx.premultiplied_pixels()))
+    }
+
     /// An estimate of the heap the page's canvases hold, in bytes: their
     /// recordings and anything kept for script beside them.
     pub fn retained_bytes(&self) -> usize {
