@@ -15,7 +15,15 @@
     // Bounds what a page can park before the engine drains: past it a
     // request is refused (0) and the surface reports a network error. The
     // per-page request budgets live in the policy; this bounds memory.
-    var MAX_QUEUED = 64;
+    // 1024: a page may start a few hundred requests in one turn (JetStream
+    // 2.2's preload starts 315); at 64 the rest failed at once.
+    var MAX_QUEUED = 1024;
+    // ... and in bytes: request bodies sit in the queue as base64 until the
+    // engine takes it, and `take` serialises all of it in one call. 64 MiB
+    // of encoded body parked at once; a request past it is refused like one
+    // past the count.
+    var MAX_QUEUED_BODY = 64 * 1024 * 1024;
+    var queuedBody = 0;
 
     var queue = [];
     var pending = {};
@@ -52,13 +60,16 @@
         request: function (desc, done) {
             if (typeof done !== 'function') throw new TypeError('a request needs a callback');
             if (queue.length >= MAX_QUEUED) return 0;
+            var body = desc.body_b64 == null ? null : String(desc.body_b64);
+            if (body !== null && queuedBody + body.length > MAX_QUEUED_BODY) return 0;
+            if (body !== null) queuedBody += body.length;
             var id = nextId++;
             queue.push({
                 id: id,
                 method: String(desc.method || 'GET'),
                 url: String(desc.url),
                 headers: pairs(desc.headers),
-                body_b64: desc.body_b64 == null ? null : String(desc.body_b64),
+                body_b64: body,
                 mode: String(desc.mode || 'cors'),
                 credentials: String(desc.credentials || 'same-origin'),
                 redirect: String(desc.redirect || 'follow'),
@@ -74,6 +85,7 @@
             delete pending[id];
             for (var i = 0; i < queue.length; i++) {
                 if (queue[i].id === id) {
+                    if (queue[i].body_b64 !== null) queuedBody -= queue[i].body_b64.length;
                     queue.splice(i, 1);
                     break;
                 }
@@ -82,10 +94,23 @@
 
         // Engine side.
         take: function () {
+            queuedBody = 0;
             return JSON.stringify(queue.splice(0));
         },
+        // A response's body does not travel in `json`: the engine leaves
+        // the bytes with the host and they are taken here, once, as
+        // `result.bytes` (a Uint8Array). `result.body_b64` is still there
+        // for whoever reads it, computed when read.
         deliver: function (json) {
             var result = JSON.parse(json);
+            if (result.ok && result.body_b64 === undefined && pending[result.id]) {
+                var bytes = new Uint8Array(__rk.takeBytes(result.id) || 0);
+                Object.defineProperty(result, 'bytes', { value: bytes });
+                Object.defineProperty(result, 'body_b64', {
+                    get: function () { return __rk.base64Encode(bytes); },
+                    enumerable: true, configurable: true
+                });
+            }
             return settle(result.id, result);
         },
         // Move one waiting callback out of fail_all's reach. The answer is
@@ -114,7 +139,7 @@
         fail_all: function (reason) {
             var failed = 0;
             for (var pass = 0; pass < 3; pass++) {
-                queue.splice(0);
+                queue.splice(0); queuedBody = 0;
                 var ids = Object.keys(pending);
                 if (ids.length === 0) break;
                 for (var i = 0; i < ids.length; i++) {
@@ -122,7 +147,7 @@
                     if (settle(id, { id: id, ok: false, error: String(reason) })) failed++;
                 }
             }
-            queue.splice(0);
+            queue.splice(0); queuedBody = 0;
             pending = {};
             return failed;
         },

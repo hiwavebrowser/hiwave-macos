@@ -2244,6 +2244,14 @@ fn create_flex_item<'a>(
         // 24x24 close button 36 tall (font_size*1.5+12, the intrinsic button
         // height) and inflated the header to 53 against Chrome's 41.
         0.0
+    } else if main_axis == Axis::Horizontal
+        && layout_box.style.aspect_ratio.is_none()
+        && natural_image_ratio(layout_box).is_some()
+    {
+        // IMG1: a row image's height follows its used width through its
+        // ratio (`aspect_ratio_cross`); its natural height is not a floor
+        // (a 400x200 image shrunk to 300 wide is 150 tall in Chrome 148).
+        0.0
     } else {
         intrinsic_cross + cross_pb
     };
@@ -3468,9 +3476,23 @@ fn aspect_ratio_flex_base(
         return;
     }
     let style = &item.layout_box.style;
-    let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()) else {
+    let css_ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
+    // IMG1: an image with no `aspect-ratio` of its own has its natural
+    // one. In a column its height follows a specified or stretched width
+    // through it (Chrome 148: a 400x200 image stretched in a 500px column
+    // is 500x250, and with `width="300"` 300x150; the engine kept the
+    // natural 200). The fit-content arm below stays for `aspect-ratio`
+    // boxes only: an unstretched auto-width image is its natural size.
+    let natural_ratio = natural_image_ratio(item.layout_box).filter(|_| css_ratio.is_none());
+    let Some(ratio) = css_ratio.or(natural_ratio) else {
         return;
     };
+    if natural_ratio.is_some()
+        && item.explicit_cross_size.is_none()
+        && !(main_axis == Axis::Vertical && single_line && item.stretches(align_items))
+    {
+        return;
+    }
     let cross_border_box = match item.explicit_cross_size {
         Some(c) => c,
         None if main_axis == Axis::Vertical && single_line && item.stretches(align_items) => match definite_inner_cross {
@@ -3546,10 +3568,16 @@ fn ratio_main_from_cross(
 /// path.
 fn aspect_ratio_cross(item: &FlexItem) -> Option<f32> {
     let b = &item.layout_box;
-    if !matches!(b.box_type, crate::BoxType::Block | crate::BoxType::AnonymousBlock) {
-        return None;
-    }
-    let ratio = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite())?;
+    let css_ratio = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
+    let ratio = match b.box_type {
+        crate::BoxType::Block | crate::BoxType::AnonymousBlock => css_ratio?,
+        // IMG1: a row image with an auto height takes it from its USED
+        // width through its natural ratio (Chrome 148: a 400x200 image
+        // shrunk to 300 is 150 tall; the engine kept 200). An image with
+        // its own `aspect-ratio` keeps the replaced path.
+        crate::BoxType::Image { .. } if css_ratio.is_none() => natural_image_ratio(b)?,
+        _ => return None,
+    };
     let main_pb = item.main_pb_start + item.main_pb_end;
     let cross_pb = item.cross_pb_start + item.cross_pb_end;
     let width = item.target_main_size;
@@ -3558,6 +3586,16 @@ fn aspect_ratio_cross(item: &FlexItem) -> Option<f32> {
     } else {
         ((width - main_pb).max(0.0) / ratio) + cross_pb
     })
+}
+
+/// An image's natural width over its natural height, when it has both.
+fn natural_image_ratio(b: &crate::LayoutBox) -> Option<f32> {
+    match b.box_type {
+        crate::BoxType::Image { natural_width, natural_height, .. } if natural_width > 0.0 && natural_height > 0.0 => {
+            Some(natural_width / natural_height)
+        }
+        _ => None,
+    }
 }
 
 /// The border-box width a COLUMN item's preferred `aspect-ratio` gives it

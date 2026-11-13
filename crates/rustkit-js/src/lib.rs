@@ -25,6 +25,8 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+#[cfg(feature = "boa")]
+mod bytes;
 mod source_context;
 #[cfg(feature = "boa")]
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
@@ -508,6 +510,13 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// Bytes left for the embedder's scripts to take by key (`__rk.takeBytes`):
+    /// a response body crosses into script as one buffer, not as text.
+    #[cfg(feature = "boa")]
+    byte_stash: bytes::Stash,
+    /// What stands behind the page's blob URLs (see `bytes::Blobs`).
+    #[cfg(feature = "boa")]
+    blobs: bytes::Blobs,
     /// Page script text, only while an embedder has asked to quote it in
     /// an error log. See [`JsRuntime::set_capture_script_sources`].
     sources: source_context::ScriptSources,
@@ -561,6 +570,10 @@ impl JsRuntime {
         if let Some(bytes) = NATIVE_STACK_BUDGET.with(std::cell::Cell::get) {
             context.runtime_limits_mut().set_native_stack_budget(bytes);
         }
+
+        // STR-10: running out of frames is a RangeError the page can catch, as in Chrome.
+        #[cfg(feature = "boa")]
+        context.runtime_limits_mut().set_catchable_stack_overflow(true);
         // A stop runs the `finally` blocks it unwinds through, for the stop
         // grace: a scheduler that posts its next task from a `finally` (as
         // React's does) is otherwise left believing a task is still running,
@@ -570,7 +583,11 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let diag = std::rc::Rc::new(diag::Diagnostics::default());
         #[cfg(feature = "boa")]
-        let host = host_object(&diag, &mut context);
+        let byte_stash = bytes::Stash::default();
+        #[cfg(feature = "boa")]
+        let blobs = bytes::Blobs::default();
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &byte_stash, &blobs, &mut context);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -593,6 +610,10 @@ impl JsRuntime {
             diag,
             #[cfg(feature = "boa")]
             host,
+            #[cfg(feature = "boa")]
+            byte_stash,
+            #[cfg(feature = "boa")]
+            blobs,
             sources: source_context::ScriptSources::default(),
         };
 
@@ -1255,6 +1276,61 @@ impl JsRuntime {
             .expect("reentry probe");
     }
 
+    /// Leave `bytes` for the embedder's scripts to take once with
+    /// `__rk.takeBytes(key)`, as an `ArrayBuffer`. Whoever stashes also
+    /// tells script the key; bytes nobody takes are dropped with
+    /// [`drop_stashed_bytes`](Self::drop_stashed_bytes).
+    pub fn stash_bytes(&mut self, key: u64, bytes: Vec<u8>) {
+        #[cfg(feature = "boa")]
+        self.byte_stash.borrow_mut().insert(key, bytes);
+        #[cfg(not(feature = "boa"))]
+        let _ = (key, bytes);
+    }
+
+    /// [`stash_bytes`](Self::stash_bytes) for bytes held as standard
+    /// base64. `false` (and nothing stashed) when `base64` is not base64.
+    pub fn stash_base64(&mut self, key: u64, base64: &str) -> bool {
+        #[cfg(feature = "boa")]
+        {
+            match bytes::base64_decode(base64.as_bytes()) {
+                Some(bytes) => {
+                    self.stash_bytes(key, bytes);
+                    true
+                }
+                None => false,
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (key, base64);
+            false
+        }
+    }
+
+    /// The bytes behind a blob URL of this runtime's pages (its fragment,
+    /// if any, is not part of the name), or `None` when nothing stands
+    /// behind it. Reads the host's store: no script runs.
+    pub fn blob_bytes(&self, url: &str) -> Option<Vec<u8>> {
+        #[cfg(feature = "boa")]
+        {
+            let name = url.split('#').next().unwrap_or(url);
+            self.blobs.borrow().get(name).map(|(bytes, _)| bytes.clone())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = url;
+            None
+        }
+    }
+
+    /// Forget the bytes stashed under `key`, if script did not take them.
+    pub fn drop_stashed_bytes(&mut self, key: u64) {
+        #[cfg(feature = "boa")]
+        self.byte_stash.borrow_mut().remove(&key);
+        #[cfg(not(feature = "boa"))]
+        let _ = key;
+    }
+
     /// Define a global function `name` that calls `function`.
     pub fn register_host_function(
         &mut self,
@@ -1455,7 +1531,12 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
 /// The host object [`JsRuntime::evaluate_with_host`] hands the embedder's
 /// scripts: natives that write into `diag`, built here, before any script.
 #[cfg(feature = "boa")]
-fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::Context) -> boa_engine::JsObject {
+fn host_object(
+    diag: &std::rc::Rc<diag::Diagnostics>,
+    byte_stash: &bytes::Stash,
+    blobs: &bytes::Blobs,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsObject {
     use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
     let reporter = diag.clone();
     // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
@@ -1480,10 +1561,11 @@ fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::
             Ok(boa_engine::JsValue::undefined())
         })
     };
-    ObjectInitializer::new(context)
-        .function(report_error, js_string!("reportError"), 1)
-        .function(unsupported, js_string!("unsupported"), 2)
-        .build()
+    let mut host = ObjectInitializer::new(context);
+    host.function(report_error, js_string!("reportError"), 1)
+        .function(unsupported, js_string!("unsupported"), 2);
+    bytes::install(&mut host, byte_stash, blobs);
+    host.build()
 }
 
 #[cfg(feature = "boa")]

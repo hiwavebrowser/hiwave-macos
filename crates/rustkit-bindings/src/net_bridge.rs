@@ -96,17 +96,28 @@ impl DomBindings {
                 body_b64,
                 kind,
                 redirected,
-            } => serde_json::json!({
-                "id": id,
-                "ok": true,
-                "url": url,
-                "status": status,
-                "status_text": status_text,
-                "headers": headers,
-                "body_b64": body_b64,
-                "kind": kind,
-                "redirected": redirected,
-            }),
+            } => {
+                // The body goes to the host's byte stash and script takes
+                // it as one buffer (`web_net_bridge.js` `deliver`). Inside
+                // the delivery's source text, megabytes of base64 had to
+                // be lexed, parsed and decoded by script loops: 3 s for
+                // 256 KB.
+                let stashed = self.runtime.borrow_mut().stash_base64(id, &body_b64);
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "url": url,
+                    "status": status,
+                    "status_text": status_text,
+                    "headers": headers,
+                    "kind": kind,
+                    "redirected": redirected,
+                });
+                if !stashed {
+                    payload["body_b64"] = serde_json::Value::String(body_b64);
+                }
+                payload
+            }
             NetDelivery::Error(reason) => serde_json::json!({
                 "id": id,
                 "ok": false,
@@ -117,8 +128,10 @@ impl DomBindings {
         let quoted = serde_json::to_string(&payload.to_string()).unwrap_or_default();
         let delivered = self.runtime.borrow_mut().evaluate_script(&format!(
             "window.__rustkit_net ? window.__rustkit_net.deliver({quoted}) : false"
-        ))?;
-        Ok(matches!(delivered, JsValue::Boolean(true)))
+        ));
+        // Nobody was waiting (aborted, navigated away): the body goes too.
+        self.runtime.borrow_mut().drop_stashed_bytes(id);
+        Ok(matches!(delivered?, JsValue::Boolean(true)))
     }
 
     /// Set `id`'s callback aside so a later [`Self::fail_pending_net_requests`]

@@ -31,6 +31,14 @@ pub struct RuntimeLimits {
     ///
     /// HIWAVE PATCH (native recursion)
     native_stack: usize,
+
+    /// Whether running out of call frames or operand-stack slots throws a catchable `RangeError`
+    /// ("Maximum call stack size exceeded") instead of the uncatchable `RuntimeLimitError`.
+    /// Host re-entry stays uncatchable either way. Off by default (upstream behaviour); the page
+    /// runtime turns it on.
+    ///
+    /// HIWAVE PATCH (STR-10)
+    catchable_stack_overflow: bool,
 }
 
 impl Default for RuntimeLimits {
@@ -47,6 +55,8 @@ impl Default for RuntimeLimits {
             recursion: 8192,
             host_recursion: 1024, // HIWAVE PATCH (recursion)
             native_stack: crate::native_stack::DEFAULT_BUDGET, // HIWAVE PATCH (native recursion)
+
+            catchable_stack_overflow: false, // HIWAVE PATCH (STR-10)
             backtrace_limit: 50,
             stack_size: 64 * 1024,
         }
@@ -54,6 +64,19 @@ impl Default for RuntimeLimits {
 }
 
 impl RuntimeLimits {
+    /// Whether a frame or stack-slot overflow is a catchable `RangeError` (STR-10).
+    #[inline]
+    #[must_use]
+    pub const fn catchable_stack_overflow(&self) -> bool {
+        self.catchable_stack_overflow
+    }
+
+    /// Make a frame or stack-slot overflow a catchable `RangeError` (STR-10).
+    #[inline]
+    pub fn set_catchable_stack_overflow(&mut self, value: bool) {
+        self.catchable_stack_overflow = value;
+    }
+
     /// Return the loop iteration limit.
     ///
     /// If the limit is exceeded in a loop it will throw an error.
