@@ -651,6 +651,8 @@ mod pseudo_animation_tests;
 mod chrome_bridge_tests;
 #[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
+#[cfg(test)]
+mod clock_live_timer_tests;
 mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
