@@ -467,6 +467,35 @@ on it fails from inside the tree ("believes it's in a workspace"). To run them, 
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
 
+## Patch: a native-stack budget for built-ins that recurse in Rust (native recursion)
+
+A page could kill the process: `var a=[]; for (...) a=[a]; JSON.stringify(a)` recursed in Rust until the
+real stack overflowed (so did `flat(Infinity)`, `join`/`toString`/`==` through nested arrays, Proxy and
+prototype chains, deeply nested source in the parser). Chrome throws a catchable `RangeError`.
+
+`src/native_stack.rs`: the stack address where the outermost engine entry on a thread began
+(`Context::run`, `JsObject::call`, `Script::parse`), and `check(budget)`, which throws `RangeError:
+Maximum call stack size exceeded` once more than the budget has been used since. Checked in
+`CallValue::resolve` (every call, native or JS), `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/`try_get` (Proxy
+and prototype chains), `JSON.stringify`'s `serialize_json_property` and `flatten_into_array`.
+`RuntimeLimits::set_native_stack_budget` (default 1 MiB, which fits any 2 MiB thread); `rustkit-js`'s
+`set_thread_native_stack_budget` sets it from the stack size a thread was spawned with (the content
+thread and `spawn_script_thread` use half of it). A thread that never sets it gets 1 MiB: in a debug
+build the parser needs several KiB per nesting level, so roughly 100 levels of `[[[...]]]` fit.
+
+`third_party/boa_parser` (marked `HIWAVE PATCH (native recursion)`): `Cursor::check_depth` at
+`AssignmentExpression`, `UnaryExpression`, `Statement` and `StatementListItem`, using the engine's probe
+(`set_stack_probe`) or the parse's own start when there is none; and `MAX_CHAIN` (8192) on the loops that
+build a left-nested chain (`1+1+...`, `a.b.c...`, `f()()()...`), because the finished tree is dropped,
+analysed and compiled recursively and a 30 000-link chain overflowed a 2 MiB thread. The error is
+`Error::is_stack_overflow`; `From<ParseError> for JsNativeError` and the `Function` constructor turn it into
+a `RangeError`.
+
+Pin: `crates/rustkit-js/tests/native_recursion.rs` (each case in a child process, since an overflow
+aborts; 40 cases, expected values from Chrome for Testing 148.0.7778.216). Where Chrome answers and this
+engine throws a RangeError instead, or where `JSON.parse` keeps its old SyntaxError ceiling, the test names
+the case and the answer it accepts.
+
 ## Patch: a catchable stack overflow (STR-10)
 
 Opt in with `RuntimeLimits::set_catchable_stack_overflow(true)` (off by default, so upstream's tests

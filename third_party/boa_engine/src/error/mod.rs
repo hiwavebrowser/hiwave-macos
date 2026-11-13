@@ -1414,6 +1414,11 @@ impl JsNativeError {
 impl From<boa_parser::Error> for JsNativeError {
     #[cfg_attr(feature = "native-backtrace", track_caller)]
     fn from(err: boa_parser::Error) -> Self {
+        // HIWAVE PATCH (native recursion): a source nested past the native stack is a RangeError,
+        // as in V8, not a SyntaxError.
+        if err.is_stack_overflow() {
+            return Self::range().with_message("Maximum call stack size exceeded");
+        }
         Self::syntax().with_message(err.to_string())
     }
 }
