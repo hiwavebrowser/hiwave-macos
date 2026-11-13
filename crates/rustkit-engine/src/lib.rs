@@ -6229,7 +6229,9 @@ impl Engine {
                     _ => String::new(),
                 }
             };
-            let Ok(document) = Document::parse_html(&html) else {
+            // With the engine's scripting setting, as the top-level load
+            // parses (HTML §13.2.3.5: `<noscript>` content is text).
+            let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
                 if let Some(parent) = parent_of(self, id) {
                     let _ = parent.frame_loaded(request.node);
                 }
