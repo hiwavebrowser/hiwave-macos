@@ -134,6 +134,8 @@ mod web_named_access_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
+#[cfg(test)]
+mod web_canvas_raster_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
