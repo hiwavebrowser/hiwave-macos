@@ -4346,8 +4346,15 @@ pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_heig
 fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
     match l {
         Length::Px(v) => Some(*v),
+        Length::Zero => Some(0.0),
         Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
         l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        // GR4: `min()`/`max()`/`clamp()` with no percentage resolve through
+        // the same `length_to_px` that places the item, so the row and the
+        // item agree (`height: min(100vh, 500px)` alone made a 0 row).
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) if !crate::flex::has_percentage(l) => {
+            Some(b.length_to_px(l, 0.0))
+        }
         _ => None,
     }
 }
@@ -5562,8 +5569,7 @@ fn apply_align_self(
     // An `auto` height is left to the stretch and min/max passes that follow.
     let definite = |l: &Length| match l {
         Length::Auto | Length::FitContent | Length::Percent(_) => None,
-        Length::Calc(sum) if sum.percent != 0.0 => None,
-        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l if crate::flex::has_percentage(l) => None,
         l => Some(child.length_to_px(l, 0.0)),
     };
     let mut child_height = child_height;
