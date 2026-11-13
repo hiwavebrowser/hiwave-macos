@@ -4146,18 +4146,31 @@ impl Engine {
         // cancel it, and then nothing scrolls. Passive ones hear it after
         // the scroll, at whatever is then under the pointer (WHL1; Chrome
         // for Testing 148). An open `<select>` drop-down keeps the wheel.
-        let listening = !self.select_popup_open(id)
-            && self
-                .views
+        let (listening, blocking) = if self.select_popup_open(id) {
+            (false, false)
+        } else {
+            self.views
                 .get(&id)
                 .and_then(|v| v.bindings.as_ref())
-                .is_some_and(|bindings| bindings.wants_wheel());
+                .map_or((false, false), |bindings| (bindings.wants_wheel(), bindings.wheel_blocking()))
+        };
         if !listening {
             return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
         }
-        let cancelable = self.wheel_target(id, x, y).is_some_and(|target| {
-            self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
-        });
+        // WHL3: only the first wheel of a scroll sequence can be cancelled
+        // (Chrome): a later step of a gesture whose first step was not
+        // cancelled (it scrolled, so the gesture is held) goes after the
+        // scroll. A wheel on its own (a mouse's) is always a first.
+        let continues = gesture
+            && self.views.get(&id).and_then(|v| v.wheel_gesture).is_some_and(|g| {
+                g.gesture && g.last.elapsed() < WHEEL_GESTURE_HOLD
+            });
+        // With no listener that can cancel, the path is not walked.
+        let cancelable = blocking
+            && !continues
+            && self.wheel_target(id, x, y).is_some_and(|target| {
+                self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+            });
         if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
             return Ok(false);
         }
