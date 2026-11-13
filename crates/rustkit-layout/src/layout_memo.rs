@@ -343,6 +343,9 @@ fn classify_every_field(b: &LayoutBox) {
         sticky_paths: _,
         scrollbar_thumb_hovered: _,
         scrollbar_overflows: _,
+        // A note the hit test keeps beside the layout: made from the root on the first hit test
+        // (`mark_hit_overflow` walks the whole tree) and forgotten by the engine on each new layout.
+        hit_overflow: _,
     } = b;
 }
 
@@ -707,5 +710,43 @@ mod restore_tests {
         let mut other = outputs.clone();
         other[0].text_line_pitch = None;
         assert!(!outputs[0].close_to(&other[0]));
+    }
+
+    /// `formatting_root` is an INPUT to a box's own layout (it encloses its floats), and the same
+    /// item is laid out twice: by the block pre-pass (not a root, height 0 around a float-only
+    /// child) and by its grid or flex parent (a root, height 30). A key that left it out restored
+    /// the first answer for the second. Found by `float_in_items_unit_tests` under the memo.
+    #[test]
+    fn a_grid_item_that_becomes_a_formatting_root_is_not_restored_from_its_block_pass() {
+        use rustkit_css::{Display, Float, GridTemplate, Length, TrackDefinition, TrackSize};
+        let float = {
+            let mut st = rustkit_css::ComputedStyle::new();
+            st.width = Length::Px(10.0);
+            st.height = Length::Px(30.0);
+            st.float = Float::Left;
+            LayoutBox::with_float(BoxType::Block, st, Float::Left)
+        };
+        let mut grid_style = rustkit_css::ComputedStyle::new();
+        grid_style.display = Display::Grid;
+        grid_style.grid_template_columns = GridTemplate {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(400.0))],
+            ..Default::default()
+        };
+        let mut item = LayoutBox::new(BoxType::Block, rustkit_css::ComputedStyle::new());
+        item.children.push(float);
+        let mut grid = LayoutBox::new(BoxType::Block, grid_style);
+        grid.children.push(item);
+        let mut body = LayoutBox::new(BoxType::Block, rustkit_css::ComputedStyle::new());
+        body.children.push(grid);
+
+        set_memo_mode(Some(MemoMode::On));
+        set_memo_min_subtree(Some(1));
+        body.set_viewport(1280.0, 800.0);
+        let cb = Dimensions { content: Rect::new(0.0, 0.0, 400.0, 0.0), ..Default::default() };
+        body.layout_with_collapse(&cb, &mut MarginCollapseContext::new(), &mut FloatContext::new());
+        set_memo_mode(None);
+        set_memo_min_subtree(None);
+        let h = body.children[0].children[0].dimensions.border_box().height;
+        assert!((h - 30.0).abs() < 0.5, "grid float-only item height {h} with the memo on; Chromium 30");
     }
 }
