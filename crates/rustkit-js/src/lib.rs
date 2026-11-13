@@ -517,6 +517,11 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// The host object of each realm after the first, by realm index: the
+    /// embedder's scripts keep their entry points on it, so each document
+    /// needs its own.
+    #[cfg(feature = "boa")]
+    realm_hosts: Vec<Option<boa_engine::JsObject>>,
     /// Bytes left for the embedder's scripts to take by key (`__rk.takeBytes`):
     /// a response body crosses into script as one buffer, not as text.
     #[cfg(feature = "boa")]
@@ -618,6 +623,8 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             host,
             #[cfg(feature = "boa")]
+            realm_hosts: vec![None],
+            #[cfg(feature = "boa")]
             byte_stash,
             #[cfg(feature = "boa")]
             blobs,
@@ -651,6 +658,9 @@ impl JsRuntime {
             let id = RealmId(self.realms.len() - 1);
             let outer = self.enter_realm(id);
             let console = self.setup_console();
+            // The new realm's own host object, made in it.
+            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &mut self.context);
+            self.realm_hosts.push(Some(host));
             self.enter_realm(outer);
             console?;
             Ok(id)
@@ -717,6 +727,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         if let Some(slot) = self.realms.get_mut(realm.0) {
             self.blobs.borrow_mut().drop_realm(realm.0);
+            if let Some(host) = self.realm_hosts.get_mut(realm.0) {
+                *host = None;
+            }
             return slot.take().is_some();
         }
         false
@@ -960,7 +973,8 @@ impl JsRuntime {
                 .as_object()
                 .filter(|f| f.is_callable())
                 .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
-            let host = boa_engine::JsValue::from(self.host.clone());
+            let host = self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone());
+            let host = boa_engine::JsValue::from(host);
             let strings = boa_engine::object::builtins::JsArray::from_iter(
                 args.iter().map(|a| boa_engine::JsValue::from(boa_engine::JsString::from(*a))),
                 &mut self.context,
