@@ -488,6 +488,16 @@ impl LiveWake {
 /// every run: the page clock in a stepped capture is virtual.
 const STEPPED_SETTLE_MS: u64 = 5_000;
 
+/// The most real time a stepped settle may take: the reference's own wait (5 s of real time). A settle
+/// whose turns are slow (a page that relays itself out on every step, at up to a second a turn) stops
+/// between turns once this is spent, and reports how far its virtual time got (batch 74's A/B: github's
+/// settle took over 77 s, squarespace's 36 s). Fast pages finish their virtual span well inside it.
+const SETTLE_REAL_BUDGET: Duration = Duration::from_secs(5);
+
+/// Real time a capture keeps, after its settle, for the layout, the frame and the dumps within
+/// `--timeout-ms`: the settle's budget shrinks when the load has left less than this plus the budget.
+const SETTLE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+
 /// What a stepped settle cost (`CaptureResult::settle_stats`).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct SettleStats {
@@ -517,9 +527,18 @@ struct SettleStats {
 /// speed, and a timer the page sets from it (fetch config, then `setTimeout(reveal, c.delay)`) is due at
 /// the same virtual time on every run. Past the cap the request is left open and the settle goes on.
 ///
+/// It also stops, between turns, once `budget` of real time is spent (`SETTLE_REAL_BUDGET`, less when the
+/// capture's timeout has less left): a page whose turns are slow gets a bounded settle, cut short and
+/// reported (`cut_short`, `virtual_ms`). A page whose span fits in the budget settles the same every run.
+///
 /// Returns what it cost (`SettleStats`), including how many requests were still open once the cap ran
 /// out: a page with a request that never answers (a long poll, an event stream) pays the cap once.
-fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId) -> SettleStats {
+fn settle_stepped(
+    rt: &tokio::runtime::Runtime,
+    engine: &mut rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    budget: Duration,
+) -> SettleStats {
     const STEP_MS: u64 = 50;
     const REQUEST_WAIT: Duration = Duration::from_millis(5);
     const REQUEST_WAIT_CAP: Duration = Duration::from_secs(3);
@@ -540,7 +559,7 @@ fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Eng
     // A request the load left open counts too: a 0 ms turn reports it without moving the clock.
     let mut in_flight = turn(&mut stats, 0);
     while left > 0 {
-        while in_flight > 0 && waited < REQUEST_WAIT_CAP {
+        while in_flight > 0 && waited < REQUEST_WAIT_CAP && began.elapsed() < budget {
             let t = Instant::now();
             std::thread::sleep(REQUEST_WAIT);
             in_flight = turn(&mut stats, 0);
@@ -549,10 +568,16 @@ fn settle_stepped(rt: &tokio::runtime::Runtime, engine: &mut rustkit_engine::Eng
         if in_flight > 0 {
             stats.held_open = stats.held_open.max(in_flight);
         }
+        // Between turns only: a turn already running is not interrupted.
+        if began.elapsed() >= budget {
+            stats.cut_short = true;
+            break;
+        }
         let step = STEP_MS.min(left);
         in_flight = turn(&mut stats, step);
         left -= step;
     }
+    stats.virtual_ms = STEPPED_SETTLE_MS - left;
     stats.wait_ms = waited.as_millis() as u64;
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -741,6 +766,7 @@ fn write_event_log(path: &str, records: &[rustkit_engine::InspectorRecord]) -> s
 }
 
 fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Arc<Inspector>>) -> CaptureResult {
+    let capture_began = Instant::now();
     let mut result = CaptureResult::new(args);
 
     if let Some(ref dump_path) = args.inspector_dump {
@@ -873,7 +899,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 // The real clock: the same span as live loop turns, in real time.
                 run_live(&rt, &mut engine, view_id, STEPPED_SETTLE_MS);
             } else {
-                let stats = settle_stepped(&rt, &mut engine, view_id);
+                // The reference's 5 s, or what the capture's timeout leaves after a margin for the frame.
+                let left_in_timeout = Duration::from_millis(args.timeout_ms)
+                    .saturating_sub(capture_began.elapsed())
+                    .saturating_sub(SETTLE_TIMEOUT_MARGIN);
+                let stats = settle_stepped(&rt, &mut engine, view_id, SETTLE_REAL_BUDGET.min(left_in_timeout));
                 result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
                 result.settle_stats = Some(stats);
             }
