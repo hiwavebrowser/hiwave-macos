@@ -239,7 +239,7 @@ where
         while let Some(tok) = cursor.peek(0, interner)? {
             chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
             if chain > crate::parser::MAX_CHAIN {
-                return Err(crate::Error::stack_overflow());
+                return Err(Error::stack_overflow());
             }
             match tok.kind() {
                 TokenKind::Punctuator(Punctuator::Dot) => {

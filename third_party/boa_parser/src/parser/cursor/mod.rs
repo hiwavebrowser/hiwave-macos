@@ -61,9 +61,9 @@ where
     /// HIWAVE PATCH (native recursion): fails once the parse has recursed too deep for the native
     /// stack, as V8 does with a RangeError, instead of overflowing it.
     #[inline]
-    pub(super) fn check_depth(&self) -> crate::error::ParseResult<()> {
+    pub(super) fn check_depth(&self) -> ParseResult<()> {
         if crate::over_stack_budget(self.stack_origin) {
-            return Err(crate::Error::stack_overflow());
+            return Err(Error::stack_overflow());
         }
         Ok(())
     }

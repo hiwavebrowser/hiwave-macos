@@ -123,7 +123,7 @@ where
         while let Some(token) = cursor.peek(0, interner)?.cloned() {
             chain += 1; // HIWAVE PATCH (native recursion): a left-nested chain this long
             if chain > crate::parser::MAX_CHAIN {
-                return Err(crate::Error::stack_overflow());
+                return Err(Error::stack_overflow());
             }
             let lhs_span_start = lhs.span().start();
             match token.kind() {

@@ -49,7 +49,7 @@ mod stack_budget {
     #[inline(always)]
     pub(crate) fn stack_addr() -> usize {
         let marker = 0u8;
-        std::hint::black_box(&marker) as *const u8 as usize
+        std::ptr::from_ref(std::hint::black_box(&marker)) as usize
     }
 
     /// Install the engine's "is the native stack over its budget" probe.

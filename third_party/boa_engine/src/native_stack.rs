@@ -24,7 +24,7 @@ thread_local! {
 #[inline(always)]
 fn here() -> usize {
     let marker = 0u8;
-    std::hint::black_box(&marker) as *const u8 as usize
+    std::ptr::from_ref(std::hint::black_box(&marker)) as usize
 }
 
 /// Marks the outermost entry into the engine on this thread; nested entries leave it alone.
