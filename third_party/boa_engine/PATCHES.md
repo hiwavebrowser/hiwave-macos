@@ -474,7 +474,7 @@ real stack overflowed (so did `flat(Infinity)`, `join`/`toString`/`==` through n
 prototype chains, deeply nested source in the parser). Chrome throws a catchable `RangeError`.
 
 `src/native_stack.rs`: the stack address where the outermost engine entry on a thread began
-(`Context::run`, `JsObject::call`, `Script::parse`), and `check(budget)`, which throws `RangeError:
+(`Context::run`, `JsObject::call`, `Script::parse`, `Module::parse`), and `check(budget)`, which throws `RangeError:
 Maximum call stack size exceeded` once more than the budget has been used since. Checked in
 `CallValue::resolve` (every call, native or JS), `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/`try_get` (Proxy
 and prototype chains), `JSON.stringify`'s `serialize_json_property` and `flatten_into_array`.
@@ -495,6 +495,13 @@ Pin: `crates/rustkit-js/tests/native_recursion.rs` (each case in a child process
 aborts; 40 cases, expected values from Chrome for Testing 148.0.7778.216). Where Chrome answers and this
 engine throws a RangeError instead, or where `JSON.parse` keeps its old SyntaxError ceiling, the test names
 the case and the answer it accepts.
+
+Follow-up (#1099 R1 MED): `Module::parse` is an entry too, and the probe answers `None` (no origin) on a
+thread with no outermost entry, so such a parse is measured from its own start. The probe is process-wide
+and was installed by the first entry and never cleared; it answered "not over" without an entry, so a parse
+outside one (a module parse) was never measured and a deeply nested module source overflowed the thread.
+Pin: `crates/rustkit-js/tests/module_parse_depth.rs` (5 nestings at 200 000 levels and a shallow control,
+Chrome for Testing 148.0.7778.216: `RangeError`, and the page runs on).
 
 ## Patch: a catchable stack overflow (STR-10)
 
