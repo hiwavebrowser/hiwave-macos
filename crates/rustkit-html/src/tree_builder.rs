@@ -1179,6 +1179,15 @@ impl<S: TreeSink> TreeBuilder<S> {
                     return self.handle_in_head(Token::StartTag { name, attrs, self_closing });
                 }
 
+                // §13.2.6.4.7: these start tags are a parse error "in
+                // body" and are ignored (a stray <td> makes no cell).
+                if matches!(
+                    name.as_str(),
+                    "caption" | "col" | "colgroup" | "frame" | "head" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+                ) {
+                    return Ok(());
+                }
+
                 // Handle table specially - switch to InTable mode
                 if name == "table" {
                     self.close_p_element();
