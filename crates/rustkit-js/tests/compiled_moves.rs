@@ -59,5 +59,5 @@ fn a_typical_loop_executes_few_moves() {
     assert!(total <= TOTAL_BOUND, "{total} opcodes executed, expected at most {TOTAL_BOUND}");
 }
 
-const MOVES_BOUND: u64 = 215;
-const TOTAL_BOUND: u64 = 2560;
+const MOVES_BOUND: u64 = 10;
+const TOTAL_BOUND: u64 = 2350;
