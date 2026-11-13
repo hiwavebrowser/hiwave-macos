@@ -513,3 +513,16 @@ frame('home', '/child.html');
         "only the frame whose whole chain is the page's origin is same-origin"
     );
 }
+
+/// The canceled flag is the frame tree's (#1106 merged with #1109): an
+/// event made in one window and dispatched in another is cancelled by an
+/// `on<type>` handler returning false or by `preventDefault()`, both ways.
+/// Chrome 148 on docs/diagnostics/2026-11-13/cross_realm_cancel.html:
+/// `A false true | B false true | C false true | D false true`.
+#[test]
+fn an_event_from_another_window_of_the_tree_is_cancelled_as_its_own() {
+    let fixture = include_str!("../../../docs/diagnostics/2026-11-13/cross_realm_cancel.html");
+    let mut page = Page::load(true, fixture);
+    page.turns_until("typeof window.result === 'string'", Duration::from_secs(5));
+    assert_eq!(page.js("window.result"), r#"String("A false true | B false true | C false true | D false true")"#);
+}
