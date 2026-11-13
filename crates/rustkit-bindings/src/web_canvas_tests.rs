@@ -189,3 +189,84 @@ fn ten_thousand_frames_of_gradients_hold_one_frame() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Canvas size checks, Chrome 148 (tools/parity_oracle/canvas_taint_cases.json
+/// "huge-get-image-data", and a probe of oversized canvases):
+/// getImageData past the ImageData limit throws RangeError instead of
+/// allocating; a canvas over 16384x16384 pixels of area (or a side over the
+/// largest bitmap side) has no bitmap: it draws nothing and reads zeros.
+#[test]
+fn canvas_size_checks_match_chrome() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "var x = document.getElementById('d').getContext('2d'); \
+                try { x.getImageData(0, 0, 100000, 100000); 'no throw' } catch (e) { e.name + ': ' + e.message }"),
+        "RangeError: Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 16384; c.height = 16385; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "0,0,0,0"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 100000; c.height = 1; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "0,0,0,0"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 32768; c.height = 1; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "255,0,0,255"
+    );
+}
+
+/// Canvas origin checks, Chrome 148 (tools/parity_oracle/canvas_taint_cases.json,
+/// canvas_taint_log.mjs, which serves the page and a second origin from two
+/// local servers): after drawing an image from its own origin, another
+/// origin, or a data: URL, directly, through a pattern, or through another
+/// canvas, what getImageData throws ("ok" for nothing). Here the page is at
+/// https://a.test/, the images are `<img>` elements the engine reported
+/// loaded from those URLs, and the loader hands back one red pixel.
+/// "cors-anonymous-img" is left out: the image loader has no CORS mode, so
+/// a crossorigin image is treated as cross-origin (stricter than Chrome).
+#[test]
+fn canvas_origin_checks_match_chrome() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_taint_cases.json")).unwrap();
+    let mut failures = Vec::new();
+    for case in data["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        if name == "cors-anonymous-img" || name == "huge-get-image-data" {
+            continue;
+        }
+        let doc = Rc::new(Document::parse_html(
+            "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s><img id=o><img id=d></body></html>",
+        ).unwrap());
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
+        b.set_document(doc.clone()).unwrap();
+        b.set_canvas_image_loader(Some(Box::new(|_url: &str, _size: (u32, u32)| {
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255])
+        })));
+        let id = |e: &str| doc.get_element_by_id(e).unwrap().id.raw();
+        b.fire_image_load(id("s"), 1, 1, "https://a.test/img.png").unwrap();
+        b.fire_image_load(id("o"), 1, 1, "https://b.test/img.png").unwrap();
+        b.fire_image_load(id("d"), 1, 1, "data:image/png;base64,AAAA").unwrap();
+        let script = case["script"].as_str().unwrap();
+        let ours = ev(
+            &b,
+            &format!(
+                "var B = 'https://b.test', x = document.getElementById('c').getContext('2d'), __r = 'none'; \
+                 function done(n) {{ __r = n; }} \
+                 function read() {{ try {{ x.getImageData(0, 0, 1, 1); done('ok'); }} catch (e) {{ done(e.name); }} }} \
+                 function img(src, co, f) {{ f(document.getElementById(src.indexOf(B) === 0 ? 'o' : src.indexOf('data:') === 0 ? 'd' : 's')); }} \
+                 {script}; __r"
+            ),
+        );
+        let chrome = case["chrome"]["name"].as_str().unwrap();
+        if ours != chrome {
+            failures.push(format!("{name}: ours {ours:?}, Chrome {chrome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
