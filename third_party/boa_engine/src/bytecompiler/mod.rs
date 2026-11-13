@@ -1743,6 +1743,17 @@ impl<'ctx> ByteCompiler<'ctx> {
 
                 let value = expr_fn(self);
 
+                // HIWAVE PATCH (tdz-assign): a lexical local whose declaration has not been
+                // compiled yet is in its temporal dead zone at this point (compilation follows the
+                // source order the declaration runs in). Assigning it is a ReferenceError, raised
+                // after the right side has run, for a `const` too (the dead zone is checked before
+                // the constness). Before, `insert_binding` below handed the assignment a fresh
+                // register of its own and it silently succeeded.
+                if is_lexical && binding.local() && !self.local_binding_registers.contains_key(&binding) {
+                    self.emit_binding_access(BindingAccessOpcode::SetName, &BindingKind::Local(None), value);
+                    return;
+                }
+
                 if is_lexical {
                     match self.lexical_scope.set_mutable_binding(name.clone()) {
                         Ok(binding) => {

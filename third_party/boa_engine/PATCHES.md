@@ -510,3 +510,18 @@ thread ends, for a probe that exits without calling the function. Pin:
 `crates/rustkit-js/tests/vm_stats.rs` (red first, against a stub report). Cost with the flag off,
 measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
 reads, a script call and arithmetic loops.
+
+## Patch: assigning a `let` or `const` in its temporal dead zone (`tdz-assign`)
+
+**Why.** `z = 1` compiled before `let z` in the same function (or block) succeeded silently: the
+compiler's `access_set` called `insert_binding`, which gave the not-yet-declared local a fresh
+register of its own, and the declaration later took another. Chrome 148 throws ReferenceError, after
+evaluating the right side, for a `const` too. A read, a compound assignment and `++` already threw
+(they read first).
+
+**What.** `access_set` in `src/bytecompiler/mod.rs` (marked `HIWAVE PATCH (tdz-assign)`): a lexical
+local with no register yet is in its dead zone at that point of the source; the assignment emits the
+same "uninitialized binding" ReferenceError a read of it does, before the constness check. Pin:
+`crates/rustkit-js/tests/tdz_assign.rs` (10 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/tdz_assign_cases.json`; 6 differed before). Not covered: a `let` declared in one
+`switch` case and assigned in a later one (compiled after the declaration, so no error; unchanged).
