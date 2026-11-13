@@ -74,6 +74,10 @@ pub struct PendingScroll {
     /// mouse's notch). Steps of a gesture stay on the scroller the gesture
     /// began on; a wheel on its own goes to what is under the pointer.
     pub gesture: bool,
+    /// The platform says a gesture begins here (AppKit's `Began` or
+    /// `MayBegin` phase): the first wheel of a new scroll sequence however
+    /// soon it follows the last one (WHL3, R1 on #1121).
+    pub began: bool,
 }
 
 /// What the platform's input method handed the content view through
@@ -211,6 +215,8 @@ impl InputQueue {
                     // Wheels summed in the queue are one scroll: a step of
                     // a gesture when all of them were.
                     prev.gesture = prev.gesture && next.gesture;
+                    // A sum holding a gesture's start starts a sequence.
+                    prev.began = prev.began || next.began;
                 }
                 _ => unreachable!("coalesces_into pairs like with like"),
             }
@@ -344,7 +350,7 @@ mod tests {
     use super::*;
 
     fn wheel(dy: f64) -> InputKind {
-        InputKind::Wheel(PendingScroll { x: 10.0, y: 10.0, dx: 0.0, dy, gesture: true })
+        InputKind::Wheel(PendingScroll { x: 10.0, y: 10.0, dx: 0.0, dy, gesture: true, began: false })
     }
 
     fn click(down: bool) -> InputKind {
@@ -580,7 +586,7 @@ mod tests {
 
         let mut q = InputQueue::default();
         let view = ViewId::new();
-        let wheel = |dy| InputKind::Wheel(PendingScroll { x: 0.0, y: 0.0, dx: 0.0, dy, gesture: true });
+        let wheel = |dy| InputKind::Wheel(PendingScroll { x: 0.0, y: 0.0, dx: 0.0, dy, gesture: true, began: false });
         let first = q.push_at(view, wheel(1.0), made);
         let second = q.push_at(view, wheel(2.0), now);
         assert_eq!(first, second, "coalesced");

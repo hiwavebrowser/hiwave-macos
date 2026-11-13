@@ -88,6 +88,7 @@ where
     type Output = Expression;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Expression> {
+        cursor.check_depth()?; // HIWAVE PATCH (native recursion)
         cursor.set_goal(InputElement::RegExp);
 
         match cursor.peek(0, interner).or_abrupt()?.kind() {

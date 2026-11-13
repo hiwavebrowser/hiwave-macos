@@ -150,10 +150,12 @@ fn wheel_turn_cost() {
     for i in 0..4000 {
         body.push_str(&format!("<p style=\"margin:0;height:20px\">paragraph {i}</p>"));
     }
-    for (label, script) in [
-        ("no listener", ""),
-        ("passive listener on the document", "<script>var n = 0; document.addEventListener('wheel', function () { n++; });</script>"),
-        ("cancelable listener on the body", "<script>var n = 0; document.body.addEventListener('wheel', function () { n++; }, { passive: false });</script>"),
+    let cancelable = "<script>var n = 0; document.body.addEventListener('wheel', function () { n++; }, { passive: false });</script>";
+    for (label, script, gesture) in [
+        ("no listener", "", true),
+        ("passive listener on the document", "<script>var n = 0; document.addEventListener('wheel', function () { n++; });</script>", true),
+        ("cancelable listener on the body, trackpad gesture steps", cancelable, true),
+        ("cancelable listener on the body, mouse wheels", cancelable, false),
     ] {
         let page = format!("{body}{script}</body></html>");
         let mut engine = Engine::new(EngineConfig::default()).expect("engine");
@@ -165,7 +167,7 @@ fn wheel_turn_cost() {
         for i in 0..400 {
             let delta = if (i / 100) % 2 == 0 { -40.0 } else { 40.0 };
             let started = std::time::Instant::now();
-            engine.scroll_at(view, 400.0, 300.0, 0.0, delta).expect("scroll_at");
+            engine.wheel_at(view, 400.0, 300.0, 0.0, delta, gesture).expect("wheel_at");
             turns.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         turns.sort_by(|a, b| a.partial_cmp(b).unwrap());
