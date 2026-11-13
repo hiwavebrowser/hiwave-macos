@@ -57,7 +57,13 @@ fn run_lines(layout_box: &LayoutBox, raw: &str) -> Vec<RunLine> {
                     cursor = start + l.text.chars().count();
                     RunLine {
                         text: apply_text_transform(&l.text, style.text_transform),
-                        rect: l.fragment_rect(i, content.x, content.y, line_height),
+                        rect: l.fragment_rect(
+                            i,
+                            content.x,
+                            content.y,
+                            line_height,
+                            layout_box.text_line_pitch.unwrap_or(line_height),
+                        ),
                         start,
                     }
                 })
