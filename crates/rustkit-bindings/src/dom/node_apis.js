@@ -302,7 +302,7 @@
         if (!__rk.takeEdited(el)) return;
         // The engine's event: trusted, built with the Event of install
         // time and dispatched as the engine dispatches.
-        var e = new EventCtor('change', { bubbles: true });
+        var e = __rk.make('Event', 'change', { bubbles: true });
         __rk.trust(e);
         dispatchNow.call(el, e);
     }

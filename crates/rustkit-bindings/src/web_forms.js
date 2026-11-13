@@ -115,7 +115,7 @@
     // `input` and `change` after a click's activation: trusted, whoever
     // made the click (Chrome 148: also after script's `click()`).
     function fire(el, type, init) {
-        var e = new EventCtor(type, init || { bubbles: true });
+        var e = __rk.make('Event', type, init || { bubbles: true });
         __rk.trust(e);
         dispatch(el, e);
     }
@@ -381,7 +381,7 @@
         if (!noValidate && !validate(form)) return;
         // The engine's event (trusted, as Chrome's is whoever asked for the
         // submission), dispatched as the engine dispatches.
-        var e = new EventCtor('submit', { bubbles: true, cancelable: true });
+        var e = __rk.make('Event', 'submit', { bubbles: true, cancelable: true });
         Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
         __rk.trust(e);
         if (dispatch(form, e)) noteSubmit(form, submitter);
@@ -449,7 +449,7 @@
         if (was === open) return;
         details.toggleAttribute('open', open);
         Promise.resolve().then(function () {
-            var e = new EventCtor('toggle');
+            var e = __rk.make('Event', 'toggle');
             e.oldState = was ? 'open' : 'closed';
             e.newState = open ? 'open' : 'closed';
             __rk.trust(e);

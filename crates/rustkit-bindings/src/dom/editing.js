@@ -42,7 +42,7 @@
     });
         function fire(el, type, inputType, data, cancelable, isComposing) {
         if (type === 'input') __rk.markEdited(el);
-        var ev = new g.InputEvent(type, {
+        var ev = __rk.make('InputEvent', type, {
             bubbles: true, cancelable: !!cancelable, composed: true, view: g,
             inputType: inputType, data: data === undefined ? null : data,
             isComposing: !!isComposing
@@ -116,7 +116,7 @@
     // compositionend ''); unmark keeps the text and fires compositionend.
     var composing = null;
     function compose(el, type, data) {
-        var ev = new g.CompositionEvent(type, {
+        var ev = __rk.make('CompositionEvent', type, {
             bubbles: true, cancelable: true, composed: true, view: g, data: data
         });
         __rk.trust(ev);

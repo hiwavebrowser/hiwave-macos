@@ -97,7 +97,7 @@
         s.scheduled--;
         if (s.closed || !s.queue.length) return;
         var m = s.queue.shift();
-        var event = new g.MessageEvent('message', { data: m.data, ports: m.ports });
+        var event = __rk.make('MessageEvent', 'message', { data: m.data, ports: m.ports });
         __rk.trust(event);
         port.dispatchEvent(event);
     }
@@ -198,6 +198,7 @@
         this.ports = portList(ports, "Failed to execute 'initMessageEvent' on 'MessageEvent': ");
     };
     hide(g, 'MessageEvent', MessageEvent);
+    __rk.keepCtor('MessageEvent', MessageEvent);
 
     // ---- window.postMessage (HTML §9.3.3), same window only.
     // '*' matches any origin; '/' the document's own; anything else must
@@ -226,7 +227,7 @@
         post(function () {
             var own = g.location ? String(g.location.origin) : 'null';
             if (origin !== null && (own === 'null' || origin !== own)) return;
-            var event = new MessageEvent('message', { data: data, origin: own, lastEventId: '', source: g, ports: ports });
+            var event = __rk.make('MessageEvent', 'message', { data: data, origin: own, lastEventId: '', source: g, ports: ports });
             __rk.trust(event);
             g.dispatchEvent(event);
         }, 0);

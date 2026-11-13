@@ -502,7 +502,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         };
         // With the DOM wrappers installed, trust is theirs to give (dom.rs).
-        if (typeof __rk.trust === 'function') __rk.trust(event);
+        if (typeof __rk.make === 'function') {
+            event = __rk.make('Event', type);
+            __rk.trust(event);
+        }
         target.dispatchEvent(event);
     };
 

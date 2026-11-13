@@ -2836,7 +2836,24 @@ const WRAPPERS_JS: &str = r#"
     // The engine made this event. It reads trusted through its one
     // dispatch, the next `dispatchEvent` of it; one dispatched again (by
     // a page that kept it) is not trusted any more.
+    //
+    // Only an event this code just made with a constructor kept at install
+    // (`make`) can be trusted, and once: whatever a page has put on the
+    // window since never builds an event the engine marks.
+    var CTORS = Object.create(null), MADE = new WeakSet();
+    // The install scripts give the engine its constructors here (host
+    // object only; the last one an install script gives wins).
+    __rk.keepCtor = function (name, C) { if (typeof C === 'function') CTORS[name] = C; };
+    __rk.hasCtor = function (name) { return typeof CTORS[name] === 'function'; };
+    function made(ev) { setAdd(MADE, ev); return ev; }
+    function make(name, type, init) {
+        var C = CTORS[name] || CTORS.Event;
+        return made(new C(type, init));
+    }
+    __rk.make = make;
     function trust(ev) {
+        if (!setHas(MADE, ev)) throw new TypeError('not an engine-made event');
+        setDrop(MADE, ev);
         stamp(ev);
         setAdd(TRUSTED, ev);
         setAdd(UNDISPATCHED, ev);
@@ -3668,7 +3685,7 @@ const WRAPPERS_JS: &str = r#"
     // replace.
     function resetForm(form) {
         // Trusted, also when script called reset() (Chrome 148).
-        var e = new Event('reset', { bubbles: true, cancelable: true });
+        var e = make('Event', 'reset', { bubbles: true, cancelable: true });
         trust(e);
         if (!dispatchTo(form, e)) return false;
         controls(form, /^(input|textarea)$/).forEach(function (el) {
@@ -5429,7 +5446,7 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         if (!changed) return false;
-        var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
+        var ev = make('InputEvent', 'input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
         trust(ev);
         dispatchTo(host, ev);
         return true;
@@ -5598,7 +5615,7 @@ const WRAPPERS_JS: &str = r#"
         if (!target) return;
         loadedImages.delete(target);
         failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-        var ev = new Event('error');
+        var ev = make('Event', 'error');
         trust(ev);
         dispatchTo(target, ev);
         settleDecodes(target, false);
@@ -5617,7 +5634,7 @@ const WRAPPERS_JS: &str = r#"
         failedImages.delete(target);
         // No URL: a `data:` image, which is its own `src`.
         loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
-        var ev = new Event('load');
+        var ev = make('Event', 'load');
         trust(ev);
         dispatchTo(target, ev);
         settleDecodes(target, true);
@@ -5683,7 +5700,7 @@ const WRAPPERS_JS: &str = r#"
         if (!target) return;
         init.bubbles = true;
         init.cancelable = type === 'transitionend';
-        var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
+        var ev = make('TransitionEvent', type, init);
         trust(ev);
         dispatchTo(target, ev);
     };
@@ -5694,7 +5711,7 @@ const WRAPPERS_JS: &str = r#"
         if (!target) return;
         init.bubbles = true;
         init.cancelable = false;
-        var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
+        var ev = make('AnimationEvent', type, init);
         trust(ev);
         dispatchTo(target, ev);
     };
@@ -5729,7 +5746,7 @@ const WRAPPERS_JS: &str = r#"
             init.isPrimary = true;
             init.pressure = init.buttons ? 0.5 : 0;
         }
-        var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
+        var ev = make(pointer && __rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', type, init);
         trust(ev);
         // Where the point is in the document and in the target's box.
         var at = {
@@ -5774,7 +5791,7 @@ const WRAPPERS_JS: &str = r#"
     // only passive listeners hear it.
     __rk.fireWheel = function (id, init, cancelable) {
             var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target || typeof g.WheelEvent !== 'function') return true;
+            if (!target || !__rk.hasCtor('WheelEvent')) return true;
             if (target.localName === 'svg') target = svgShapeAt(target, init.clientX, init.clientY);
             init.bubbles = true;
             init.cancelable = cancelable !== false;
@@ -5785,7 +5802,7 @@ const WRAPPERS_JS: &str = r#"
             var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * Math.max(1, Math.round(Math.abs(d) / 100)); };
             init.wheelDeltaX = notches(init.deltaX);
             init.wheelDeltaY = notches(init.deltaY);
-            var ev = new g.WheelEvent('wheel', init);
+            var ev = make('WheelEvent', 'wheel', init);
             trust(ev);
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
@@ -5817,7 +5834,7 @@ const WRAPPERS_JS: &str = r#"
         init.detail = 0;
         init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
         init.dataTransfer = dt;
-        var ev = new (g.DragEvent || g.MouseEvent)(type, init);
+        var ev = make(__rk.hasCtor('DragEvent') ? 'DragEvent' : 'MouseEvent', type, init);
         if (!(ev.dataTransfer instanceof Object)) {
             Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
         }
@@ -5859,7 +5876,7 @@ const WRAPPERS_JS: &str = r#"
                 init.keyCode = virtualKey(init.key);
                 init.charCode = 0;
             }
-            var ev = new g.KeyboardEvent(type, init);
+            var ev = make('KeyboardEvent', type, init);
             trust(ev);
             return dispatchTo(target, ev);
     };
@@ -5888,7 +5905,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireTextInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target || typeof __rk.newTextEvent !== 'function') return true;
-            var ev = __rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
+            var ev = made(__rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data }));
             trust(ev);
             return dispatchTo(target, ev);
     };
@@ -5903,7 +5920,7 @@ const WRAPPERS_JS: &str = r#"
             // The user edited it: `change` when it loses the focus
             // (node_apis.js).
             __rk.markEdited(target);
-            var ev = new g.InputEvent('input', {
+            var ev = make('InputEvent', 'input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
             });
@@ -6354,6 +6371,7 @@ const WRAPPERS_JS: &str = r#"
     };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
+    __rk.keepCtor('Event', Event);
 
     // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
     // XML parser, which RustKit does not have yet.
@@ -6386,10 +6404,9 @@ const WRAPPERS_JS: &str = r#"
     // label's activation gives its control (trusted when the label's was).
     function clickElement(el, trusted) {
         if (el.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(el.localName)) return;
-        var C = typeof g.PointerEvent === 'function' ? g.PointerEvent : g.MouseEvent;
         var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
                      pointerId: -1, pointerType: '' };
-        var e = typeof C === 'function' ? new C('click', init) : new Event('click', init);
+        var e = make(__rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', 'click', init);
         e[SYNTHETIC_CLICK] = true;
         if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
