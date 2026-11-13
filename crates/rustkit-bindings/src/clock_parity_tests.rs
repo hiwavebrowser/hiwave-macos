@@ -147,3 +147,20 @@ fn in_capture_mode_the_page_clock_reproduces_across_runs() {
     assert_eq!(first, second);
     assert!(first.starts_with('['), "{first}");
 }
+
+/// The real-flowing page clock never loses real time. It used to count real time only since the
+/// virtual clock last moved, and held its last value until virtual time caught up: after a long
+/// real wait with no virtual step, the next timer left `performance.now()` far behind real time.
+#[test]
+fn the_page_clock_keeps_real_time_across_a_virtual_step() {
+    let b = page();
+    b.evaluate(
+        "var p0 = performance.now(), p1; setTimeout(function () { p1 = performance.now(); }, 16);",
+    )
+    .unwrap();
+    // 150 ms of real time pass with the virtual clock standing still, then it steps 16 ms
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    b.run_timers(100, 100).unwrap();
+    let gap: f64 = ev(&b, "String(p1 - p0)").parse().unwrap();
+    assert!(gap >= 140.0, "performance.now() moved {gap} ms across 150 ms of real time and a virtual step");
+}
