@@ -517,7 +517,31 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(window);
     makeEventTarget(document);
 
-    var now = 0, nextId = 1, timers = [];
+    // The timers. The engine reads this table where script is not
+    // interrupted (`__rk.nextTimer`), so it is the engine's alone: it
+    // inherits from nothing, holds slots 0..count-1 in the order the
+    // timers were set, is written and read by index here and is passed to
+    // no method. A timer is a record that inherits from nothing, with
+    // plain data of its own; its times are numbers made with the `Number`
+    // of install time. The built-ins used around it are taken now.
+    var objCreate = Object.create, setProto = Object.setPrototypeOf, toNumber = Number, toText = String,
+        evalNow = eval, applyTo = Reflect.apply, win = window;
+    var now = 0, nextId = 1, timers = objCreate(null), count = 0;
+    function removeAt(i) {
+        for (count--; i < count; i++) timers[i] = timers[i + 1];
+        delete timers[count];
+    }
+    function slotOf(timer) {
+        for (var i = 0; i < count; i++) if (timers[i] === timer) return i;
+        return -1;
+    }
+    // A callback's arguments (what followed `skip` of them), kept in an
+    // array that inherits from nothing.
+    function rest(args, skip) {
+        var out = setProto([], null);
+        for (var i = skip; i < args.length; i++) out[i - skip] = args[i];
+        return out;
+    }
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
@@ -540,28 +564,30 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     };
 
     function schedule(cb, ms, args, repeat, frame) {
-        var delay = Number(ms) || 0;
+        var delay = toNumber(ms) || 0;
         if (delay < 0) delay = 0;
         var id = nextId++;
-        timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
+        var timer = objCreate(null);
+        timer.id = id; timer.seq = id; timer.due = now + delay; timer.cb = cb; timer.args = args;
+        timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
+        timers[count++] = timer;
         return id;
     }
     function clearTimer(id) {
-        for (var i = 0; i < timers.length; i++) {
-            if (timers[i].id === id) { timers.splice(i, 1); return; }
+        for (var i = 0; i < count; i++) {
+            if (timers[i].id === id) { removeAt(i); return; }
         }
     }
     window.setTimeout = function (cb, ms) {
-        return schedule(cb, ms, Array.prototype.slice.call(arguments, 2), false);
+        return schedule(cb, ms, rest(arguments, 2), false);
     };
     window.setInterval = function (cb, ms) {
-        return schedule(cb, ms, Array.prototype.slice.call(arguments, 2), true);
+        return schedule(cb, ms, rest(arguments, 2), true);
     };
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false, true);
+        return schedule(function () { cb(now); }, 16, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -571,8 +597,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
 
     function call(timer) {
         try {
-            if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
-            else (0, eval)(String(timer.cb));
+            if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
+            else evalNow(toText(timer.cb));
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
@@ -586,7 +612,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var ran = 0;
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
-            for (var i = 0; i < timers.length; i++) {
+            for (var i = 0; i < count; i++) {
                 var t = timers[i];
                 if (timersOnly && t.frame) continue;
                 if (best < 0 || t.due < timers[best].due ||
@@ -604,9 +630,28 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 if (timer.due <= now) timer.due = now + timer.every;
                 timer.seq = nextId++;
             }
-            else timers.splice(best, 1);
+            else removeAt(best);
             ran++;
             call(timer);
+        }
+        return ran;
+    }
+    // A turn's animation frame callbacks: those due now, once each, in
+    // the order they were asked for, until `max` callbacks have run in
+    // the turn (`ran` so far). The round is a table of the engine's own,
+    // as the timers are. Returns the new count.
+    function frameRound(ran, max) {
+        var round = objCreate(null), due = 0;
+        for (var i = 0; i < count; i++) {
+            if (timers[i].frame && timers[i].due <= now) round[due++] = timers[i];
+        }
+        for (var j = 0; j < due && ran < max; j++) {
+            // Cancelled by an earlier callback of the round.
+            var at = slotOf(round[j]);
+            if (at < 0) continue;
+            removeAt(at);
+            ran++;
+            call(round[j]);
         }
         return ran;
     }
@@ -654,19 +699,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             return ran;
         }
         if (now < target) now = target;
-        var round = [];
-        for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
-        }
-        for (var j = 0; j < round.length && ran < max; j++) {
-            // Cancelled by an earlier callback of the round.
-            var at = timers.indexOf(round[j]);
-            if (at < 0) continue;
-            timers.splice(at, 1);
-            ran++;
-            call(round[j]);
-        }
-        return ran;
+        return frameRound(ran, max);
     };
     // Like `__rk.advanceTimers`, but stop between callbacks once
     // `frameMs` of wall time has passed so the host can publish a frame.
@@ -700,28 +733,23 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         if (now < target) now = target;
         if (ran >= max) return yielded ? -ran : ran;
-        var round = [];
-        for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
-        }
-        for (var j = 0; j < round.length && ran < max; j++) {
-            var at = timers.indexOf(round[j]);
-            if (at < 0) continue;
-            timers.splice(at, 1);
-            ran++;
-            call(round[j]);
-        }
+        ran = frameRound(ran, max);
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
     __rk.now = function () { return now; };
     __rk.nextTimer = function () {
+        // Only a number is a time; compared and subtracted here, with no
+        // call.
         var due = -1;
-        for (var i = 0; i < timers.length; i++) {
-            if (due < 0 || timers[i].due < due) due = timers[i].due;
+        for (var i = 0; i < count; i++) {
+            var at = timers[i].due;
+            if (typeof at !== 'number') continue;
+            if (due < 0 || at < due) due = at;
         }
-        return due < 0 ? -1 : Math.max(0, due - now);
+        if (due < 0) return -1;
+        return due > now ? due - now : 0;
     };
 })();
 "#;
