@@ -20,9 +20,31 @@
     var states = new WeakMap();
     // The built-ins this script uses, held from install as the event code holds its own: later page
     // script that replaces them does not reach the worker records.
-    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call), objCreate = Object.create;
     var stateOf = uncurry(WeakMap.prototype.get), setState = uncurry(WeakMap.prototype.set);
     var objKeys = Object.keys, isArray = Array.isArray, jsonParse = JSON.parse, jsonStringify = JSON.stringify;
+    var indexOf = uncurry(Array.prototype.indexOf);
+    // The JavaScript MIME types (MIME Sniffing 4.6): importScripts refuses any other (NetworkError), as
+    // Chrome does. A worker's own script is not held to it (Chrome runs one served as text/plain).
+    var JS_MIME = ['application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+        'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0', 'text/javascript1.1',
+        'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
+        'text/livescript', 'text/x-ecmascript', 'text/x-javascript'];
+    function isJavaScript(headers) {
+        for (var i = 0; headers && i < headers.length; i++) {
+            if (String(headers[i][0]).toLowerCase() !== 'content-type') continue;
+            var essence = String(headers[i][1]).split(';')[0].trim().toLowerCase();
+            return indexOf(JS_MIME, essence) >= 0;
+        }
+        return false;
+    }
+    // A request descriptor with every key the bridge reads, so it reads none through a prototype.
+    function scriptRequest(url, destination, mode) {
+        var d = objCreate(null);
+        d.method = 'GET'; d.url = url; d.headers = []; d.body_b64 = null; d.mode = mode;
+        d.credentials = 'same-origin'; d.redirect = 'follow'; d.destination = destination;
+        return d;
+    }
     var live = {};
     var MAX_QUEUED = 1024;
 
@@ -79,8 +101,9 @@
         urls.forEach(function (raw, i) {
             var href;
             try { href = new g.URL(raw, st.href).href; } catch (_) { settle(i, { ok: false }); return; }
-            var nid = net ? net.request({ url: href, destination: 'script', mode: 'cors', credentials: 'same-origin' }, function (r) {
-                if (!r.ok || r.status < 200 || r.status >= 300) { settle(i, { ok: false }); return; }
+            // Cross-origin imports need CORS here (Chrome's classic imports are no-cors): stricter, not looser.
+            var nid = net ? net.request(scriptRequest(href, 'script', 'cors'), function (r) {
+                if (!r.ok || r.status < 200 || r.status >= 300 || !isJavaScript(r.headers)) { settle(i, { ok: false }); return; }
                 try { settle(i, { ok: true, src: new g.TextDecoder().decode(fromBase64(r.body_b64)) }); }
                 catch (_) { settle(i, { ok: false }); }
             }) : 0;
@@ -214,7 +237,8 @@
             }
             var net = __rk.net;
             if (!net) { failLoad(this, st); return; }
-            st.net = net.request({ url: u.href, destination: 'worker', mode: 'cors', credentials: 'same-origin' }, function (r) {
+            // Same-origin, as the spec's worker script request: a redirect off the origin fails.
+            st.net = net.request(scriptRequest(u.href, 'worker', 'same-origin'), function (r) {
                 st.net = 0;
                 if (st.dead) return;
                 if (!r.ok || r.status < 200 || r.status >= 300) { failLoad(self, st); return; }

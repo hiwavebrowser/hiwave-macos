@@ -247,9 +247,10 @@ fn observe(key: &str, file: &str, post: Option<&str>) -> serde_json::Value {
     while Instant::now() < end {
         for r in b.take_net_requests() {
             let path = r.url.trim_start_matches("http://a.test").to_string();
-            let (status, body) = match w2_file(&path) {
-                Some(s) => (200, s),
-                None => (404, "no"),
+            // As the Chrome measurement's server: scripts as text/javascript (importScripts checks it).
+            let (status, body, content_type) = match w2_file(&path) {
+                Some(s) => (200, s, "text/javascript"),
+                None => (404, "no", "text/plain"),
             };
             b.deliver_net_response(
                 r.id,
@@ -257,7 +258,7 @@ fn observe(key: &str, file: &str, post: Option<&str>) -> serde_json::Value {
                     url: r.url,
                     status,
                     status_text: "".into(),
-                    headers: vec![],
+                    headers: vec![("content-type".into(), content_type.into())],
                     body_b64: b64(body.as_bytes()),
                     kind: "basic".into(),
                     redirected: false,

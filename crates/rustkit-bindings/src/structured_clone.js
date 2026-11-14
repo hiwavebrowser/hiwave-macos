@@ -18,6 +18,7 @@
     var uncurry = Function.prototype.bind.bind(Function.prototype.call);
     var jsonParse = JSON.parse, jsonStringify = JSON.stringify, objKeys = Object.keys, isArray = Array.isArray;
     var defineProp = Object.defineProperty, objCreate = Object.create, toStr = uncurry(Object.prototype.toString);
+    var indexOf = uncurry(Array.prototype.indexOf);
     var HEX = [];
     for (var h = 0; h < 256; h++) HEX.push((h < 16 ? '0' : '') + h.toString(16));
     var ERROR_NAMES = ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError'];
@@ -93,12 +94,12 @@
                 rec.l = tag === 'DataView' ? v.byteLength : v.length;
             } else if (v instanceof g.Error) {
                 var name = v.name;
-                rec.t = 'E'; rec.n = ERROR_NAMES.indexOf(name) >= 0 ? name : 'Error';
+                rec.t = 'E'; rec.n = indexOf(ERROR_NAMES, name) >= 0 ? name : 'Error';
                 rec.m = v.message === undefined ? undefined : String(v.message);
                 if (typeof v.stack === 'string') rec.s = v.stack;
             } else if (v instanceof g.Boolean || v instanceof g.Number || v instanceof g.String) {
                 rec.t = 'W'; rec.k = tag; rec.v = enc(v.valueOf());
-            } else if (UNCLONEABLE.indexOf(tag) >= 0 || isDomNode(v)) {
+            } else if (indexOf(UNCLONEABLE, tag) >= 0 || isDomNode(v)) {
                 throw cloneError(describe(v) + ' could not be cloned.', where);
             } else if (isArray(v)) {
                 rec.t = 'a'; rec.l = v.length; rec.k = [];
@@ -193,11 +194,11 @@
                     if (typeof rec.d !== 'string') throw refused();
                     out = unhex(rec.d); made[id] = out; return out;
                 case 'TA':
-                    if (VIEWS.indexOf(rec.c) < 0) throw refused();
+                    if (indexOf(VIEWS, rec.c) < 0) throw refused();
                     out = new g[rec.c](dec(rec.b), rec.o, rec.l); made[id] = out; return out;
                 case 'DV': out = new g.DataView(dec(rec.b), rec.o, rec.l); made[id] = out; return out;
                 case 'E':
-                    if (ERROR_NAMES.indexOf(rec.n) < 0) throw refused();
+                    if (indexOf(ERROR_NAMES, rec.n) < 0) throw refused();
                     out = new g[rec.n](rec.m); made[id] = out;
                     if (rec.s !== undefined) { try { out.stack = rec.s; } catch (_) {} }
                     return out;
