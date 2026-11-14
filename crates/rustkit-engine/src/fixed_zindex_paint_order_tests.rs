@@ -13,9 +13,17 @@ use std::collections::BTreeMap;
 const CASES: &str = include_str!("../../../docs/diagnostics/2026-11-14/fixed_zindex_cases.json");
 const CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-14/fixed_zindex_cft148.json");
 
-/// Cases this change does not reach, with what this engine answers (top, hit). A clipping wrapper stops
-/// the lift (the boxes under it keep its clip), so a fixed box inside one keeps its old place.
-const KNOWN_NOT_DONE: &[(&str, &str, &str)] = &[("fixed_z5_in_overflow_hidden_wrapper_over_fixed_z1", "b", "b")];
+/// Cases this change does not reach, with what this engine answers (top, hit); each differs from Chrome
+/// and is a row of its own.
+/// - A clipping wrapper stops the lift (the boxes under it keep its clip), so a fixed box inside one keeps
+///   its old place in the picture; its hit, by the fixed-box pass, is Chrome's.
+/// - The hit test takes fixed boxes in a pass of their own and puts any non-negative one over the whole
+///   page (a sticky box apart), so an absolute z-index:2 box under a fixed z-index:1 one loses the hit
+///   that it wins in the picture. As on develop.
+const KNOWN_NOT_DONE: &[(&str, &str, &str)] = &[
+    ("fixed_z5_in_overflow_hidden_wrapper_over_fixed_z1", "b", "a"),
+    ("absolute_z2_over_fixed_z1_later", "a", "b"),
+];
 
 /// Which box is drawn last of the two ("a" red, "b" blue), and which `elementFromPoint(150, 150)` names.
 fn on_top_and_hit(body: &str) -> (&'static str, String) {
