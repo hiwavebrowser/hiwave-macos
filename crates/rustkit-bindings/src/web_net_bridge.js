@@ -31,9 +31,15 @@
     // script, and the tables and what is queued inherit from nothing.
     var create = Object.create, keys = Object.keys, stringify = JSON.stringify, parse = JSON.parse,
         setProto = Object.setPrototypeOf, defineOwn = Object.defineProperty, U8 = Uint8Array,
-        takeBytes = __rk.takeBytes, base64Encode = __rk.base64Encode;
+        text = String, number = Number, TypeErr = TypeError,
+        takeBytes = __rk.takeBytes, base64Encode = __rk.base64Encode, reportError = __rk.reportError;
     function bare(o) { return setProto(o, null); }
-    var queue = [];
+    // The queue is a table of the engine's own: slots 0..queued-1 in the
+    // order the requests were made, written and read by index here and
+    // passed to no method. What it holds is plain data (strings made
+    // with the `String` of install time, and tables of them).
+    var queue = create(null), queued = 0;
+    function emptyQueue() { queue = create(null); queued = 0; queuedBody = 0; }
     var pending = create(null);
     // Callbacks set aside because the JavaScript budget was spent before
     // their answer could be delivered. fail_all does not settle them; the
@@ -44,7 +50,7 @@
     function pairs(source) {
         var out = bare([]);
         for (var i = 0; source && i < source.length; i++) {
-            out[i] = bare([String(source[i][0]), String(source[i][1])]);
+            out[i] = bare([text(source[i][0]), text(source[i][1])]);
         }
         return out;
     }
@@ -56,7 +62,7 @@
         try {
             done(result);
         } catch (e) {
-            try { __rk.reportError(e); } catch (_) {}
+            try { reportError(e); } catch (_) {}
         }
         return true;
     }
@@ -66,23 +72,27 @@
         // credentials, redirect, destination }. `done` is called once with the
         // delivered result. Returns the request id, or 0 when refused.
         request: function (desc, done) {
-            if (typeof done !== 'function') throw new TypeError('a request needs a callback');
-            if (queue.length >= MAX_QUEUED) return 0;
-            var body = desc.body_b64 == null ? null : String(desc.body_b64);
+            if (typeof done !== 'function') throw new TypeErr('a request needs a callback');
+            if (queued >= MAX_QUEUED) return 0;
+            var body = desc.body_b64 == null ? null : text(desc.body_b64);
             if (body !== null && queuedBody + body.length > MAX_QUEUED_BODY) return 0;
             if (body !== null) queuedBody += body.length;
             var id = nextId++;
-            queue[queue.length] = bare({
+            var item = bare({
                 id: id,
-                method: String(desc.method || 'GET'),
-                url: String(desc.url),
+                method: text(desc.method || 'GET'),
+                url: text(desc.url),
                 headers: pairs(desc.headers),
                 body_b64: body,
-                mode: String(desc.mode || 'cors'),
-                credentials: String(desc.credentials || 'same-origin'),
-                redirect: String(desc.redirect || 'follow'),
-                destination: String(desc.destination || 'fetch')
+                mode: text(desc.mode || 'cors'),
+                credentials: text(desc.credentials || 'same-origin'),
+                redirect: text(desc.redirect || 'follow'),
+                destination: text(desc.destination || 'fetch')
             });
+            // Reading `desc` may have run page script that asked again:
+            // the slot is chosen now.
+            if (queued >= MAX_QUEUED) { if (body !== null) queuedBody -= body.length; return 0; }
+            queue[queued++] = item;
             pending[id] = done;
             return id;
         },
@@ -91,10 +101,11 @@
         // ignored) and a request not yet taken never leaves the page.
         cancel: function (id) {
             delete pending[id];
-            for (var i = 0; i < queue.length; i++) {
+            for (var i = 0; i < queued; i++) {
                 if (queue[i].id === id) {
                     if (queue[i].body_b64 !== null) queuedBody -= queue[i].body_b64.length;
-                    queue.splice(i, 1);
+                    for (queued--; i < queued; i++) queue[i] = queue[i + 1];
+                    delete queue[queued];
                     break;
                 }
             }
@@ -102,9 +113,9 @@
 
         // Engine side.
         take: function () {
-            queuedBody = 0;
-            var taken = bare(queue);
-            queue = [];
+            var taken = bare([]);
+            for (var i = 0; i < queued; i++) taken[i] = queue[i];
+            emptyQueue();
             return stringify(taken);
         },
         // A response's body does not travel in `json`: the engine leaves
@@ -151,15 +162,15 @@
         fail_all: function (reason) {
             var failed = 0;
             for (var pass = 0; pass < 3; pass++) {
-                queue = []; queuedBody = 0;
+                emptyQueue();
                 var ids = keys(pending);
                 if (ids.length === 0) break;
                 for (var i = 0; i < ids.length; i++) {
-                    var id = Number(ids[i]);
-                    if (settle(id, bare({ id: id, ok: false, error: String(reason) }))) failed++;
+                    var id = number(ids[i]);
+                    if (settle(id, bare({ id: id, ok: false, error: text(reason) }))) failed++;
                 }
             }
-            queue = []; queuedBody = 0;
+            emptyQueue();
             pending = create(null);
             return failed;
         },
@@ -167,7 +178,7 @@
             return keys(pending).length;
         },
         queued: function () {
-            return queue.length;
+            return queued;
         }
     });
 
