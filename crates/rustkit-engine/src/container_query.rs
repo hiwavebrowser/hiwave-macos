@@ -693,11 +693,14 @@ fn absolute_length(len: &Length) -> bool {
 /// Flex and grid items are; what #782's fail-safe
 /// list knows the engine still lays out differently is not, with
 /// everything under it: a box beside an earlier float (a context it starts
-/// is not narrowed by the float here), a float, an absolute or fixed box
+/// is not narrowed by the float here), an absolute or fixed box
 /// (percentages and padding against the containing block), a vertical
 /// writing mode (the inline size is the height), a form control, replaced
 /// element or `dialog` (Chrome shrinks a `display: block` button), a
-/// `-webkit-box`, and a child of a multi-column box.
+/// `-webkit-box`, and a child of a multi-column box. A float and its
+/// contents are trusted (CQ3): its shrink-to-fit width, a size container's
+/// contained one among them, matches Chrome on the twelve float shapes in
+/// `css_container_query_in_float.html`.
 fn layout_trusted(
     style: &ComputedStyle,
     parent: Option<&ComputedStyle>,
@@ -705,8 +708,7 @@ fn layout_trusted(
     float_seen: bool,
 ) -> bool {
     !float_seen
-        && style.float == Float::None
-        && !out_of_flow(style)
+        && !matches!(style.position, Position::Absolute | Position::Fixed)
         && style.writing_mode == WritingMode::HorizontalTb
         && !style.writing_mode_declared
         && style.webkit_box.is_none()

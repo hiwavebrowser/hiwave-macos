@@ -175,6 +175,14 @@ struct Args {
     #[arg(long)]
     event_log_error_text: bool,
 
+    /// Append the page's console calls, uncaught exceptions and unhandled
+    /// rejections to this file as JSON Lines, with the text the page wrote
+    /// (the command-line form of `HIWAVE_CONSOLE_LOG=<path>`; see
+    /// docs/INSPECTOR_EVENT_LOG.md). The file holds page content (cookies,
+    /// tokens, form values): never for a log that will be shared.
+    #[arg(long, value_name = "PATH")]
+    console_log: Option<std::path::PathBuf>,
+
     /// Filter subresources through the app's shield (EasyList, EasyPrivacy
     /// and the interim domain floor), so a block shows in the event log as
     /// `failure.blocked_by`. Off by default: the board runs unfiltered.
@@ -736,6 +744,9 @@ struct LayoutStats {
 
 fn main() {
     let args = Args::parse();
+    if let Some(path) = &args.console_log {
+        rustkit_engine::console_file::set_path(path);
+    }
 
     // Initialize tracing - respect RUST_LOG if set, otherwise use defaults
     let default_filter = if args.verbose { "info" } else { "warn" };
@@ -2248,6 +2259,15 @@ mod tests {
         let too_large = log_of(&big);
         let failed = inline_script_failure(&too_large).expect("a too-large inline script fails the capture");
         assert!(matches!(failed.outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")), "{too_large:?}");
+    }
+
+    #[test]
+    fn console_log_is_off_unless_a_path_is_given() {
+        assert_eq!(parsed(&[]).console_log, None);
+        assert_eq!(
+            parsed(&["--console-log", "/tmp/console.jsonl"]).console_log,
+            Some(std::path::PathBuf::from("/tmp/console.jsonl"))
+        );
     }
 
     fn parsed(extra: &[&str]) -> Args {

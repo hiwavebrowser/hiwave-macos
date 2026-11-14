@@ -1,7 +1,7 @@
 // fetch, Headers, Request and Response, built on the script-network bridge.
 //
 // No network access of its own: fetch() queues a request on
-// window.__rustkit_net and waits for the engine, which vets and fetches it
+// __rk.net and waits for the engine, which vets and fetches it
 // under the page's FetchPolicy (the one allow/deny layer). Installed only
 // after the bridge and XMLHttpRequest (which shares its body encoding).
 //
@@ -10,7 +10,7 @@
 // streams are read whole before sending; no cookies (the policy sends none);
 // `cache`, `integrity`, `keepalive`, `priority` are stored and ignored.
 (function (g) {
-    var net = g.__rustkit_net;
+    var net = __rk.net;
     if (!net || !net.util || typeof g.fetch === 'function') return;
     var U = net.util;
     var domError = U.domError, utf8 = U.utf8;

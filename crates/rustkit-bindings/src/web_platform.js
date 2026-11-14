@@ -43,6 +43,9 @@
     }
 
     // ---- performance (High Resolution Time, Performance Timeline, Navigation Timing).
+    // The engine's monotonic clock (STR-9), taken off the window.
+    var nowMs = g.__rustkit_now_ms;
+    try { delete g.__rustkit_now_ms; } catch (_) {}
     if (typeof g.performance === 'undefined') {
         var origin = Date.now();
         var entries = [];
@@ -54,7 +57,7 @@
             now: function now() {
                 var page = g.__rustkit_perf_now;
                 if (typeof page === 'function') return page();
-                return typeof g.__rustkit_now_ms === 'function' ? g.__rustkit_now_ms() : Date.now() - origin;
+                return typeof nowMs === 'function' ? nowMs() : Date.now() - origin;
             },
             mark: function (name) {
                 var e = { name: String(name), entryType: 'mark', startTime: performance.now(), duration: 0 };
