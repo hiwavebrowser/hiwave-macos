@@ -1588,6 +1588,29 @@ mod tests {
         assert_eq!(p.execute(&loader(), same).await.unwrap_err(), Denial::SameOriginOnly);
     }
 
+    /// A worker's classic `importScripts` from another origin is a no-cors script request: Chrome 148 runs it
+    /// without CORS headers (`docs/diagnostics/2026-11-14/worker_csp_cft148.json`,
+    /// `import_cross_origin_without_cors`). The engine gets the body and type to run it; the response is
+    /// still opaque, and a no-cors fetch still gets nothing.
+    #[tokio::test]
+    async fn a_no_cors_script_request_hands_the_engine_its_body() {
+        let s = serve(|_| resp(200, &[("Content-Type", "text/javascript"), ("Set-Cookie", "k=v")], b"self.libValue = 'b';")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let mut req = ScriptRequest::get(s.url("/lib.js"));
+        req.mode = RequestMode::NoCors;
+        req.destination = RequestDestination::Script;
+        let r = p.execute(&loader(), req).await.expect("opaque script");
+        assert_eq!((r.kind, r.status), (ResponseKind::Opaque, 200));
+        assert_eq!(&r.body[..], b"self.libValue = 'b';");
+        assert_eq!(header_str(&r.headers, "content-type"), Some("text/javascript"));
+        assert!(r.headers.get("set-cookie").is_none());
+        let mut fetch = ScriptRequest::get(s.url("/lib.js"));
+        fetch.mode = RequestMode::NoCors;
+        let r = p.execute(&loader(), fetch).await.expect("opaque fetch");
+        assert_eq!((r.kind, r.status), (ResponseKind::Opaque, 0));
+        assert!(r.body.is_empty() && r.headers.is_empty());
+    }
+
     #[tokio::test]
     async fn a_no_cors_request_never_carries_a_non_safelisted_header() {
         // The Request guard in script is the first line; this is the boundary
