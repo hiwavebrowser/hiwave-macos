@@ -32,6 +32,10 @@ const cases = {
   opacity_rel_outside_clip_path: [`<div style='opacity:.99;position:relative'><div ${clip("clip-path:inset(0)")}><div ${R}></div></div></div>`, 175, 25],
   // A positioned box between: its own containing block chain is inside, so clipped.
   opacity_overflow_hidden_abs_in_abs: [`<div ${clip("opacity:.99;overflow:hidden;position:relative")}><div style='position:absolute;left:0;top:0'><div ${R}></div></div></div>`, 175, 25],
+  // In the clipper's border, outside its padding box (the overflow clip): the box is clipped there, so
+  // the hit is the clipper. The probe (5, 5) is inside the clipper's border box.
+  opacity_overflow_hidden_rel_inside_border_area: [`<div ${clip("opacity:.99;overflow:hidden;border:20px solid rgb(0,0,255)")}><div style='position:relative'><div id=r style='position:absolute;left:-20px;top:-20px;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>`, 5, 5],
+  root_overflow_hidden_rel_inside_border_area: [`<div ${clip("overflow:hidden;border:20px solid rgb(0,0,255)")}><div style='position:relative'><div id=r style='position:absolute;left:-20px;top:-20px;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>`, 5, 5],
   // A fixed box escapes overflow clipping of a non-transformed ancestor.
   opacity_overflow_hidden_fixed_inside: [`<div ${clip("opacity:.99;overflow:hidden")}><div style='position:relative'><div id=r style='position:fixed;left:150px;top:0;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>`, 175, 25],
 };

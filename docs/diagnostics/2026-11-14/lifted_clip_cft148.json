@@ -134,6 +134,24 @@
    255
   ]
  },
+ "opacity_overflow_hidden_rel_inside_border_area": {
+  "red": false,
+  "hit": "c",
+  "px": [
+   2,
+   2,
+   255
+  ]
+ },
+ "root_overflow_hidden_rel_inside_border_area": {
+  "red": false,
+  "hit": "c",
+  "px": [
+   0,
+   0,
+   255
+  ]
+ },
  "opacity_overflow_hidden_fixed_inside": {
   "red": true,
   "hit": "r",

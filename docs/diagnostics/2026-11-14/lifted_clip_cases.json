@@ -74,6 +74,16 @@
   175,
   25
  ],
+ "opacity_overflow_hidden_rel_inside_border_area": [
+  "<div id=c style='width:100px;height:100px;background:rgb(0,0,255);opacity:.99;overflow:hidden;border:20px solid rgb(0,0,255)'><div style='position:relative'><div id=r style='position:absolute;left:-20px;top:-20px;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>",
+  5,
+  5
+ ],
+ "root_overflow_hidden_rel_inside_border_area": [
+  "<div id=c style='width:100px;height:100px;background:rgb(0,0,255);overflow:hidden;border:20px solid rgb(0,0,255)'><div style='position:relative'><div id=r style='position:absolute;left:-20px;top:-20px;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>",
+  5,
+  5
+ ],
  "opacity_overflow_hidden_fixed_inside": [
   "<div id=c style='width:100px;height:100px;background:rgb(0,0,255);opacity:.99;overflow:hidden'><div style='position:relative'><div id=r style='position:fixed;left:150px;top:0;width:50px;height:50px;background:rgb(255,0,0)'></div></div></div>",
   175,
