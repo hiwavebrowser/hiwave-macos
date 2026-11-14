@@ -62,8 +62,16 @@ Skipped and **not** failures:
   the design, never a gate-1 FAIL and never evidence of green either.
 
 A batch PR needs no R1 of its own: its members carry `r1-clear` at the merged
-SHAs. Do not FAIL-stamp a batch PR for gate 6 or 7 (it is the sum of its
-members); stamp it on gate 1 and 2 only.
+SHAs. On a batch PR, gates 6 and 7 do not apply (it is the sum of its
+members); gates 1 to 5 do. Gates 3 and 4 matter most there: the batch's merge
+commits are the one place content can appear that no member carried and no
+review read. Its PASS stamp reads `gates: 1-5 ok (batch)`.
+
+A **promotion PR** (`develop` -> `master`) is not an ordinary PR: its head is
+`develop`, so the heavy suites skip on it. Require a green `Parity Gate` run
+on exactly that head SHA from a `workflow_dispatch` on `develop` (or the push
+run on the batch PR that produced that SHA). Without one, wait; do not stamp
+PASS on the four cheap checks alone.
 
 ### FAIL if any of these is true
 
