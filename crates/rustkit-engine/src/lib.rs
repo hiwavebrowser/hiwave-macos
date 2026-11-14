@@ -761,6 +761,8 @@ mod focus_pseudo_tests;
 mod form_setter_calls_tests;
 #[cfg(all(test, feature = "headless"))]
 mod document_title_tests;
+#[cfg(all(test, feature = "headless"))]
+mod template_in_head_tests;
 
 #[cfg(test)]
 thread_local! {
