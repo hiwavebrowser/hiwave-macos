@@ -91,6 +91,7 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 pub mod interrupt_diag; // HIWAVE PATCH (interrupt diagnostics)
+pub mod stats; // HIWAVE PATCH (vm-stats)
 pub mod host_stack; // HIWAVE PATCH (host stack)
 
 #[cfg(feature = "flowgraph")]
@@ -1146,7 +1147,18 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
-        let _native_entry = crate::native_stack::Entry::new(self.vm.runtime_limits.native_stack_budget()); // HIWAVE PATCH (native recursion)
+        // HIWAVE PATCH (native recursion): one native-stack entry for the whole run, taken here in
+        // the shared entry so both loops below (counting and not) run under it.
+        let _native_entry = crate::native_stack::Entry::new(self.vm.runtime_limits.native_stack_budget());
+        // HIWAVE PATCH (vm-stats): the counting loop only when `RUSTKIT_VM_STATS` asks for it.
+        if stats::enabled() {
+            self.run_impl::<true>()
+        } else {
+            self.run_impl::<false>()
+        }
+    }
+
+    fn run_impl<const STATS: bool>(&mut self) -> CompletionRecord {
         // HIWAVE PATCH (interrupt): no bytecode runs in a stopped turn, even
         // when an engine reaction let in by `new_promise_reaction_job`
         // resumes a body or runs a module: it fails as its first opcode
@@ -1171,6 +1183,9 @@ impl Context {
             .get(self.vm.frame().pc as usize)
         {
             let opcode = Opcode::decode(*byte);
+            if STATS {
+                stats::op(*byte); // HIWAVE PATCH (vm-stats)
+            }
 
             match self.execute_one(
                 |context, opcode| {

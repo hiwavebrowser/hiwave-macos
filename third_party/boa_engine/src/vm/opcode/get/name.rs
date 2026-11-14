@@ -95,6 +95,15 @@ impl GetNameGlobal {
 
             // Cache the property.
             let slot = *context.slot();
+            // HIWAVE PATCH (vm-stats): an inline-cache miss on a global read, by name.
+            if crate::vm::stats::enabled() {
+                crate::vm::stats::miss(
+                    crate::vm::stats::Site::GetGlobal,
+                    &binding_locator.name().to_std_string_escaped(),
+                    "global",
+                    slot.is_cacheable(),
+                );
+            }
             if slot.is_cacheable() {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
                 let object_borrowed = object.borrow();
@@ -201,6 +210,11 @@ impl GetNameOrUndefined {
         let is_global = binding_locator.is_global();
 
         context.find_runtime_binding(&mut binding_locator)?;
+
+        // HIWAVE PATCH (global-lexical-scope): a global name that resolved, at run time, to a later
+        // script's lexical binding is no longer "an undeclared global": while that binding is
+        // uninitialised, `typeof x` is a ReferenceError (the temporal dead zone), not "undefined".
+        let is_global = is_global && binding_locator.is_global();
 
         let result = if let Some(value) = context.get_binding(&binding_locator)? {
             value

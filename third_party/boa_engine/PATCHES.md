@@ -474,7 +474,7 @@ real stack overflowed (so did `flat(Infinity)`, `join`/`toString`/`==` through n
 prototype chains, deeply nested source in the parser). Chrome throws a catchable `RangeError`.
 
 `src/native_stack.rs`: the stack address where the outermost engine entry on a thread began
-(`Context::run`, `JsObject::call`, `Script::parse`), and `check(budget)`, which throws `RangeError:
+(`Context::run`, `JsObject::call`, `Script::parse`, `Module::parse`), and `check(budget)`, which throws `RangeError:
 Maximum call stack size exceeded` once more than the budget has been used since. Checked in
 `CallValue::resolve` (every call, native or JS), `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/`try_get` (Proxy
 and prototype chains), `JSON.stringify`'s `serialize_json_property` and `flatten_into_array`.
@@ -495,6 +495,13 @@ Pin: `crates/rustkit-js/tests/native_recursion.rs` (each case in a child process
 aborts; 40 cases, expected values from Chrome for Testing 148.0.7778.216). Where Chrome answers and this
 engine throws a RangeError instead, or where `JSON.parse` keeps its old SyntaxError ceiling, the test names
 the case and the answer it accepts.
+
+Follow-up (#1099 R1 MED): `Module::parse` is an entry too, and the probe answers `None` (no origin) on a
+thread with no outermost entry, so such a parse is measured from its own start. The probe is process-wide
+and was installed by the first entry and never cleared; it answered "not over" without an entry, so a parse
+outside one (a module parse) was never measured and a deeply nested module source overflowed the thread.
+Pin: `crates/rustkit-js/tests/module_parse_depth.rs` (5 nestings at 200 000 levels and a shallow control,
+Chrome for Testing 148.0.7778.216: `RangeError`, and the page runs on).
 
 ## Patch: a catchable stack overflow (STR-10)
 
@@ -521,6 +528,26 @@ showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/t
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
 
+## Patch: interpreter statistics (`vm-stats`, JS-PERF2 item 4)
+
+**Why.** To say where the interpreter's property lookups go slow on a real page (CodeMirror's first
+parse) without guessing: which opcodes run how often, and which property accesses miss their inline
+cache, on what kind of receiver, for which name.
+
+**What.** `src/vm/stats.rs` (new). Off unless `RUSTKIT_VM_STATS=1` is in the environment (read once
+per process): `Context::run` picks `run_impl::<true>`, a copy of the loop that counts every opcode,
+only then, and the miss hooks in `get_by_name`, `set_by_name` and `GetNameGlobal` (all on the path
+that already missed) are one branch on that flag. `rustkit_js::vm_stats_report()` returns the text:
+the top 40 opcodes with counts and shares, the misses per site split into cacheable (cold, or the
+shape changed) and not cacheable (misses every time, e.g. a store that adds a property), and the top
+40 (site, receiver kind, name) misses. Hits are the opcode's count minus its misses.
+`RUSTKIT_VM_STATS_FILE=<path>` also rewrites the report to `<path>.t<thread number>` every 1M opcodes and when the
+thread ends, for a probe that exits without calling the function. Pin:
+`crates/rustkit-js/tests/vm_stats.rs` (red first, against a stub report). Privacy: the report carries shapes, not data; property names are recorded only when identifier-like
+and at most 48 characters (anything else is one bucket), and computed keys are never recorded.
+Cost with the flag off,
+measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
+reads, a script call and arithmetic loops.
 ## Patch: whole-number double keys without a string (`js-perf1`)
 
 **Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset
@@ -584,6 +611,10 @@ compiler could not know). Pins: `crates/rustkit-js/tests/global_lexical_scope.rs
 per global-object name read once any script has a top-level lexical declaration; a 1M-iteration loop
 of three global reads with 300 top-level consts went 1.41 s to 1.6 s (release, Linux).
 
+`GetNameOrUndefined` (`src/vm/opcode/get/name.rs`) takes its "undeclared global, so `undefined`" decision
+after the locator has been re-pointed, so `typeof` of a later script's binding before its declaration
+has run is a ReferenceError as in Chrome, not `"undefined"` (#1101 follow-up).
+
 ## Patch: sort in V8's order (`sort-v8`)
 
 **Why.** With a comparator that is not a consistent total order (`(a, b) => a > b`, a NaN or
@@ -604,3 +635,47 @@ shapes, plus typed arrays) with Chrome's sorted result AND its comparator call l
 stability and totality with a seeded generator. Not pinned: comparators with side effects other
 than logging, arrays over ~500 elements, and proxies or array-likes with getters (the algorithm does
 not depend on them, but they were not measured).
+
+## Patch: a left operand is read before the right one can assign (`eval-order`)
+
+**Why.** Boa's `compile_binary` used a local variable's own register as the left operand of
+`lhs op rhs` (no copy into a temporary), so the operator read it AFTER the right operand had run.
+`a + --a` and `a < (a = 5)` used the new value; ECMA-262 reads the left operand first. The same in the
+fused comparison branch of a loop or `if` condition (`while (a < (a = a + 2))`). Chrome 148 gives the
+old value in all of them.
+
+**What.** `ByteCompiler::compile_expr_operand_before(lhs, rhs, ...)` (`src/bytecompiler/mod.rs`,
+marked `HIWAVE PATCH (eval-order)`): the register is used directly only when `rhs` contains no
+assignment or update expression (`may_assign`, a conservative AST visitor); otherwise the left operand
+is copied into a temporary first. Used by `compile_binary` (arithmetic, bitwise, relational) and
+`try_fused_comparison_branch`. Pins: `crates/rustkit-js/tests/eval_order.rs` (800 generated programs,
+3 of which differ from Chrome without the fix, and 34 hand-written cases, 3 of which differ, all from
+Chrome 148.0.7778.216).
+
+## Patch: assigning a `let` or `const` in its temporal dead zone (`tdz-assign`)
+
+**Why.** `z = 1` compiled before `let z` in the same function (or block) succeeded silently: the
+compiler's `access_set` called `insert_binding`, which gave the not-yet-declared local a fresh
+register of its own, and the declaration later took another. Chrome 148 throws ReferenceError, after
+evaluating the right side, for a `const` too. A read, a compound assignment and `++` already threw
+(they read first).
+
+**What.** `access_set` in `src/bytecompiler/mod.rs` (marked `HIWAVE PATCH (tdz-assign)`): a lexical
+local with no register yet is in its dead zone at that point of the source; the assignment emits the
+same "uninitialized binding" ReferenceError a read of it does, before the constness check. Pin:
+`crates/rustkit-js/tests/tdz_assign.rs` (10 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/tdz_assign_cases.json`; 6 differed before). Not covered: a `let` declared in one
+`switch` case and assigned in a later one (compiled after the declaration, so no error; unchanged).
+
+## Patch: cyclic ToPrimitive and Array join (cyclic to-primitive)
+
+`JsObject::ordinary_to_primitive` carried upstream's `RecursionLimiter`: an object already being
+converted answered the hint's default (`0` / `""`). So a user `toString() { return String(o); }` returned
+`""` after one level where Chrome recurses to a `RangeError`. The limiter is removed. What it was
+protecting, cyclic arrays, is V8's join stack now: `Array.prototype.join` and `toLocaleString` keep a
+thread-local list of the arrays they are running on, and one reached again contributes `""` (`a=[1];
+a[1]=a; String(a)` is `"1,"`). `join` no longer treats "the receiver itself as an element" as empty (a
+plain object that is its own element prints `[object Object]`, as in Chrome). `toLocaleString` joins
+with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
+(19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
+cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
