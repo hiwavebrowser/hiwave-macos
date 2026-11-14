@@ -11,6 +11,20 @@ use crate::{
     vm::opcode::Operation,
 };
 use boa_macros::js_str;
+use crate::string::StaticJsStrings;
+
+/// HIWAVE PATCH (array-length-ic): whether `object` defines properties the ordinary way, the
+/// only case in which `SetPropertyByName` may write a cached slot directly.
+#[inline(always)]
+fn has_ordinary_define_own_property(object: &JsObject) -> bool {
+    let ordinary: fn(
+        &JsObject,
+        &PropertyKey,
+        PropertyDescriptor,
+        &mut InternalMethodPropertyContext<'_>,
+    ) -> JsResult<bool> = crate::object::internal_methods::ordinary_define_own_property;
+    std::ptr::fn_addr_eq(object.vtable().__define_own_property__, ordinary)
+}
 
 fn set_by_name(
     value: RegisterOperand,
@@ -26,7 +40,15 @@ fn set_by_name(
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    if let Some((shape, slot)) = ic.get(object_borrowed.shape())
+        // HIWAVE PATCH (array-length-ic): a cached slot is written directly only on an object whose
+        // [[DefineOwnProperty]] is the ordinary one, or on an array for any name but `length`. An
+        // Array subclass instance has the same shape as `Object.create(Q.prototype)` given a
+        // writable own `length`, so a site that cached that object's `length` would otherwise
+        // write a real array's `length` past ArraySetLength.
+        && (has_ordinary_define_own_property(&object)
+            || (object.is_array() && ic.name != StaticJsStrings::LENGTH))
+    {
         let slot_index = slot.index as usize;
 
         if slot.attributes.is_accessor_descriptor() {

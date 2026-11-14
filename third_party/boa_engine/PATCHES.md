@@ -733,3 +733,16 @@ slot and skipped ArraySetLength. So nothing was truncated (old elements stayed r
 `crates/rustkit-js/tests/array_length_reset.rs` (30 cases from Chrome 148.0.7778.216: push, shift,
 pop, unshift, index writes, holes, closures, a queue pump, string and growing lengths, a frozen
 array; 6 differed before).
+
+**Follow-up (R1 on #1157).** The write cache could still be filled by an ordinary object that has an
+array's shape (an Array subclass instance is shaped like `Object.create(Q.prototype)` given a writable
+own `length`), and a later hit wrote a real array's `length` directly. `vm/opcode/set/property.rs`
+`set_by_name`: a cache hit writes the slot only when the object's [[DefineOwnProperty]] is the ordinary
+one, or the object is an array and the name is not `length` (so other named writes on arrays stay
+cached). `object/operations.rs` `length_of_array_like`: an array's length is read and the borrow
+released before it is converted. With the cache guard in place every array's `length` slot holds a
+number, so this second change has no failing case of its own; it is defensive. Pin:
+`crates/rustkit-js/tests/array_length_shapes.rs` (15 cases from Chrome 148.0.7778.216: subclass,
+`Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
+non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
+2 differed at #1157's head).
