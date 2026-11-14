@@ -284,7 +284,7 @@ fn write(page: &Page, kind: &str, level: &str, message: &str, at: Option<At<'_>>
         level,
         message,
         cut,
-        source: at.map(|(path, _, _)| source(path)),
+        source: at.map(|(path, _, _)| source(page.view, path)),
         line: at.map(|(_, line, _)| line),
         column: at.map(|(_, _, column)| column),
     };
@@ -293,15 +293,15 @@ fn write(page: &Page, kind: &str, level: &str, message: &str, at: Option<At<'_>>
     }
 }
 
-/// A script's place as the Inspector's console shows it: an inline
+/// A script of `view`'s place as the Inspector's console shows it: an inline
 /// script's label as it is (the document is `page`, and the line counts
 /// from the script's own start), anything else as the URL it was loaded
 /// from, cut like every devtools URL.
-fn source(path: &str) -> String {
+fn source(view: u64, path: &str) -> String {
     if path.starts_with("inline#") {
         return path.to_string();
     }
-    crate::console_log::resolve(path)
+    crate::console_log::resolve(view, path)
 }
 
 /// One console call, with the text the page logged.
@@ -400,10 +400,10 @@ mod tests {
     /// starts that way is a URL or a specifier, and is cut like one.
     #[test]
     fn only_a_strict_inline_label_is_written_as_it_is() {
-        assert_eq!(source("inline#1"), "inline#1");
-        assert_eq!(source("inline#204"), "inline#204");
+        assert_eq!(source(0, "inline#1"), "inline#1");
+        assert_eq!(source(0, "inline#204"), "inline#204");
         for not_a_label in ["inline#", "inline#1?token=secret", "inline#x#secret", "inline#1/../u:secret@h/x?secret"] {
-            let shown = source(not_a_label);
+            let shown = source(0, not_a_label);
             assert!(!shown.contains("secret"), "{not_a_label:?} was written as {shown:?}");
         }
     }

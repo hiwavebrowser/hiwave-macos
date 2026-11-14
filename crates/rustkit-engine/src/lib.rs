@@ -8661,14 +8661,14 @@ impl Engine {
             // set, records the same names so a log line can show the URL.
             let external: Option<String> = if label.starts_with("inline#") {
                 if let Some(url) = document_url.as_ref() {
-                    crate::console_log::alias(&label, url.as_str());
+                    crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
-                crate::console_log::alias(&name, &label);
+                crate::console_log::alias(inspector.view_id(), &name, &label);
                 Some(name)
             };
             let began = std::time::Instant::now();

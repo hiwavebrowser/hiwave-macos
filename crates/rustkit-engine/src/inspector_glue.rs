@@ -25,6 +25,7 @@ use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>, view: u64) {
     // The console file wants what the tracing mirror wants of the runtime:
     // the text of console calls and of errors. `mirror` is either of them.
+    inspector.set_view_id(view);
     let file = crate::console_file::enabled();
     let mirror = crate::console_log::enabled() || file;
     let listening = inspector.is_active();
@@ -39,10 +40,9 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>, view: u
     }
     let shapes = mirror && !inspector.keeps_console_text();
     let sink = inspector.clone();
-    inspector.set_view_id(view);
     let page = file.then(|| crate::console_file::Page::new(view, &bindings.location().href));
     bindings.set_console_handler(Box::new(move |level, message, at, stack| {
-        crate::console_log::console_message(level, message, at);
+        crate::console_log::console_message(view, level, message, at);
         if let Some(page) = &page {
             let at = at.map(|at| (at.path.as_str(), at.line, method_column(level, at.column)));
             crate::console_file::console(page, level, message, at);
@@ -294,7 +294,7 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
             let window = report.frames.first().and_then(|frame| {
                 bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
             });
-            crate::console_log::page_error(&report, source, window);
+            crate::console_log::page_error(inspector.view_id(), &report, source, window);
         }
         if listening {
             script_error(inspector, &report, source);

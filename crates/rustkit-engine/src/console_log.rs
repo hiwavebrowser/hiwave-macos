@@ -32,7 +32,9 @@ const SNIPPET_CAP: usize = 400;
 const CALLEE_CAP: usize = 120;
 
 struct AliasMap {
-    entries: VecDeque<(String, String)>,
+    /// The view, the label, the URL it stands for. Labels (`script#1`,
+    /// `inserted#<node>`) repeat from one view to the next.
+    entries: VecDeque<(u64, String, String)>,
 }
 
 /// Run `f` on the label map. The process shares one; each test thread has
@@ -98,9 +100,10 @@ pub(crate) fn swap_test_hooks(hooks: TestHooks) -> TestHooks {
     before
 }
 
-/// `name` (an engine script label) was loaded from `url`. Ignored when the
-/// switch and the console file (`console_file`) are both off.
-pub(crate) fn alias(name: &str, url: &str) {
+/// In `view`, `name` (an engine script label) was loaded from `url`.
+/// Ignored when the switch and the console file (`console_file`) are both
+/// off.
+pub(crate) fn alias(view: u64, name: &str, url: &str) {
     if !enabled() && !crate::console_file::enabled() {
         return;
     }
@@ -108,14 +111,16 @@ pub(crate) fn alias(name: &str, url: &str) {
         if map.entries.len() >= ALIAS_CAP {
             map.entries.pop_front();
         }
-        map.entries.push_back((name.to_string(), url.to_string()));
+        map.entries.push_back((view, name.to_string(), url.to_string()));
     });
 }
 
-/// The URL an engine script label stands for, or `path` itself; either
+/// The URL an engine script label stands for in `view`, or `path` itself; either
 /// way through [`brief_place`].
-pub(crate) fn resolve(path: &str) -> String {
-    let url = with_aliases(|map| map.entries.iter().rev().find(|(name, _)| name == path).map(|(_, url)| url.clone()));
+pub(crate) fn resolve(view: u64, path: &str) -> String {
+    let url = with_aliases(|map| {
+        map.entries.iter().rev().find(|(of, name, _)| *of == view && name == path).map(|(_, _, url)| url.clone())
+    });
     brief_place(url.flatten().as_deref().unwrap_or(path))
 }
 
@@ -131,7 +136,7 @@ fn emit(line: String) {
     tracing::info!(target: "hiwave::console", "{line}");
 }
 
-pub(crate) fn console_message(level: LogLevel, message: &str, at: Option<&ScriptPosition>) {
+pub(crate) fn console_message(view: u64, level: LogLevel, message: &str, at: Option<&ScriptPosition>) {
     if !enabled() {
         return;
     }
@@ -144,7 +149,7 @@ pub(crate) fn console_message(level: LogLevel, message: &str, at: Option<&Script
     };
     let (message, _) = cap(message, MAX_MESSAGE_CHARS);
     let where_at = match at {
-        Some(at) => format!("{}:{}:{}", resolve(&at.path), at.line, at.column),
+        Some(at) => format!("{}:{}:{}", resolve(view, &at.path), at.line, at.column),
         None => "-".to_string(),
     };
     emit(format!("console {level} {where_at} {message}"));
@@ -245,15 +250,15 @@ fn is_callee_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.' || ch == '?'
 }
 
-pub(crate) fn page_error(report: &ErrorReport, script: &str, window: Option<SourceWindow>) {
+pub(crate) fn page_error(view: u64, report: &ErrorReport, script: &str, window: Option<SourceWindow>) {
     if !enabled() {
         return;
     }
     let kind = if report.rejection { "unhandled rejection" } else { "uncaught" };
     let name = report.name.unwrap_or("Error");
     let (message, _) = cap(report.message.as_deref().unwrap_or(""), MAX_MESSAGE_CHARS);
-    let (url, line, column) = report.frames.first().map(|frame| (resolve(&frame.path), frame.line, frame.column)).unwrap_or_else(
-        || (resolve(report.module.as_deref().unwrap_or(script)), 0, 0),
+    let (url, line, column) = report.frames.first().map(|frame| (resolve(view, &frame.path), frame.line, frame.column)).unwrap_or_else(
+        || (resolve(view, report.module.as_deref().unwrap_or(script)), 0, 0),
     );
     let around = match window {
         Some(window) => {
@@ -268,7 +273,7 @@ pub(crate) fn page_error(report: &ErrorReport, script: &str, window: Option<Sour
         let lines: Vec<String> = report
             .frames
             .iter()
-            .map(|frame| format!("    at {}:{}:{}", resolve(&frame.path), frame.line, frame.column))
+            .map(|frame| format!("    at {}:{}:{}", resolve(view, &frame.path), frame.line, frame.column))
             .collect();
         let (stack, _) = cap(&lines.join("\n"), MAX_STACK_CHARS);
         format!("\n{stack}")
@@ -516,24 +521,24 @@ mod tests {
     fn a_label_recorded_on_another_test_thread_does_not_resolve_here() {
         let _reset = Reset;
         force_for_test(Some(true));
-        alias("inserted#90001", "https://mine.example/a.js");
+        alias(0, "inserted#90001", "https://mine.example/a.js");
         std::thread::spawn(|| {
             force_for_test(Some(true));
-            alias("inserted#90001", "https://theirs.example/b.js");
+            alias(0, "inserted#90001", "https://theirs.example/b.js");
             force_for_test(None);
         })
         .join()
         .unwrap();
-        assert_eq!(resolve("inserted#90001"), "https://mine.example/a.js");
+        assert_eq!(resolve(0, "inserted#90001"), "https://mine.example/a.js");
     }
 
     #[test]
     fn forcing_the_switch_starts_with_no_labels() {
         let _reset = Reset;
         force_for_test(Some(true));
-        alias("inserted#90002", "https://old.example/a.js");
+        alias(0, "inserted#90002", "https://old.example/a.js");
         force_for_test(Some(true));
-        assert_eq!(resolve("inserted#90002"), "inserted#90002");
+        assert_eq!(resolve(0, "inserted#90002"), "inserted#90002");
     }
 
     #[test]
@@ -542,19 +547,22 @@ mod tests {
         force_for_test(Some(true));
         let sink = Arc::new(Mutex::new(Vec::new()));
         install_sink(Some(Arc::clone(&sink)));
-        alias("chunk#console-log-unit", "https://cdn.example/ok.js");
-        alias("inline#console-log-unit", "https://page.example/");
+        alias(0, "chunk#console-log-unit", "https://cdn.example/ok.js");
+        alias(0, "inline#console-log-unit", "https://page.example/");
         console_message(
+            0,
             LogLevel::Warn,
             "hello-console",
             Some(&ScriptPosition { path: "inline#console-log-unit".into(), line: 2, column: 5 }),
         );
         console_message(
+            0,
             LogLevel::Log,
             "from-chunk",
             Some(&ScriptPosition { path: "chunk#console-log-unit".into(), line: 1, column: 1 }),
         );
         page_error(
+            0,
             &ErrorReport {
                 value: "error",
                 name: Some("Error"),
@@ -570,6 +578,7 @@ mod tests {
             None,
         );
         page_error(
+            0,
             &ErrorReport {
                 value: "error",
                 name: Some("Error"),
@@ -593,6 +602,7 @@ mod tests {
         assert!(window.snippet.chars().count() <= 400, "{}", window.snippet.chars().count());
         assert!(!window.snippet.contains('\n'), "{}", window.snippet);
         page_error(
+            0,
             &ErrorReport {
                 value: "error",
                 name: Some("TypeError"),
@@ -632,8 +642,9 @@ mod tests {
 
         force_for_test(Some(false));
         let before = sink.lock().unwrap().len();
-        console_message(LogLevel::Log, "quiet", None);
+        console_message(0, LogLevel::Log, "quiet", None);
         page_error(
+            0,
             &ErrorReport {
                 value: "error",
                 name: Some("Error"),
@@ -650,7 +661,7 @@ mod tests {
         );
         inserted_script("https://cdn.example/ok.js", "load");
         dynamic_import_failed("./gone.js", "https://cdn.example/gone.js", "not found");
-        alias("chunk#console-log-unit", "https://cdn.example/other.js");
+        alias(0, "chunk#console-log-unit", "https://cdn.example/other.js");
         assert_eq!(sink.lock().unwrap().len(), before);
     }
 
@@ -918,11 +929,11 @@ mod tests {
         force_for_test(Some(true));
         let sink = Arc::new(Mutex::new(Vec::new()));
         install_sink(Some(Arc::clone(&sink)));
-        alias("chunk#q-unit", "https://cdn.example/c.js?token=SECRET");
+        alias(0, "chunk#q-unit", "https://cdn.example/c.js?token=SECRET");
         let at = ScriptPosition { path: "chunk#q-unit".into(), line: 2, column: 3 };
-        console_message(LogLevel::Log, "hi", Some(&at));
+        console_message(0, LogLevel::Log, "hi", Some(&at));
         let inline = ScriptPosition { path: "inline#1".into(), line: 1, column: 1 };
-        console_message(LogLevel::Log, "hi", Some(&inline));
+        console_message(0, LogLevel::Log, "hi", Some(&inline));
         inserted_script("https://cdn.example/i.js?token=SECRET#f", "load");
         dynamic_import_failed("./m.js?token=SECRET", "https://u:SECRET@cdn.example/m.js;s=SECRET", "not found");
         let text = sink.lock().unwrap().join("\n");

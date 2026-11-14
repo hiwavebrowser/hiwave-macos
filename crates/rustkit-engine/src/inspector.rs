@@ -582,7 +582,8 @@ pub struct Inspector {
     /// the runtime (`set_console_held_counter`) and read without the page.
     console_held: Arc<std::sync::atomic::AtomicUsize>,
     /// The engine's id for the view this records, for the console file's
-    /// lines (`console_file`); 0 until a document's console is hooked.
+    /// lines and for script labels, which repeat from view to view
+    /// (`console_file`, `console_log`); 0 until a document is attached.
     view: AtomicU64,
     state: Mutex<State>,
 }
