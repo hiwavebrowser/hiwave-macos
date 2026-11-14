@@ -718,3 +718,43 @@ to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/
 `decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
 `crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
 a parameter, a global and a member; 12 differed before).
+## Patch: a write to an array's `length` is never inline-cached (`array-length-ic`)
+
+**Why.** Unmodified Boa 0.22 bug, reported by Atlas from engine-side JS on develop e8ed58da (a
+request queue emptied with `queue.length = 0` lost elements after the second reset). An array's
+`length` is an ordinary shape slot, so the first `a.length = n` at a site found it and
+`SetPropertyByName` cached the slot; every later write from that site stored `n` straight into the
+slot and skipped ArraySetLength. So nothing was truncated (old elements stayed readable: `q[0]` after
+`q.length = 0`), later `q[i] = v` writes did not grow `length`, and `q.length = '2'` stored a string.
+
+**What.** `builtins/array/mod.rs` `array_exotic_define_own_property` (marked
+`HIWAVE PATCH (array-length-ic)`): after ArraySetLength, the slot is marked `NOT_CACHEABLE`, so a
+`length` write always takes the exotic path. Reads of `length` are still cached. Pin:
+`crates/rustkit-js/tests/array_length_reset.rs` (30 cases from Chrome 148.0.7778.216: push, shift,
+pop, unshift, index writes, holes, closures, a queue pump, string and growing lengths, a frozen
+array; 6 differed before).
+
+## Patch: a dead zone for `let`/`const`/`class` declared in a `switch` case (`switch-tdz`)
+
+**Why.** A binding declared in one `switch` case is reached by jumps that skip its declaration
+(`case 0: let z = 1; break; case 1: z`). Boa kept it in a register, and registers have no run-time
+dead zone: compilation follows source order, so the later case's access compiled as initialised and
+read whatever the reused register last held (another local's value, the switch value), where Chrome
+throws ReferenceError. A non-local `const` there had the same hole through `const_binding_cache`.
+
+**What.** In vendored `boa_ast` (`src/scope_analyzer.rs`, `visit_switch_mut` of the escape analysis,
+marked `HIWAVE PATCH (switch-tdz)`): a switch scope's bindings always escape, so they live in a
+declarative environment (as they already did under direct `eval`), whose uninitialised binding throws.
+In `src/bytecompiler/mod.rs` and `statement/switch.rs`: a `const` of a switch scope is not cached in a
+register (`switch_scope_ids`). The cost is limited to `switch` statements that declare a lexical
+binding in a case. Pin: `crates/rustkit-js/tests/switch_tdz.rs` (14 cases from Chrome 148.0.7778.216,
+including fallthrough, same-case access, hoisted functions, closures and a fresh binding per loop
+iteration; 9 differed before).
+
+## Patch: ArrayBuffer transfer without `experimental` (arraybuffer transfer)
+
+`ArrayBuffer.prototype.transfer`, `transferToFixedLength` and the `detached` getter were behind Boa's
+`experimental` feature, so no page saw them. The four `#[cfg(feature = "experimental")]` gates in
+`src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
+transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
+(18 cases, Chrome for Testing 148.0.7778.216).
