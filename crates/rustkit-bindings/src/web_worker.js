@@ -4,7 +4,7 @@
 // which runs it on a thread of its own (worker_host.rs, worker_prelude.js).
 //
 // Messages are structured clones (structured_clone.js), as strings between the threads. The worker's replies are drained by
-// `__rustkit_workers_pump`, which the timer pump calls, so every handler
+// `__rk.workersPump` (the host registry, #1123), which the timer pump calls, so every handler
 // runs on the page's own thread and turn.
 (function () {
     var g = globalThis;
@@ -66,7 +66,7 @@
             if (!st.dead) reply(id, rid, '[]');
             return;
         }
-        var out = [], left = urls.length, net = g.__rustkit_net;
+        var out = [], left = urls.length, net = __rk.net;
         function settle(i, value) {
             out[i] = value;
             if (--left === 0 && !st.dead && st.id === id) reply(id, rid, JSON.stringify(out));
@@ -207,7 +207,7 @@
                 g.queueMicrotask(function () { begin(text); });
                 return;
             }
-            var net = g.__rustkit_net;
+            var net = __rk.net;
             if (!net) { failLoad(this, st); return; }
             st.net = net.request({ url: u.href, destination: 'worker', mode: 'cors', credentials: 'same-origin' }, function (r) {
                 st.net = 0;
@@ -236,7 +236,7 @@
             if (st.dead) return;
             st.dead = true;
             st.queue = [];
-            if (st.net) { try { g.__rustkit_net.cancel(st.net); } catch (_) {} st.net = 0; }
+            if (st.net) { try { __rk.net.cancel(st.net); } catch (_) {} st.net = 0; }
             if (st.id) { var id = st.id; delete live[id]; st.id = 0; terminate(id); }
         }
     }
@@ -245,5 +245,6 @@
     });
     Object.defineProperty(Worker.prototype, Symbol.toStringTag, { value: 'Worker', configurable: true });
     Object.defineProperty(g, 'Worker', { value: Worker, writable: true, configurable: true, enumerable: false });
-    Object.defineProperty(g, '__rustkit_workers_pump', { value: pump, writable: true, configurable: true, enumerable: false });
+    // Called by the timer pump (bindings lib.rs) through the host registry; nothing on the page's global.
+    __rk.workersPump = pump;
 })();

@@ -562,7 +562,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
         // What a worker has sent since the last turn is delivered first.
-        var ran = typeof window.__rustkit_workers_pump === 'function' ? window.__rustkit_workers_pump() : 0;
+        var ran = typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0;
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
