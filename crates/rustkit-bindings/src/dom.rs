@@ -2878,7 +2878,7 @@ const WRAPPERS_JS: &str = r#"
     // The documents of a frame tree share these (`__rk.shared` is
     // one object for every realm of the runtime): an event made in one
     // window and dispatched in another is stamped once, and reads the same.
-    var SHARED = __rk.shared || {};
+    var SHARED = __rk.shared;
     var TRUSTED = SHARED.trusted || (SHARED.trusted = new WeakSet()),
         UNDISPATCHED = SHARED.undispatched || (SHARED.undispatched = new WeakSet()),
         STAMPED = SHARED.stamped || (SHARED.stamped = new WeakSet());
@@ -2892,8 +2892,9 @@ const WRAPPERS_JS: &str = r#"
     // window reads cancelled in the window that made it.
     var CANCELED = SHARED.canceled || (SHARED.canceled = new WeakSet());
     // Whether an event may be cancelled (WHL3): shared the same way, so
-    // `cancelable` reads the same in every window of the frame tree.
-    var CANCELABLE = SHARED.cancelable || (SHARED.cancelable = new WeakSet());
+    // `cancelable` reads the same in every window of the frame tree. (The
+    // slot's name is not an event member's name.)
+    var CANCELABLE = SHARED.cancelables || (SHARED.cancelables = new WeakSet());
     function setCancelable(ev, on) { if (on) setAdd(CANCELABLE, ev); else setDrop(CANCELABLE, ev); }
     // A real event is one whose prototype chain holds the `Event.prototype`
     // of some window of the frame tree, not only this one's: an event made
@@ -2953,6 +2954,20 @@ const WRAPPERS_JS: &str = r#"
             defineOwn(ev, k, d);
         }
     }
+    // This window becomes a frame's (`DomBindings::attach_frame`): its
+    // `parent`, the frame tree's `top` and its `frameElement`, defined with
+    // the built-ins of install whatever the frame's page has done since.
+    __rk.becomeFrame = function (up, top, el) {
+        function own(name, value, writable) {
+            var d = objCreate(null);
+            d.value = value; d.writable = writable; d.enumerable = true; d.configurable = true;
+            defineOwn(g, name, d);
+        }
+        own('parent', up, true);
+        own('top', top, false);
+        own('frameElement', el, false);
+        __rk.realTop = top;
+    };
     // An interface's own fields (`[name, default]` pairs), its parent and
     // a finishing step (a direct call; WheelEvent's legacy deltas).
     var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
@@ -3070,7 +3085,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;

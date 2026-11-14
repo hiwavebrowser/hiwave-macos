@@ -74,7 +74,7 @@
         request(id, null);
     }
 
-    HOOKS.frames = {
+    HOOKS.frames = Object.setPrototypeOf({
         tree: function (op, node) {
             if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f); });
             else if (op === 'remove') each(node, gone);
@@ -82,7 +82,7 @@
         changed: function (node, op, name) {
             if (isFrame(node) && isConnected(node) && op === 'setAttr' && String(name).toLowerCase() === 'src') navigate(node);
         }
-    };
+    }, null);
 
     // The engine's side, on the host object.
     __rk.frames = Object.setPrototypeOf({
@@ -94,11 +94,16 @@
                 if (id >= 0 && !frames[id] && isConnected(f)) navigate(f);
             }
         },
-        // The frame's element when it took the window, or null.
+        // The frame takes the window (or, with null, gives it up). What
+        // the window is to be told when it took one: this window and the
+        // frame's element (the caller adds the tree's top); or null.
         attach: function (id, win) {
             var r = frames[id];
-            if (r) r.win = win;
-            return r ? r.el : null;
+            if (!r) return null;
+            r.win = win;
+            var h = create(null);
+            h.up = g; h.el = r.el; h.top = null;
+            return h;
         },
         loaded: function (id) {
             var r = frames[id];

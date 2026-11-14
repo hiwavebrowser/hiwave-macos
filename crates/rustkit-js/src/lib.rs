@@ -631,10 +631,13 @@ impl JsRuntime {
         let host = host_object(&diag, &byte_stash, &blobs, &mut context);
         // One object every realm's host object holds as `shared`:
         // what the documents of a frame tree must agree on (which events
-        // are the engine's) is kept there, not once per realm.
+        // are the engine's) is kept there, not once per realm. Like the
+        // host object it inherits from nothing: it is made in the first
+        // realm and read in every one.
         #[cfg(feature = "boa")]
         {
             let shared = boa_engine::object::ObjectInitializer::new(&mut context).build();
+            shared.set_prototype(None);
             let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut context);
         }
 
@@ -1001,40 +1004,76 @@ impl JsRuntime {
         self.call_with_host(source, &[], false)
     }
 
-    /// Give the host object these names as own properties (`undefined`
-    /// until an embedder's script fills one in), before any script runs:
-    /// what the embedder probes (`__rk.net ? ... : ...`) is then always an
-    /// own property. A name the host already has is left alone.
+    /// Give the host object of the realm entered these names as own
+    /// properties (`undefined` until an embedder's script fills one in),
+    /// before any script runs in it: what the embedder probes
+    /// (`__rk.net ? ... : ...`) is then always an own property. A name the
+    /// host already has is left alone.
     pub fn reserve_host_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        self.realm_gone()?;
         #[cfg(feature = "boa")]
         {
-            use boa_engine::{property::PropertyDescriptor, JsString};
-            for name in names {
-                let key = JsString::from(*name);
-                let owned = self
-                    .host
-                    .has_own_property(key.clone(), &mut self.context)
-                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-                if owned {
-                    continue;
-                }
-                let slot = PropertyDescriptor::builder()
-                    .value(boa_engine::JsValue::undefined())
-                    .writable(true)
-                    .enumerable(true)
-                    .configurable(true)
-                    .build();
-                self.host
-                    .define_property_or_throw(key, slot, &mut self.context)
-                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            }
-            Ok(())
+            let host = self.entered_host();
+            self.reserve_slots(&host, names)
         }
         #[cfg(not(feature = "boa"))]
         {
             let _ = names;
             Err(JsError::NotInitialized)
         }
+    }
+
+    /// [`reserve_host_slots`](Self::reserve_host_slots) for the object
+    /// every realm's host object holds as `shared`: each name is an own
+    /// property of it from now on. A name it already has (a later realm
+    /// reserving again) is left alone.
+    pub fn reserve_shared_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let shared = self
+                .host
+                .get(boa_engine::js_string!("shared"), &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            let Some(shared) = shared.as_object() else {
+                return Err(JsError::ExecutionError("no shared state".into()));
+            };
+            self.reserve_slots(&shared.clone(), names)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = names;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// The host object of the realm entered.
+    #[cfg(feature = "boa")]
+    fn entered_host(&self) -> boa_engine::JsObject {
+        self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone())
+    }
+
+    #[cfg(feature = "boa")]
+    fn reserve_slots(&mut self, object: &boa_engine::JsObject, names: &[&str]) -> Result<(), JsError> {
+        use boa_engine::{property::PropertyDescriptor, JsString};
+        for name in names {
+            let key = JsString::from(*name);
+            let owned = object
+                .has_own_property(key.clone(), &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            if owned {
+                continue;
+            }
+            let slot = PropertyDescriptor::builder()
+                .value(boa_engine::JsValue::undefined())
+                .writable(true)
+                .enumerable(true)
+                .configurable(true)
+                .build();
+            object
+                .define_property_or_throw(key, slot, &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Run a function body that holds the host object (`__rk`, as
@@ -1069,7 +1108,7 @@ impl JsRuntime {
                 .as_object()
                 .filter(|f| f.is_callable())
                 .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
-            let host = self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone());
+            let host = self.entered_host();
             let host = boa_engine::JsValue::from(host);
             let strings = boa_engine::object::builtins::JsArray::from_iter(
                 args.iter().map(|a| boa_engine::JsValue::from(boa_engine::JsString::from(*a))),
@@ -1454,7 +1493,7 @@ impl JsRuntime {
             let wrapped = format!("(function (__rk) {{\n{body}\n}})");
             // The host object of the realm entered: each document of a
             // frame tree keeps its own entry points.
-            let host = self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone());
+            let host = self.entered_host();
             let host = boa_engine::JsValue::from(host);
             let result = self
                 .context

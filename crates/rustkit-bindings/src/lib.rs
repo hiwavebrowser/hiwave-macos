@@ -467,18 +467,35 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "compose", "decodeWait", "dispatchTo",
-    "domDirty", "domHooks", "domReset", "dragStore", "editKey", "finishComposing", "fire", "fireAnimation",
-    "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn", "fireTextInput", "fireTransition", "fireWheel",
-    "followLink", "fragmentNavigation", "hasCtor", "historyReset", "imageFailed", "imageFailedFor", "imageGaveUp",
-    "imageLoaded", "imageLoadedFor", "imageWritten", "implicitSubmit", "isDispatching", "keepCtor", "keepFinish",
-    "locationHashSync", "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net",
-    "newTextEvent", "nextTimer", "now", "observersTick", "pickOption", "runTimers", "runTimersFramed",
-    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
-    "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
-    "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
+    "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
+    "implicitSubmit", "isDispatching", "keepCtor", "keepFinish", "locationHashSync", "locationSync", "make",
+    "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer", "now", "observersTick",
+    "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment", "scrollToLocationFragment",
+    "setAdoptedStyles", "setCurrentScript", "setFocus", "setSelection", "setSheetDisabled", "sheetGeneration",
+    "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit", "userScrolled", "userScrolledElement",
+    "viewFocused", "wheelBlocks",
+    // Installed only with nested browsing contexts on (web_frames.js).
+    "frames",
+    // The frame tree's shared state, which the runtime puts there itself.
+    "shared",
     // Reserved for the workers script (not installed in every realm).
     "workersPump",
+];
+
+/// Every name the embedder's scripts keep on the frame tree's shared state
+/// (the host object's `shared`, one object for every document of the
+/// tree). Each is an own property of it before the first script runs
+/// ([`JsRuntime::reserve_shared_slots`]), and it inherits from nothing: a
+/// read or a first write of one, from whichever document, stays on the
+/// object itself. `host_object_tests` checks the list against the scripts.
+pub(crate) const SHARED_SLOTS: &[&str] = &[
+    "canceled", "cancelables", "dispatching", "evCurrent", "evPhase", "evTarget", "evType", "eventProtos", "handoff",
+    "kind", "legacyType", "made", "origin", "path", "stamped", "stop", "stopNow", "timerQueue", "trustGet", "trusted",
+    "undispatched",
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
@@ -524,9 +541,21 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (same-origin frames are one event loop, HTML 8.1.7): a frame's realm
     // finds its parent's on the host object's `shared`, which every realm
     // of a runtime holds. Each entry runs in the realm that set it.
-    var shared = __rk.shared || {};
-    var Q = shared.timerQueue || (shared.timerQueue = { now: 0, nextId: 1, timers: [] });
+    // The queue's record inherits from nothing, and an entry joins the
+    // queue as an own element defined with the built-ins of install: a
+    // frame's timer goes through nothing of the first document's.
+    var SHARED = __rk.shared, objCreate = Object.create, defineOwn = Object.defineProperty;
+    var Q = SHARED.timerQueue;
+    if (!Q) {
+        Q = SHARED.timerQueue = objCreate(null);
+        Q.now = 0; Q.nextId = 1; Q.timers = [];
+    }
     var timers = Q.timers;
+    function enqueue(timer) {
+        var d = objCreate(null);
+        d.value = timer; d.writable = true; d.enumerable = true; d.configurable = true;
+        defineOwn(timers, timers.length, d);
+    }
     // `Q.now` is the frame tree's one clock: lifecycle `timeStamp` and the
     // rAF argument read it. When #1104's page clock lands, `Q.now` moves
     // onto it (one page clock for the tree), not a second clock beside it.
@@ -555,8 +584,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
         var id = Q.nextId++;
-        timers.push({ id: id, seq: id, due: Q.now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame, win: window, run: call });
+        enqueue({ id: id, seq: id, due: Q.now + delay, cb: cb, args: args,
+                  every: repeat ? Math.max(delay, 1) : 0, frame: !!frame, win: window, run: call });
         return id;
     }
     function clearTimer(id) {
@@ -1326,26 +1355,43 @@ impl DomBindings {
     /// `contentDocument`, and in the child `parent`, `top` and
     /// `frameElement`. `false` when `node` is no longer a frame here.
     pub fn attach_frame(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
-        // The two windows change hands on the frame tree's shared object,
-        // which only the embedder's scripts hold: nothing is put on either
-        // window for it.
+        let attached = self.hand_over(node, child);
+        // Whatever happened, nothing stays where the windows changed hands,
+        // and a frame that was not attached holds no window.
+        let clear = "__rk.shared.handoff = null;";
+        if self.runtime.borrow_mut().evaluate_host_bookkeeping(clear).is_err() {
+            let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping(clear);
+        }
+        if !matches!(attached, Ok(true)) {
+            let _ = self
+                .runtime
+                .borrow_mut()
+                .evaluate_host_bookkeeping(&format!("if (__rk.frames) __rk.frames.attach({node}, null);"));
+        }
+        attached
+    }
+
+    /// The three steps of [`Self::attach_frame`]. The two windows change
+    /// hands on the frame tree's shared state, which only the embedder's
+    /// scripts hold: nothing is put on either window for it. Each step
+    /// that takes what was handed over empties the place in a `finally`.
+    fn hand_over(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
         child.runtime.borrow_mut().evaluate_host_bookkeeping("__rk.shared.handoff = globalThis;")?;
         let attached = self.runtime.borrow_mut().evaluate_host_bookkeeping(&format!(
-            "var w = __rk.shared.handoff; __rk.shared.handoff = null; \
-             var el = __rk.frames ? __rk.frames.attach({node}, w) : null; \
-             if (el) __rk.shared.handoff = {{ up: globalThis, top: __rk.realTop, el: el }}; \
-             return !!el;"
+            "var S = __rk.shared, w = S.handoff, h = null; \
+             try {{ h = __rk.frames ? __rk.frames.attach({node}, w) : null; }} finally {{ S.handoff = null; }} \
+             if (h) {{ h.top = __rk.realTop; S.handoff = h; }} \
+             return !!h;"
         ))?;
         if !matches!(attached, JsValue::Boolean(true)) {
             return Ok(false);
         }
-        child.runtime.borrow_mut().evaluate_host_bookkeeping(
-            "var h = __rk.shared.handoff; __rk.shared.handoff = null; var up = h.up, el = h.el; __rk.realTop = h.top; \
-             Object.defineProperty(window, 'parent', { value: up, writable: true, configurable: true, enumerable: true }); \
-             Object.defineProperty(window, 'top', { value: h.top, writable: false, configurable: true, enumerable: true }); \
-             Object.defineProperty(window, 'frameElement', { value: el, writable: false, configurable: true, enumerable: true });",
+        let framed = child.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "var S = __rk.shared, h = S.handoff; \
+             try { if (h) __rk.becomeFrame(h.up, h.top, h.el); } finally { S.handoff = null; } \
+             return !!h;",
         )?;
-        Ok(true)
+        Ok(matches!(framed, JsValue::Boolean(true)))
     }
 
     /// Fire `load` at this document's iframe `node` (the child's load is
@@ -1380,6 +1426,7 @@ impl DomBindings {
         // global added after them made every page load measurably slower
         // (two app tests 1.4 s -> 3.0 s).
         runtime.reserve_host_slots(HOST_SLOTS)?;
+        runtime.reserve_shared_slots(SHARED_SLOTS)?;
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
