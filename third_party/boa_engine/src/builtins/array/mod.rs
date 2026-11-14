@@ -302,6 +302,36 @@ impl BuiltInConstructor for Array {
     }
 }
 
+// HIWAVE PATCH (cyclic to-primitive): the arrays `join`/`toLocaleString` are running on, so one
+// reached again through its own elements contributes "" as in V8.
+thread_local! {
+    static JOINING: std::cell::RefCell<Vec<JsObject>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct JoinGuard;
+
+impl JoinGuard {
+    /// `None` when `object` is already being joined.
+    fn enter(object: &JsObject) -> Option<Self> {
+        JOINING.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.iter().any(|o| JsObject::equals(o, object)) {
+                return None;
+            }
+            stack.push(object.clone());
+            Some(Self)
+        })
+    }
+}
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        JOINING.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
 impl Array {
     /// Optimized helper function, that sets the length of the array.
     fn set_length(o: &JsObject, len: u64, context: &mut Context) -> JsResult<()> {
@@ -1002,6 +1032,11 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        // HIWAVE PATCH (cyclic to-primitive): V8's join stack. An array already being joined
+        // contributes "" (`a=[1]; a[1]=a; String(a)` is "1,"), whatever path reached it.
+        let Some(_joining) = JoinGuard::enter(&o) else {
+            return Ok(js_string!().into());
+        };
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. If separator is undefined, let sep be the single-element String ",".
@@ -1024,8 +1059,10 @@ impl Array {
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
             let element = o.get(k, context)?;
-            // c. If element is undefined, null or the array itself, let next be the empty String; otherwise, let next be ? ToString(element).
-            let next = if element.is_null_or_undefined() || &element == this {
+            // c. If element is undefined or null, let next be the empty String; otherwise, let next be ? ToString(element).
+            // (HIWAVE PATCH (cyclic to-primitive): not "or the array itself": the join stack
+            // above ends a cycle, and a plain object that is the receiver prints as itself.)
+            let next = if element.is_null_or_undefined() {
                 js_string!()
             } else {
                 element.to_string(context)?
@@ -2177,41 +2214,19 @@ impl Array {
         // 1. Let array be ? ToObject(this value).
         let array = this.to_object(context)?;
         // 2. Let len be ? ToLength(? Get(array, "length")).
+        // HIWAVE PATCH (cyclic to-primitive): the same join stack as `join`.
+        let Some(_joining) = JoinGuard::enter(&array) else {
+            return Ok(js_string!().into());
+        };
         let len = array.length_of_array_like(context)?;
 
         let locales = args.get_or_undefined(0);
         let options = args.get_or_undefined(1);
 
         // 3. Let separator be the implementation-defined list-separator String value appropriate for the host environment's current locale (such as ", ").
-        let separator = {
-            #[cfg(feature = "intl")]
-            {
-                use crate::builtins::intl::locale::default_locale;
-                use icu_list::{
-                    ListFormatter, ListFormatterPreferences, options::ListFormatterOptions,
-                };
-
-                let locale = default_locale(context.intl_provider().locale_canonicalizer()?);
-                let preferences = ListFormatterPreferences::from(&locale);
-                let formatter = ListFormatter::try_new_unit_with_buffer_provider(
-                    context.intl_provider().erased_provider(),
-                    preferences,
-                    ListFormatterOptions::default(),
-                )
-                .map_err(|e| JsNativeError::typ().with_message(e.to_string()))?;
-
-                // Ask ICU for the list pattern literal by formatting two empty elements.
-                // For many locales this yields ", ", but it may differ.
-                js_string!(
-                    formatter.format_to_string(std::iter::once("").chain(std::iter::once("")))
-                )
-            }
-
-            #[cfg(not(feature = "intl"))]
-            {
-                js_string!(", ")
-            }
-        };
+        // HIWAVE PATCH (cyclic to-primitive): V8 joins with "," in every locale; the ICU unit list
+        // pattern (", ") made `[1, 2].toLocaleString()` differ from Chrome's "1,2".
+        let separator = js_string!(",");
 
         // 4. Let R be the empty String.
         let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);

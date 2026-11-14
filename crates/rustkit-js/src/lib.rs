@@ -177,6 +177,20 @@ impl Drop for DiagJob {
     }
 }
 
+/// HIWAVE PATCH (vm-stats): the interpreter's counters as text (opcode counts, inline-cache misses
+/// by site, receiver kind and identifier-like property name), collected when `RUSTKIT_VM_STATS=1` is
+/// set in the environment; empty otherwise. Diagnostic only.
+#[cfg(feature = "boa")]
+pub fn vm_stats_report() -> String {
+    boa_engine::vm_stats::report()
+}
+
+/// Without the Boa engine there is nothing to report.
+#[cfg(not(feature = "boa"))]
+pub fn vm_stats_report() -> String {
+    String::new()
+}
+
 /// Install the function Boa calls when an interrupt path fires. A null hook
 /// leaves those paths silent. The hook itself decides whether to write.
 #[cfg(feature = "boa")]

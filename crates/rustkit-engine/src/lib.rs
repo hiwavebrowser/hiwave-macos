@@ -826,6 +826,8 @@ mod grid_item_flex_percent_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_viewport_height_tests;
 #[cfg(all(test, feature = "headless"))]
+mod grid_item_percent_block_tests;
+#[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_maximize_tracks_tests;

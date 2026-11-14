@@ -55,10 +55,11 @@ impl Drop for Entry {
     }
 }
 
-/// Whether the native stack is past the default budget (the parser's probe).
-pub(crate) fn over_budget() -> bool {
+/// Whether the native stack is past the budget of this thread's outermost entry (the parser's probe);
+/// `None` when the thread has no entry, so the parser measures from its own start.
+pub(crate) fn over_budget() -> Option<bool> {
     let origin = ORIGIN.with(Cell::get);
-    origin != 0 && origin.saturating_sub(here()) > BUDGET.with(Cell::get)
+    (origin != 0).then(|| origin.saturating_sub(here()) > BUDGET.with(Cell::get))
 }
 
 /// Throws the same `RangeError` as a JS stack overflow once more than `budget` bytes of native
