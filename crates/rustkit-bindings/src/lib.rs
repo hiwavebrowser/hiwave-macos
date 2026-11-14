@@ -136,6 +136,8 @@ mod web_named_access_tests;
 mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
+#[cfg(test)]
+mod host_object_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
