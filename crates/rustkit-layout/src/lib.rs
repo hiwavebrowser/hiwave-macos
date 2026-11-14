@@ -9628,7 +9628,6 @@ impl StackOrder {
                 .map(|e| StackEntry {
                     b: boxes[e.node as usize],
                     node: e.node,
-                    z: e.z,
                     lifted: e.lifted,
                     context: e.context,
                     positioned_like: e.positioned_like,
@@ -9668,7 +9667,6 @@ impl StackOrder {
             .map(move |e| StackEntry {
                 b: boxes[e.node as usize],
                 node: e.node,
-                z: e.z,
                 lifted: e.lifted,
                 context: e.context,
                 positioned_like: e.positioned_like,
@@ -9691,8 +9689,6 @@ pub struct StackEntry<'a> {
     pub(crate) b: &'a LayoutBox,
     /// Its node in the order (`StackOrder::parent_of` walks up to the context).
     pub(crate) node: u32,
-    /// The z-index it is painted at.
-    pub(crate) z: i32,
     /// Taken from inside a child (the `via_len` boxes between are its ancestors too).
     pub(crate) lifted: bool,
     /// It is a stacking context.
