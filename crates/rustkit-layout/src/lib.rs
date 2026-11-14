@@ -11085,6 +11085,10 @@ pub struct DisplayList {
     open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
+    /// Positioned boxes a stacking context took into its own z-index order from inside boxes that form
+    /// no stacking context of their own (see `lift_positioned`): their parents skip them. Box addresses,
+    /// valid for this build of the list.
+    lifted: std::collections::HashSet<usize>,
     /// How many ancestors of the box being painted have a `transform` or
     /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
     /// box is the containing block of the fixed boxes inside it
@@ -11206,6 +11210,7 @@ impl DisplayList {
             painting_item: false,
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
+            lifted: std::collections::HashSet::new(),
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -11232,6 +11237,7 @@ impl DisplayList {
             painting_item: false,
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
+            lifted: std::collections::HashSet::new(),
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -11302,6 +11308,46 @@ impl DisplayList {
     }
 
     /// Render a stacking context with proper z-ordering.
+    /// Whether a box forms a stacking context for its descendants as the painter treats them (Chrome 148):
+    /// a context it was given, a positioned box (`relative` and `sticky` included) with a declared
+    /// z-index, a fixed or sticky box, group opacity, a transform, a filter, or a box that contains fixed
+    /// boxes.
+    fn forms_stacking_context(b: &LayoutBox) -> bool {
+        let style_position = b.style.position;
+        let positioned = b.position != Position::Static || style_position != rustkit_css::Position::Static;
+        b.stacking_context.as_ref().is_some_and(|ctx| ctx.creates_context)
+            || (positioned && b.style.z_index_declared)
+            || b.position == Position::Fixed
+            || matches!(style_position, rustkit_css::Position::Fixed | rustkit_css::Position::Sticky)
+            || Self::group_opacity(b) < 1.0
+            || !b.style.effective_transform().is_identity()
+            || !b.style.filter.is_empty()
+            || b.holds_fixed_boxes()
+    }
+
+    /// Whether a box clips its descendants (overflow, `clip-path`, `clip`): the positioned boxes inside it
+    /// stay where they are, under its clip.
+    fn clips_descendants(b: &LayoutBox) -> bool {
+        b.style.overflow_x != rustkit_css::Overflow::Visible
+            || b.style.overflow_y != rustkit_css::Overflow::Visible
+            || !b.style.clip_path.is_empty()
+            || b.style.clip.is_some()
+    }
+
+    /// The positioned boxes inside `b` that belong to the stacking context above it, in tree order: a
+    /// positioned box is taken, and the walk goes on through boxes that form no stacking context and do
+    /// not clip.
+    fn lift_positioned<'b>(b: &'b LayoutBox, out: &mut Vec<&'b LayoutBox>) {
+        for child in &b.children {
+            if child.paint_z().is_some() {
+                out.push(child);
+            }
+            if !Self::forms_stacking_context(child) && !Self::clips_descendants(child) {
+                Self::lift_positioned(child, out);
+            }
+        }
+    }
+
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
         // `opacity` fades the box and its whole subtree as one group, and
         // at 0 the group paints nothing (it still takes its space and its
@@ -11551,48 +11597,56 @@ impl DisplayList {
         }
         self.depth += 1;
 
-        // Collect children grouped by paint order
-        let mut negative_z: Vec<(&LayoutBox, u32)> = Vec::new();
-        let mut normal_flow: Vec<(&LayoutBox, u32)> = Vec::new();
-        let mut positive_z: Vec<(&LayoutBox, u32)> = Vec::new();
+        // Collect children grouped by paint order: (box, tree-order key, z, lifted). The key is a direct
+        // child's layer, then the order of the positioned boxes lifted from inside it.
+        let mut negative_z: Vec<(&LayoutBox, u64, i32, bool)> = Vec::new();
+        let mut normal_flow: Vec<(&LayoutBox, u64)> = Vec::new();
+        let mut positive_z: Vec<(&LayoutBox, u64, i32, bool)> = Vec::new();
+        // A stacking context (or the root) takes in the positioned boxes inside its children that form no
+        // stacking context of their own: they paint at their z-index in this context, not where their
+        // static parent paints (CSS 2 Appendix E; Chrome 148: a fixed z-index:5 header inside a static
+        // wrapper paints over a later fixed z-index:1 layer). The lift stops at a box that clips its
+        // descendants, whose clip the boxes inside must keep, and at one that forms a context.
+        let lifts = self.depth == 1 || Self::forms_stacking_context(layout_box);
 
         for child in &layout_box.children {
             *layer += 1;
-            let child_layer = *layer;
+            let child_layer = (*layer as u64) << 20;
+            if self.lifted.contains(&(child as *const LayoutBox as usize)) {
+                continue;
+            }
+            if lifts && !Self::forms_stacking_context(child) && !Self::clips_descendants(child) {
+                let mut found = Vec::new();
+                Self::lift_positioned(child, &mut found);
+                for (sub, boxed) in found.into_iter().enumerate() {
+                    self.lifted.insert(boxed as *const LayoutBox as usize);
+                    let key = child_layer | (sub as u64 + 1);
+                    let z = boxed.paint_z().unwrap_or(0);
+                    if z < 0 {
+                        negative_z.push((boxed, key, z, true));
+                    } else {
+                        positive_z.push((boxed, key, z, true));
+                    }
+                }
+            }
 
             if let Some(z) = layout_box.child_paint_z(child) {
                 if z < 0 {
-                    negative_z.push((child, child_layer));
+                    negative_z.push((child, child_layer, z, false));
                 } else {
-                    positive_z.push((child, child_layer));
+                    positive_z.push((child, child_layer, z, false));
                 }
             } else if child.float != Float::None {
-                // Floats paint between normal flow and positioned
-                positive_z.push((child, child_layer));
+                // Floats paint between normal flow and positioned (at 0, as before).
+                positive_z.push((child, child_layer, 0, false));
             } else {
                 normal_flow.push((child, child_layer));
             }
         }
 
-        // Sort by z-index, then by layer for stability
-        // Floats ride in `positive_z` at 0, as before.
-        let z_of = |b: &LayoutBox| layout_box.child_paint_z(b).unwrap_or(0);
-        negative_z.sort_by(|a, b| {
-            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
-            if z_cmp == Ordering::Equal {
-                a.1.cmp(&b.1)
-            } else {
-                z_cmp
-            }
-        });
-        positive_z.sort_by(|a, b| {
-            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
-            if z_cmp == Ordering::Equal {
-                a.1.cmp(&b.1)
-            } else {
-                z_cmp
-            }
-        });
+        // Sort by z-index, then by tree order for stability.
+        negative_z.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
+        positive_z.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
 
         let items_paint_as_units = matches!(
             layout_box.style.display,
@@ -11607,8 +11661,8 @@ impl DisplayList {
 
         // Render in correct order:
         // 1. Negative z-index positioned descendants
-        for (child, _) in negative_z {
-            self.painting_item = items_paint_as_units;
+        for (child, _, _, lifted) in negative_z {
+            self.painting_item = items_paint_as_units && !lifted;
             self.render_stacking_context(child, z_index, layer);
         }
 
@@ -11620,11 +11674,11 @@ impl DisplayList {
 
         // 3. Floats and positive/zero z-index positioned descendants. The
         // positioned ones paint over the outlines so far.
-        for (child, _) in positive_z {
-            if layout_box.child_paint_z(child).is_some() {
+        for (child, _, _, lifted) in positive_z {
+            if lifted || layout_box.child_paint_z(child).is_some() {
                 self.flush_outlines(own_outline.take(), unlisted_clip, element_scroll);
             }
-            self.painting_item = items_paint_as_units;
+            self.painting_item = items_paint_as_units && !lifted;
             self.render_stacking_context(child, z_index, layer);
         }
 
