@@ -604,3 +604,19 @@ shapes, plus typed arrays) with Chrome's sorted result AND its comparator call l
 stability and totality with a seeded generator. Not pinned: comparators with side effects other
 than logging, arrays over ~500 elements, and proxies or array-likes with getters (the algorithm does
 not depend on them, but they were not measured).
+
+## Patch: a left operand is read before the right one can assign (`eval-order`)
+
+**Why.** Boa's `compile_binary` used a local variable's own register as the left operand of
+`lhs op rhs` (no copy into a temporary), so the operator read it AFTER the right operand had run.
+`a + --a` and `a < (a = 5)` used the new value; ECMA-262 reads the left operand first. The same in the
+fused comparison branch of a loop or `if` condition (`while (a < (a = a + 2))`). Chrome 148 gives the
+old value in all of them.
+
+**What.** `ByteCompiler::compile_expr_operand_before(lhs, rhs, ...)` (`src/bytecompiler/mod.rs`,
+marked `HIWAVE PATCH (eval-order)`): the register is used directly only when `rhs` contains no
+assignment or update expression (`may_assign`, a conservative AST visitor); otherwise the left operand
+is copied into a temporary first. Used by `compile_binary` (arithmetic, bitwise, relational) and
+`try_fused_comparison_branch`. Pins: `crates/rustkit-js/tests/eval_order.rs` (800 generated programs,
+3 of which differ from Chrome without the fix, and 34 hand-written cases, 3 of which differ, all from
+Chrome 148.0.7778.216).
