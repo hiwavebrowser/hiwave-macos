@@ -498,6 +498,62 @@ const SETTLE_REAL_BUDGET: Duration = Duration::from_secs(5);
 /// `--timeout-ms`: the settle's budget shrinks when the load has left less than this plus the budget.
 const SETTLE_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
 
+/// The capture's outputs as the load left the page, taken before a stepped settle: if the settle is cut
+/// short, these replace the outputs taken after it, so a capture never shows a page part-way through its
+/// own reveal (batch 75: squarespace's content hidden by the first settle turn, its reveal never reached).
+/// Each entry is (side file, requested output path).
+struct PreSettle {
+    files: Vec<(String, String)>,
+    layout: Option<String>,
+}
+
+impl PreSettle {
+    /// Render the view and write each requested output (frame, layout, display list) beside its path.
+    /// `None` when nothing is requested or the render fails: there is nothing to fall back to.
+    fn take(engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId, args: &Args) -> Option<Self> {
+        if args.dump_frame.is_none() && args.dump_layout.is_none() && args.dump_display_list.is_none() {
+            return None;
+        }
+        engine.render_view(view_id).ok()?;
+        let side = |path: &String| format!("{path}.pre-settle");
+        let mut files = Vec::new();
+        if let Some(ref path) = args.dump_frame {
+            engine.capture_frame(view_id, &side(path)).ok()?;
+            files.push((side(path), path.clone()));
+        }
+        if let Some(ref path) = args.dump_layout {
+            engine.export_layout_json(view_id, &side(path)).ok()?;
+            files.push((side(path), path.clone()));
+        }
+        if let Some(ref path) = args.dump_display_list {
+            engine.export_display_list_json(view_id, &side(path)).ok()?;
+            files.push((side(path), path.clone()));
+        }
+        Some(Self { files, layout: args.dump_layout.clone() })
+    }
+
+    /// The settle finished its span: the outputs taken after it stand.
+    fn discard(self) {
+        for (side, _) in self.files {
+            let _ = fs::remove_file(side);
+        }
+    }
+
+    /// The settle was cut short: the outputs taken before it replace the ones taken after.
+    fn restore(self, result: &mut CaptureResult) {
+        for (side, path) in &self.files {
+            if let Err(e) = fs::rename(side, path) {
+                error!("Failed to restore the pre-settle output: {:?}", e);
+            }
+        }
+        if let Some(path) = self.layout {
+            if let Ok(layout_json) = fs::read_to_string(&path) {
+                result.layout_stats = analyze_layout_json(&layout_json);
+            }
+        }
+    }
+}
+
 /// What a stepped settle cost (`CaptureResult::settle_stats`).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct SettleStats {
@@ -869,6 +925,8 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     // Load: either the fixture HTML, or the live URL through the same
     // navigation path the browser uses (document fetch, then stylesheets,
     // fonts and images via load_subresources).
+    // The outputs as the load left the page, kept while a stepped settle runs (see `PreSettle`).
+    let mut pre_settle: Option<PreSettle> = None;
     if let Some(url) = url {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -919,7 +977,17 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                     run_live(&rt, &mut engine, view_id, budget.as_millis() as u64);
                 }
             } else {
-                let stats = settle_stepped(&rt, &mut engine, view_id, budget);
+                // Actions and a resize define the state after the settle on purpose: nothing to fall back to.
+                if !budget.is_zero() && args.actions.is_none() && args.resize_to.is_none() {
+                    pre_settle = PreSettle::take(&mut engine, view_id, args);
+                }
+                let mut stats = settle_stepped(&rt, &mut engine, view_id, budget);
+                stats.fell_back = stats.cut_short && pre_settle.is_some();
+                if !stats.fell_back {
+                    if let Some(pre) = pre_settle.take() {
+                        pre.discard();
+                    }
+                }
                 result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
                 result.settle_stats = Some(stats);
             }
@@ -1036,6 +1104,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             Ok(()) => result.display_list_path = Some(path.clone()),
             Err(e) => error!("Failed to export display list: {:?}", e),
         }
+    }
+
+    // A settle cut short: the outputs as the load left the page replace the half-way ones.
+    if let Some(pre) = pre_settle.take() {
+        pre.restore(&mut result);
     }
 
     write_diagnostics(&engine, view_id, args, &mut result);
