@@ -5533,6 +5533,7 @@ dependencies = [
  "cocoa 0.25.0",
  "futures",
  "http",
+ "libc",
  "objc",
  "raw-window-handle",
  "rustkit-bindings",

@@ -101,19 +101,31 @@ struct Sink {
 
 impl Sink {
     /// Open `path` for appending, for its owner only: a new file is made
-    /// 0600 and one that exists is narrowed to it.
+    /// 0600 and one that exists is narrowed to it. File open hardening:
+    /// the path itself is opened, never waited on, and only a regular file
+    /// this user owns is kept.
     fn open(path: &Path, limit: u64) -> std::io::Result<Self> {
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let file = options.open(path)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // The handle's own metadata (fstat), not the path's.
+            let opened = file.metadata()?;
+            // SAFETY: `geteuid` takes nothing, touches no memory and cannot fail.
+            let me = unsafe { libc::geteuid() };
+            if !opened.file_type().is_file() || opened.uid() != me {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "not a regular file owned by this user",
+                ));
+            }
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
         let written = file.metadata()?.len();
