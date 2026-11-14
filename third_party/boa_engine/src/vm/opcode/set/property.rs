@@ -25,8 +25,26 @@ fn set_by_name(
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
+    // HIWAVE PATCH (super-set-receiver): whether [[Set]] would write the object's own storage, i.e.
+    // the receiver is the object itself. `SetPropertyByName` passes one value as both, so that is a
+    // pointer comparison; a primitive base never is (the object is a fresh wrapper), and neither is
+    // `super.x = v` with `this` other than the home object's prototype.
+    let receiver_is_object = if std::ptr::eq(value_object, receiver) {
+        value_object.is_object()
+    } else {
+        receiver.as_object().is_some_and(|r| JsObject::equals(&r, &object))
+    };
+
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    if let Some((shape, slot)) = ic.get(object_borrowed.shape())
+        // HIWAVE PATCH (super-set-receiver): an accessor hit calls the setter with the receiver, so
+        // it is right for any receiver. A data hit writes a slot in place, which is what [[Set]]
+        // does only for an own data property of the receiver: the slot must be the object's own
+        // (not `PROTOTYPE`: a data property found on the prototype is defined on the receiver,
+        // never written where it was found) and the receiver must be the object.
+        && (slot.attributes.is_accessor_descriptor()
+            || (!slot.attributes.contains(SlotAttributes::PROTOTYPE) && receiver_is_object))
+    {
         let slot_index = slot.index as usize;
 
         if slot.attributes.is_accessor_descriptor() {
@@ -82,7 +100,13 @@ fn set_by_name(
             succeeded && slot.is_cacheable(),
         );
     }
-    if succeeded && slot.is_cacheable() {
+    // HIWAVE PATCH (super-set-receiver): when the receiver is not the object, a data slot recorded
+    // here may describe the receiver's define, not the object's storage, so only an accessor slot
+    // (found on the object's chain) is kept.
+    if succeeded
+        && slot.is_cacheable()
+        && (receiver_is_object || slot.attributes.is_accessor_descriptor())
+    {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();

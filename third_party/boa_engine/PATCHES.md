@@ -718,3 +718,30 @@ to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/
 `decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
 `crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
 a parameter, a global and a member; 12 differed before).
+## Patch: a name-write cache hit writes a data slot only for the receiver's own property (`super-set-receiver`)
+
+**Why.** Unmodified Boa 0.22 bug, flagged by Atlas in the R1 on #1157 and confirmed against Chrome 148.
+`SetPropertyByName`'s cache hit checked only the object's shape and ignored the receiver. `super.x = v`
+uses the home object's prototype as the object and `this` as the receiver. A site whose first call had
+`this` equal to that prototype filled the cache, and later calls wrote `x` on the prototype instead of
+defining it on `this` (`B.prototype.m.call(A.prototype, 5); b.m(7)` left `A.prototype.x` at 7 and `b`
+with no own `x`). The cache also wrote a data slot found on the prototype (`PROTOTYPE`) in place, where
+[[Set]] defines the property on the receiver (R1 on #1163: a grandparent's `x`).
+
+**What.** `vm/opcode/set/property.rs` `set_by_name` (marked `HIWAVE PATCH (super-set-receiver)`):
+- a hit on an accessor slot calls the setter with the receiver, so it is used for any receiver;
+- a hit on a data slot is used only when the slot is the object's own (not `PROTOTYPE`) and the
+  receiver is the object. `SetPropertyByName` passes one value as both, so that is a pointer
+  comparison; a primitive base (`(5).x = v`, `'s'.x = v`) is never its wrapper object, so its data
+  writes give up the cache, and its prototype-setter writes still hit;
+- the cache is filled from a data write only when the receiver is the object. Upstream already marks
+  that case not cacheable inside OrdinarySet, so this has no failing case of its own; it is defensive.
+
+Checked with the vm-stats counters: 4,000 writes to an object, an array, a function and a class
+instance, 1,000 `super.x = v` onto a prototype setter with a new `this` each time, and 1,000 writes
+to a `String.prototype` setter from a string base give 6 cold misses in all. Pin:
+`crates/rustkit-js/tests/super_set.rs` (16 cases from Chrome for Testing 148.0.7778.216: class and
+object-literal `super` with fresh, shared and grandparent receivers in both orders, setters on the
+prototype for many receivers and for a primitive base, a primitive base over a prototype data
+property, `Reflect.set` with another receiver, a plain write over a prototype data property; 3 differed
+on develop, and 2 more at f23adfa7).
