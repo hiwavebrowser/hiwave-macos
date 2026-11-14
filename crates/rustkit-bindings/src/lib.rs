@@ -123,6 +123,7 @@ mod traversal_tests;
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
+mod web_intl_likely;
 #[cfg(test)]
 mod web_match_media_tests;
 #[cfg(test)]
@@ -133,10 +134,16 @@ mod web_messaging_tests;
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod internal_names_tests;
+#[cfg(test)]
+mod engine_event_origin_tests;
 mod web_canvas;
 mod worker_host;
 #[cfg(test)]
 mod web_canvas_tests;
+#[cfg(test)]
+mod web_canvas_raster_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
@@ -150,7 +157,7 @@ pub use dom::{
 };
 pub mod events;
 pub use rustkit_canvas as canvas;
-pub use web_canvas::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
+pub use web_canvas::{CanvasImageLoader, CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
     AnimationEventData, DataTransfer, DragEventData, DroppedFile, Event, EventDispatcher,
@@ -160,13 +167,12 @@ pub use events::{
     TransitionEventData, WheelDeltaMode, WheelEventData,
 };
 
-use rustkit_dom::{Document, NodeId};
+use rustkit_dom::Document;
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::debug;
 use url::Url;
 
 /// Errors that can occur in bindings.
@@ -184,10 +190,6 @@ pub enum BindingError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 }
-
-/// Unique identifier for an event listener.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ListenerId(u64);
 
 /// An external classic script that script inserted
 /// ([`DomBindings::take_inserted_scripts`]).
@@ -207,23 +209,6 @@ pub struct InsertedScript {
     /// When the page inserted it. The engine takes the queue later, at its
     /// next drain; the gap is the script's `queued_ms` in the Inspector.
     pub inserted_at: std::time::Instant,
-}
-
-impl ListenerId {
-    fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-/// An event listener registration.
-#[derive(Debug)]
-pub struct EventListener {
-    pub id: ListenerId,
-    pub node_id: NodeId,
-    pub event_type: String,
-    pub callback: String, // JS code to execute
-    pub capture: bool,
 }
 
 /// Mouse event data for JavaScript binding.
@@ -263,29 +248,6 @@ pub struct KeyboardEventBindingData {
     pub shift_key: bool,
     pub meta_key: bool,
     pub location: u32,
-}
-
-/// Focus event data for JavaScript binding.
-#[derive(Debug, Clone, Default)]
-pub struct FocusEventBindingData {
-    pub related_target: Option<u64>,
-}
-
-/// Input event data for JavaScript binding.
-#[derive(Debug, Clone, Default)]
-pub struct InputEventBindingData {
-    pub data: Option<String>,
-    pub input_type: String,
-    pub is_composing: bool,
-}
-
-/// Event data for JavaScript dispatch.
-#[derive(Debug, Clone)]
-pub enum EventData {
-    Mouse(MouseEventBindingData),
-    Keyboard(KeyboardEventBindingData),
-    Focus(FocusEventBindingData),
-    Input(InputEventBindingData),
 }
 
 /// Location object (window.location).
@@ -474,7 +436,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// engine to collect. The one thing that does
 /// propagate is Boa's loop-iteration limit, which a script cannot catch.
 ///
-/// Timers run on a virtual clock the engine advances (`__rustkit_run_timers`),
+/// Timers run on a virtual clock the engine advances (`__rk.runTimers`),
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
@@ -537,7 +499,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
-    window.__rustkit_fire = function (targetName, type) {
+    __rk.fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         var event = {
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
@@ -546,7 +508,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         };
         // With the DOM wrappers installed, trust is theirs to give (dom.rs).
-        if (typeof __rk.trust === 'function') __rk.trust(event);
+        if (typeof __rk.make === 'function') {
+            event = __rk.make('Event', type);
+            __rk.trust(event);
+            __rk.dispatchTo(target, event);
+            return;
+        }
         target.dispatchEvent(event);
     };
 
@@ -622,13 +589,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     }
-    window.__rustkit_run_timers = function (horizon, max) {
+    __rk.runTimers = function (horizon, max) {
         return runTimers(horizon, max, false);
     };
     // The load's clock, one callback at a time, so the host can publish a
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
-    window.__rustkit_run_timers_framed = function (horizon, max, frameMs) {
+    __rk.runTimersFramed = function (horizon, max, frameMs) {
         var start = Date.now();
         var ran = 0;
         while (ran < max) {
@@ -657,7 +624,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // between its callbacks, rather than once 1000 of them have run
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
-    window.__rustkit_advance_timers = function (delta, max, slice) {
+    __rk.advanceTimers = function (delta, max, slice) {
         var target = now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
@@ -680,12 +647,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     };
-    // Like `__rustkit_advance_timers`, but stop between callbacks once
+    // Like `__rk.advanceTimers`, but stop between callbacks once
     // `frameMs` of wall time has passed so the host can publish a frame.
     // A negative return is `-callbacks` and means timers are still due.
     // Zero frame budget never stops early. Callbacks that finish inside
     // the budget run in this call, and the clock and animation-frame round
-    // match `__rustkit_advance_timers`.
+    // match `__rk.advanceTimers`.
     //
     // The elapsed delta is applied even when a callback ran long enough to
     // stop the turn. Leaving the clock at that callback's due time drops
@@ -696,7 +663,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // A turn that yields still has its frame (#776): its animation-frame
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
-    window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
+    __rk.advanceTimersFramed = function (delta, max, frameMs) {
         var target = now + delta;
         var start = Date.now();
         var ran = 0;
@@ -727,8 +694,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
-    window.__rustkit_now = function () { return now; };
-    window.__rustkit_next_timer = function () {
+    __rk.now = function () { return now; };
+    __rk.nextTimer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
@@ -1098,7 +1065,6 @@ impl MutationLog {
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
     window: RefCell<WindowState>,
-    event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
     /// What the page posted with `window.ipc.postMessage`, held on the
@@ -1185,7 +1151,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_file_reader.js"))?;
         // A constructible DataTransfer and the drag data store the engine's drag and
         // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
-        runtime.evaluate_script(include_str!("web_dnd.js"))?;
+        runtime.evaluate_with_host(include_str!("web_dnd.js"))?;
         // Named access on the Window object: `<div id=x>` makes bare `x` the
         // element, through a WindowProperties object on the prototype chain
         // that asks the document when read (web_named_access.js).
@@ -1198,9 +1164,9 @@ impl DomBindings {
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
-        runtime.evaluate_script(include_str!("web_shadow.js"))?;
+        runtime.evaluate_with_host(include_str!("web_shadow.js"))?;
         // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
-        runtime.evaluate_script(include_str!("web_reflect.js"))?;
+        runtime.evaluate_with_host(include_str!("web_reflect.js"))?;
         // NodeFilter, TreeWalker, NodeIterator, createTreeWalker/createNodeIterator (web_traversal.js).
         runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
@@ -1209,7 +1175,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
         // insertRule writes into the <style>'s text, which the engine restyles from.
-        runtime.evaluate_script(include_str!("web_cssom.js"))?;
+        runtime.evaluate_with_host(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_with_host(include_str!("web_forms.js"))?;
         // execCommand, navigator.clipboard and the user's edit commands over
@@ -1218,7 +1184,7 @@ impl DomBindings {
         dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
-        runtime.evaluate_script(include_str!("web_history.js"))?;
+        runtime.evaluate_with_host(include_str!("web_history.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
@@ -1259,7 +1225,6 @@ impl DomBindings {
         Ok(Self {
             runtime: RefCell::new(runtime),
             window: RefCell::new(WindowState::default()),
-            event_listeners: RefCell::new(Vec::new()),
             dom_host,
             ipc_queue,
             dirty,
@@ -1293,6 +1258,12 @@ impl DomBindings {
     /// The text shaper `measureText` and canvas text use (the engine's).
     pub fn set_canvas_text_measurer(&self, measurer: Option<CanvasTextMeasurer>) {
         self.canvases.borrow_mut().set_measurer(measurer);
+    }
+
+    /// Where `drawImage`/`createPattern` get an `<img>`'s decoded pixels
+    /// (by its URL): the engine's image cache.
+    pub fn set_canvas_image_loader(&self, loader: Option<CanvasImageLoader>) {
+        self.canvases.borrow_mut().images = loader;
     }
 
     /// Measure `text` in the canvas `font` the way the canvas does.
@@ -1500,7 +1471,7 @@ impl DomBindings {
         };
         // The text is an argument, never script source (`fire_key_event`).
         let (value, text) = value.map_or(("null", ""), |v| ("__a[0]", v));
-        let script = format!("return document.__rkUserEdit({node}, {name:?}, {value});");
+        let script = format!("return __rk.userEdit({node}, {name:?}, {value});");
         let report = match self.runtime.borrow_mut().evaluate_host_turn(&script, &[text])? {
             JsValue::String(json) => json,
             _ => return Ok(Default::default()),
@@ -1529,7 +1500,7 @@ impl DomBindings {
         text: &str,
     ) -> Result<Option<serde_json::Value>, BindingError> {
         // The text is an argument, never script source (`fire_key_event`).
-        let script = format!("return document.__rkCompose({node}, {action:?}, __a[0]);");
+        let script = format!("return __rk.compose({node}, {action:?}, __a[0]);");
         Ok(match self.runtime.borrow_mut().evaluate_host_turn(&script, &[text])? {
             JsValue::String(json) => serde_json::from_str(&json).ok(),
             _ => None,
@@ -1663,7 +1634,9 @@ impl DomBindings {
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_with_host(include_str!("web_streams.js"))?;
 
-        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
+        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js),
+        // with CLDR's likely subtags behind Intl.Locale's maximize()/minimize().
+        web_intl_likely::install(runtime)?;
         runtime.evaluate_script(include_str!("web_intl.js"))?;
 
         // IPC bridge for communication with Rust: the app's own documents
@@ -2132,7 +2105,7 @@ impl DomBindings {
     /// records from the geometry as it stands. The engine calls this after a
     /// layout and after a scroll. Returns how many observers have targets.
     pub fn tick_observers(&self) -> usize {
-        match self.evaluate("typeof __rkObserversTick === 'function' ? __rkObserversTick() : 0") {
+        match self.host_turn("return typeof __rk.observersTick === 'function' ? __rk.observersTick() : 0", &[]) {
             Ok(JsValue::Number(n)) if n >= 0.0 => n as usize,
             _ => 0,
         }
@@ -2140,14 +2113,14 @@ impl DomBindings {
 
     /// Tell the page its window was scrolled by the user: fires `scroll`.
     pub fn notify_scrolled(&self) {
-        let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
+        let _ = self.host_turn("return typeof __rk.userScrolled === 'function' && __rk.userScrolled()", &[]);
     }
 
     /// Tell the page the user scrolled an element: `scroll` fires at it.
     pub fn notify_element_scrolled(&self, node: usize) {
-        let _ = self.evaluate(&format!(
-            "typeof __rkUserScrolledElement === 'function' && __rkUserScrolledElement({node})"
-        ));
+        let _ = self.host_turn(&format!(
+            "return typeof __rk.userScrolledElement === 'function' && __rk.userScrolledElement({node})"
+        ), &[]);
     }
 
     /// Publish the computed style of each laid-out element (raw NodeId to
@@ -2186,7 +2159,7 @@ impl DomBindings {
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
         self.canvases.borrow_mut().clear();
-        runtime.evaluate_script(&format!("__rustkit_dom_reset({generation});"))?;
+        runtime.evaluate_host_turn(&format!("return __rk.domReset({generation});"), &[])?;
 
         debug!("Document bound to JS context");
         Ok(())
@@ -2198,12 +2171,13 @@ impl DomBindings {
 
         // Update state
         self.window.borrow_mut().location = location.clone();
+        self.canvases.borrow_mut().origin = Some(url.origin());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&format!(
+        runtime.evaluate_host_turn(&format!(
             r#"
-            if (window.__rustkit_location_sync) window.__rustkit_location_sync({:?});
+            if (__rk.locationSync) __rk.locationSync({:?});
             else window.location.href = {:?};
             window.location.protocol = {:?};
             window.location.host = {:?};
@@ -2211,10 +2185,10 @@ impl DomBindings {
             window.location.port = {:?};
             window.location.pathname = {:?};
             window.location.search = {:?};
-            if (window.__rustkit_location_hash_sync) window.__rustkit_location_hash_sync({:?});
+            if (__rk.locationHashSync) __rk.locationHashSync({:?});
             window.location.origin = {:?};
             document.URL = {:?};
-            if (window.__rustkit_history_reset) window.__rustkit_history_reset();
+            if (__rk.historyReset) __rk.historyReset();
             "#,
             location.href,
             location.href,
@@ -2227,7 +2201,7 @@ impl DomBindings {
             location.hash,
             location.origin,
             location.href
-        ))?;
+        ), &[])?;
 
         Ok(())
     }
@@ -2255,6 +2229,16 @@ impl DomBindings {
         self.workers.running()
     }
 
+
+    /// Run one of the engine's own entry points as a turn of page script.
+    /// `body` is a function body whose `__rk` is the host object, which
+    /// the embedder's scripts keep their entry points on and no page
+    /// script can reach (`return __rk.fireMouse(...);`); `strings` are
+    /// read in it as `__a[0]`, `__a[1]`, ... (text that must not be in
+    /// script source). See [`JsRuntime::evaluate_host_turn`].
+    pub fn host_turn(&self, body: &str, strings: &[&str]) -> Result<JsValue, BindingError> {
+        self.runtime.borrow_mut().evaluate_host_turn(body, strings).map_err(Into::into)
+    }
 
     /// Evaluate a script in the bound context.
     pub fn evaluate(&self, script: &str) -> Result<JsValue, BindingError> {
@@ -2416,19 +2400,19 @@ impl DomBindings {
     /// sees it; `None` between scripts. `node` is the element's raw NodeId.
     pub fn set_current_script(&self, node: Option<usize>) -> Result<(), BindingError> {
         let script = match node {
-            Some(id) => format!("document.__rkSetCurrentScript({id});"),
-            None => "document.__rkSetCurrentScript(null);".to_string(),
+            Some(id) => format!("return __rk.setCurrentScript({id});"),
+            None => "return __rk.setCurrentScript(null);".to_string(),
         };
-        self.runtime.borrow_mut().evaluate_script(&script)?;
+        self.runtime.borrow_mut().evaluate_host_turn(&script, &[])?;
         Ok(())
     }
 
     /// Fire `load` or `error` at a `<script>` element (by node id). Listener
     /// exceptions are queued, see [`Self::take_reported_errors`].
     pub fn fire_script_event(&self, node: usize, event_type: &str) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireOn({node}, {event_type:?});"
-        ))?;
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireOn({node}, {event_type:?});"
+        ), &[])?;
         Ok(())
     }
 
@@ -2438,9 +2422,9 @@ impl DomBindings {
     /// bubble). Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_image_error(&self, node: usize) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkImageFailed({node});"
-        ))?;
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.imageFailed({node});"
+        ), &[])?;
         Ok(())
     }
 
@@ -2452,10 +2436,10 @@ impl DomBindings {
     /// `load` fires at it (it does not bubble). Listener exceptions are
     /// queued, see [`Self::take_reported_errors`].
     pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
-        let url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkImageLoaded({node}, {width}, {height}, {url});"
-        ))?;
+        // The URL is an argument, never script source (`fire_key_event`).
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.imageLoaded({node}, {width}, {height}, __a[0]);"), &[url])?;
         Ok(())
     }
 
@@ -2464,7 +2448,7 @@ impl DomBindings {
     /// slot): no event fires, it still reads as loading, and a `decode()`
     /// waiting on it resolves, as before E54.
     pub fn fire_image_gave_up(&self, node: usize) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!("document.__rkImageGaveUp({node});"))?;
+        self.runtime.borrow_mut().evaluate_host_turn(&format!("return __rk.imageGaveUp({node});"), &[])?;
         Ok(())
     }
 
@@ -2496,8 +2480,8 @@ impl DomBindings {
         if matches!(event_type, "mousedown" | "pointerdown" | "mouseup" | "pointerup") {
             self.notify_user_activation();
         }
-        let result = self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+        let result = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
              altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {}, detail: {} }})",
             data.client_x,
@@ -2516,7 +2500,7 @@ impl DomBindings {
             data.movement_y,
             data.related_target.map_or("null".to_string(), |n| n.to_string()),
             data.detail.map_or("null".to_string(), |n| n.to_string()),
-        ))?;
+        ), &[])?;
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
@@ -2536,8 +2520,8 @@ impl DomBindings {
         data: &MouseEventBindingData,
         operation: &str,
     ) -> Result<(bool, String), BindingError> {
-        let result = self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireDrag({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+        let result = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireDrag({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
              altKey: {}, shiftKey: {}, metaKey: {}, related: {} }}, {operation:?})",
             data.client_x,
@@ -2553,7 +2537,7 @@ impl DomBindings {
             data.shift_key,
             data.meta_key,
             data.related_target.map_or("null".to_string(), |n| n.to_string()),
-        ))?;
+        ), &[])?;
         Ok(match result {
             JsValue::String(s) => {
                 let (flag, op) = s.split_once(':').unwrap_or(("1", "none"));
@@ -2674,7 +2658,7 @@ impl DomBindings {
         let node = node.map_or("null".to_string(), |n| n.to_string());
         self.runtime
             .borrow_mut()
-            .evaluate_script(&format!("document.__rkSetFocus({node});"))?;
+            .evaluate_host_turn(&format!("return __rk.setFocus({node});"), &[])?;
         Ok(())
     }
 
@@ -2682,7 +2666,7 @@ impl DomBindings {
     /// user's click, or script's `focus()`/`blur()`): `Some(Some(node))`,
     /// `Some(None)` for nothing focused, `None` when it has not moved.
     pub fn take_focus_move(&self) -> Option<Option<usize>> {
-        match self.evaluate("document.__rkTakeFocus()") {
+        match self.host_turn("return __rk.takeFocus()", &[]) {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(Some(n as usize)),
             Ok(JsValue::Number(_)) => Some(None),
             _ => None,
@@ -2696,10 +2680,10 @@ impl DomBindings {
     /// back by [`Self::take_selection_change`].
     pub fn set_selection(&self, ends: Option<(usize, usize, usize, usize)>) -> Result<(), BindingError> {
         let call = match ends {
-            Some((a, ao, f, fo)) => format!("document.__rkSetSelection({a}, {ao}, {f}, {fo});"),
-            None => "document.__rkSetSelection(null, 0, null, 0);".to_string(),
+            Some((a, ao, f, fo)) => format!("return __rk.setSelection({a}, {ao}, {f}, {fo});"),
+            None => "return __rk.setSelection(null, 0, null, 0);".to_string(),
         };
-        self.runtime.borrow_mut().evaluate_script(&call)?;
+        self.runtime.borrow_mut().evaluate_host_turn(&call, &[])?;
         Ok(())
     }
 
@@ -2712,7 +2696,7 @@ impl DomBindings {
         let result = self
             .runtime
             .borrow_mut()
-            .evaluate_host_turn(&format!("return document.__rkEditKey({host}, {op:?}, __a[0]);"), &[text])?;
+            .evaluate_host_turn(&format!("return __rk.editKey({host}, {op:?}, __a[0]);"), &[text])?;
         Ok(matches!(result, JsValue::Boolean(true)))
     }
 
@@ -2722,7 +2706,7 @@ impl DomBindings {
     /// not changed.
     #[allow(clippy::type_complexity)]
     pub fn take_selection_change(&self) -> Option<Option<(usize, usize, usize, usize)>> {
-        match self.evaluate("document.__rkTakeSelection ? document.__rkTakeSelection() : null") {
+        match self.host_turn("return __rk.takeSelection ? __rk.takeSelection() : null", &[]) {
             Ok(JsValue::String(s)) if s.is_empty() => Some(None),
             Ok(JsValue::String(s)) => {
                 let n: Vec<usize> = s.split(' ').filter_map(|p| p.parse().ok()).collect();
@@ -2808,10 +2792,10 @@ impl DomBindings {
     /// before `window` `load`. A state the document is already in changes
     /// nothing and fires nothing.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "if (document.readyState !== {0:?}) {{ document.readyState = {0:?}; window.__rustkit_fire('document', 'readystatechange'); }}",
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "if (document.readyState !== {0:?}) {{ document.readyState = {0:?}; __rk.fire('document', 'readystatechange'); }}",
             state
-        ))?;
+        ), &[])?;
         Ok(())
     }
 
@@ -2827,10 +2811,10 @@ impl DomBindings {
             LifecycleTarget::Window => "window",
             LifecycleTarget::Document => "document",
         };
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_fire({:?}, {:?});",
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fire({:?}, {:?});",
             target, event_type
-        ))?;
+        ), &[])?;
         Ok(())
     }
 
@@ -2844,9 +2828,8 @@ impl DomBindings {
     /// document's list of media query lists flipped (a list stays there
     /// once it has listened, as in the spec, listeners or not).
     pub fn fire_media_query_changes(&self) -> Result<u32, BindingError> {
-        let fired = self.runtime.borrow_mut().evaluate_script(
-            "typeof window.__rustkit_media_changes === 'function' ? window.__rustkit_media_changes() : 0",
-        )?;
+        let fired = self.runtime.borrow_mut().evaluate_host_turn(
+            "return typeof __rk.mediaChanges === 'function' ? __rk.mediaChanges() : 0", &[])?;
         Ok(match fired {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2856,10 +2839,10 @@ impl DomBindings {
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
     /// most `max_callbacks` of them. Returns how many ran.
     pub fn run_timers(&self, horizon_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_run_timers({}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.runTimers({}, {})",
             horizon_ms, max_callbacks
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2874,10 +2857,10 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_run_timers_framed({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.runTimersFramed({}, {}, {})",
             horizon_ms, max_callbacks, frame_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
             JsValue::Number(n) => (n as u32, false),
@@ -2902,10 +2885,10 @@ impl DomBindings {
         slice: Option<std::time::Duration>,
     ) -> Result<u32, BindingError> {
         let slice_ms = slice.map_or(0, |slice| slice.as_millis().max(1) as u64);
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.advanceTimers({}, {}, {})",
             delta_ms, max_callbacks, slice_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
@@ -2920,10 +2903,10 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers_framed({}, {}, {})",
+        let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.advanceTimersFramed({}, {}, {})",
             delta_ms, max_callbacks, frame_ms
-        ))?;
+        ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
             JsValue::Number(n) => (n as u32, false),
@@ -2937,7 +2920,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_bookkeeping("window.__rustkit_now()")
+            .evaluate_host_bookkeeping("return __rk.now()")
         {
             Ok(JsValue::Number(n)) if n.is_finite() => n,
             _ => 0.0,
@@ -2957,11 +2940,11 @@ impl DomBindings {
         property: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
              elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
             pseudo = pseudo.unwrap_or("")
-        ))?;
+        ), &[])?;
         Ok(())
     }
 
@@ -2978,11 +2961,11 @@ impl DomBindings {
         name: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
-        self.runtime.borrow_mut().evaluate_script(&format!(
-            "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
+        self.runtime.borrow_mut().evaluate_host_turn(&format!(
+            "return __rk.fireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
              elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
             pseudo = pseudo.unwrap_or("")
-        ))?;
+        ), &[])?;
         Ok(())
     }
 
@@ -2992,7 +2975,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_bookkeeping("window.__rustkit_next_timer()")
+            .evaluate_host_bookkeeping("return __rk.nextTimer()")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
             _ => None,
@@ -3018,148 +3001,6 @@ impl DomBindings {
     /// Check if there are pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
         !self.ipc_queue.borrow().is_empty()
-    }
-
-    /// Add an event listener.
-    pub fn add_event_listener(
-        &self,
-        node_id: NodeId,
-        event_type: &str,
-        callback: &str,
-        capture: bool,
-    ) -> ListenerId {
-        let id = ListenerId::new();
-        let listener = EventListener {
-            id,
-            node_id,
-            event_type: event_type.to_string(),
-            callback: callback.to_string(),
-            capture,
-        };
-
-        self.event_listeners.borrow_mut().push(listener);
-        trace!(?id, event_type, "Event listener added");
-        id
-    }
-
-    /// Remove an event listener.
-    pub fn remove_event_listener(&self, id: ListenerId) {
-        self.event_listeners.borrow_mut().retain(|l| l.id != id);
-        trace!(?id, "Event listener removed");
-    }
-
-    /// Dispatch an event.
-    pub fn dispatch_event(&self, node_id: NodeId, event_type: &str) -> Result<bool, BindingError> {
-        self.dispatch_event_with_data(node_id, event_type, None)
-    }
-
-    /// Dispatch an event with additional data.
-    pub fn dispatch_event_with_data(
-        &self,
-        node_id: NodeId,
-        event_type: &str,
-        event_data: Option<&EventData>,
-    ) -> Result<bool, BindingError> {
-        let listeners: Vec<_> = self
-            .event_listeners
-            .borrow()
-            .iter()
-            .filter(|l| l.node_id == node_id && l.event_type == event_type)
-            .map(|l| l.callback.clone())
-            .collect();
-
-        if listeners.is_empty() {
-            return Ok(true);
-        }
-
-        // Create the Event object in JS
-        let event_js = Self::create_event_object(event_type, event_data);
-
-        let mut runtime = self.runtime.borrow_mut();
-        runtime.evaluate_script(&event_js)?;
-
-        // Execute each listener
-        for callback in listeners {
-            runtime.evaluate_script(&format!(
-                "(function(e) {{ {} }})(__rustkit_event)",
-                callback
-            ))?;
-        }
-
-        // Check if default was prevented
-        let prevented = runtime.evaluate_script("__rustkit_event.defaultPrevented")?;
-        let was_prevented = matches!(prevented, JsValue::Boolean(true));
-
-        // Clean up
-        runtime.evaluate_script("delete __rustkit_event;")?;
-
-        Ok(!was_prevented)
-    }
-
-    /// Create a JavaScript Event object.
-    fn create_event_object(event_type: &str, data: Option<&EventData>) -> String {
-        let mut props = vec![
-            format!("type: {:?}", event_type),
-            "bubbles: true".to_string(),
-            "cancelable: true".to_string(),
-            "defaultPrevented: false".to_string(),
-            "target: null".to_string(),
-            "currentTarget: null".to_string(),
-            "eventPhase: 0".to_string(),
-            "timeStamp: Date.now()".to_string(),
-            "isTrusted: true".to_string(),
-            "preventDefault: function() { this.defaultPrevented = true; }".to_string(),
-            "stopPropagation: function() { this._stopped = true; }".to_string(),
-            "stopImmediatePropagation: function() { this._stoppedImmediate = true; }".to_string(),
-        ];
-
-        // Add type-specific properties
-        if let Some(event_data) = data {
-            match event_data {
-                EventData::Mouse(mouse) => {
-                    props.push(format!("clientX: {}", mouse.client_x));
-                    props.push(format!("clientY: {}", mouse.client_y));
-                    props.push(format!("screenX: {}", mouse.screen_x));
-                    props.push(format!("screenY: {}", mouse.screen_y));
-                    props.push(format!("offsetX: {}", mouse.offset_x));
-                    props.push(format!("offsetY: {}", mouse.offset_y));
-                    props.push(format!("button: {}", mouse.button));
-                    props.push(format!("buttons: {}", mouse.buttons));
-                    props.push(format!("ctrlKey: {}", mouse.ctrl_key));
-                    props.push(format!("altKey: {}", mouse.alt_key));
-                    props.push(format!("shiftKey: {}", mouse.shift_key));
-                    props.push(format!("metaKey: {}", mouse.meta_key));
-                }
-                EventData::Keyboard(keyboard) => {
-                    props.push(format!("key: {:?}", keyboard.key));
-                    props.push(format!("code: {:?}", keyboard.code));
-                    props.push(format!("repeat: {}", keyboard.repeat));
-                    props.push(format!("ctrlKey: {}", keyboard.ctrl_key));
-                    props.push(format!("altKey: {}", keyboard.alt_key));
-                    props.push(format!("shiftKey: {}", keyboard.shift_key));
-                    props.push(format!("metaKey: {}", keyboard.meta_key));
-                    props.push(format!("location: {}", keyboard.location));
-                }
-                EventData::Focus(focus) => {
-                    if let Some(related) = focus.related_target {
-                        props.push(format!("relatedTarget: {{ nodeId: {} }}", related));
-                    } else {
-                        props.push("relatedTarget: null".to_string());
-                    }
-                }
-                EventData::Input(input) => {
-                    if let Some(ref data) = input.data {
-                        props.push(format!("data: {:?}", data));
-                    } else {
-                        props.push("data: null".to_string());
-                    }
-                    props.push(format!("inputType: {:?}", input.input_type));
-                    props.push(format!("isComposing: {}", input.is_composing));
-                }
-            }
-        }
-
-        format!("var __rustkit_event = {{ {} }};", props.join(", "))
     }
 
     /// Dispatch a DOM event through the DOM event system.

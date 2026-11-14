@@ -716,6 +716,16 @@ impl rustkit_html::TreeSink for DocumentSink {
         self.open_elements.last().cloned()
     }
 
+    fn reopen(&mut self, node: Self::NodeId) {
+        self.open_elements.push(node);
+    }
+
+    fn remove_open(&mut self, node: Self::NodeId) {
+        if let Some(at) = self.open_elements.iter().rposition(|n| Rc::ptr_eq(n, &node)) {
+            self.open_elements.remove(at);
+        }
+    }
+
     fn add_attrs_if_missing(&mut self, target: Self::NodeId, attrs: Vec<(String, String)>) {
         self.attr_merges.push((target.id, attrs));
     }

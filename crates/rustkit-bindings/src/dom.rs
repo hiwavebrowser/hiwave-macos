@@ -1097,12 +1097,13 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             // An HTML document always has a body, but rustkit-html drops
             // it (and the text) for text-only input; supply an empty one.
+            // A frameset document's body element is its frameset (§3.1.3).
             if let Some(html) = doc
                 .children()
                 .into_iter()
                 .find(|n| n.tag_name() == Some("html"))
             {
-                if !html.children().iter().any(|n| n.tag_name() == Some("body")) {
+                if !html.children().iter().any(|n| matches!(n.tag_name(), Some("body") | Some("frameset"))) {
                     html.append_child(document.create_node(NodeType::Element {
                         tag_name: String::from("body"),
                         namespace: String::from("http://www.w3.org/1999/xhtml"),
@@ -2832,7 +2833,7 @@ pub(crate) fn install(
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
-/// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+/// surface. `__rk.domReset(gen)` rebinds it to a new document.
 #[cfg(test)]
 pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
 
@@ -2858,6 +2859,10 @@ const WRAPPERS_JS: &str = r#"
         'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+    // The DOM's dirty flag (a native registered as a global), for
+    // web_observers_live.js.
+    __rk.domDirty = g.__rustkit_dom_dirty;
+    delete g.__rustkit_dom_dirty;
 
     // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
     // this closure's and are read with methods taken now, before any page
@@ -2881,13 +2886,112 @@ const WRAPPERS_JS: &str = r#"
     // for an object that will not take it.
     function stamp(ev) {
         if (setHas(STAMPED, ev)) return;
-        defineOwn(ev, 'isTrusted', { get: TRUST_GET, set: undefined, enumerable: true, configurable: false });
+        defineOwn(ev, 'isTrusted', getterDesc(TRUST_GET));
         setAdd(STAMPED, ev);
     }
     // The engine made this event. It reads trusted through its one
     // dispatch, the next `dispatchEvent` of it; one dispatched again (by
     // a page that kept it) is not trusted any more.
+    //
+    // Only an event this code just made with a constructor kept at install
+    // (`make`) can be trusted, and once: whatever a page has put on the
+    // window since never builds an event the engine marks.
+    var CTORS = Object.create(null), MADE = new WeakSet();
+    // The engine builds its events with nothing a page can reach: these
+    // built-ins are taken now, and every descriptor has no prototype.
+    var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
+    function getterDesc(get) {
+        var d = objCreate(null);
+        d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;
+        return d;
+    }
+    function fixed(o, k, v) {
+        var d = objCreate(null);
+        d.value = v; d.writable = true; d.enumerable = true; d.configurable = false;
+        defineOwn(o, k, d);
+    }
+    // What the engine adds to its event past the interface's fields (a
+    // point's page and offset coordinates), defined as the fields are.
+    function extra(ev, at) {
+        for (var k in at) {
+            if (!hasOwn(at, k)) continue;
+            if (hasOwn(ev, k)) { fixed(ev, k, at[k]); continue; }
+            var d = objCreate(null);
+            d.value = at[k]; d.writable = false; d.enumerable = true; d.configurable = true;
+            defineOwn(ev, k, d);
+        }
+    }
+    // An interface's own fields (`[name, default]` pairs), its parent and
+    // a finishing step (a direct call; WheelEvent's legacy deltas).
+    var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
+    // The install scripts give the engine its constructors here (host
+    // object only; the last one an install script gives wins).
+    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    // An event's dispatch state, private: `target`, `currentTarget` and
+    // `eventPhase` are read-only getters over these (as in Chrome), and an
+    // event being dispatched is in DISPATCHING, which the initializers
+    // check.
+    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
+    var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
+    __rk.keepCtor = function (name, C, parent, fields) {
+        if (typeof C !== 'function') return;
+        CTORS[name] = C;
+        PROTOS[name] = C.prototype;
+        if (typeof parent === 'string') { PARENT[name] = parent; FIELDS[name] = fields || []; }
+        // An interface's prototype cannot be replaced (Web IDL).
+        try { defineOwn(C, 'prototype', { writable: false }); } catch (_) {}
+    };
+    // An event's type as its constructor or initEvent set it: what dispatch
+    // and activation read, whatever a page defines on the prototypes.
+    // An engine event is always in the map; only a page's own event, which
+    // is never trusted, falls back to its `type`.
+    function evType(e) { return mapHas(EVTYPE, e) ? mapGet(EVTYPE, e) : e.type; }
+    __rk.keepFinish = function (name, fn) { if (typeof fn === 'function') FINISH[name] = fn; };
+    // A click made by the engine as a mouse or pointer event, or made by
+    // script with the MouseEvent of install time.
+    function isMouseClick(e) {
+        var k = mapGet(KIND, e);
+        if (k !== undefined) return k === 'MouseEvent' || k === 'PointerEvent';
+        return !!PROTOS.MouseEvent && isProto(PROTOS.MouseEvent, e);
+    }
+    __rk.hasCtor = function (name) { return typeof CTORS[name] === 'function'; };
+    // The engine's event: an object of the interface's prototype with
+    // every field an own, non-configurable property, built here and
+    // nowhere else (no constructor, no call through a built-in a page can
+    // replace). `init` is the engine's own object literal.
+    function make(name, type, init) {
+        if (!PROTOS[name] || (name !== 'Event' && !FIELDS[name])) name = 'Event';
+        var i = init || objCreate(null);
+        function arg(k) { return hasOwn(i, k) ? i[k] : undefined; }
+        var ev = objCreate(PROTOS[name]);
+        mapSet(EVTYPE, ev, '' + type);
+        defineOwn(ev, 'type', getterDesc(TYPE_GET));
+        fixed(ev, 'bubbles', !!arg('bubbles'));
+        setCancelable(ev, !!arg('cancelable'));
+        fixed(ev, 'composed', !!arg('composed'));
+        stamp(ev);
+        fixed(ev, 'timeStamp', dateNow());
+        // The fields, the root interface's first.
+        var chain = objCreate(null), depth = 0, n;
+        for (n = name; n !== 'Event' && FIELDS[n]; n = PARENT[n]) chain[depth++] = n;
+        while (depth > 0) {
+            var fields = FIELDS[chain[--depth]];
+            for (var j = 0; j < fields.length; j++) {
+                var f = fields[j], v = arg(f[0]);
+                fixed(ev, f[0], v === undefined ? (isArray(f[1]) ? [] : f[1]) : v);
+            }
+        }
+        var finish = FINISH[name];
+        if (finish) finish(ev, i);
+        mapSet(KIND, ev, name);
+        setAdd(MADE, ev);
+        return ev;
+    }
+    __rk.make = make;
     function trust(ev) {
+        if (!setHas(MADE, ev) || !mapHas(EVTYPE, ev)) throw new TypeError('not an engine-made event');
+        setDrop(MADE, ev);
         stamp(ev);
         setAdd(TRUSTED, ev);
         setAdd(UNDISPATCHED, ev);
@@ -2895,6 +2999,11 @@ const WRAPPERS_JS: &str = r#"
     }
     // For the embedder's other scripts, which hold the host object.
     __rk.trust = trust;
+    // A field the user edited (it commits with `change` when it loses the
+    // focus): kept here, not as a property of the element.
+    var EDITED = new WeakSet();
+    __rk.markEdited = function (el) { setAdd(EDITED, el); };
+    __rk.takeEdited = function (el) { var was = setHas(EDITED, el); if (was) setDrop(EDITED, el); return was; };
 
     if (typeof g.DOMException !== 'function') {
         g.DOMException = function DOMException(message, name) {
@@ -2927,7 +3036,8 @@ const WRAPPERS_JS: &str = r#"
     // each element script creates, each insert before it happens (and gets
     // back what to run once it has), and each write to a node's own data.
     var HOOKS = {};
-    Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
+    // On the host object, for the embedder's other scripts.
+    __rk.domHooks = HOOKS;
     var gen = 0;
     var cache = new Map();
 
@@ -3720,7 +3830,7 @@ const WRAPPERS_JS: &str = r#"
     // replace.
     function resetForm(form) {
         // Trusted, also when script called reset() (Chrome 148).
-        var e = new Event('reset', { bubbles: true, cancelable: true });
+        var e = make('Event', 'reset', { bubbles: true, cancelable: true });
         trust(e);
         if (!dispatchTo(form, e)) return false;
         controls(form, /^(input|textarea)$/).forEach(function (el) {
@@ -3762,8 +3872,8 @@ const WRAPPERS_JS: &str = r#"
     // updated at once, not on the next event.
     function imageWritten(el, name) {
         var n = String(name).toLowerCase();
-        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && document.__rkImageWritten) {
-            document.__rkImageWritten(el);
+        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
+            __rk.imageWritten(el);
         }
     }
     Element.prototype.setAttribute = function (name, value) {
@@ -5151,8 +5261,8 @@ const WRAPPERS_JS: &str = r#"
 
     // The document's selection (Selection API §2): at most one range, and a
     // direction that says which end is the anchor. The engine paints it and
-    // moves it with the mouse: `__rkSetSelection` is how a drag reaches
-    // script, `__rkTakeSelection` how a script's change reaches the engine.
+    // moves it with the mouse: `__rk.setSelection` is how a drag reaches
+    // script, `__rk.takeSelection` how a script's change reaches the engine.
     var SELN = { range: null, backward: false, gen: -1, sent: '', pending: false };
     function selRange() {
         if (SELN.gen !== gen) {
@@ -5291,16 +5401,13 @@ const WRAPPERS_JS: &str = r#"
     Document.prototype.getSelection = function () { return selection; };
     // The engine moved the selection (a drag, a double-click): ids and
     // UTF-16 offsets, or null to clear it.
-    Object.defineProperty(Document.prototype, '__rkSetSelection', {
-        value: function (aId, aOff, fId, fOff) {
-            var a = typeof aId === 'number' ? wrap(aId) : null;
-            var f = typeof fId === 'number' ? wrap(fId) : null;
-            if (!a || !f) setSel(null);
-            else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
-            SELN.sent = selKey();
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setSelection = function (aId, aOff, fId, fOff) {
+        var a = typeof aId === 'number' ? wrap(aId) : null;
+        var f = typeof fId === 'number' ? wrap(fId) : null;
+        if (!a || !f) setSel(null);
+        else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
+        SELN.sent = selKey();
+    };
     function selKey() {
         var e = selEnds();
         if (!e) return '';
@@ -5368,141 +5475,135 @@ const WRAPPERS_JS: &str = r#"
         var ws = g.getComputedStyle ? String(g.getComputedStyle(host).whiteSpace || '') : '';
         return /^(pre|pre-wrap|pre-line|break-spaces)$/.test(ws);
     }
-    Object.defineProperty(Document.prototype, '__rkEditKey', {
-        value: function (hostId, op, text) {
-            var host = typeof hostId === 'number' ? wrap(hostId) : null;
-            if (!host) return false;
-            var r = selRange();
-            if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
-                caretAt(host, host.childNodes.length);
-                r = selRange();
-            }
-            if (op === 'all') {
-                setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
-                return true;
-            }
-            var p = r[RANGE].start, leaf;
-            if (op === 'left' || op === 'right') {
-                if (!r.collapsed) {
-                    var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
-                    caretAt(end.node, end.offset);
-                    return true;
-                }
-                if (op === 'left') {
-                    if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
-                    leaf = leafBefore(host, p);
-                    if (!leaf) return false;
-                    if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
-                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
-                } else {
-                    if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
-                    leaf = leafAfter(host, p);
-                    if (!leaf) return false;
-                    if (leaf.nodeType === 3) caretAt(leaf, 1);
-                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
-                }
-                return true;
-            }
-            var inputType, data = null, changed = false;
-            if (!r.collapsed) {
-                r.deleteContents();
-                p = r[RANGE].start;
-                caretAt(p.node, p.offset);
-                changed = true;
-            }
-            if (op === 'insert') {
-                inputType = 'insertText';
-                data = String(text);
-                // A typed space at an edge or beside another space would
-                // collapse away: it goes in as a no-break space, as in Chrome.
-                if (data === ' ' && !preformatted(host)) {
-                    var t = p.node.nodeType === 3 ? p.node.data : '';
-                    var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
-                    if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
-                }
-                insertText(host, p, data);
-                changed = true;
-            } else if (op === 'enter') {
-                inputType = 'insertParagraph';
-                if (preformatted(host)) {
-                    insertText(host, p, '\n');
-                } else {
-                    var br = g.document.createElement('br');
-                    var after = null;
-                    if (p.node.nodeType === 3) {
-                        var rest = p.node.data.slice(p.offset);
-                        p.node.data = p.node.data.slice(0, p.offset);
-                        p.node.parentNode.insertBefore(br, p.node.nextSibling);
-                        after = g.document.createTextNode(rest);
-                        br.parentNode.insertBefore(after, br.nextSibling);
-                    } else {
-                        p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
-                    }
-                    // A line break at the very end needs a second one to
-                    // show the new empty line.
-                    if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
-                        br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
-                    }
-                    if (after) caretAt(after, 0);
-                    else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
-                }
-                changed = true;
-            } else if (op === 'back' || op === 'del') {
-                inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
-                if (!changed) {
-                    if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
-                        var cut = p.offset - 1;
-                        var code = p.node.data.charCodeAt(cut);
-                        if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
-                        p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
-                        caretAt(p.node, cut);
-                        changed = true;
-                    } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
-                        var stop = p.offset + 1;
-                        var hi = p.node.data.charCodeAt(p.offset);
-                        if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
-                        p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
-                        caretAt(p.node, p.offset);
-                        changed = true;
-                    } else {
-                        leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
-                        if (leaf && leaf.nodeType === 3) {
-                            if (op === 'back') {
-                                leaf.data = leaf.data.slice(0, -1);
-                                caretAt(leaf, leaf.data.length);
-                            } else {
-                                leaf.data = leaf.data.slice(1);
-                                caretAt(leaf, 0);
-                            }
-                            changed = true;
-                        } else if (leaf) {
-                            var parent = leaf.parentNode, at = childIndex(parent, leaf);
-                            parent.removeChild(leaf);
-                            if (p.node.nodeType !== 3) caretAt(parent, at);
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if (!changed) return false;
-            var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
-            trust(ev);
-            dispatchTo(host, ev);
+    __rk.editKey = function (hostId, op, text) {
+        var host = typeof hostId === 'number' ? wrap(hostId) : null;
+        if (!host) return false;
+        var r = selRange();
+        if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
+            caretAt(host, host.childNodes.length);
+            r = selRange();
+        }
+        if (op === 'all') {
+            setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
             return true;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+        }
+        var p = r[RANGE].start, leaf;
+        if (op === 'left' || op === 'right') {
+            if (!r.collapsed) {
+                var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
+                caretAt(end.node, end.offset);
+                return true;
+            }
+            if (op === 'left') {
+                if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
+                leaf = leafBefore(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
+            } else {
+                if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
+                leaf = leafAfter(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
+            }
+            return true;
+        }
+        var inputType, data = null, changed = false;
+        if (!r.collapsed) {
+            r.deleteContents();
+            p = r[RANGE].start;
+            caretAt(p.node, p.offset);
+            changed = true;
+        }
+        if (op === 'insert') {
+            inputType = 'insertText';
+            data = String(text);
+            // A typed space at an edge or beside another space would
+            // collapse away: it goes in as a no-break space, as in Chrome.
+            if (data === ' ' && !preformatted(host)) {
+                var t = p.node.nodeType === 3 ? p.node.data : '';
+                var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
+                if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
+            }
+            insertText(host, p, data);
+            changed = true;
+        } else if (op === 'enter') {
+            inputType = 'insertParagraph';
+            if (preformatted(host)) {
+                insertText(host, p, '\n');
+            } else {
+                var br = g.document.createElement('br');
+                var after = null;
+                if (p.node.nodeType === 3) {
+                    var rest = p.node.data.slice(p.offset);
+                    p.node.data = p.node.data.slice(0, p.offset);
+                    p.node.parentNode.insertBefore(br, p.node.nextSibling);
+                    after = g.document.createTextNode(rest);
+                    br.parentNode.insertBefore(after, br.nextSibling);
+                } else {
+                    p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
+                }
+                // A line break at the very end needs a second one to
+                // show the new empty line.
+                if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
+                    br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
+                }
+                if (after) caretAt(after, 0);
+                else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
+            }
+            changed = true;
+        } else if (op === 'back' || op === 'del') {
+            inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
+            if (!changed) {
+                if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
+                    var cut = p.offset - 1;
+                    var code = p.node.data.charCodeAt(cut);
+                    if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
+                    p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
+                    caretAt(p.node, cut);
+                    changed = true;
+                } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
+                    var stop = p.offset + 1;
+                    var hi = p.node.data.charCodeAt(p.offset);
+                    if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
+                    p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
+                    caretAt(p.node, p.offset);
+                    changed = true;
+                } else {
+                    leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
+                    if (leaf && leaf.nodeType === 3) {
+                        if (op === 'back') {
+                            leaf.data = leaf.data.slice(0, -1);
+                            caretAt(leaf, leaf.data.length);
+                        } else {
+                            leaf.data = leaf.data.slice(1);
+                            caretAt(leaf, 0);
+                        }
+                        changed = true;
+                    } else if (leaf) {
+                        var parent = leaf.parentNode, at = childIndex(parent, leaf);
+                        parent.removeChild(leaf);
+                        if (p.node.nodeType !== 3) caretAt(parent, at);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (!changed) return false;
+        var ev = make('InputEvent', 'input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
+        trust(ev);
+        dispatchTo(host, ev);
+        return true;
+    };
     // The selection as the engine last heard it changed: null when it did
     // not, else '' (none) or "anchorId anchorOffset focusId focusOffset".
-    Object.defineProperty(Document.prototype, '__rkTakeSelection', {
-        value: function () {
-            var key = selKey();
-            if (key === SELN.sent) return null;
-            SELN.sent = key;
-            return key;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.takeSelection = function () {
+        var key = selKey();
+        if (key === SELN.sent) return null;
+        SELN.sent = key;
+        return key;
+    };
     // An `<svg>` is one box in the layout. The shape of it a client point
     // is on, else the `<svg>`: found host-side, from the shapes' geometry
     // (svg_geometry.rs `shape_at`), with nothing a page can replace on the
@@ -5636,43 +5737,34 @@ const WRAPPERS_JS: &str = r#"
     // `publicPath` detection (`document.currentScript.src`). With it
     // missing, both threw "cannot convert null or undefined to object" and
     // the rest of the script never ran. The engine names the element
-    // through `__rkSetCurrentScript(id)` before each script and clears it
+    // through `__rk.setCurrentScript(id)` before each script and clears it
     // after; the hook is not enumerable.
     var currentScript = null;
     getter(Document.prototype, 'currentScript', function () {
         var s = slotOf(this); return s.gen === gen ? currentScript : null;
     });
-    Object.defineProperty(Document.prototype, '__rkSetCurrentScript', {
-        value: function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setCurrentScript = function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; };
     // The engine reports a script's outcome to its element: `load` or
     // `error`, which do not bubble (HTML "execute the script element").
-    Object.defineProperty(Document.prototype, '__rkFireOn', {
-        value: function (id, type) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (target) dispatchTo(target, new Event(type));
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireOn = function (id, type) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (target) dispatchTo(target, new Event(type));
+    };
     // The engine reports that an `<img>`'s image failed to load (a 404, a
     // failed connection, bytes that do not decode, its budget spent): the
     // element is marked with the `src`/`srcset` that failed, which is what
     // `img.complete` reads (web_reflect.js), and hears `error`.
     var failedImages = new WeakMap();
-    Object.defineProperty(Document.prototype, '__rkImageFailed', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            loadedImages.delete(target);
-            failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            var ev = new Event('error');
-            trust(ev);
-            dispatchTo(target, ev);
-            settleDecodes(target, false);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageFailed = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        loadedImages.delete(target);
+        failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        var ev = make('Event', 'error');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, false);
+    };
     // The engine reports that an `<img>`'s image is in (E54): the element
     // is marked with the `src`/`srcset` that loaded, the image's own size
     // and the URL it came from, which `complete`, `naturalWidth`,
@@ -5681,20 +5773,17 @@ const WRAPPERS_JS: &str = r#"
     // are one step, so a handler never runs for an image that reads as
     // still loading.
     var loadedImages = new WeakMap();
-    Object.defineProperty(Document.prototype, '__rkImageLoaded', {
-        value: function (id, width, height, url) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            failedImages.delete(target);
-            // No URL: a `data:` image, which is its own `src`.
-            loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
-            var ev = new Event('load');
-            trust(ev);
-            dispatchTo(target, ev);
-            settleDecodes(target, true);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageLoaded = function (id, width, height, url) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        failedImages.delete(target);
+        // No URL: a `data:` image, which is its own `src`.
+        loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+        var ev = make('Event', 'load');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, true);
+    };
     // `decode()` promises waiting on an `<img>` (web_reflect.js): each with
     // the `src`/`srcset` it waits for. They settle with the image's event,
     // and resolve when the engine gives up on it (E54 R1: a slow image the
@@ -5715,133 +5804,107 @@ const WRAPPERS_JS: &str = r#"
         pendingDecodes.delete(img);
         list.forEach(function (p) { if (ok) p[2](); else p[3](decodeError()); });
     }
-    Object.defineProperty(Document.prototype, '__rkDecodeWait', {
-        value: function (img, resolve, reject) {
-            if (sameSource(img, gaveUpImages.get(img))) return resolve();
-            var list = pendingDecodes.get(img) || [];
-            list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
-            pendingDecodes.set(img, list);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageGaveUp', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
-            settleDecodes(target, true);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageWritten', {
-        value: function (img) {
-            // A failure is not held against the restarted load, nor is a
-            // give-up; a successful image stays readable while the same
-            // `src` reloads (its mark is checked against `src`).
-            failedImages.delete(img);
-            gaveUpImages.delete(img);
-            var list = pendingDecodes.get(img);
-            if (!list) return;
-            var keep = list.filter(function (p) { return sameSource(img, p); });
-            list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
-            if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.decodeWait = function (img, resolve, reject) {
+        if (sameSource(img, gaveUpImages.get(img))) return resolve();
+        var list = pendingDecodes.get(img) || [];
+        list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
+        pendingDecodes.set(img, list);
+    };
+    __rk.imageGaveUp = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        settleDecodes(target, true);
+    };
+    __rk.imageWritten = function (img) {
+        // A failure is not held against the restarted load, nor is a
+        // give-up; a successful image stays readable while the same
+        // `src` reloads (its mark is checked against `src`).
+        failedImages.delete(img);
+        gaveUpImages.delete(img);
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        var keep = list.filter(function (p) { return sameSource(img, p); });
+        list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
+        if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
+    };
     // The mark of the image an `<img>` shows now: null while its current
     // `src`/`srcset` has not loaded.
-    Object.defineProperty(Document.prototype, '__rkImageLoadedFor', {
-        value: function (img) {
-            var mark = loadedImages.get(img);
-            if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
-            return mark;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
-    Object.defineProperty(Document.prototype, '__rkImageFailedFor', {
-        value: function (img) { return failedImages.get(img) || null; },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.imageLoadedFor = function (img) {
+        var mark = loadedImages.get(img);
+        if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+        return mark;
+    };
+    __rk.imageFailedFor = function (img) { return failedImages.get(img) || null; };
     // The engine's CSS transitions report their phases (css-transitions-2
     // §4): a trusted TransitionEvent that bubbles; `transitionend` can be
     // cancelled, the others not. An element taken out of the document
     // still hears its `transitioncancel`.
-    Object.defineProperty(Document.prototype, '__rkFireTransition', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            init.bubbles = true;
-            init.cancelable = type === 'transitionend';
-            var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
-            trust(ev);
-            dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireTransition = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init.bubbles = true;
+        init.cancelable = type === 'transitionend';
+        var ev = make('TransitionEvent', type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     // Likewise the engine's `@keyframes` animations (css-animations-1 §5):
     // a trusted AnimationEvent that bubbles and cannot be cancelled.
-    Object.defineProperty(Document.prototype, '__rkFireAnimation', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return;
-            init.bubbles = true;
-            init.cancelable = false;
-            var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
-            trust(ev);
-            dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireAnimation = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init.bubbles = true;
+        init.cancelable = false;
+        var ev = make('AnimationEvent', type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     // The engine delivers the user's mouse input: a trusted event that
     // bubbles and can be cancelled (UI Events §3.4), except the enter and
     // leave events, which do neither and go to one element each.
     // `pointer*` and `click` are PointerEvents of the mouse (Pointer
     // Events §4, §12); `mousedown`, `mouseup` and `click` carry the click
     // count. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireMouse', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return true;
-            // The pointer is on a shape of an `<svg>`, which the layout
-            // sees as one box: the event's target is the shape.
-            if (target.localName === 'svg' && typeof init.clientX === 'number') {
-                target = svgShapeAt(target, init.clientX, init.clientY);
-            }
-            // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
-            var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
-                type.indexOf('pointer') === 0;
-            var edge = /(enter|leave)$/.test(type);
-            var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
-            init.bubbles = !edge;
-            init.cancelable = !edge && type !== 'pointercancel';
-            init.composed = !edge;
-            init.view = g;
-            init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
-            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
-            if (pointer) {
-                init.pointerId = 1;
-                init.pointerType = 'mouse';
-                init.isPrimary = true;
-                init.pressure = init.buttons ? 0.5 : 0;
-            }
-            var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
-            trust(ev);
-            // Where the point is in the document and in the target's box.
-            var at = {
-                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-                offsetX: init.offsetX, offsetY: init.offsetY,
-                movementX: init.movementX, movementY: init.movementY
-            };
-            // A move or a boundary event has no button of its own: `which`
-            // is the primary button while it is held.
-            if (!press && !pointer) at.which = init.buttons & 1;
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
-            return dispatchTo(target, ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireMouse = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return true;
+        // The pointer is on a shape of an `<svg>`, which the layout
+        // sees as one box: the event's target is the shape.
+        if (target.localName === 'svg' && typeof init.clientX === 'number') {
+            target = svgShapeAt(target, init.clientX, init.clientY);
+        }
+        // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
+        var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
+            type.indexOf('pointer') === 0;
+        var edge = /(enter|leave)$/.test(type);
+        var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
+        init.bubbles = !edge;
+        init.cancelable = !edge && type !== 'pointercancel';
+        init.composed = !edge;
+        init.view = g;
+        init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        if (pointer) {
+            init.pointerId = 1;
+            init.pointerType = 'mouse';
+            init.isPrimary = true;
+            init.pressure = init.buttons ? 0.5 : 0;
+        }
+        var ev = make(pointer && __rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', type, init);
+        // Where the point is in the document and in the target's box.
+        var at = {
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY,
+            movementX: init.movementX, movementY: init.movementY
+        };
+        // A move or a boundary event has no button of its own: `which`
+        // is the primary button while it is held.
+        if (!press && !pointer) at.which = init.buttons & 1;
+        extra(ev, at);
+        trust(ev);
+        return dispatchTo(target, ev);
+    };
 
     // Whether a wheel at this element can be cancelled: something on its
     // way up to the window listens for `wheel` and is not passive (an
@@ -5879,7 +5942,7 @@ const WRAPPERS_JS: &str = r#"
     // only passive listeners hear it.
     __rk.fireWheel = function (id, init, cancelable) {
             var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target || typeof g.WheelEvent !== 'function') return true;
+            if (!target || !__rk.hasCtor('WheelEvent')) return true;
             if (target.localName === 'svg') target = svgShapeAt(target, init.clientX, init.clientY);
             init.bubbles = true;
             init.cancelable = cancelable !== false;
@@ -5890,19 +5953,17 @@ const WRAPPERS_JS: &str = r#"
             var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * Math.max(1, Math.round(Math.abs(d) / 100)); };
             init.wheelDeltaX = notches(init.deltaX);
             init.wheelDeltaY = notches(init.deltaY);
-            var ev = new g.WheelEvent('wheel', init);
-            trust(ev);
+            var ev = make('WheelEvent', 'wheel', init);
             // A target with no `wheel` listener or handler hears the legacy
             // `mousewheel` instead (Chrome for Testing 148; the user's
-            // wheel only).
-            if (mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute()) ev[LEGACY] = 'mousewheel';
+            // wheel only). Kept in a private map, read by `invoke`.
+            if (mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute()) mapSet(LEGACY_TYPE, ev, 'mousewheel');
             var at = {
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY
             };
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
+            extra(ev, at);
+            trust(ev);
             return dispatchTo(target, ev);
     };
 
@@ -5912,40 +5973,33 @@ const WRAPPERS_JS: &str = r#"
     // is the current drag operation. Returns 'notCancelled:operation',
     // the operation being what the dataTransfer's effects allow after the
     // listeners ran.
-    Object.defineProperty(Document.prototype, '__rkFireDrag', {
-        value: function (id, type, init, op) {
-            var store = g.__rkDragStore;
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!store || !target) return '1:none';
-            if (type === 'dragstart') store.begin(target);
-            var dt = store.prepare(type, op);
-            var cancelable = type !== 'dragleave' && type !== 'dragend';
-            init.bubbles = true;
-            init.cancelable = cancelable;
-            init.composed = true;
-            init.view = g;
-            init.detail = 0;
-            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
-            init.dataTransfer = dt;
-            var ev = new (g.DragEvent || g.MouseEvent)(type, init);
-            if (!(ev.dataTransfer instanceof Object)) {
-                Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
-            }
-            trust(ev);
-            var at = {
-                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-                offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
-            };
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
-            });
-            var notCancelled = dispatchTo(target, ev);
-            // A cancelled dragstart ends the drag before it began.
-            var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
-            return (notCancelled ? '1:' : '0:') + settled;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireDrag = function (id, type, init, op) {
+        var store = __rk.dragStore;
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!store || !target) return '1:none';
+        if (type === 'dragstart') store.begin(target);
+        var dt = store.prepare(type, op);
+        var cancelable = type !== 'dragleave' && type !== 'dragend';
+        init.bubbles = true;
+        init.cancelable = cancelable;
+        init.composed = true;
+        init.view = g;
+        init.detail = 0;
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        init.dataTransfer = dt;
+        var ev = make(__rk.hasCtor('DragEvent') ? 'DragEvent' : 'MouseEvent', type, init);
+
+        var at = {
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0, dataTransfer: dt
+        };
+        extra(ev, at);
+        trust(ev);
+        var notCancelled = dispatchTo(target, ev);
+        // A cancelled dragstart ends the drag before it began.
+        var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
+        return (notCancelled ? '1:' : '0:') + settled;
+    };
 
     // The engine delivers the user's key press or release to the focused
     // element: a trusted KeyboardEvent that bubbles and can be cancelled
@@ -5971,7 +6025,7 @@ const WRAPPERS_JS: &str = r#"
                 init.keyCode = virtualKey(init.key);
                 init.charCode = 0;
             }
-            var ev = new g.KeyboardEvent(type, init);
+            var ev = make('KeyboardEvent', type, init);
             trust(ev);
             return dispatchTo(target, ev);
     };
@@ -6000,7 +6054,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireTextInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target || typeof __rk.newTextEvent !== 'function') return true;
-            var ev = __rk.newTextEvent('textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
+            var ev = make('TextEvent', 'textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
             trust(ev);
             return dispatchTo(target, ev);
     };
@@ -6014,10 +6068,8 @@ const WRAPPERS_JS: &str = r#"
             if (!target) return;
             // The user edited it: `change` when it loses the focus
             // (node_apis.js).
-            Object.defineProperty(target, '__rkEdited', {
-                value: true, configurable: true, enumerable: false, writable: true
-            });
-            var ev = new g.InputEvent('input', {
+            __rk.markEdited(target);
+            var ev = make('InputEvent', 'input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
             });
@@ -6072,7 +6124,7 @@ const WRAPPERS_JS: &str = r#"
         N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
     }
     function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
-    var LEGACY = Symbol('rustkit.legacyType');
+    var LEGACY_TYPE = new WeakMap();
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -6119,9 +6171,13 @@ const WRAPPERS_JS: &str = r#"
     };
     // A listener's exception goes to the engine's error log, not to the
     // dispatcher (as in a browser, where it reaches window.onerror).
+    var callNow = uncurry(Function.prototype.call);
     function callListener(t, cb, event) {
         try {
-            return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
+            // The call of install time: a page that replaces
+            // Function.prototype.call does not stand between the engine's
+            // dispatch and a listener.
+            return typeof cb === 'function' ? callNow(cb, t, event) : cb.handleEvent(event);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
         }
@@ -6322,19 +6378,21 @@ const WRAPPERS_JS: &str = r#"
     });
     var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
-        event.currentTarget = t;
-        event.eventPhase = phase;
+        mapSet(EV_CURRENT, event, t);
+        mapSet(EV_PHASE, event, phase);
         // A listener sees the target as its own tree sees it: a node inside a
         // shadow tree is the host to a listener outside.
-        if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
-        var all = LISTENERS.get(t), list = all && all[event.type];
+        if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
+        var type = evType(event);
+        var all = LISTENERS.get(t), list = all && all[type];
         // The legacy type, at a target with no listener or handler for the
-        // event's own (the user's wheel as `mousewheel`).
-        var legacy = event[LEGACY], own = event.type;
-        if (legacy && !(list && list.length) && typeof handlerOf(t, own) !== 'function' &&
+        // event's own (the user's wheel as `mousewheel`). The engine's
+        // event changes type in the type map only, never by assignment.
+        var legacy = mapGet(LEGACY_TYPE, event);
+        if (legacy && mapHas(EVTYPE, event) && !(list && list.length) && typeof handlerOf(t, type) !== 'function' &&
             ((all && all[legacy] && all[legacy].length) || typeof handlerOf(t, legacy) === 'function')) {
-            event.type = legacy;
-            try { invoke(t, event, phase, capture); } finally { event.type = own; }
+            mapSet(EVTYPE, event, legacy);
+            try { invoke(t, event, phase, capture); } finally { mapSet(EVTYPE, event, type); }
             return;
         }
         if (list) {
@@ -6342,15 +6400,15 @@ const WRAPPERS_JS: &str = r#"
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
-                if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
+                if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
                 var passiveBefore = passiveNow;
                 passiveNow = l.passive === true ? event : null;
                 try { callListener(t, l.cb, event); } finally { passiveNow = passiveBefore; }
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
-        if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
+        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
+        if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
             if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
@@ -6358,7 +6416,7 @@ const WRAPPERS_JS: &str = r#"
     // never reaches window from a node).
     function eventParent(n, event) {
         if (n === g) return null;
-        if (n === doc) return event.type === 'load' ? null : g;
+        if (n === doc) return evType(event) === 'load' ? null : g;
         if (!n[SLOT]) return null;
         var p = n.parentNode;
         // A composed event goes on from a shadow root to its host.
@@ -6371,38 +6429,50 @@ const WRAPPERS_JS: &str = r#"
     // call with "was not cancelled" once the listeners have run, or null.
     var activation = null, SYNTHETIC_CLICK = Symbol('rustkit.click');
     function activationFor(t, event) {
-        if (!activation || event.type !== 'click' || !t[SLOT]) return null;
-        if (!event[SYNTHETIC_CLICK] && !(typeof g.MouseEvent === 'function' && event instanceof g.MouseEvent)) return null;
+        if (!activation || evType(event) !== 'click' || !t[SLOT]) return null;
+        if (!event[SYNTHETIC_CLICK] && !isMouseClick(event)) return null;
         return activation(t, event);
     }
     EventTarget.prototype.dispatchEvent = function (event) {
-        if (event == null || typeof event !== 'object' || event.type === undefined) {
+        // An Event: made by one of the Event constructors or by the engine
+        // (both stamp it). Anything else, a look-alike or a Proxy of an
+        // event included, is a TypeError, as in Chrome.
+        if (event == null || typeof event !== 'object' || !setHas(STAMPED, event)) {
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
+        }
+        // An event already being dispatched cannot be dispatched again.
+        if (setHas(DISPATCHING, event)) {
+            throw new DOMException("Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.", 'InvalidStateError');
         }
         // Only the engine's own event, on its one dispatch, is trusted.
         stamp(event);
         if (setHas(UNDISPATCHED, event)) setDrop(UNDISPATCHED, event); else setDrop(TRUSTED, event);
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
-        event.target = t;
+        mapSet(EV_TARGET, event, t);
         event[ORIGIN] = t;
         event[PATH] = path;
         var activated = activationFor(t, event);
-        for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
-        if (!event[STOP]) invoke(t, event, 2, true);
-        if (!event[STOP]) invoke(t, event, 2, false);
-        if (event.bubbles) {
-            for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+        setAdd(DISPATCHING, event);
+        try {
+            for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
+            if (!event[STOP]) invoke(t, event, 2, true);
+            if (!event[STOP]) invoke(t, event, 2, false);
+            if (event.bubbles) {
+                for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+            }
+        } finally {
+            setDrop(DISPATCHING, event);
+            event[STOP] = event[STOP_NOW] = false;
+            mapSet(EV_CURRENT, event, null);
+            mapSet(EV_PHASE, event, 0);
+            // After dispatch the target is the outermost host (the node
+            // itself when it is in the document), and there is no path.
+            mapSet(EV_TARGET, event, HOOKS.retarget ? HOOKS.retarget(t, g) : t);
+            event[ORIGIN] = null;
+            event[PATH] = null;
         }
-        event[STOP] = event[STOP_NOW] = false;
-        event.currentTarget = null;
-        event.eventPhase = 0;
-        // After dispatch the target is the outermost host (the node itself
-        // when it is in the document), and there is no path.
-        event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
-        event[ORIGIN] = null;
-        event[PATH] = null;
         // The canceled flag, not a property a listener can redefine; an
         // object that is not an Event keeps its own.
         var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
@@ -6412,6 +6482,7 @@ const WRAPPERS_JS: &str = r#"
     // The engine's own dispatches go through this, whatever a page has put
     // in place of `dispatchEvent` since.
     var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
+    __rk.dispatchTo = dispatchTo;
 
     function Event(type, init) {
         if (!(this instanceof Event)) {
@@ -6421,27 +6492,30 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present.");
         }
         init = init || {};
-        this.type = String(type);
-        this.bubbles = !!init.bubbles;
+        // Own properties, defined (not assigned): what a page puts on the
+        // prototypes is never run for them. The type is kept here too, and
+        // `cancelable` in a private set (WHL3).
+        mapSet(EVTYPE, this, String(type));
+        defineOwn(this, 'type', getterDesc(TYPE_GET));
+        own(this, 'bubbles', !!init.bubbles);
         setCancelable(this, !!init.cancelable);
-        this.composed = !!init.composed;
-        this.target = null;
-        this.currentTarget = null;
-        this.eventPhase = 0;
+        own(this, 'composed', !!init.composed);
         stamp(this);
-        this.timeStamp = Date.now();
+        own(this, 'timeStamp', Date.now());
     }
+    var TYPE_GET = Object.getOwnPropertyDescriptor({ get type() { return mapGet(EVTYPE, this); } }, 'type').get;
+    function own(o, k, v) { defineOwn(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
     // The legacy initializers; they do nothing during dispatch.
     // Re-initialising clears the canceled flag (DOM §2.2 "initialize");
     // during dispatch it does nothing.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {
-        if (this.eventPhase !== 0) return;
-        this.type = String(type);
-        this.bubbles = !!bubbles;
+        if (setHas(DISPATCHING, this)) return;
+        if (mapHas(EVTYPE, this)) mapSet(EVTYPE, this, String(type)); else this.type = String(type);
+        own(this, 'bubbles', !!bubbles);
         setCancelable(this, !!cancelable);
         setDrop(CANCELED, this);
     };
-    function cancel(ev) { if (ev.cancelable && passiveNow !== ev) setAdd(CANCELED, ev); }
+    function cancel(ev) { if (setHas(CANCELABLE, ev) && passiveNow !== ev) setAdd(CANCELED, ev); }
     // `cancelable` is read-only, as in Chrome for Testing 148 (assignment
     // does nothing; strict code throws).
     Object.defineProperty(Event.prototype, 'cancelable', {
@@ -6471,6 +6545,9 @@ const WRAPPERS_JS: &str = r#"
     });
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
+    getter(Event.prototype, 'target', function () { return mapHas(EV_TARGET, this) ? mapGet(EV_TARGET, this) : null; });
+    getter(Event.prototype, 'currentTarget', function () { return mapHas(EV_CURRENT, this) ? mapGet(EV_CURRENT, this) : null; });
+    getter(Event.prototype, 'eventPhase', function () { return mapHas(EV_PHASE, this) ? mapGet(EV_PHASE, this) : 0; });
     Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
     ['NONE', 'CAPTURING_PHASE', 'AT_TARGET', 'BUBBLING_PHASE'].forEach(function (k, i) {
         Event[k] = Event.prototype[k] = i;
@@ -6487,12 +6564,14 @@ const WRAPPERS_JS: &str = r#"
     });
     Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
     CustomEvent.prototype.initCustomEvent = function (type, bubbles, cancelable, detail) {
-        if (this.eventPhase !== 0) return;
+        if (setHas(DISPATCHING, this)) return;
         this.initEvent(type, bubbles, cancelable);
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
+    __rk.keepCtor('Event', Event);
+    __rk.keepCtor('CustomEvent', CustomEvent);
 
     // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
     // XML parser, which RustKit does not have yet.
@@ -6525,15 +6604,14 @@ const WRAPPERS_JS: &str = r#"
     // label's activation gives its control (trusted when the label's was).
     function clickElement(el, trusted) {
         if (el.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(el.localName)) return;
-        var C = typeof g.PointerEvent === 'function' ? g.PointerEvent : g.MouseEvent;
         var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
                      pointerId: -1, pointerType: '' };
-        var e = typeof C === 'function' ? new C('click', init) : new Event('click', init);
+        var e = make(__rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', 'click', init);
         e[SYNTHETIC_CLICK] = true;
         if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
-        if (dispatchTo(el, e) && g.__rustkit_follow_link) g.__rustkit_follow_link(el);
+        if (dispatchTo(el, e) && __rk.followLink) __rk.followLink(el);
     }
     HTMLElement.prototype.click = function click() { clickElement(this, false); };
 
@@ -6585,13 +6663,13 @@ const WRAPPERS_JS: &str = r#"
     };
     // web_cssom.js publishes constructed-sheet text through this. The
     // wrapper's slot is private to this closure.
-    g.__rkSetAdoptedStyles = function (node, json) {
+    __rk.setAdoptedStyles = function (node, json) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
     };
     // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
-    g.__rkSetSheetDisabled = function (node, on) {
+    __rk.setSheetDisabled = function (node, on) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setSheetDisabled(s.gen, s.id, !!on);
@@ -6599,7 +6677,7 @@ const WRAPPERS_JS: &str = r#"
     // web_cssom.js: which sheet a <style> owns now (a number that changes
     // when its children change or it moves); -1 for a node of another
     // document.
-    g.__rkSheetGeneration = function (node) {
+    __rk.sheetGeneration = function (node) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return -1;
         return N.info(s.gen, s.id, 'sheetGen');
@@ -6627,14 +6705,14 @@ const WRAPPERS_JS: &str = r#"
         }
     };
 
-    g.__rustkit_dom_reset = function (newGen) {
+    __rk.domReset = function (newGen) {
         gen = newGen;
         cache = new Map();
         var root = N.root(gen, 'document');
         Object.defineProperty(doc, SLOT, { value: { id: root, gen: gen }, configurable: true });
         if (typeof root === 'number') cache.set(root, doc);
     };
-    g.__rustkit_dom_reset(0);
+    __rk.domReset(0);
 })(globalThis);
 "#;
 

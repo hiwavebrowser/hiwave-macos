@@ -1339,6 +1339,38 @@ impl JsRuntime {
         }
     }
 
+    /// [`evaluate_bookkeeping`](Self::evaluate_bookkeeping) for what the
+    /// embedder's scripts keep on the host object: `body` is a function
+    /// body whose `__rk` is the host object (`return __rk.now();`). The
+    /// same rules: the interrupt word does not stop it, no promise jobs
+    /// run, and it must call none of the page's functions.
+    pub fn evaluate_host_bookkeeping(&mut self, body: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let armed = self.deadline.armed.get();
+            self.arm(false);
+            let wrapped = format!("(function (__rk) {{\n{body}\n}})");
+            let host = boa_engine::JsValue::from(self.host.clone());
+            let result = self
+                .context
+                .eval(boa_engine::Source::from_bytes(wrapped.as_bytes()))
+                .and_then(|function| match function.as_callable() {
+                    Some(function) => function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context),
+                    None => Ok(boa_engine::JsValue::undefined()),
+                });
+            self.arm(armed);
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(err.to_string())),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = body;
+            Err(JsError::NotInitialized)
+        }
+    }
+
     /// Evaluate the embedder's own bookkeeping script (reading a queue or a
     /// table the page's script filled), which the interrupt word never
     /// stops: a stop landing in it would lose what it reads, such as the
