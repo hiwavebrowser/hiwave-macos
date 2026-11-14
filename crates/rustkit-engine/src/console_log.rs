@@ -99,9 +99,9 @@ pub(crate) fn swap_test_hooks(hooks: TestHooks) -> TestHooks {
 }
 
 /// `name` (an engine script label) was loaded from `url`. Ignored when the
-/// switch is off.
+/// switch and the console file (`console_file`) are both off.
 pub(crate) fn alias(name: &str, url: &str) {
-    if !enabled() {
+    if !enabled() && !crate::console_file::enabled() {
         return;
     }
     with_aliases(|map| {
@@ -114,7 +114,7 @@ pub(crate) fn alias(name: &str, url: &str) {
 
 /// The URL an engine script label stands for, or `path` itself; either
 /// way through [`brief_place`].
-fn resolve(path: &str) -> String {
+pub(crate) fn resolve(path: &str) -> String {
     let url = with_aliases(|map| map.entries.iter().rev().find(|(name, _)| name == path).map(|(_, url)| url.clone()));
     brief_place(url.flatten().as_deref().unwrap_or(path))
 }

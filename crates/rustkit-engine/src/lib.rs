@@ -9642,7 +9642,7 @@ impl Engine {
                     )
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
@@ -10094,7 +10094,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the

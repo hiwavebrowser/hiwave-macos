@@ -4,7 +4,8 @@
 //! members the bindings saw. Every function here returns at once when the
 //! view's Inspector has nobody listening, unless `HIWAVE_CONSOLE_LOG=1`
 //! (see `console_log`), which mirrors console output and those page errors
-//! into the tracing log.
+//! into the tracing log, or `HIWAVE_CONSOLE_LOG=<path>` (see
+//! `console_file`), which writes them, as text, to a file of their own.
 //!
 //! An error record is built from the runtime's report only, never from the
 //! script log's text: the report holds no text the page chose unless error
@@ -20,9 +21,12 @@ use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 /// Set up a document's new bindings for a listening Inspector: console
 /// calls with their positions, error reports, unsupported members' callers.
 /// Nothing is set up (and nothing costs anything) when nobody listens and
-/// `HIWAVE_CONSOLE_LOG` is unset.
-pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
-    let mirror = crate::console_log::enabled();
+/// `HIWAVE_CONSOLE_LOG` is unset. `view` is the engine's id for the view.
+pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>, view: u64) {
+    // The console file wants what the tracing mirror wants of the runtime:
+    // the text of console calls and of errors. `mirror` is either of them.
+    let file = crate::console_file::enabled();
+    let mirror = crate::console_log::enabled() || file;
     let listening = inspector.is_active();
     if !listening && !mirror {
         return;
@@ -35,8 +39,14 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     }
     let shapes = mirror && !inspector.keeps_console_text();
     let sink = inspector.clone();
+    inspector.set_view_id(view);
+    let page = file.then(|| crate::console_file::Page::new(view, &bindings.location().href));
     bindings.set_console_handler(Box::new(move |level, message, at, stack| {
         crate::console_log::console_message(level, message, at);
+        if let Some(page) = &page {
+            let at = at.map(|at| (at.path.as_str(), at.line, method_column(level, at.column)));
+            crate::console_file::console(page, level, message, at);
+        }
         if !shapes {
             console_record(&sink, level, message, at, stack);
         }
@@ -59,9 +69,21 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
     bindings.set_console_held_counter(Some(inspector.console_held_counter()));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
-    // The mirror quotes the source around a throw. The Inspector does not,
-    // so the text is kept only while the mirror is on.
-    bindings.capture_script_sources(mirror);
+    // The tracing mirror quotes the source around a throw. The Inspector
+    // and the console file do not, so the text is kept only while it is on.
+    bindings.capture_script_sources(crate::console_log::enabled());
+}
+
+/// Boa places a console call at its `(`; a browser places it at the
+/// method's name (`console.log(` is `log`), which is the name's length
+/// before.
+fn method_column(level: rustkit_js::LogLevel, column: u32) -> u32 {
+    let method_len = match level {
+        rustkit_js::LogLevel::Log => 3,
+        rustkit_js::LogLevel::Info | rustkit_js::LogLevel::Warn => 4,
+        rustkit_js::LogLevel::Error | rustkit_js::LogLevel::Debug => 5,
+    };
+    if column > method_len { column - method_len } else { column }
 }
 
 /// `stacks` with every function name dropped: frames keep their place.
@@ -84,6 +106,7 @@ fn console_record(
     if !sink.is_active() {
         return;
     }
+    let location = at.and_then(|at| sink.frame_location(&at.path, at.line, method_column(level, at.column)));
     let level = match level {
         rustkit_js::LogLevel::Log => ConsoleLevel::Log,
         rustkit_js::LogLevel::Info => ConsoleLevel::Info,
@@ -91,17 +114,6 @@ fn console_record(
         rustkit_js::LogLevel::Error => ConsoleLevel::Error,
         rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
     };
-    // Boa places a call at its `(`; a browser places it at the method's
-    // name (`console.log(` is `log`), which is the name's length before.
-    let method_len = match level {
-        ConsoleLevel::Log => 3,
-        ConsoleLevel::Info | ConsoleLevel::Warn => 4,
-        ConsoleLevel::Error | ConsoleLevel::Debug => 5,
-    };
-    let location = at.and_then(|at| {
-        let column = if at.column > method_len { at.column - method_len } else { at.column };
-        sink.frame_location(&at.path, at.line, column)
-    });
     sink.console_with_stacks(level, message, location, stacks);
 }
 
@@ -246,7 +258,7 @@ fn drain_dynamic_imports(bindings: &DomBindings, mirror: bool) {
 }
 
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
-    let mirror = crate::console_log::enabled();
+    let mirror = crate::console_log::enabled() || crate::console_file::enabled();
     if !inspector.is_active() && !mirror {
         drain_dynamic_imports(bindings, false);
         return;
@@ -264,12 +276,17 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 /// The page's error reports since the last drain, under `source`.
 pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     let mirror = crate::console_log::enabled();
+    let file = crate::console_file::enabled();
     let listening = inspector.is_active();
     drain_dynamic_imports(bindings, mirror);
-    if !listening && !mirror {
+    if !listening && !mirror && !file {
         return;
     }
+    let page = file.then(|| crate::console_file::Page::new(inspector.view_id(), &bindings.location().href));
     for report in bindings.take_error_reports() {
+        if let Some(page) = &page {
+            crate::console_file::page_error(page, &report);
+        }
         if mirror {
             let window = report.frames.first().and_then(|frame| {
                 bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
