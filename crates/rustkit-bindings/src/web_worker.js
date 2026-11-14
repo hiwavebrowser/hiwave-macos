@@ -30,23 +30,35 @@
         'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0', 'text/javascript1.1',
         'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
         'text/livescript', 'text/x-ecmascript', 'text/x-javascript'];
-    function isJavaScript(headers) {
+    // The first value of a response header, or null.
+    function header(headers, name) {
         for (var i = 0; headers && i < headers.length; i++) {
-            if (String(headers[i][0]).toLowerCase() !== 'content-type') continue;
-            var essence = String(headers[i][1]).split(';')[0].trim().toLowerCase();
-            return indexOf(JS_MIME, essence) >= 0;
+            if (String(headers[i][0]).toLowerCase() === name) return String(headers[i][1]);
         }
-        return false;
+        return null;
+    }
+    // The MIME type's essence (`type/subtype`, lower case) of the Content-Type, or null when it does not
+    // parse as one (MIME Sniffing 4.4: tokens around one slash, HTTP whitespace trimmed).
+    var TOKEN_PAIR = /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/;
+    function essenceOf(headers) {
+        var value = header(headers, 'content-type');
+        if (value === null) return null;
+        var essence = value.split(';')[0].replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '').toLowerCase();
+        return TOKEN_PAIR.test(essence) ? essence : null;
+    }
+    function isJavaScript(headers) {
+        var essence = essenceOf(headers);
+        return essence !== null && indexOf(JS_MIME, essence) >= 0;
     }
     // A worker script of an image, audio, video or text/csv type is refused (Fetch, "should response to
     // request be blocked due to its MIME type"), as in Chrome; any other type runs.
+    // With `X-Content-Type-Options: nosniff` it must be JavaScript (Fetch, "should response to request be
+    // blocked due to nosniff"), as in Chrome, which refuses a text/plain one then.
     function blockedScriptType(headers) {
-        for (var i = 0; headers && i < headers.length; i++) {
-            if (String(headers[i][0]).toLowerCase() !== 'content-type') continue;
-            var essence = String(headers[i][1]).split(';')[0].trim().toLowerCase();
-            return /^(audio|image|video)\//.test(essence) || essence === 'text/csv';
-        }
-        return false;
+        var essence = essenceOf(headers);
+        if (essence !== null && (/^(audio|image|video)\//.test(essence) || essence === 'text/csv')) return true;
+        var nosniff = header(headers, 'x-content-type-options');
+        return nosniff !== null && nosniff.split(',')[0].trim().toLowerCase() === 'nosniff' && !isJavaScript(headers);
     }
     // A request descriptor with every key the bridge reads, so it reads none through a prototype.
     function scriptRequest(url, destination, mode) {
@@ -111,8 +123,17 @@
         urls.forEach(function (raw, i) {
             var href;
             try { href = new g.URL(raw, st.href).href; } catch (_) { settle(i, { ok: false }); return; }
-            // Cross-origin imports need CORS here (Chrome's classic imports are no-cors): stricter, not looser.
-            var nid = net ? net.request(scriptRequest(href, 'script', 'cors'), function (r) {
+            // A blob: URL the page made: its bytes from the host's blob store, as `new Worker(blob:)` reads them.
+            if (href.indexOf('blob:') === 0) {
+                var found = __rk.blobGet(href.split('#')[0]);
+                if (!found) { settle(i, { ok: false }); return; }
+                try { settle(i, { ok: true, src: new g.TextDecoder().decode(new Uint8Array(found[0])) }); }
+                catch (_) { settle(i, { ok: false }); }
+                return;
+            }
+            // A classic import is a no-cors request, as in Chrome: another origin's script runs without CORS
+            // headers. The policy hands the engine its body (it is a script); page script never sees it.
+            var nid = net ? net.request(scriptRequest(href, 'script', 'no-cors'), function (r) {
                 if (!r.ok || r.status < 200 || r.status >= 300 || !isJavaScript(r.headers)) { settle(i, { ok: false }); return; }
                 try { settle(i, { ok: true, src: new g.TextDecoder().decode(fromBase64(r.body_b64)) }); }
                 catch (_) { settle(i, { ok: false }); }
@@ -252,6 +273,8 @@
                 st.net = 0;
                 if (st.dead) return;
                 if (!r.ok || r.status < 200 || r.status >= 300 || blockedScriptType(r.headers)) { failLoad(self, st); return; }
+                // The worker's URL is the response's, after redirects: its location and its imports' base.
+                try { u = new g.URL(String(r.url || u.href)); st.href = u.href; } catch (_) {}
                 var source;
                 try { source = new g.TextDecoder().decode(fromBase64(r.body_b64)); } catch (_) { failLoad(self, st); return; }
                 begin(source);

@@ -101,14 +101,15 @@ fn url_workers_and_import_scripts_load_through_the_engine_as_in_chrome() {
 
 /// The #1105 follow-ups (R1 at eee9d5c4), vs the pinned Chrome (CfT 148.0.7778.216) on the same routes:
 /// `docs/diagnostics/2026-11-14/worker_csp_probe.mjs`, output `worker_csp_cft148.json` (its CSP cases wait for
-/// page CSP, which the engine does not apply yet). Two local servers: the page's (127.0.0.1) and another
-/// origin (localhost). Extra response headers ride in the content type, which the test server writes as is.
+/// page CSP, which the engine does not apply yet). Two local servers: the page's and another origin's (the
+/// same address on another port). Extra response headers ride in the content type, which the test server writes as is.
 const FOLLOW_UPS_CHROME: &str = include_str!("../../../docs/diagnostics/2026-11-14/worker_csp_cft148.json");
 
 const FOLLOW_UPS: &[(&str, &str, &str)] = &[
     ("url_worker_no_csp", "url", "/w.js"),
-    ("import_cross_origin_without_cors", "url", "/imports_cross.js"),
-    ("import_cross_origin_with_cors", "url", "/imports_cross_cors.js"),
+    // Not here: `import_cross_origin_without_cors` / `_with_cors`. The policy's private-network rule lets a
+    // loopback page reach only its own origin, so a second local server is out of reach; the no-cors script
+    // request is pinned at the policy (`a_no_cors_script_request_hands_the_engine_its_body`).
     ("worker_script_text_plain_nosniff", "url", "/plain_nosniff.js"),
     ("worker_location_after_redirect", "url", "/redir_w.js"),
     ("import_scripts_partial_failure", "url", "/imports_partial.js"),
@@ -121,7 +122,8 @@ fn follow_up_log(kind: &str, what: &str, want: usize) -> Vec<String> {
         ("/lib_cors.js", "text/javascript
 Access-Control-Allow-Origin: *", "self.libValue = 'b';".to_string()),
     ]);
-    let origin_b = format!("http://localhost:{}", other.port);
+    // Another origin: the same address on another port (Chrome's file used localhost).
+    let origin_b = format!("http://127.0.0.1:{}", other.port);
     let server = serve_routes(vec![
         ("/", "text/html", "<!doctype html><title>w</title>".to_string()),
         ("/w.js", JS, "postMessage('ran:' + self.location.pathname);".to_string()),

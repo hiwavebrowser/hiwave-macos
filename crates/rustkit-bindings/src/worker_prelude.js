@@ -199,12 +199,14 @@
         var urls = [].map.call(arguments, String);
         if (!urls.length || closing) return;
         var raw = fetchHost(JSON.stringify(urls)), res = raw ? JSON.parse(raw) : null;
+        // In order: each runs once fetched, and the first that failed stops the rest with a NetworkError
+        // (the ones before it have run), as in Chrome.
         for (var i = 0; i < urls.length; i++) {
             if (!res || !res[i] || !res[i].ok) {
                 throw new DOMException("Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '" + urls[i] + "' failed to load.", 'NetworkError');
             }
+            (0, eval)(res[i].src);
         }
-        for (var j = 0; j < res.length; j++) (0, eval)(res[j].src);
     });
     hide('__rk_worker_setup', function (name, locJson) {
         g.name = String(name);

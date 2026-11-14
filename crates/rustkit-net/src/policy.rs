@@ -1089,6 +1089,13 @@ impl FetchPolicy {
             headers.remove("set-cookie");
             headers.remove("set-cookie2");
             ResponseKind::Basic
+        } else if req.mode == RequestMode::NoCors && req.destination == RequestDestination::Script {
+            // A classic script (a worker's `importScripts`) runs from an opaque response: the engine gets
+            // its body and type to run it, read below under the size limit; page script never sees either
+            // (only the engine's own scripts make script requests). Any other opaque response is empty.
+            headers.remove("set-cookie");
+            headers.remove("set-cookie2");
+            ResponseKind::Opaque
         } else if req.mode == RequestMode::NoCors {
             return Ok(ScriptResponse {
                 id: req.id,
