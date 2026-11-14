@@ -3448,6 +3448,51 @@ Connection: close
         assert!(drawn.contains("\"content\""), "the display list is the half-revealed state");
     }
 
+    /// A load-only capture runs the page on develop's real-flowing clock unless `--deterministic-clock`
+    /// asks for the stepped one (batch 75: under the stepped clock squarespace's load-only capture drew
+    /// a blank frame where develop's draws the page; with the clock flowing it is develop's capture). The
+    /// page reads `performance.now()` around 40 ms of real time and names what it saw.
+    #[test]
+    fn a_load_only_capture_reads_a_flowing_clock_by_default() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><script>var a = performance.now(), t = Date.now(); while (Date.now() - t < 40) {} var d = performance.now() - a; var e = document.createElement('div'); e.id = d >= 35 ? 'clock-flows' : 'clock-stepped'; e.style.height = '10px'; document.body.appendChild(e);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-clock-default-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from(["parity-capture", "--url", url.as_str(), "--dump-layout", layout.to_str().unwrap()]).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("clock-flows"), "a plain capture stepped the page clock: {}", &dumped[..dumped.len().min(300)]);
+    }
+
     /// When the load has used the capture's timeout down to the margin the frame needs, the settle does not
     /// start at all, not even its first turn: a heavy page (walmart's load is most of the 30 s on the Mac)
     /// must not be pushed past its timeout by the settle.
