@@ -6,6 +6,10 @@
 (function (g) {
     'use strict';
     var out = g.__rk_worker_out, closeHost = g.__rk_worker_close, errorHost = g.__rk_worker_error, fetchHost = g.__rk_worker_fetch;
+    // The structured clone helper (structured_clone.js, evaluated just before this): held here, not left on
+    // the worker's global scope.
+    var sc = g.__rk_sc;
+    delete g.__rk_sc;
     var listeners = Object.create(null);
     var closing = false;
 
@@ -183,7 +187,7 @@
     hide('postMessage', function postMessage(message, transfer) {
         if (arguments.length < 1) throw new TypeError("Failed to execute 'postMessage' on 'DedicatedWorkerGlobalScope': 1 argument required, but only 0 present.");
         if (closing) return;
-        out(g.__rk_sc.serialize(message, transfer, 'DedicatedWorkerGlobalScope'));
+        out(sc.serialize(message, transfer, 'DedicatedWorkerGlobalScope'));
     });
     hide('close', function close() { closing = true; closeHost(); });
     // Synchronous: the worker thread waits while the page fetches the
@@ -210,7 +214,7 @@
     hide('__rk_worker_dispatch', function (json) {
         if (closing) return;
         var data;
-        try { data = g.__rk_sc.deserialize(json); } catch (_) { dispatchEvent(new MessageEvent('messageerror', {})); return; }
+        try { data = sc.deserialize(json); } catch (_) { dispatchEvent(new MessageEvent('messageerror', {})); return; }
         dispatchEvent(new MessageEvent('message', { data: data }));
     });
 })(globalThis);

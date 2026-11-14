@@ -8,6 +8,10 @@
 // runs on the page's own thread and turn.
 (function () {
     var g = globalThis;
+    // The structured clone helper (structured_clone.js, evaluated just before this): held here, not left
+    // on the page's global, where page script could enumerate or call it.
+    var sc = g.__rk_sc;
+    delete g.__rk_sc;
     if (typeof g.__rustkit_worker_spawn !== 'function') return;
     var spawn = g.__rustkit_worker_spawn, post = g.__rustkit_worker_post,
         poll = g.__rustkit_worker_poll, reply = g.__rustkit_worker_reply, terminate = g.__rustkit_worker_terminate;
@@ -48,7 +52,7 @@
         } catch (_) { return null; }
     }
     function encode(message, transfer) {
-        return g.__rk_sc.serialize(message, transfer, 'Worker');
+        return sc.serialize(message, transfer, 'Worker');
     }
 
     // importScripts: fetch the scripts under the page's fetch policy and
@@ -92,7 +96,7 @@
                 ran++;
                 if (it.k === 'm') {
                     var data;
-                    try { data = g.__rk_sc.deserialize(it.d); } catch (_) { fire(st.w, new g.MessageEvent('messageerror', { origin: '' })); continue; }
+                    try { data = sc.deserialize(it.d); } catch (_) { fire(st.w, new g.MessageEvent('messageerror', { origin: '' })); continue; }
                     fire(st.w, new g.MessageEvent('message', { data: data, origin: '' }));
                 } else if (it.k === 'e') {
                     var info = JSON.parse(it.m), ev;
