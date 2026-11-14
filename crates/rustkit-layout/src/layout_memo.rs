@@ -352,6 +352,7 @@ fn classify_every_field(b: &LayoutBox) {
         hit_overflow: _,
         // The paint order the hit test keeps, emptied by that same walk.
         stack_order: _,
+        stack_gen: _,
     } = b;
 }
 
