@@ -679,3 +679,11 @@ plain object that is its own element prints `[object Object]`, as in Chrome). `t
 with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
 (19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
 cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
+
+## Patch: ArrayBuffer transfer without `experimental` (arraybuffer transfer)
+
+`ArrayBuffer.prototype.transfer`, `transferToFixedLength` and the `detached` getter were behind Boa's
+`experimental` feature, so no page saw them. The four `#[cfg(feature = "experimental")]` gates in
+`src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
+transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
+(18 cases, Chrome for Testing 148.0.7778.216).
