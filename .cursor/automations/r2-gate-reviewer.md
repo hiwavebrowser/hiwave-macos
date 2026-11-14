@@ -69,9 +69,13 @@ review read. Its PASS stamp reads `gates: 1-5 ok (batch)`.
 
 A **promotion PR** (`develop` -> `master`) is not an ordinary PR: its head is
 `develop`, so the heavy suites skip on it. Require a green `Parity Gate` run
-on exactly that head SHA from a `workflow_dispatch` on `develop` (or the push
-run on the batch PR that produced that SHA). Without one, wait; do not stamp
-PASS on the four cheap checks alone.
+on exactly that head SHA from a `workflow_dispatch` on `develop`:
+`gh run list --workflow "Parity Gate" --branch develop --event workflow_dispatch`.
+A batch PR's run does not count (it ran on the batch head, not on the merge
+commit `develop` points at). The lead starts the dispatch when Pete calls a
+release; the gate does not start it. Without a run, post one comment saying
+the promotion head has no heavy-suite run yet, then wait; do not stamp PASS
+on the four cheap checks alone.
 
 ### FAIL if any of these is true
 
@@ -116,6 +120,8 @@ If everything passes, post exactly:
 R2-STAMP: PASS @ <HEAD>
 checks: green | merge: CLEAN | gates: 1-7 ok
 ```
+
+On a batch PR the last field is `gates: 1-5 ok (batch)`.
 
 and add label `r2-pass` (remove `r2-fail` if present).
 
