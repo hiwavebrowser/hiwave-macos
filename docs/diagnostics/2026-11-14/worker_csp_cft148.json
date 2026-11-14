@@ -1,0 +1,65 @@
+{
+ "url_worker_no_csp": [
+  "msg:ran:/w.js"
+ ],
+ "url_worker_script_src_nonce_worker_src_self": [
+  "msg:ran:/w.js"
+ ],
+ "url_worker_worker_src_none_script_src_star": [
+  "error"
+ ],
+ "url_worker_script_src_self_only": [
+  "msg:ran:/w.js"
+ ],
+ "url_worker_script_src_none_only": [
+  "error"
+ ],
+ "url_worker_child_src_none_script_src_self": [
+  "error"
+ ],
+ "url_worker_child_src_self_script_src_none": [
+  "msg:ran:/w.js"
+ ],
+ "url_worker_default_src_none": [
+  "error"
+ ],
+ "blob_worker_no_csp": [
+  "msg:ran"
+ ],
+ "blob_worker_worker_src_self": [
+  "error"
+ ],
+ "blob_worker_worker_src_blob": [
+  "msg:ran"
+ ],
+ "data_worker_no_csp": [
+  "msg:ran"
+ ],
+ "data_worker_worker_src_self": [
+  "error"
+ ],
+ "data_worker_worker_src_data": [
+  "msg:ran"
+ ],
+ "import_data_url_under_worker_script_src_self": [
+  "msg:import:NetworkError"
+ ],
+ "import_cross_origin_without_cors": [
+  "msg:imported:b"
+ ],
+ "import_cross_origin_with_cors": [
+  "msg:imported:b"
+ ],
+ "worker_script_text_plain_nosniff": [
+  "error"
+ ],
+ "worker_location_after_redirect": [
+  "msg:ran:/w.js"
+ ],
+ "import_scripts_partial_failure": [
+  "msg:import:NetworkError:a"
+ ],
+ "import_scripts_of_a_blob_url": [
+  "msg:imported:blob"
+ ]
+}
