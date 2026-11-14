@@ -8905,6 +8905,7 @@ impl LayoutBox {
                 context,
                 positioned_like,
                 via: Vec::new(),
+                held_on_path: false,
             };
             if let Some(z) = paint_z {
                 if z < 0 {
@@ -8955,6 +8956,7 @@ impl LayoutBox {
                     lifted: true,
                     context,
                     positioned_like: true,
+                    held_on_path: via.iter().any(|v| v.holds_absolute_boxes()),
                     via: via.clone(),
                 };
                 if z < 0 {
@@ -9341,13 +9343,16 @@ impl LayoutBox {
             if skip_held_fixed && child.position == Position::Fixed {
                 continue;
             }
-            let out_of_flow = matches!(child.position, Position::Absolute | Position::Fixed);
+            // An absolute box lifted past the box that holds it is clipped and scrolled as in flow here.
+            let held_here = entry.held_on_path && child.position == Position::Absolute;
+            let out_of_flow = !held_here && matches!(child.position, Position::Absolute | Position::Fixed);
             let (child_x, child_y, child_escaped) = if out_of_flow {
                 (inner_x - inner_escaped.0, inner_y - inner_escaped.1, (0.0, 0.0))
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
             let child_clipped = match child.position {
+                Position::Absolute if held_here => (flow_clipped, flow_clipped),
                 Position::Absolute => (absolute_clipped, absolute_clipped),
                 Position::Fixed => (false, false),
                 _ => (flow_clipped, absolute_clipped),
@@ -9537,6 +9542,9 @@ pub struct StackEntry<'a> {
     pub(crate) positioned_like: bool,
     /// The boxes from the context's child down to this box's parent, when lifted.
     pub(crate) via: Vec<&'a LayoutBox>,
+    /// Lifted, and a box in `via` holds absolute boxes: an absolute box's containing block is inside
+    /// the context, so the context's clips (and its scroll) apply to it.
+    pub(crate) held_on_path: bool,
 }
 
 impl StackEntry<'_> {
@@ -11251,6 +11259,9 @@ pub struct DisplayList {
     /// `(lifts, reached)` for the next box `render_stacking_context` paints (`LayoutBox::stack_entries`);
     /// a root starts as a stacking context.
     next_stacking: (bool, bool),
+    /// The next box `render_stacking_context` paints was lifted past the box that holds it
+    /// (`StackEntry::held_on_path`): an absolute one keeps the clips above instead of escaping them.
+    next_keeps_clips: bool,
     /// How many ancestors of the box being painted have a `transform` or
     /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
     /// box is the containing block of the fixed boxes inside it
@@ -11373,6 +11384,7 @@ impl DisplayList {
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             next_stacking: (true, false),
+            next_keeps_clips: false,
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -11400,6 +11412,7 @@ impl DisplayList {
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             next_stacking: (true, false),
+            next_keeps_clips: false,
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -11472,6 +11485,7 @@ impl DisplayList {
     /// Render a stacking context with proper z-ordering.
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
         let (lifts, reached) = std::mem::replace(&mut self.next_stacking, (true, false));
+        let keeps_clips = std::mem::take(&mut self.next_keeps_clips);
         // `opacity` fades the box and its whole subtree as one group, and
         // at 0 the group paints nothing (it still takes its space and its
         // hits). Until 2026-10-08 only the image command carried it, so a
@@ -11509,7 +11523,14 @@ impl DisplayList {
         let positioned = layout_box.position != Position::Static
             || layout_box.style.position != rustkit_css::Position::Static
             || shape_clip.is_some();
-        let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
+        // A box lifted to its stacking context's list past the box that holds it (its containing block
+        // is inside the context) is painted from the context's loop, so that holder never scoped the
+        // context's clips out: the box keeps them, as it would under the holder (R2 HIGH 5 on #1151).
+        let escapes = match layout_box.position {
+            Position::Absolute => !keeps_clips,
+            Position::Fixed => true,
+            _ => false,
+        };
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
             if escapes {
@@ -11742,6 +11763,7 @@ impl DisplayList {
         // 1. Negative z-index layers
         for entry in &negative_z {
             self.next_stacking = entry.child_flags(passes_lift);
+            self.next_keeps_clips = entry.held_on_path;
             self.painting_item = items_paint_as_units && !entry.lifted;
             self.render_stacking_context(entry.b, z_index, layer);
         }
@@ -11749,6 +11771,7 @@ impl DisplayList {
         // 2. In-flow content
         for entry in &normal_flow {
             self.next_stacking = entry.child_flags(passes_lift);
+            self.next_keeps_clips = entry.held_on_path;
             self.painting_item = items_paint_as_units;
             self.render_stacking_context(entry.b, z_index, layer);
         }
@@ -11759,6 +11782,7 @@ impl DisplayList {
                 self.flush_outlines(own_outline.take(), unlisted_clip, element_scroll);
             }
             self.next_stacking = entry.child_flags(passes_lift);
+            self.next_keeps_clips = entry.held_on_path;
             self.painting_item = items_paint_as_units && !entry.lifted;
             self.render_stacking_context(entry.b, z_index, layer);
         }
