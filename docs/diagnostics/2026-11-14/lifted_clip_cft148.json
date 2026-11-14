@@ -160,5 +160,95 @@
    3,
    3
   ]
+ },
+ "opacity_overflow_hidden_rel_opacity_between": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "root_overflow_hidden_rel_opacity_between": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "opacity_rel_outside_overflow_hidden_opacity_between": {
+  "red": true,
+  "hit": "r",
+  "px": [
+   255,
+   5,
+   5
+  ]
+ },
+ "opacity_overflow_auto_scrolled_rel_opacity_between": {
+  "red": true,
+  "hit": "r",
+  "px": [
+   252,
+   3,
+   5
+  ]
+ },
+ "opacity_overflow_auto_scrolled_rel_abs": {
+  "red": true,
+  "hit": "r",
+  "px": [
+   255,
+   3,
+   3
+  ]
+ },
+ "opacity_overflow_hidden_transform_holds_abs": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "opacity_overflow_hidden_filter_holds_abs": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "opacity_overflow_hidden_transform_holds_fixed": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "opacity_overflow_hidden_filter_holds_fixed": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
+ },
+ "root_overflow_hidden_rel_transform_holds_fixed": {
+  "red": false,
+  "hit": "BODY",
+  "px": [
+   255,
+   255,
+   255
+  ]
  }
 }

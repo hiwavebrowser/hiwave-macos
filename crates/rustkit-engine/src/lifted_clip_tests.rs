@@ -3,7 +3,9 @@
 //! The second review of #1151 (HIGH 5): a positioned box lifted to its stacking context's list must keep
 //! the clip of an overflow / clip-path / border-radius clipper that holds its containing block, and must
 //! not take one that does not. For each case: is the probe point red (the box `r` shows there), and which
-//! element `elementFromPoint` names there.
+//! element `elementFromPoint` names there. The third review (HIGH 7) added an opacity layer between the
+//! holder and the absolute box, scrolled clippers (a case's optional `[id, scrollTop]`), and transform /
+//! filter boxes as the containing block of absolute and fixed boxes.
 
 use super::*;
 use std::collections::BTreeMap;
@@ -15,11 +17,16 @@ const WIDTH: u32 = 400;
 const HEIGHT: u32 = 300;
 
 /// Whether the probe point is red, and what `elementFromPoint` names there (id, else tag).
-fn red_and_hit(body: &str, x: u64, y: u64, tag: &str) -> (bool, String) {
+fn red_and_hit(body: &str, x: u64, y: u64, scroll: Option<(&str, u64)>, tag: &str) -> (bool, String) {
     let page = format!("<!doctype html><html><head><style>body{{margin:0;background:#fff}}</style></head><body>{body}</body></html>");
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine.create_headless_view(Bounds::new(0, 0, WIDTH, HEIGHT)).expect("view");
     engine.load_html(view, &page).expect("load_html");
+    if let Some((id, top)) = scroll {
+        engine
+            .execute_script(view, &format!("document.getElementById({id:?}).scrollTop = {top}; 0"))
+            .expect("scroll");
+    }
     engine.render_view(view).expect("render");
     let path = std::env::temp_dir().join(format!("rustkit-lifted-clip-{tag}-{}.ppm", std::process::id()));
     engine.capture_frame(view, path.to_str().unwrap()).expect("capture");
@@ -44,11 +51,13 @@ fn red_and_hit(body: &str, x: u64, y: u64, tag: &str) -> (bool, String) {
 
 #[test]
 fn a_clipper_keeps_its_clip_over_a_lifted_absolute_box_as_in_chrome() {
-    let cases: BTreeMap<String, (String, u64, u64)> = serde_json::from_str(CASES).unwrap();
+    let cases: BTreeMap<String, Vec<serde_json::Value>> = serde_json::from_str(CASES).unwrap();
     let chrome: BTreeMap<String, serde_json::Value> = serde_json::from_str(CHROME).unwrap();
     let mut wrong = Vec::new();
-    for (name, (body, x, y)) in &cases {
-        let (red, hit) = red_and_hit(body, *x, *y, name);
+    for (name, case) in &cases {
+        let (body, x, y) = (case[0].as_str().unwrap(), case[1].as_u64().unwrap(), case[2].as_u64().unwrap());
+        let scroll = case.get(3).map(|s| (s[0].as_str().unwrap(), s[1].as_u64().unwrap()));
+        let (red, hit) = red_and_hit(body, x, y, scroll, name);
         let want_red = chrome[name]["red"].as_bool().unwrap();
         let want_hit = chrome[name]["hit"].as_str().unwrap();
         if red != want_red || hit != want_hit {
