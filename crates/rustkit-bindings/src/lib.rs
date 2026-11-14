@@ -472,6 +472,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
     "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
     "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    // Reserved for the workers script (not installed in every realm).
+    "workersPump",
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"

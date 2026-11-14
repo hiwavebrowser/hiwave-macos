@@ -103,9 +103,8 @@
         // Engine side.
         take: function () {
             queuedBody = 0;
-            var taken = bare([]);
-            for (var i = 0; i < queue.length; i++) taken[i] = queue[i];
-            queue.length = 0;
+            var taken = bare(queue);
+            queue = [];
             return stringify(taken);
         },
         // A response's body does not travel in `json`: the engine leaves
@@ -152,7 +151,7 @@
         fail_all: function (reason) {
             var failed = 0;
             for (var pass = 0; pass < 3; pass++) {
-                queue.splice(0); queuedBody = 0;
+                queue = []; queuedBody = 0;
                 var ids = keys(pending);
                 if (ids.length === 0) break;
                 for (var i = 0; i < ids.length; i++) {
@@ -160,7 +159,7 @@
                     if (settle(id, bare({ id: id, ok: false, error: String(reason) }))) failed++;
                 }
             }
-            queue.splice(0); queuedBody = 0;
+            queue = []; queuedBody = 0;
             pending = create(null);
             return failed;
         },

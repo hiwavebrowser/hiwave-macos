@@ -261,6 +261,11 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
     let _ = b.clock_now_ms();
     let _ = b.next_timer_delay();
     assert_eq!(text(b.evaluate("String(ran)").unwrap()), "0", "calls of replaced built-ins");
+    // The queue takes the next request after it has been emptied.
+    b.evaluate("var y = new XMLHttpRequest(); y.open('GET', 'https://example.test/b'); y.send(); ran = 0;").unwrap();
+    let again: Vec<String> = b.take_net_requests().into_iter().map(|r| r.url).collect();
+    assert_eq!(again, vec!["https://example.test/b".to_string()], "the second take");
+    assert_eq!(text(b.evaluate("String(ran)").unwrap()), "0", "calls of replaced built-ins");
     assert_eq!(
         (requests.len(), requests.first().map(|r| r.url.clone()), waiting, shelved, back),
         (1, Some("https://example.test/a".to_string()), 1, Some(true), 1),
@@ -328,4 +333,28 @@ fn the_host_object_inherits_nothing() {
         )
         .unwrap();
     assert_eq!(text(got), "");
+}
+
+/// A response handler that asks again is heard at each round.
+#[test]
+fn the_queue_takes_a_request_made_by_a_response_handler() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    b.set_location(&Url::parse("https://example.test/page").unwrap()).unwrap();
+    b.enable_net_bridge().unwrap();
+    b.evaluate(
+        "var path = []; function next(n) { var x = new XMLHttpRequest(); x.open('GET', 'https://example.test/s' + n); \
+         x.onloadend = function () { path.push(n + ':' + x.status); if (n < 3) next(n + 1); }; x.send(); } next(1);",
+    )
+    .unwrap();
+    let mut rounds = Vec::new();
+    for _ in 0..4 {
+        let requests = b.take_net_requests();
+        rounds.push(requests.len());
+        for request in requests {
+            b.deliver_net_response(request.id, NetDelivery::Error("blocked".into())).unwrap();
+        }
+        b.run_jobs().unwrap();
+    }
+    assert_eq!((rounds, text(b.evaluate("path.join()").unwrap())), (vec![1, 1, 1, 0], "1:0,2:0,3:0".to_string()));
 }
