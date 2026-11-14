@@ -11531,6 +11531,17 @@ struct PendingOutline {
     commands: Vec<DisplayCommand>,
 }
 
+/// The layout generation a display list keeps paint orders under (`DisplayList::stack_gen`). Printed as
+/// `_`: two lists of the same commands print the same whichever layout generation built them.
+#[derive(Clone, Copy)]
+struct ListGen(u64);
+
+impl std::fmt::Debug for ListGen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
 /// A display list of paint commands.
 #[derive(Debug, Clone)]
 pub struct DisplayList {
@@ -11577,7 +11588,7 @@ pub struct DisplayList {
     next_keeps_clips: bool,
     /// The generation of the layout root this list is built from (`LayoutBox::stack_gen`): each box's
     /// paint order is kept for the hit test under it. 0: not kept.
-    stack_gen: u64,
+    stack_gen: ListGen,
     /// How many ancestors of the box being painted have a `transform` or
     /// otherwise hold fixed boxes (`LayoutBox::holds_fixed_boxes`). Such a
     /// box is the containing block of the fixed boxes inside it
@@ -11701,7 +11712,7 @@ impl DisplayList {
             in_viewport_fixed: false,
             next_stacking: (true, false),
             next_keeps_clips: false,
-            stack_gen: 0,
+            stack_gen: ListGen(0),
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -11730,7 +11741,7 @@ impl DisplayList {
             in_viewport_fixed: false,
             next_stacking: (true, false),
             next_keeps_clips: false,
-            stack_gen: root.tree_gen(),
+            stack_gen: ListGen(root.tree_gen()),
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
@@ -12070,7 +12081,7 @@ impl DisplayList {
         // hit test reads too, so the picture and the hit agree).
         *layer += layout_box.children.len() as u32;
         let order = std::sync::Arc::new(layout_box.stack_entries(lifts, reached));
-        layout_box.keep_stack_order(self.stack_gen, &order);
+        layout_box.keep_stack_order(self.stack_gen.0, &order);
         let boxes = order.boxes(layout_box);
         let (negative_z, normal_flow, positive_z) = order.entries(&boxes);
         let passes_lift = lifts || reached;
