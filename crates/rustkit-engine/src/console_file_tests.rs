@@ -20,6 +20,20 @@ impl Drop for Reset {
     }
 }
 
+/// Removes one more file when a test ends.
+struct Remove(PathBuf);
+
+impl Drop for Remove {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The tracing log's warnings about the console file.
+fn console_file_warnings(log: &str) -> Vec<&str> {
+    log.lines().filter(|line| line.contains(" WARN ") && line.contains("console log")).collect()
+}
+
 /// A file name no other test or run uses; the file does not exist.
 fn scratch(tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("hiwave-console-file-{tag}-{}.jsonl", std::process::id()));
@@ -86,14 +100,111 @@ fn of_kind<'a>(lines: &'a [serde_json::Value], kind: &str) -> &'a serde_json::Va
 
 #[test]
 fn only_a_value_with_a_slash_names_a_file() {
-    use crate::console_file::path_from;
+    use crate::console_file::{setting, Setting};
+    use std::ffi::OsStr;
     // `1` is the tracing mirror's switch (console_log); it and every other
     // bare word stay what they were before this file existed: not a path.
-    for off in ["", "0", "1", "true", "on", "console.jsonl"] {
-        assert_eq!(path_from(off), None, "{off:?}");
+    for off in ["", "0", "1", "true", "on"] {
+        assert_eq!(setting(OsStr::new(off)), Setting::Off, "{off:?}");
     }
-    assert_eq!(path_from("/tmp/c.jsonl"), Some(PathBuf::from("/tmp/c.jsonl")));
-    assert_eq!(path_from("./c.jsonl"), Some(PathBuf::from("./c.jsonl")));
+    assert_eq!(setting(OsStr::new("/tmp/c.jsonl")), Setting::File(PathBuf::from("/tmp/c.jsonl")));
+    assert_eq!(setting(OsStr::new("./c.jsonl")), Setting::File(PathBuf::from("./c.jsonl")));
+}
+
+// ---- The process's own sink: `set_path`, the variable, a file that
+// cannot be opened ----
+
+fn configured(set_path: Option<&PathBuf>, env: Option<&str>) -> Forced {
+    Forced::Configured { set_path: set_path.cloned(), env: env.map(Into::into) }
+}
+
+#[test]
+fn the_variable_alone_names_the_file() {
+    let path = scratch("env");
+    let _reset = Reset(path.clone());
+    crate::console_file::force_for_test(Some(configured(None, path.to_str())));
+    load(vec![Route::html("/", PAGE)], "/");
+    assert_eq!(lines(&path).len(), 3);
+}
+
+#[test]
+fn set_path_wins_over_the_variable() {
+    let (chosen, env) = (scratch("chosen"), scratch("not-chosen"));
+    let (_reset, _other) = (Reset(chosen.clone()), Remove(env.clone()));
+    crate::console_file::force_for_test(Some(configured(Some(&chosen), env.to_str())));
+    load(vec![Route::html("/", PAGE)], "/");
+    assert_eq!(lines(&chosen).len(), 3);
+    assert!(!env.exists(), "the variable's file was made although set_path chose another");
+}
+
+#[test]
+fn the_tracing_mirrors_values_and_no_value_make_no_file() {
+    let path = scratch("legacy");
+    let _reset = Reset(path.clone());
+    for env in [None, Some("1"), Some("0"), Some("")] {
+        let log = tracing_log(|| {
+            crate::console_file::force_for_test(Some(configured(None, env)));
+            assert!(!crate::console_file::enabled(), "{env:?} turned the file on");
+            load(vec![Route::html("/", PAGE)], "/");
+        });
+        assert!(console_file_warnings(&log).is_empty(), "{env:?} was warned about:\n{log}");
+    }
+}
+
+/// A file that cannot be opened: the page loads, nothing is written, and
+/// the log says so once, as a shape (no path, no page text).
+#[test]
+fn a_file_that_cannot_be_opened_is_said_once_and_the_page_still_loads() {
+    let missing = std::env::temp_dir().join(format!("hiwave-console-file-no-such-dir-{}", std::process::id()));
+    let path = missing.join("console.jsonl");
+    let _reset = Reset(path.clone());
+    let log = tracing_log(|| {
+        crate::console_file::force_for_test(Some(configured(None, path.to_str())));
+        assert!(!crate::console_file::enabled());
+        load(vec![Route::html("/", PAGE)], "/");
+    });
+    assert!(!path.exists() && !missing.exists());
+    assert_eq!(console_file_warnings(&log).len(), 1, "{log}");
+    assert!(!log.contains("no-such-dir") && !log.contains("secret"), "{log}");
+}
+
+/// The real thing, in a process of its own: the variable is read from the
+/// environment and `set_path` is the process's. Each case runs this test
+/// binary again with only `process_sink_child` in it.
+#[test]
+fn the_process_reads_the_variable_and_set_path_wins() {
+    let (from_env, chosen) = (scratch("process-env"), scratch("process-chosen"));
+    let (_a, _b) = (Remove(from_env.clone()), Remove(chosen.clone()));
+    let child = |set_path: Option<&PathBuf>| {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "console_file_tests::process_sink_child", "--ignored", "--test-threads=1"])
+            .env("HIWAVE_CONSOLE_LOG", &from_env)
+            .env_remove("HIWAVE_CONSOLE_FILE_TEST_SET_PATH");
+        if let Some(path) = set_path {
+            command.env("HIWAVE_CONSOLE_FILE_TEST_SET_PATH", path);
+        }
+        let out = command.output().expect("the test binary runs again");
+        assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    };
+    child(None);
+    assert_eq!(lines(&from_env).len(), 3, "the variable's file");
+    std::fs::remove_file(&from_env).unwrap();
+    child(Some(&chosen));
+    assert_eq!(lines(&chosen).len(), 3, "set_path's file");
+    assert!(!from_env.exists(), "the variable's file was made although set_path chose another");
+}
+
+/// Run only by `the_process_reads_the_variable_and_set_path_wins`.
+#[test]
+#[ignore = "a child process of the_process_reads_the_variable_and_set_path_wins"]
+fn process_sink_child() {
+    if let Some(path) = std::env::var_os("HIWAVE_CONSOLE_FILE_TEST_SET_PATH") {
+        crate::console_file::set_path(path);
+    }
+    crate::console_file::force_for_test(Some(Forced::Process));
+    assert!(crate::console_file::enabled());
+    load(vec![Route::html("/", PAGE)], "/");
 }
 
 #[test]

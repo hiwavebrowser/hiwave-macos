@@ -16,7 +16,8 @@
 //!
 //! `HIWAVE_CONSOLE_LOG=1` is a different, older switch: the tracing mirror
 //! in `console_log`. A value names a file here only when it has a `/` in
-//! it, so `1`, `0` and every other bare word mean what they did before.
+//! it ([`setting`]), so `1`, `0` and every other bare word mean what they
+//! did before.
 //!
 //! When it is off, every function here returns before formatting a line,
 //! and no file is made.
@@ -25,7 +26,6 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 
 use rustkit_js::{ErrorReport, LogLevel};
@@ -51,10 +51,45 @@ pub fn set_path(path: impl Into<PathBuf>) {
     }
 }
 
-/// The file a `HIWAVE_CONSOLE_LOG` value names, if it names one: only a
-/// value with a `/` in it (`/tmp/console.jsonl`, `./console.jsonl`).
-pub(crate) fn path_from(value: &str) -> Option<PathBuf> {
-    value.contains('/').then(|| PathBuf::from(value))
+/// What a `HIWAVE_CONSOLE_LOG` value asks of this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Setting {
+    /// Nothing: unset, or the tracing mirror's own values.
+    Off,
+    /// A value with a `/` in it names the file (`/tmp/console.jsonl`,
+    /// `./console.jsonl`).
+    File(PathBuf),
+    /// Neither: a mistake worth saying once.
+    NotAPath,
+}
+
+pub(crate) fn setting(value: &std::ffi::OsStr) -> Setting {
+    if value.as_encoded_bytes().contains(&b'/') {
+        return Setting::File(PathBuf::from(value));
+    }
+    Setting::Off
+}
+
+/// The file to write, opened: `chosen` (what `set_path` was given) wins
+/// over `env` (the variable's value). `None` when neither names a file or
+/// the file cannot be opened; the reason is logged as a shape (no path, no
+/// value), by the one caller that runs once a process.
+fn open_configured(chosen: Option<PathBuf>, env: Option<std::ffi::OsString>, limit: u64) -> Option<Sink> {
+    let path = match chosen {
+        Some(path) => path,
+        None => match setting(&env?) {
+            Setting::File(path) => path,
+            Setting::Off | Setting::NotAPath => return None,
+        },
+    };
+    match Sink::open(&path, limit) {
+        Ok(sink) => Some(sink),
+        Err(error) => {
+            // Only with the switch on, and only the error's kind.
+            tracing::warn!(kind = ?error.kind(), "the console log file could not be opened; nothing will be written to it");
+            None
+        }
+    }
 }
 
 struct Sink {
@@ -129,54 +164,73 @@ fn ends_truncated(path: &Path, len: u64) -> bool {
     last.starts_with("{\"t\":\"") && last.contains("\",\"truncated\":true,\"limit_bytes\":")
 }
 
+/// The process's file, opened the first time it is wanted, from what
+/// `set_path` was given or else the variable.
+fn process_sink() -> Option<&'static Mutex<Sink>> {
+    static SINK: OnceLock<Option<Mutex<Sink>>> = OnceLock::new();
+    SINK.get_or_init(|| {
+        let chosen = CHOSEN.lock().ok().and_then(|chosen| chosen.clone());
+        open_configured(chosen, std::env::var_os("HIWAVE_CONSOLE_LOG"), MAX_FILE_BYTES).map(Mutex::new)
+    })
+    .as_ref()
+}
+
 /// Run `f` on the open file; `None` when the switch is off or the file
-/// could not be opened. The process has one, opened the first time it is
-/// wanted; each test thread forces its own.
+/// could not be opened. Each test thread forces its own.
 #[cfg(not(test))]
 fn with_sink<R>(f: impl FnOnce(&mut Sink) -> R) -> Option<R> {
-    static SINK: OnceLock<Option<Mutex<Sink>>> = OnceLock::new();
-    let sink = SINK.get_or_init(|| {
-        let chosen = CHOSEN.lock().ok().and_then(|chosen| chosen.clone());
-        let path = chosen.or_else(|| path_from(std::env::var_os("HIWAVE_CONSOLE_LOG")?.to_str()?))?;
-        match Sink::open(&path, MAX_FILE_BYTES) {
-            Ok(sink) => Some(Mutex::new(sink)),
-            Err(error) => {
-                // Only with the switch on, and only the error's kind.
-                tracing::warn!(kind = ?error.kind(), "the console log file could not be opened; nothing will be written to it");
-                None
-            }
-        }
-    });
-    Some(f(&mut *sink.as_ref()?.lock().ok()?))
+    Some(f(&mut *process_sink()?.lock().ok()?))
 }
 
 #[cfg(test)]
 fn with_sink<R>(f: impl FnOnce(&mut Sink) -> R) -> Option<R> {
-    TEST_SINK.with(|sink| sink.borrow_mut().as_mut().map(f))
+    TEST_SINK.with(|sink| match &mut *sink.borrow_mut() {
+        TestSink::Off => None,
+        TestSink::Own(sink) => Some(f(sink)),
+        TestSink::Process => Some(f(&mut *process_sink()?.lock().ok()?)),
+    })
+}
+
+#[cfg(test)]
+enum TestSink {
+    Off,
+    Own(Sink),
+    Process,
 }
 
 #[cfg(test)]
 thread_local! {
-    static TEST_SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
+    static TEST_SINK: std::cell::RefCell<TestSink> = const { std::cell::RefCell::new(TestSink::Off) };
 }
 
 /// What a test forces on its own thread.
 #[cfg(test)]
 pub(crate) enum Forced {
     Off,
-    /// Write to this file, and stop at this many bytes.
+    /// As `set_path` with this file, stopping at this many bytes.
     On(PathBuf, u64),
+    /// As a process whose `set_path` and `HIWAVE_CONSOLE_LOG` are these.
+    Configured { set_path: Option<PathBuf>, env: Option<std::ffi::OsString> },
+    /// The process's own file: the real `set_path` and environment, read
+    /// once. Only for a test that is alone in its process.
+    Process,
 }
 
-/// Tests never read the environment: `None` and `Off` are both off, `On`
-/// opens the file as a new process would.
+/// Tests never read the environment unless they ask for `Process`: `None`
+/// and `Off` are both off; `On` and `Configured` open the file the way a
+/// new process does (a file that cannot be opened is off, with a warning).
 #[cfg(test)]
 pub(crate) fn force_for_test(forced: Option<Forced>) {
     let sink = match forced {
-        Some(Forced::On(path, limit)) => Some(Sink::open(&path, limit).expect("the test's console file opens")),
+        Some(Forced::On(path, limit)) => open_configured(Some(path), None, limit),
+        Some(Forced::Configured { set_path, env }) => open_configured(set_path, env, MAX_FILE_BYTES),
+        Some(Forced::Process) => {
+            TEST_SINK.with(|slot| *slot.borrow_mut() = TestSink::Process);
+            return;
+        }
         Some(Forced::Off) | None => None,
     };
-    TEST_SINK.with(|slot| *slot.borrow_mut() = sink);
+    TEST_SINK.with(|slot| *slot.borrow_mut() = sink.map_or(TestSink::Off, TestSink::Own));
 }
 
 /// Whether console lines are being written to a file.
