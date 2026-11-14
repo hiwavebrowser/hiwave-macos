@@ -281,6 +281,22 @@ impl<'a> GridItem<'a> {
                     .length_to_px(&style.height, container_height)
                     + margins;
             }
+            // GR5 (#1114 LOW): `0` and `min()`/`max()`/`clamp()` resolve
+            // through the resolver placement uses, so the first estimate of
+            // an auto row in a definite-height grid is not short (a lone
+            // `min(100vh, 500px)` item made a 0 row; Chrome 148: 500).
+            Length::Zero => return margins,
+            // A percentage form is cyclic while rows are sized (Chrome 148
+            // sizes the row to the content), so only the percentage-free
+            // forms resolve here.
+            Length::Min(_) | Length::Max(_) | Length::Clamp(_)
+                if !crate::flex::has_percentage(&style.height) =>
+            {
+                return self
+                    .layout_box
+                    .length_to_px(&style.height, container_height)
+                    + margins;
+            }
             _ => {}
         }
 
@@ -289,6 +305,11 @@ impl<'a> GridItem<'a> {
             Length::Px(h) => *h,
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
             l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_height),
+            l @ (Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_))
+                if !crate::flex::has_percentage(l) =>
+            {
+                self.layout_box.length_to_px(l, container_height)
+            }
             _ => 0.0,
         };
 
@@ -2233,7 +2254,16 @@ pub fn layout_grid_container(
                 // content-sized pass must give it (#1110 R1: a column-flex
                 // card with wrapping text otherwise stayed at the estimate,
                 // 20 tall where Chrome's row is 100, and overflowed).
-                let definite_in_area = has_definite_height
+                // GR5: rows of a fixed size are final from track sizing
+                // too, whatever the grid's own height (a 300px row of a
+                // content-sized grid: Chrome 148's `height: 100%` pane is
+                // 300, the content-sized pass gave 40).
+                let in_fixed_rows = row_spans.get(item_idx).is_some_and(|&(r0, r1)| {
+                    r0 < grid.rows.len()
+                        && (r0..r1.clamp(r0 + 1, grid.rows.len()))
+                            .all(|r| track_is_fixed(&grid.rows[r]))
+                });
+                let definite_in_area = (has_definite_height || in_fixed_rows)
                     && !child.style.flex_direction.is_row()
                     && (crate::flex::has_percentage(&child.style.height)
                         || (matches!(child.style.height, rustkit_css::Length::Auto)
@@ -2332,6 +2362,16 @@ pub fn layout_grid_container(
                 // 1. Position at the top of the grid item (not below its height)
                 // 2. Resolve percentage heights against the grid item's actual height
                 let grid_item_height = child.dimensions.content.height;
+                // GR6: the base its children's percentage heights resolve
+                // against. An item with a height of its own, or one that
+                // stretches to its row, has a definite block size
+                // (css-grid-1 §11.6); a start-aligned auto one does not, and
+                // their percentages compute to `auto` (Chrome 148: a
+                // `height: 100%` block in an `align-self: start` item is its
+                // content, 40, not the row's 900).
+                let percent_base = (!matches!(child.style.height, Length::Auto)
+                    || stretches_to_its_row(child, &container_align_items))
+                .then_some(grid_item_height);
                 // The grid item's own ratio inputs, read before the loop
                 // below takes a mutable borrow of its children (see the
                 // out-of-flow arm in Phase 9).
@@ -2622,10 +2662,14 @@ pub fn layout_grid_container(
                     // DEBUG: Uncomment to trace Phase 9 percentage height issues
                     // debug!("Phase 9: grandchild style.height={:?}, grid_item_height={}, existing_height={}",
                     //        grandchild.style.height, grid_item_height, grandchild.dimensions.content.height);
+                    let percent_resolved = crate::flex::has_percentage(&grandchild.style.height)
+                        && percent_base.is_some();
                     let grandchild_height = match &grandchild.style.height {
-                        rustkit_css::Length::Percent(pct) => {
-                            // Resolve percentage against grid item's height
-                            (pct / 100.0 * grid_item_height).max(0.0)
+                        // A percentage, or a calc()/min()/max()/clamp() with
+                        // one, against the item's definite height; `auto`
+                        // when the item has none (the arm below).
+                        l if percent_resolved => {
+                            grandchild.length_to_px(l, grid_item_height).max(0.0)
                         }
                         rustkit_css::Length::Px(h) => *h,
                         rustkit_css::Length::Auto => {
@@ -2638,11 +2682,42 @@ pub fn layout_grid_container(
                     // Apply min-height constraint
                     let min_height = match &grandchild.style.min_height {
                         rustkit_css::Length::Px(h) => *h,
-                        rustkit_css::Length::Percent(pct) => pct / 100.0 * grid_item_height,
+                        l if crate::flex::has_percentage(l) => match percent_base {
+                            Some(base) => grandchild.length_to_px(l, base),
+                            None => 0.0,
+                        },
                         _ => 0.0,
                     };
 
                     grandchild.dimensions.content.height = grandchild_height.max(min_height);
+
+                    // GR6: the re-flow above ran before this height existed,
+                    // so the block's own percentage-height children took
+                    // `auto` (an `img { height: 100% }` kept its ratio
+                    // height, 800, in a 900 block; Chrome 148: 900). Flow
+                    // them again against the now-definite height, and keep
+                    // the height (the re-flow writes the auto height back).
+                    if percent_resolved
+                        && !grandchild.style.display.is_flex()
+                        && !grandchild.style.display.is_grid()
+                        && grandchild
+                            .children
+                            .iter()
+                            .any(|c| crate::flex::has_percentage(&c.style.height))
+                    {
+                        let resolved = grandchild.dimensions.content.height;
+                        for c in &mut grandchild.children {
+                            c.percent_height_is_auto = false;
+                        }
+                        let mut child_margins = crate::MarginCollapseContext::new();
+                        let mut floats = crate::FloatContext::new();
+                        grandchild.layout_block_children_with_collapse(
+                            &mut child_margins,
+                            &mut floats,
+                            Some(resolved),
+                        );
+                        grandchild.dimensions.content.height = resolved;
+                    }
 
                     // Re-layout grandchild's children with the corrected dimensions
                     if !grandchild.children.is_empty() {
@@ -4372,8 +4447,15 @@ pub(crate) fn replaced_min_content_width_in_row(layout_box: &LayoutBox, row_heig
 fn definite_len(b: &LayoutBox, l: &Length) -> Option<f32> {
     match l {
         Length::Px(v) => Some(*v),
+        Length::Zero => Some(0.0),
         Length::Calc(sum) if sum.percent == 0.0 => Some(b.length_to_px(l, 0.0)),
         l if is_font_or_viewport_relative(l) => Some(b.length_to_px(l, 0.0)),
+        // GR4: `min()`/`max()`/`clamp()` with no percentage resolve through
+        // the same `length_to_px` that places the item, so the row and the
+        // item agree (`height: min(100vh, 500px)` alone made a 0 row).
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) if !crate::flex::has_percentage(l) => {
+            Some(b.length_to_px(l, 0.0))
+        }
         _ => None,
     }
 }
@@ -5574,7 +5656,12 @@ fn apply_align_self(
         // cell height the percentage arm uses. Left on the `_` arm it would
         // be called explicit and then sized as if it were `auto`.
         Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
-        _ => cell_height,
+        // GR4: every other length is the item's own too: `100vh`, `20rem`,
+        // `min(100vh, 500px)`. They fell to the cell height, so a sticky
+        // `100vh` pane beside a 3000px column was 3000 tall (Chrome 148:
+        // 800). `fit-content` and the sizing keywords stay with the cell.
+        Length::FitContent => cell_height,
+        ref l => child.length_to_px(l, cell_height),
     };
     // A definite `max-height` and `min-height` bound an explicit height (max
     // first, then min, CSS 2.1 10.7), as the inline axis does above. google's
@@ -5583,8 +5670,7 @@ fn apply_align_self(
     // An `auto` height is left to the stretch and min/max passes that follow.
     let definite = |l: &Length| match l {
         Length::Auto | Length::FitContent | Length::Percent(_) => None,
-        Length::Calc(sum) if sum.percent != 0.0 => None,
-        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => None,
+        l if crate::flex::has_percentage(l) => None,
         l => Some(child.length_to_px(l, 0.0)),
     };
     let mut child_height = child_height;

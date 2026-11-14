@@ -778,7 +778,12 @@ fn main() {
     let handler = std::thread::Builder::new()
         .name(worker_name.into())
         .stack_size(worker_stack)
-        .spawn(move || run_capture(&args_clone))
+        .spawn(move || {
+            // Half the stack is the native-recursion budget: the 1 MiB fallback would throw on
+            // pages Chrome renders and show up as false diffs.
+            rustkit_engine::set_thread_native_stack_budget(Some(worker_stack / 2));
+            run_capture(&args_clone)
+        })
         .expect("failed to spawn capture worker thread");
     let mut result = match handler.join() {
         Ok(r) => r,

@@ -64,45 +64,47 @@ impl AdBlocker {
     /// captchas) and the whole `connect.facebook.net` host (it serves the SDK that logins and
     /// like buttons need; EasyList blocks only `/signals/`, `fbds.js` and `pcm.js`, third-party).
     const DEFAULT_RULES: &'static [&'static str] = &[
+        // SH2: every rule here is `$third-party`: it protects a page from the tracker, and must not
+        // stop a user browsing the tracker's own site (mixpanel.com blocked its own scripts).
         // Google advertising
-        "||doubleclick.net^",
-        "||googlesyndication.com^",
-        "||googleadservices.com^",
-        "||adtrafficquality.google^",
+        "||doubleclick.net^$third-party",
+        "||googlesyndication.com^$third-party",
+        "||googleadservices.com^$third-party",
+        "||adtrafficquality.google^$third-party",
         // Social media ads/tracking
-        "||ads.twitter.com^",
-        "||facebook.com/tr^",
-        "||tr.snapchat.com^",
+        "||ads.twitter.com^$third-party",
+        "||facebook.com/tr^$third-party",
+        "||tr.snapchat.com^$third-party",
         // Amazon
-        "||amazon-adsystem.com^",
+        "||amazon-adsystem.com^$third-party",
         // Criteo
-        "||criteo.com/sync^",
-        "||criteo.com/syncframe^",
+        "||criteo.com/sync^$third-party",
+        "||criteo.com/syncframe^$third-party",
         // Common ad networks
-        "||adnxs.com^",
-        "||adsrvr.org^",
-        "||adroll.com^",
-        "||taboola.com^",
-        "||outbrain.com^",
-        "||zedo.com^",
-        "||bidswitch.net^",
-        "||rubiconproject.com^",
-        "||openx.net^",
-        "||pubmatic.com^",
-        "||casalemedia.com^",
-        "||mediavine.com^",
+        "||adnxs.com^$third-party",
+        "||adsrvr.org^$third-party",
+        "||adroll.com^$third-party",
+        "||taboola.com^$third-party",
+        "||outbrain.com^$third-party",
+        "||zedo.com^$third-party",
+        "||bidswitch.net^$third-party",
+        "||rubiconproject.com^$third-party",
+        "||openx.net^$third-party",
+        "||pubmatic.com^$third-party",
+        "||casalemedia.com^$third-party",
+        "||mediavine.com^$third-party",
         // Tracking pixels and analytics
-        "||pixel.facebook.com^",
-        "||bat.bing.com^",
-        "||scorecardresearch.com^",
-        "||chartbeat.com^",
-        "||segment.io^",
-        "||segment.com^",
-        "||mixpanel.com^",
-        "||hotjar.com^",
-        "||fullstory.com^",
-        "||mouseflow.com^",
-        "||luckyorange.com^",
+        "||pixel.facebook.com^$third-party",
+        "||bat.bing.com^$third-party",
+        "||scorecardresearch.com^$third-party",
+        "||chartbeat.com^$third-party",
+        "||segment.io^$third-party",
+        "||segment.com^$third-party",
+        "||mixpanel.com^$third-party",
+        "||hotjar.com^$third-party",
+        "||fullstory.com^$third-party",
+        "||mouseflow.com^$third-party",
+        "||luckyorange.com^$third-party",
         // Service worker iframes (block as popups)
         "||googletagmanager.com/static/service_worker^",
     ];
@@ -482,7 +484,7 @@ mod tests {
 
     /// A URL the built-in rule `||host[/path]^` blocks.
     fn url_for_rule(rule: &str) -> Url {
-        let rest = rule.trim_start_matches("||").trim_end_matches('^');
+        let rest = rule.trim_start_matches("||").split('$').next().unwrap().trim_end_matches('^');
         let url = if rest.contains('/') { format!("https://{rest}?x=1") } else { format!("https://{rest}/x.js") };
         Url::parse(&url).unwrap()
     }
@@ -667,7 +669,7 @@ mod tests {
         assert_eq!(blocker.check(&fine, &source, ResourceType::Script), None);
         assert_eq!(
             AdBlocker::new().check(&Url::parse("https://doubleclick.net/x").unwrap(), &source, ResourceType::Script),
-            Some(BlockMatch { list: "HiWave defaults".into(), rule: Some("||doubleclick.net^".into()) })
+            Some(BlockMatch { list: "HiWave defaults".into(), rule: Some("||doubleclick.net^$third-party".into()) })
         );
     }
 
@@ -824,5 +826,21 @@ mod tests {
         let stats = blocker.get_stats();
         assert_eq!(stats.requests_blocked, 1);
         assert_eq!(stats.trackers_blocked, 1);
+    }
+
+    /// SH2: the host-wide defaults are third-party rules. Browsing mixpanel.com must not block
+    /// mixpanel.com's own scripts; embedding it on another site still does.
+    #[test]
+    fn a_host_wide_default_does_not_block_the_site_s_own_subresources() {
+        let blocker = AdBlocker::new();
+        let script = |url: &str, page: &str| {
+            blocker.check(&Url::parse(url).unwrap(), &Url::parse(page).unwrap(), ResourceType::Script)
+        };
+        for host in ["mixpanel.com", "segment.com", "hotjar.com", "taboola.com"] {
+            let own = format!("https://{host}/lib.js");
+            let page = format!("https://{host}/");
+            assert!(script(&own, &page).is_none(), "{host} blocked on its own site");
+            assert!(script(&own, "https://news.example/").is_some(), "{host} not blocked as a third party");
+        }
     }
 }

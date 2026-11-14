@@ -653,9 +653,9 @@
     };
     Animation.prototype._dispatch = function (type) {
         var ev = Object.create(AnimationPlaybackEvent.prototype);
-        ev.type = type; ev.target = this; ev.currentTarget = this; ev.bubbles = false; ev.cancelable = false;
+        ev.type = type; ev.target = this; ev.currentTarget = this; ev.bubbles = false;
         ev.currentTime = type === 'cancel' ? null : this.currentTime;
-        ev.timelineTime = timeNow; ev.timeStamp = timeNow; ev.defaultPrevented = false; ev.isTrusted = true;
+        ev.timelineTime = timeNow; ev.timeStamp = timeNow; ev.isTrusted = true;
         var h = this['on' + type];
         var list = (this._listeners[type] || []).slice();
         if (typeof h === 'function') { try { h.call(this, ev); } catch (e) { report(e); } }

@@ -42,13 +42,40 @@ must name that SHA. If HEAD moves while you wait on CI, re-record and re-check.
 
 ### Required checks (gate 1)
 
-Treat these pull_request checks as required (must be SUCCESS, not pending):
+CI is batch-level since 2026-11-13 (#1125): the heavy macOS suites run once on
+the batch PR (head branch `batch/NN`), not on every member PR.
 
-- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`, `render-suites`
+On an ordinary PR, these checks are required (must be SUCCESS, not pending):
+
+- `audit`, `f1-test-compile`, `selector-key`, `script-guards`
+
+On a **batch PR** (head branch starts with `batch/`), these are required too:
+
+- `unit-suites`, `render-suites`, `capture-suites`, `js-suites`
 - `pr-swarm` (0–3), `pr-aggregate`
 
-Skipped on PRs and **not** failures: `nightly-swarm`, `nightly-aggregate`,
-`commit-gate`.
+Skipped and **not** failures:
+
+- on every PR: `nightly-swarm`, `nightly-aggregate`, `commit-gate`
+- on an ordinary (non-batch) PR: `unit-suites`, `render-suites`,
+  `capture-suites`, `js-suites`, `pr-swarm`, `pr-aggregate`. SKIPPED there is
+  the design, never a gate-1 FAIL and never evidence of green either.
+
+A batch PR needs no R1 of its own: its members carry `r1-clear` at the merged
+SHAs. On a batch PR, gates 6 and 7 do not apply (it is the sum of its
+members); gates 1 to 5 do. Gates 3 and 4 matter most there: the batch's merge
+commits are the one place content can appear that no member carried and no
+review read. Its PASS stamp reads `gates: 1-5 ok (batch)`.
+
+A **promotion PR** (`develop` -> `master`) is not an ordinary PR: its head is
+`develop`, so the heavy suites skip on it. Require a green `Parity Gate` run
+on exactly that head SHA from a `workflow_dispatch` on `develop`:
+`gh run list --workflow "Parity Gate" --branch develop --event workflow_dispatch`.
+A batch PR's run does not count (it ran on the batch head, not on the merge
+commit `develop` points at). The lead starts the dispatch when Pete calls a
+release; the gate does not start it. Without a run, post one comment saying
+the promotion head has no heavy-suite run yet, then wait; do not stamp PASS
+on the four cheap checks alone.
 
 ### FAIL if any of these is true
 
@@ -93,6 +120,8 @@ If everything passes, post exactly:
 R2-STAMP: PASS @ <HEAD>
 checks: green | merge: CLEAN | gates: 1-7 ok
 ```
+
+On a batch PR the last field is `gates: 1-5 ok (batch)`.
 
 and add label `r2-pass` (remove `r2-fail` if present).
 
