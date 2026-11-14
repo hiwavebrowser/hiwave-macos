@@ -498,3 +498,46 @@ fn a_script_label_names_its_own_views_script_in_the_file_and_in_the_mirror() {
     assert!(mirror_line("said-by-a").contains("/a.js"), "{}", mirror_line("said-by-a"));
     assert!(mirror_line("said-by-b").contains("/b.js"), "{}", mirror_line("said-by-b"));
 }
+
+// ---- R1 nit 3: file open hardening ----
+
+#[cfg(unix)]
+#[test]
+fn file_open_hardening_a_link_at_the_path_is_refused() {
+    let (link, target) = (scratch("link"), scratch("link-target"));
+    let (_reset, _target) = (Reset(link.clone()), Remove(target.clone()));
+    std::fs::write(&target, "").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let log = tracing_log(|| {
+        crate::console_file::force_for_test(Some(Forced::On(link.clone(), MAX_FILE_BYTES)));
+        load(vec![Route::html("/", PAGE)], "/");
+    });
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "", "something was written");
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the path was replaced");
+    assert!(!crate::console_file::enabled());
+    assert_eq!(console_file_warnings(&log).len(), 1, "{log}");
+    assert!(!log.contains("hiwave-console-file") && !log.contains("secret"), "more than a shape in the warning:\n{log}");
+}
+
+#[cfg(unix)]
+#[test]
+fn file_open_hardening_only_a_regular_file_is_written() {
+    let dir = scratch("a-directory");
+    let _reset = Reset(dir.clone());
+    std::fs::create_dir(&dir).unwrap();
+    let _dir = RemoveDir(dir.clone());
+    let log = tracing_log(|| {
+        crate::console_file::force_for_test(Some(Forced::On(dir.clone(), MAX_FILE_BYTES)));
+        load(vec![Route::html("/", PAGE)], "/");
+    });
+    assert!(!crate::console_file::enabled());
+    assert_eq!(console_file_warnings(&log).len(), 1, "{log}");
+}
+
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
