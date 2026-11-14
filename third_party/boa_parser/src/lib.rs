@@ -52,8 +52,12 @@ mod stack_budget {
         std::ptr::from_ref(std::hint::black_box(&marker)) as usize
     }
 
-    /// Install the engine's "is the native stack over its budget" probe.
-    pub fn set_stack_probe(probe: Option<fn() -> bool>) {
+    /// Install the engine's "is the native stack over its budget" probe. The probe answers `None`
+    /// when its thread has no outermost engine entry (a parse outside the engine's run), and the parse
+    /// is then measured from its own start, as with no probe. The probe is process-wide; the entry is
+    /// per thread, so a probe that answered "not over" without an entry let such a parse recurse
+    /// unmeasured (#1099 R1).
+    pub fn set_stack_probe(probe: Option<fn() -> Option<bool>>) {
         let ptr = probe.map_or(std::ptr::null_mut(), |f| f as *mut ());
         PROBE.store(ptr, Ordering::Relaxed);
     }
@@ -64,9 +68,10 @@ mod stack_budget {
         if ptr.is_null() {
             return own_origin.saturating_sub(stack_addr()) > OWN_BUDGET;
         }
-        // SAFETY: only `set_stack_probe` stores here, and it stores a `fn() -> bool`.
-        let probe: fn() -> bool = unsafe { std::mem::transmute::<*mut (), fn() -> bool>(ptr) };
-        probe()
+        // SAFETY: only `set_stack_probe` stores here, and it stores a `fn() -> Option<bool>`.
+        let probe: fn() -> Option<bool> =
+            unsafe { std::mem::transmute::<*mut (), fn() -> Option<bool>>(ptr) };
+        probe().unwrap_or_else(|| own_origin.saturating_sub(stack_addr()) > OWN_BUDGET)
     }
 }
 pub use stack_budget::set_stack_probe;
