@@ -449,6 +449,8 @@ mod script_loading_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
+mod worker_url_e2e_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_display_tests;
