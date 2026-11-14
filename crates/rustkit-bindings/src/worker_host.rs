@@ -41,7 +41,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 pub(crate) static ENDED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-enum FromWorker {
+pub(crate) enum FromWorker {
     Message(String),
     /// An uncaught error, as JSON `{m, f, l, c}`.
     Error(String),
@@ -55,6 +55,9 @@ struct Handle {
     from: Receiver<FromWorker>,
     control: Arc<ViewControl>,
     thread: JoinHandle<()>,
+    /// Tests put items on the worker-to-page channel themselves (items no worker can produce).
+    #[cfg(test)]
+    inject: Sender<FromWorker>,
 }
 
 /// One page's workers. The host functions share it; the page's bindings
@@ -89,6 +92,14 @@ impl Registry {
 pub struct Guard(Rc<Registry>);
 
 impl Guard {
+    /// Tests: put `item` on every live worker's worker-to-page channel, as the next thing it sends.
+    #[cfg(test)]
+    pub(crate) fn inject_all(&self, item: impl Fn() -> FromWorker) {
+        for h in self.0.workers.borrow().values() {
+            let _ = h.inject.send(item());
+        }
+    }
+
     /// How many of the page's worker threads are still running, terminated ones that have not ended
     /// included.
     pub(crate) fn running(&self) -> usize {
@@ -142,6 +153,8 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
             let (to, rx) = channel();
             let (reply, reply_rx) = channel();
             let (tx, from) = channel();
+            #[cfg(test)]
+            let inject = tx.clone();
             let control = Watchdog::shared().view_control();
             let c = control.clone();
             let thread = std::thread::Builder::new().name(format!("worker-{id}")).spawn(move || {
@@ -154,7 +167,18 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
             let Ok(thread) = thread else {
                 return JsValue::Number(0.0);
             };
-            r.workers.borrow_mut().insert(id, Handle { to, reply, from, control, thread });
+            r.workers.borrow_mut().insert(
+                id,
+                Handle {
+                    to,
+                    reply,
+                    from,
+                    control,
+                    thread,
+                    #[cfg(test)]
+                    inject,
+                },
+            );
             JsValue::Number(id as f64)
         }),
     )?;

@@ -602,3 +602,81 @@ fn the_structured_clone_helper_is_on_neither_global() {
     assert!(pump_until(&b, "seen !== null"), "no answer");
     assert_eq!(ev(&b, "JSON.stringify(seen)"), "{\"sc\":\"undefined\",\"own\":-1}");
 }
+
+/// Worker scope hardening: a worker's own global scope carries none of the host's or the prelude's
+/// plumbing (`__`-prefixed names): the prelude holds the host functions it was given, and the host holds
+/// the prelude's entry points.
+#[test]
+fn a_worker_scope_has_no_host_or_prelude_globals() {
+    let b = bound();
+    b.evaluate("var seen = null, w = new Worker('http://a.test/g.js'); w.onmessage = function (e) { seen = e.data; };").unwrap();
+    serve(&b, "postMessage(Object.getOwnPropertyNames(self).filter(function (n) { return n.indexOf('__') === 0; }).join(' '));");
+    assert!(pump_until(&b, "seen !== null"), "no answer");
+    assert_eq!(ev(&b, "seen"), "");
+}
+
+/// Worker scope hardening: what the host calls each turn is what the prelude set up, held by the host,
+/// not whatever the worker's global holds under that name later.
+#[test]
+fn a_worker_cannot_replace_what_the_host_calls() {
+    let b = bound();
+    b.evaluate("var got = [], w = new Worker('http://a.test/h.js'); w.onmessage = function (e) { got.push(e.data); };").unwrap();
+    serve(
+        &b,
+        "self.onmessage = function (e) { postMessage('handled:' + e.data); };\n\
+         try { self.__rk_worker_dispatch = function () { postMessage('replaced'); }; } catch (_) {}\n\
+         postMessage('ready');",
+    );
+    assert!(pump_until(&b, "got.length >= 1"), "no ready");
+    b.evaluate("w.postMessage('x');").unwrap();
+    assert!(pump_until(&b, "got.length >= 2"), "no answer: {}", ev(&b, "JSON.stringify(got)"));
+    assert_eq!(ev(&b, "JSON.stringify(got)"), "[\"ready\",\"handled:x\"]");
+}
+
+/// Worker scope hardening: the clone decoder builds only what the encoder can describe. A payload naming
+/// any other constructor, or an id that is not one of its own records, is refused; nothing is built.
+#[test]
+fn the_clone_decoder_builds_only_what_it_allows() {
+    let mut rt = rustkit_js::JsRuntime::new().unwrap();
+    rt.evaluate_script(include_str!("structured_clone.js")).unwrap();
+    let cases = [
+        ("view of another constructor", r#"{"r":{"@":0},"n":[{"t":"TA","c":"Function","b":"return 1","o":0,"l":0}]}"#),
+        ("error of another constructor", r#"{"r":{"@":0},"n":[{"t":"E","n":"Function","m":"return 1"}]}"#),
+        ("error of an inherited name", r#"{"r":{"@":0},"n":[{"t":"E","n":"constructor","m":"x"}]}"#),
+        ("an id that is not a record", r#"{"r":{"@":"constructor"},"n":[]}"#),
+        ("an inherited marker", r#"{"r":{"toString":1},"n":[]}"#),
+    ];
+    let mut wrong = Vec::new();
+    for (what, payload) in cases {
+        let script = format!(
+            "(function () {{ try {{ var v = __rk_sc.deserialize({}); return 'built:' + typeof v; }} catch (e) {{ return 'refused'; }} }})()",
+            serde_json::to_string(payload).unwrap()
+        );
+        match rt.evaluate_script(&script) {
+            Ok(JsValue::String(s)) if s == "refused" => {}
+            other => wrong.push(format!("{what}: {other:?}")),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Worker scope hardening: one malformed item from a worker costs only that item; the rest of the poll,
+/// that worker's and other workers', is still delivered.
+#[test]
+fn one_malformed_item_does_not_drop_the_rest_of_the_poll() {
+    let b = bound();
+    b.evaluate(
+        "var got = [], errors = 0; \
+         var a = new Worker('http://a.test/a.js'), c = new Worker('http://a.test/c.js'); \
+         a.onmessage = function (e) { got.push('a:' + e.data); }; c.onmessage = function (e) { got.push('c:' + e.data); }; \
+         a.onerror = function () { errors++; }; c.onerror = function () { errors++; };",
+    )
+    .unwrap();
+    serve(&b, "self.onmessage = function (e) { postMessage(e.data); };");
+    std::thread::sleep(Duration::from_millis(200));
+    b.workers.inject_all(|| crate::worker_host::FromWorker::Error("not json {".into()));
+    b.evaluate("a.postMessage('1'); c.postMessage('2');").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(pump_until(&b, "got.length >= 2"), "lost: {}", ev(&b, "JSON.stringify(got)"));
+    assert_eq!(ev(&b, "JSON.stringify(got.slice().sort())"), "[\"a:1\",\"c:2\"]");
+}
