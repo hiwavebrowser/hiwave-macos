@@ -146,7 +146,6 @@ pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BorderStyle, BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::collections::HashMap;
-use std::cmp::Ordering;
 
 /// The `word-break` the line breaker should run with.
 ///
