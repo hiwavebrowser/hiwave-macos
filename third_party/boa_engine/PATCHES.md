@@ -718,3 +718,18 @@ to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/
 `decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
 `crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
 a parameter, a global and a member; 12 differed before).
+## Patch: a write to an array's `length` is never inline-cached (`array-length-ic`)
+
+**Why.** Unmodified Boa 0.22 bug, reported by Atlas from engine-side JS on develop e8ed58da (a
+request queue emptied with `queue.length = 0` lost elements after the second reset). An array's
+`length` is an ordinary shape slot, so the first `a.length = n` at a site found it and
+`SetPropertyByName` cached the slot; every later write from that site stored `n` straight into the
+slot and skipped ArraySetLength. So nothing was truncated (old elements stayed readable: `q[0]` after
+`q.length = 0`), later `q[i] = v` writes did not grow `length`, and `q.length = '2'` stored a string.
+
+**What.** `builtins/array/mod.rs` `array_exotic_define_own_property` (marked
+`HIWAVE PATCH (array-length-ic)`): after ArraySetLength, the slot is marked `NOT_CACHEABLE`, so a
+`length` write always takes the exotic path. Reads of `length` are still cached. Pin:
+`crates/rustkit-js/tests/array_length_reset.rs` (30 cases from Chrome 148.0.7778.216: push, shift,
+pop, unshift, index writes, holes, closures, a queue pump, string and growing lengths, a frozen
+array; 6 differed before).
