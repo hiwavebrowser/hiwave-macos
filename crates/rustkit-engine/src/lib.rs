@@ -343,6 +343,10 @@ pub use page_protocol::{
     PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
+/// Tell script runtimes made on the calling thread how much native stack they may use before a
+/// built-in that recurses in Rust throws a `RangeError` (see `rustkit_js`). Call it first thing
+/// on a thread whose stack size is known.
+pub use rustkit_js::set_thread_native_stack_budget;
 pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
@@ -475,12 +479,20 @@ mod lay2_fixed_containing_block_tests;
 mod html1_noscript_tests;
 #[cfg(all(test, feature = "headless"))]
 mod html1_noscript_serialize_tests;
+#[cfg(all(test, feature = "headless"))]
+mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
 mod r1_stack_pins_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl1_trusted_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl2_discrete_wheel_tests;
+#[cfg(all(test, feature = "headless"))]
+mod whl3_wheel_sequence_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod grid_item_final_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -493,6 +505,8 @@ mod select_height_tests;
 mod input_height_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod input_width_tests;
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod set5_input_content_width_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod inline_line_pitch_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -739,6 +753,24 @@ mod svg_paint_state_tests;
 #[cfg(all(test, feature = "headless"))]
 mod focus_pseudo_tests;
 #[cfg(all(test, feature = "headless"))]
+mod form_setter_calls_tests;
+#[cfg(all(test, feature = "headless"))]
+mod document_title_tests;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's engines read a document for its title
+    /// after a script turn (`Engine::follow_script_title`).
+    static TITLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`TITLE_READS`], for the test that a page pays nothing for the title
+/// unless a write touched one.
+#[cfg(test)]
+pub(crate) fn title_reads() -> u64 {
+    TITLE_READS.with(|reads| reads.get())
+}
+#[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
@@ -789,6 +821,12 @@ mod abspos_inline_line_tests;
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_auto_repeat_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_flex_percent_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_viewport_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_percent_block_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -853,6 +891,8 @@ mod feed_fill_paint_tests;
 mod backdrop_filter_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_global_lexical_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -1422,6 +1462,9 @@ struct ViewState {
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// Script wrote to the DOM since the title was last compared with the
+    /// document's (`Engine::follow_script_title`).
+    title_stale: bool,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
@@ -3477,6 +3520,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3599,6 +3643,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -3738,6 +3783,7 @@ impl Engine {
             scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
+            title_stale: false,
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
@@ -4071,6 +4117,13 @@ impl Engine {
     /// becomes the held target: a box at its end hands on at once, as
     /// Chromium does.
     ///
+    /// The hold is for the steps of a gesture only (WHL2): a trackpad's
+    /// scroll, which the platform marks with a phase. A wheel on its own (a
+    /// mouse's notch) goes to what is under the pointer however soon after
+    /// the last one, as in Chrome, and so does the first step of a gesture
+    /// after such a wheel. `scroll_at` is a step of a gesture; `wheel_at`
+    /// takes which it is.
+    ///
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
     pub fn scroll_at(
@@ -4081,25 +4134,159 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        self.wheel_at(id, x, y, delta_x, delta_y, true)
+    }
+
+    /// A wheel over a viewport point (`scroll_at` has the rules); `gesture`
+    /// says whether it is a step of a gesture or a wheel on its own.
+    pub fn wheel_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
+        self.wheel_phase_at(id, x, y, delta_x, delta_y, gesture, false)
+    }
+
+    /// [`Engine::wheel_at`] for a wheel the platform says begins a gesture
+    /// (`began`): the first wheel of a new scroll sequence, however soon
+    /// it follows the last one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wheel_phase_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+        began: bool,
+    ) -> Result<bool, EngineError> {
+        // A gesture that begins starts a new scroll sequence: whatever the
+        // last one held (its scroller, its first wheel's fate) is let go,
+        // however soon this follows it (R1 on #1121).
+        if began {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.wheel_gesture = None;
+            }
+        }
+        // The page hears the wheel when it has a listener for one
+        // (`DomBindings::wants_wheel`); a page with none runs no script
+        // here. A listener that is not passive hears it first and may
+        // cancel it, and then nothing scrolls. Passive ones hear it after
+        // the scroll, at whatever is then under the pointer (WHL1; Chrome
+        // for Testing 148). An open `<select>` drop-down keeps the wheel.
+        let (listening, blocking) = if self.select_popup_open(id) {
+            (false, false)
+        } else {
+            self.views
+                .get(&id)
+                .and_then(|v| v.bindings.as_ref())
+                .map_or((false, false), |bindings| (bindings.wants_wheel(), bindings.wheel_blocking()))
+        };
+        if !listening {
+            return self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture);
+        }
+        // WHL3: only the first wheel of a scroll sequence can be cancelled
+        // (Chrome): a later step of a gesture whose first step was not
+        // cancelled (it scrolled, so the gesture is held) goes after the
+        // scroll. A wheel on its own (a mouse's) is always a first.
+        let continues = gesture
+            && self.views.get(&id).and_then(|v| v.wheel_gesture).is_some_and(|g| {
+                g.gesture && g.last.elapsed() < WHEEL_GESTURE_HOLD
+            });
+        // With no listener that can cancel, the path is not walked.
+        let cancelable = blocking
+            && !continues
+            && self.wheel_target(id, x, y).is_some_and(|target| {
+                self.run_listeners(id, target, "wheel", false, |bindings| bindings.wheel_blocks(target))
+            });
+        if cancelable && !self.fire_wheel(id, x, y, delta_x, delta_y, true) {
+            return Ok(false);
+        }
+        let changed = self.scroll_by_wheel(id, x, y, delta_x, delta_y, gesture)?;
+        if !cancelable {
+            self.fire_wheel(id, x, y, delta_x, delta_y, false);
+        }
+        Ok(changed)
+    }
+
+    /// `scroll_at` without the page's `wheel` event.
+    fn scroll_by_wheel(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        gesture: bool,
+    ) -> Result<bool, EngineError> {
         // An open `<select>` drop-down takes the wheel.
         if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
             return Ok(moved);
         }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        let recent = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        // Only a step of a gesture stays on what the step before it moved.
+        let held = recent.filter(|g| gesture && g.gesture);
         let held_target = held
             .map(|g| g.target)
             .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
         let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
-        let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
+        let rest = recent.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
         let (changed, rest) = match target {
             WheelTarget::Window => (self.scroll_view(id, delta_x, delta_y)?, (0.0, 0.0)),
             WheelTarget::Element(node) => self.wheel_element(id, node, delta_x, delta_y, rest)?,
         };
         if let Some(view) = self.views.get_mut(&id) {
-            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
+            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest, gesture });
         }
         Ok(changed)
+    }
+
+    /// The element under a viewport point (raw NodeId), for a `wheel`.
+    fn wheel_target(&self, id: EngineViewId, x: f32, y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let raw = Self::hit_at(view, x, y)?.node_id?;
+        let doc = view.document.as_ref()?;
+        let mut node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+        while !node.is_element() {
+            node = node.parent()?;
+        }
+        Some(node.id.raw())
+    }
+
+    /// Dispatch `wheel` at the element under a viewport point, with the
+    /// engine's scroll deltas as DOM ones (down and right are positive).
+    /// Returns false when a listener cancelled it.
+    fn fire_wheel(&mut self, id: EngineViewId, x: f32, y: f32, delta_x: f32, delta_y: f32, cancelable: bool) -> bool {
+        let Some(target) = self.wheel_target(id, x, y) else {
+            return true;
+        };
+        let (offset_x, offset_y) = self
+            .views
+            .get(&id)
+            .and_then(|view| Self::hit_at(view, x, y))
+            .map_or((0.0, 0.0), |hit| (hit.local_x as f64, hit.local_y as f64));
+        let data = rustkit_bindings::MouseEventBindingData {
+            client_x: x as f64,
+            client_y: y as f64,
+            screen_x: x as f64,
+            screen_y: y as f64,
+            offset_x,
+            offset_y,
+            ..Default::default()
+        };
+        let not_cancelled = self.run_listeners(id, target, "wheel", true, |bindings| {
+            bindings.fire_wheel_event(target, &data, delta_x as f64, -(delta_y as f64), cancelable)
+        });
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after wheel event failed");
+        }
+        not_cancelled
     }
 
     /// What a new wheel over a point moves: the innermost scroller under the
@@ -6704,6 +6891,18 @@ impl Engine {
             }
             return !not_cancelled;
         };
+        // A focused checkbox or radio button takes no text: Space's keydown
+        // is taken and clicks it at the keyup, like a button's.
+        if key_code != 0x0D && self.is_checkable_input(id, focused.raw()) {
+            let not_cancelled = self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt);
+            if key == " " && !ctrl && !alt {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.space_armed = not_cancelled.then_some(focused.raw());
+                }
+                return true;
+            }
+            return false;
+        }
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
         // tries before this.
@@ -13463,6 +13662,8 @@ impl layout_ctx::LayoutCtx {
                             value,
                             placeholder,
                             input_type,
+                            // SET5: how many characters wide the field is.
+                            size: input_size_attribute(attributes.get("size").map(String::as_str)),
                         },
                     };
 
@@ -24488,7 +24689,66 @@ impl Engine {
         if self.follow_script_selection(id) {
             self.repaint_selection(id);
         }
+        self.follow_script_title(id);
         Ok(laid)
+    }
+
+    /// Could this write have changed the document's title: it is to a
+    /// `<title>` or its text, or it inserted, removed or replaced nodes
+    /// with a `<title>` among them. A write that replaced an element's
+    /// children says nothing of what was there, so with a title on record
+    /// (`had_title`) it counts: finding that title again is a short walk.
+    /// A page with no `<title>` is never walked for one.
+    fn touches_title(document: Option<&Document>, had_title: bool, record: &rustkit_bindings::MutationRecord) -> bool {
+        use rustkit_bindings::MutationKind;
+        let Some(document) = document else {
+            return false;
+        };
+        let node = |raw: usize| document.get_node(rustkit_dom::NodeId::new(raw));
+        match record.kind {
+            MutationKind::Text => node(record.node)
+                .is_some_and(|n| n.is_title_element() || n.parent().is_some_and(|p| p.is_title_element())),
+            MutationKind::ChildList => {
+                let Some(parent) = node(record.node) else {
+                    return had_title;
+                };
+                if parent.is_title_element() {
+                    return true;
+                }
+                match record.child {
+                    Some(child) => node(child).map_or(had_title, |child| child.holds_title_element()),
+                    None => had_title || parent.holds_title_element(),
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The tab's title follows the document's: when the script that just
+    /// settled wrote to the DOM and the document's title is no longer the
+    /// one last reported, report it (`EngineEvent::TitleChanged`, the empty
+    /// string when the document has none now). Once per settle, however
+    /// many writes there were.
+    fn follow_script_title(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if !std::mem::take(&mut view.title_stale) {
+            return;
+        }
+        #[cfg(test)]
+        TITLE_READS.with(|reads| reads.set(reads.get() + 1));
+        let Some(title) = view.document.as_ref().map(|document| document.title()) else {
+            return;
+        };
+        if title == view.title {
+            return;
+        }
+        view.title = title.clone();
+        let _ = self.event_tx.send(EngineEvent::TitleChanged {
+            view_id: id,
+            title: title.unwrap_or_default(),
+        });
     }
 
     fn flush_script_dom_writes_once(
@@ -24506,6 +24766,10 @@ impl Engine {
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
+        let had_title = view.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.document.as_deref(), had_title, record)) {
+            view.title_stale = true;
+        }
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
@@ -29045,9 +29309,26 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
     computed_read::set_root_font(root_style);
 }
 
-/// How long after a wheel the next one still belongs to its gesture. macOS
-/// marks a real gesture's phases, but the input queue does not carry them; a
+/// An `<input>`'s `size` attribute as a number of characters (HTML
+/// §4.10.5.3.2, the rules for parsing non-negative integers): leading ASCII
+/// whitespace, an optional "+", then the digits up to the first other
+/// character ("10px" is 10, "3.9" is 3, "1e2" is 1); 20 unless that is 1 to
+/// 2147483647. `HTMLInputElement.size` reads it the same way (dom.rs).
+fn input_size_attribute(value: Option<&str>) -> u32 {
+    let text = value.unwrap_or("").trim_start_matches(['\t', '\n', '\u{c}', '\r', ' ']);
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let digits: &str = &text[..text.bytes().take_while(u8::is_ascii_digit).count()];
+    match digits.trim_start_matches('0').len() {
+        0 if digits.is_empty() => 20,
+        n if n > 10 => 20,
+        _ => digits.parse::<u64>().ok().filter(|n| (1..=2_147_483_647).contains(n)).map_or(20, |n| n as u32),
+    }
+}
+
+/// How long after a step of a gesture the next step still belongs to it. A
 /// flick's events, inertia included, come much closer together than this.
+/// Which wheels are steps of a gesture is the platform's to say (macOS
+/// marks them with a phase; `PendingScroll::gesture`).
 const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// CH2.E7: a thumb drag in progress. The scroll follows the pointer's
@@ -29081,6 +29362,8 @@ struct WheelGesture {
     last: std::time::Instant,
     /// What rounding the last step to a whole pixel left over.
     rest: (f32, f32),
+    /// Whether that wheel was a step of a gesture (`Engine::wheel_at`).
+    gesture: bool,
 }
 
 /// Copy the view's element scroll offsets onto the scrollers of a layout tree,

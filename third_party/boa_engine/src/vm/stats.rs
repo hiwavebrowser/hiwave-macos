@@ -6,7 +6,7 @@
 //! branch on a path that is already the slow one.
 //!
 //! `report()` returns the text; with `RUSTKIT_VM_STATS_FILE=<path>` the report is also rewritten to
-//! that file every 1M opcodes and when the thread ends, so a probe that exits without calling
+//! `<path>.t<thread number>` every 1M opcodes and when the thread ends, so a probe that exits without calling
 //! `report()` still leaves one.
 
 use std::cell::RefCell;
@@ -87,6 +87,8 @@ pub(crate) fn miss(site: Site, name: &str, receiver: &'static str, cacheable: bo
     if !enabled() {
         return;
     }
+    let name = shape_of(name);
+    let name = name.as_str();
     STATS.with(|s| {
         let mut s = s.borrow_mut();
         *s.misses.entry((site, cacheable)).or_insert(0) += 1;
@@ -94,6 +96,21 @@ pub(crate) fn miss(site: Site, name: &str, receiver: &'static str, cacheable: bo
             *s.names.entry((site, receiver, name.to_string())).or_insert(0) += 1;
         }
     });
+}
+
+/// Privacy: logs and reports carry shapes, not data. A property name is recorded only when it is an
+/// identifier of reasonable length, which is what a name written in the page's script source is;
+/// anything else (a string-literal key such as an email or a token, an over-long name) is counted
+/// under one bucket. Computed keys (`o[x]`) never reach this: the miss hooks are on the by-name
+/// opcodes only.
+const OTHER_NAME: &str = "(not an identifier, or longer than 48)";
+
+fn shape_of(name: &str) -> String {
+    let mut chars = name.chars();
+    let ok = name.len() <= 48
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    if ok { name.to_string() } else { OTHER_NAME.to_string() }
 }
 
 /// The kind of value an access is made on, for the miss report.
@@ -115,8 +132,13 @@ pub(crate) fn receiver_kind(value: &crate::JsValue) -> &'static str {
     }
 }
 
+/// One file per thread (`<path>.t<N>`), so two threads' reports do not overwrite each other.
 fn write_file(text: &str) {
     if let Some(path) = std::env::var_os("RUSTKIT_VM_STATS_FILE") {
+        let id = format!("{:?}", std::thread::current().id());
+        let digits: String = id.chars().filter(char::is_ascii_digit).collect();
+        let mut path = path;
+        path.push(format!(".t{digits}"));
         drop(std::fs::write(path, text));
     }
 }

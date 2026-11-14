@@ -1056,28 +1056,6 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
     }
 
-    /// HIWAVE PATCH (js-perf2 item 6): whether evaluating `expr` could assign to or update a
-    /// variable of this function. Conservative: any assignment or update expression anywhere in it
-    /// (function bodies inside it included) answers true. A local variable held in a register can
-    /// only change through such an expression in the function's own code, so when this is false
-    /// the register may be read lazily, after `expr` has run, instead of copied first.
-    pub(crate) fn may_assign(expr: &Expression) -> bool {
-        use boa_ast::visitor::{VisitWith, Visitor};
-        use boa_ast::expression::operator::{Assign, Update};
-        use std::ops::ControlFlow;
-
-        struct Finder;
-        impl<'ast> Visitor<'ast> for Finder {
-            type BreakTy = ();
-            fn visit_assign(&mut self, _: &'ast Assign) -> ControlFlow<()> {
-                ControlFlow::Break(())
-            }
-            fn visit_update(&mut self, _: &'ast Update) -> ControlFlow<()> {
-                ControlFlow::Break(())
-            }
-        }
-        expr.visit_with(&mut Finder).is_break()
-    }
 
     /// HIWAVE PATCH (js-perf2 item 6): whether compiling `expr` into a destination register writes
     /// that register only with its LAST instruction (every operand goes to its own temporary or is
@@ -2062,7 +2040,29 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// it allocates a temporary register and compiles into it.
     ///
     /// The `inner_fn` passed in will be called before the register get deallocated.
-    /// HIWAVE PATCH (js-perf2 item 6): `compile_expr_operand` for an operand that is read BEFORE
+    /// HIWAVE PATCH (eval-order): whether evaluating `expr` could assign to or update a variable
+    /// of this function. Conservative: any assignment or update expression anywhere in it
+    /// (function bodies inside it included) answers true. A local variable held in a register can
+    /// only change through such an expression in the function's own code.
+    pub(crate) fn may_assign(expr: &Expression) -> bool {
+        use boa_ast::expression::operator::{Assign, Update};
+        use boa_ast::visitor::{VisitWith, Visitor};
+        use std::ops::ControlFlow;
+
+        struct Finder;
+        impl<'ast> Visitor<'ast> for Finder {
+            type BreakTy = ();
+            fn visit_assign(&mut self, _: &'ast Assign) -> ControlFlow<()> {
+                ControlFlow::Break(())
+            }
+            fn visit_update(&mut self, _: &'ast Update) -> ControlFlow<()> {
+                ControlFlow::Break(())
+            }
+        }
+        expr.visit_with(&mut Finder).is_break()
+    }
+
+    /// HIWAVE PATCH (eval-order): `compile_expr_operand` for an operand that is read BEFORE
     /// another one (`later`) is evaluated and used after it, as the left side of `lhs op rhs`. A
     /// local's register is used directly only when `later` cannot assign: `a + --a` and
     /// `a < (a = 5)` read `a` first, so its old value has to be copied before `later` runs.

@@ -1,11 +1,18 @@
-//! JS-PERF2 item 6: the compiler reads a local variable's register directly (no copy into a
-//! temporary) when nothing evaluated in between can assign to it, and updates `var` locals in
-//! place. Evaluation order is where that goes wrong (`a[a = 1]`, `x += (x = 5)`, `a + a++`), so
-//! 400 generated programs full of exactly those hazards (`tools/parity_oracle/gen_eval_order_cases.py`,
+//! Evaluation order of local variables held in registers. The compiler reads a local's register
+//! directly as an operand (no copy into a temporary), which is only right when nothing evaluated
+//! before the operand is USED can assign to it: `a + --a` and `a < (a = 5)` must use the OLD `a`
+//! (the left side is read first), and the old compiler used the new one.
+//!
+//! 1,200 generated programs full of exactly those hazards (`tools/parity_oracle/gen_eval_order_cases.py`,
 //! seeded) are compared with Chrome for Testing 148.0.7778.216 (`js_cases_log.mjs eval_order_cases.json
 //! --write`): locals declared with `var` and `let`, a parameter, objects and arrays, side-effecting
-//! keys, compound assignment, `++`/`--`, a closure that mutates a captured variable. They pass
-//! before the change too; they are what would catch an order mistake in it.
+//! keys, compound assignment, `++`/`--`, a closure that mutates a captured variable, calls,
+//! literals, chained assignment, `var` declarations with expressions, member stores of locals.
+//! Four of them differed on develop before #1124 and #1129. A second file of 56
+//! hand-written scoping cases (`compiled_locals_cases.json`: mapped `arguments`, named function
+//! expression names, `const`, the temporal dead zone, generators, `eval`, `with`, every compound
+//! operator, throwing initializers, frozen and setter targets) guards the same area, including
+//! JS-PERF2 item 6's in-place compilation.
 
 use rustkit_js::{JsRuntime, JsValue};
 

@@ -1147,6 +1147,9 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        // HIWAVE PATCH (native recursion): one native-stack entry for the whole run, taken here in
+        // the shared entry so both loops below (counting and not) run under it.
+        let _native_entry = crate::native_stack::Entry::new(self.vm.runtime_limits.native_stack_budget());
         // HIWAVE PATCH (vm-stats): the counting loop only when `RUSTKIT_VM_STATS` asks for it.
         if stats::enabled() {
             self.run_impl::<true>()

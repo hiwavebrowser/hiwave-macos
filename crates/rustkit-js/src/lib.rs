@@ -177,16 +177,23 @@ impl Drop for DiagJob {
     }
 }
 
-/// Install the function Boa calls when an interrupt path fires. A null hook
-/// leaves those paths silent. The hook itself decides whether to write.
-#[cfg(feature = "boa")]
 /// HIWAVE PATCH (vm-stats): the interpreter's counters as text (opcode counts, inline-cache misses
-/// by site, receiver kind and property name), collected when `RUSTKIT_VM_STATS=1` is set in the
-/// environment; empty otherwise. Diagnostic only.
+/// by site, receiver kind and identifier-like property name), collected when `RUSTKIT_VM_STATS=1` is
+/// set in the environment; empty otherwise. Diagnostic only.
+#[cfg(feature = "boa")]
 pub fn vm_stats_report() -> String {
     boa_engine::vm_stats::report()
 }
 
+/// Without the Boa engine there is nothing to report.
+#[cfg(not(feature = "boa"))]
+pub fn vm_stats_report() -> String {
+    String::new()
+}
+
+/// Install the function Boa calls when an interrupt path fires. A null hook
+/// leaves those paths silent. The hook itself decides whether to write.
+#[cfg(feature = "boa")]
 pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag>) {
     boa_engine::interrupt_diag::set_interrupt_diag(hook);
 }
@@ -380,6 +387,19 @@ pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
 /// called from ([`JsRuntime::register_host_function_with_caller`]).
 pub type HostFunctionWithCaller = Box<dyn Fn(&[JsValue], Option<ScriptPosition>) -> JsValue>;
 
+thread_local! {
+    static NATIVE_STACK_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tell runtimes made on this thread how much native stack a script turn may use before a
+/// built-in that recurses in Rust (JSON.stringify of nested arrays, `flat`, a Proxy chain, the
+/// parser) throws a `RangeError` instead of overflowing the thread. Call it first thing on a
+/// thread whose stack size you chose; about half of it leaves room for the host's own frames. A
+/// thread that never calls it gets Boa's 1 MiB, which fits any 2 MiB thread.
+pub fn set_thread_native_stack_budget(bytes: Option<usize>) {
+    NATIVE_STACK_BUDGET.with(|budget| budget.set(bytes));
+}
+
 fn stack_addr() -> usize {
     let slot = 0u8;
     &slot as *const u8 as usize
@@ -562,6 +582,11 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        #[cfg(feature = "boa")]
+        if let Some(bytes) = NATIVE_STACK_BUDGET.with(std::cell::Cell::get) {
+            context.runtime_limits_mut().set_native_stack_budget(bytes);
+        }
+
         // STR-10: running out of frames is a RangeError the page can catch, as in Chrome.
         #[cfg(feature = "boa")]
         context.runtime_limits_mut().set_catchable_stack_overflow(true);
@@ -1693,7 +1718,10 @@ where
     std::thread::Builder::new()
         .name(name.into())
         .stack_size(SCRIPT_THREAD_STACK_SIZE)
-        .spawn(f)
+        .spawn(move || {
+            set_thread_native_stack_budget(Some(SCRIPT_THREAD_STACK_SIZE / 2));
+            f()
+        })
 }
 
 #[cfg(test)]

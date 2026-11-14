@@ -197,6 +197,16 @@ pub struct Node {
     /// How many times `adoptedStyleSheets` was set on this document or
     /// shadow root: equal readings, the same adopted texts.
     adopted_generation: Cell<u64>,
+    /// The node's document (DOM "node document"), as the NodeId of its
+    /// Document node; 0 when no path has said (unknown). The page's own
+    /// Document node owns itself, and so does each other document here
+    /// (one `DOMParser` or `createHTMLDocument` made, and the one that
+    /// holds template contents). Set where a document makes a node, taken
+    /// from the new parent whenever a node is inserted (the move adopts
+    /// it), kept on removal and on a data write, copied by a clone. A
+    /// reader that needs to know must treat 0 as "not the page's". See
+    /// `set_owner`.
+    owner: Cell<usize>,
 }
 
 impl Node {
@@ -215,7 +225,35 @@ impl Node {
             sheet_generation: Cell::new(0),
             connection_generation: Cell::new(0),
             adopted_generation: Cell::new(0),
+            owner: Cell::new(0),
         })
+    }
+
+    /// The NodeId of this node's Document node, 0 when unknown.
+    pub fn owner_document_id(&self) -> usize {
+        self.owner.get()
+    }
+
+    /// Give this node and everything under it the document `owner` (a
+    /// subtree always has one document). Shadow trees follow their host.
+    pub fn set_owner(&self, owner: usize) {
+        if self.owner.get() == owner {
+            return;
+        }
+        self.owner.set(owner);
+        let mut pending: Vec<Rc<Node>> = self.children.borrow().iter().cloned().collect();
+        pending.extend(self.shadow_root());
+        while let Some(node) = pending.pop() {
+            node.owner.set(owner);
+            pending.extend(node.children.borrow().iter().cloned());
+            pending.extend(node.shadow_root());
+        }
+    }
+
+    /// The document whose nodes a node inserted under this one joins:
+    /// this node's own document (a Document node owns itself).
+    fn document_for_children(&self) -> usize {
+        self.owner.get()
     }
 
     /// The current lifetime of this element's sheet: changes whenever the
@@ -305,6 +343,17 @@ impl Node {
         }
     }
 
+    /// Is this an HTML `<title>` element (not an SVG one).
+    pub fn is_title_element(&self) -> bool {
+        matches!(&self.node_type, NodeType::Element { tag_name, namespace, .. }
+            if tag_name.eq_ignore_ascii_case("title") && namespace != svg_names::SVG_NAMESPACE)
+    }
+
+    /// Is this, or anything under it, an HTML `<title>` element.
+    pub fn holds_title_element(&self) -> bool {
+        self.is_title_element() || self.children.borrow().iter().any(|child| child.holds_title_element())
+    }
+
     /// Get parent node.
     pub fn parent(&self) -> Option<Rc<Node>> {
         self.parent.borrow().as_ref().and_then(|w| w.upgrade())
@@ -356,6 +405,8 @@ impl Node {
         note_mutation();
         self.end_sheet();
         child.moved();
+        // An inserted node takes its new parent's document.
+        child.set_owner(self.document_for_children());
         // Update child's parent
         *child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -423,6 +474,7 @@ impl Node {
         if let Some(idx) = ref_idx {
             self.end_sheet();
             new_child.moved();
+            new_child.set_owner(self.document_for_children());
             // Update new_child's parent
             *new_child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -948,6 +1000,8 @@ impl Document {
         // child ends its parent's.
         new.sheet_generation.set(old.sheet_generation.get());
         new.connection_generation.set(old.connection_generation.get());
+        // A data write keeps the node's document.
+        new.owner.set(old.owner.get());
         if let Some(p) = old.parent() {
             p.end_sheet();
         }
@@ -1075,14 +1129,33 @@ impl Document {
         copy
     }
 
-    /// Get the title of the document.
+    /// The document's title as `document.title` reads it (HTML §3.1.3):
+    /// the text children of the first HTML `<title>` in tree order, with
+    /// ASCII whitespace stripped and collapsed. `None` when the document
+    /// has no such element.
     pub fn title(&self) -> Option<String> {
-        let head = self.head()?;
-        let title_elem = head
-            .children()
-            .into_iter()
-            .find(|n| n.tag_name() == Some("title"))?;
-        Some(title_elem.text_content())
+        fn first_title(node: &Rc<Node>) -> Option<Rc<Node>> {
+            if node.is_title_element() {
+                return Some(Rc::clone(node));
+            }
+            let mut i = 0;
+            while let Some(child) = node.children.borrow().get(i).cloned() {
+                if let Some(found) = first_title(&child) {
+                    return Some(found);
+                }
+                i += 1;
+            }
+            None
+        }
+        let title = first_title(&self.root)?;
+        let mut text = String::new();
+        for child in title.children.borrow().iter() {
+            if let NodeType::Text(data) = &child.node_type {
+                text.push_str(data);
+            }
+        }
+        const ASCII_WHITESPACE: [char; 5] = ['\t', '\n', '\u{c}', '\r', ' '];
+        Some(text.split(ASCII_WHITESPACE).filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" "))
     }
 
     /// Traverse all nodes depth-first.
@@ -1141,6 +1214,24 @@ impl QuerySelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The document's title is what `document.title` reads (HTML §3.1.3):
+    /// the first HTML `<title>` in tree order, its own text, ASCII
+    /// whitespace stripped and collapsed.
+    #[test]
+    fn the_title_is_the_first_html_title_elements_collapsed_text() {
+        let title = |html: &str| Document::parse_html(html).unwrap().title();
+        assert_eq!(title("<title>  a \n\t b  </title>"), Some("a b".to_string()));
+        assert_eq!(title("<p>none</p>"), None);
+        assert_eq!(title("<title></title>"), Some(String::new()));
+        assert_eq!(title("<body><svg><title>drawing</title></svg><p>x</p>"), None, "an SVG title is not the document's");
+        assert_eq!(
+            title("<head></head><body><svg><title>drawing</title></svg><title>in body</title>"),
+            Some("in body".to_string()),
+            "a title outside the head counts"
+        );
+        assert_eq!(title("<title>\u{a0}kept\u{a0}</title>"), Some("\u{a0}kept\u{a0}".to_string()), "only ASCII whitespace is stripped");
+    }
 
     #[test]
     fn test_parse_simple_html() {
