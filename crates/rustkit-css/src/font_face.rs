@@ -82,34 +82,106 @@ fn split_top_level_commas(value: &str) -> Vec<String> {
     out
 }
 
-/// Extract the first fetchable font URL from a `src` descriptor.
+/// `name(` at the start of `s` (any case): what is between the parentheses,
+/// trimmed, and what follows them.
+fn function_arg<'a>(s: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    let head = s.get(..name.len())?;
+    let body = s[name.len()..].strip_prefix('(')?;
+    if !head.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let close = body.find(')')?;
+    Some((body[..close].trim(), &body[close + 1..]))
+}
+
+/// Whether a `format()` argument names a container the font loader decodes:
+/// sfnt (TrueType, OpenType, a collection), WOFF and WOFF2
+/// (`rustkit_text::webfonts`). `embedded-opentype` and `svg` are formats, but
+/// nothing here reads them; anything else is no format at all. The answers
+/// are Chrome 148's: it takes a string in any case or the keyword, and the
+/// legacy `-variations` names as strings only.
+fn format_is_decodable(arg: &str) -> bool {
+    let quoted = arg.len() >= 2
+        && [('"', '"'), ('\'', '\'')].iter().any(|(open, close)| arg.starts_with(*open) && arg.ends_with(*close));
+    let name = if quoted { &arg[1..arg.len() - 1] } else { arg };
+    match name.to_ascii_lowercase().as_str() {
+        "woff" | "woff2" | "truetype" | "opentype" | "collection" => true,
+        "woff-variations" | "woff2-variations" | "truetype-variations" | "opentype-variations" => quoted,
+        _ => false,
+    }
+}
+
+/// Whether every technology a `tech()` argument lists is one Chrome 148
+/// accepts on macOS (the pinned oracle): a source that needs one it does not
+/// have (`color-SVG`, `features-graphite`, `incremental`) or does not know is
+/// passed over. `features-aat` is accepted there only on macOS.
+fn tech_is_supported(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.split(',').all(|tech| {
+            matches!(
+                tech.trim().to_ascii_lowercase().as_str(),
+                "variations"
+                    | "palettes"
+                    | "features-opentype"
+                    | "features-aat"
+                    | "color-colrv0"
+                    | "color-colrv1"
+                    | "color-sbix"
+                    | "color-cbdt"
+            )
+        })
+}
+
+/// The URL of one `src` entry, when the entry is a source the loader can
+/// use: `url(...)`, then an optional `format()` it decodes, then an optional
+/// `tech()` it supports, and nothing else.
+fn usable_source(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    let after_name = entry.get(..3).filter(|name| name.eq_ignore_ascii_case("url")).map(|_| &entry[3..])?;
+    let inside = after_name.strip_prefix('(')?.trim_start();
+    // A quoted URL ends at its closing quote, so it may hold a `)`.
+    let (url, mut rest) = match inside.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let close = inside[1..].find(quote)?;
+            (&inside[1..1 + close], inside[close + 2..].trim_start().strip_prefix(')')?)
+        }
+        _ => {
+            let close = inside.find(')')?;
+            (inside[..close].trim(), &inside[close + 1..])
+        }
+    };
+    if url.is_empty() {
+        return None;
+    }
+    rest = rest.trim_start();
+    if let Some((format, after)) = function_arg(rest, "format") {
+        if !format_is_decodable(format) {
+            return None;
+        }
+        rest = after.trim_start();
+    }
+    if let Some((tech, after)) = function_arg(rest, "tech") {
+        if !tech_is_supported(tech) {
+            return None;
+        }
+        rest = after.trim_start();
+    }
+    rest.is_empty().then(|| url.to_string())
+}
+
+/// Extract the first usable font URL from a `src` descriptor.
 ///
 /// `src` is a comma-separated PRIORITY LIST, and entries we cannot use must be
 /// SKIPPED rather than aborting the descriptor: `local("Inter")` names an
 /// installed face with no URL to fetch, and real stylesheets routinely list
 /// `local(...)` first as an optimisation. Treating the first entry as
 /// authoritative would drop the webfont on exactly the pages that took care to
-/// offer one.
+/// offer one. The same goes for a `url()` whose `format()` no decoder here
+/// reads: the list every icon-font generator writes opens with
+/// `url(x.eot?#iefix) format("embedded-opentype")`, and taking it fetched the
+/// .eot and never the woff2 after it. A source with no `format()` is tried.
 fn first_fetchable_src(value: &str) -> Option<String> {
-    for entry in split_top_level_commas(value) {
-        let entry = entry.trim();
-        let lower = entry.to_ascii_lowercase();
-        if lower.starts_with("local(") {
-            continue;
-        }
-        let Some(start) = lower.find("url(") else {
-            continue;
-        };
-        let rest = &entry[start + 4..];
-        let Some(end) = rest.find(')') else {
-            continue;
-        };
-        let url = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'');
-        if !url.is_empty() {
-            return Some(url.to_string());
-        }
-    }
-    None
+    split_top_level_commas(value).iter().find_map(|entry| usable_source(entry))
 }
 
 /// Parse an `@font-face` weight descriptor.
