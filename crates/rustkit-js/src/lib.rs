@@ -1001,6 +1001,42 @@ impl JsRuntime {
         self.call_with_host(source, &[], false)
     }
 
+    /// Give the host object these names as own properties (`undefined`
+    /// until an embedder's script fills one in), before any script runs:
+    /// what the embedder probes (`__rk.net ? ... : ...`) is then always an
+    /// own property. A name the host already has is left alone.
+    pub fn reserve_host_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{property::PropertyDescriptor, JsString};
+            for name in names {
+                let key = JsString::from(*name);
+                let owned = self
+                    .host
+                    .has_own_property(key.clone(), &mut self.context)
+                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+                if owned {
+                    continue;
+                }
+                let slot = PropertyDescriptor::builder()
+                    .value(boa_engine::JsValue::undefined())
+                    .writable(true)
+                    .enumerable(true)
+                    .configurable(true)
+                    .build();
+                self.host
+                    .define_property_or_throw(key, slot, &mut self.context)
+                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = names;
+            Err(JsError::NotInitialized)
+        }
+    }
+
     /// Run a function body that holds the host object (`__rk`, as
     /// [`evaluate_with_host`](Self::evaluate_with_host)) as a turn of page
     /// script: for the engine's own dispatches (a key, typed text), in
@@ -1874,7 +1910,12 @@ fn host_object(
     host.function(report_error, js_string!("reportError"), 1)
         .function(unsupported, js_string!("unsupported"), 2);
     bytes::install(&mut host, byte_stash, blobs);
-    host.build()
+    let host = host.build();
+    // The host object inherits from nothing: a name it does not own reads
+    // as `undefined` and a first write makes an own property, with no
+    // lookup through the realm's `Object.prototype`.
+    host.set_prototype(None);
+    host
 }
 
 #[cfg(feature = "boa")]
