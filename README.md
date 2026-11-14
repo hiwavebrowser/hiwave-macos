@@ -381,6 +381,8 @@ This means:
  
 For commercial licensing options, see COMMERCIAL-LICENSE.md.
 
+**Third-party notices:** the app also contains third-party works (Rust crates, the vendored Boa engine, Chart.js, Unicode CLDR data) under their own licences. Their copyright notices and licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ---
 
 ## FAQ

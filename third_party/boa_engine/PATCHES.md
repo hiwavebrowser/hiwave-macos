@@ -1,4 +1,4 @@
-# Vendored boa_engine 0.22.0, with one patch
+# Vendored boa_engine 0.22.0 (and boa_parser, boa_ast), with HiWave's patches
 
 Source: crates.io `boa_engine` 0.22.0 (upstream `boa-dev/boa` at `337a3668`,
 `core/engine`), the version `Cargo.lock` pins. The first commit that added this

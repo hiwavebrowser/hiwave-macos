@@ -2,6 +2,7 @@
 # Data only, re-encoded by scripts/cldr_likely_subtags.py: key=ScrpRG, or key=lang-ScrpRG when the language differs.
 # Copyright (c) 1991-2025 Unicode, Inc. All rights reserved. Distributed under the Unicode License v3
 # (SPDX: Unicode-3.0), https://www.unicode.org/license.txt
+# The full notice and licence text ship in THIRD_PARTY_NOTICES.md at the repository root.
 aa=LatnET
 aaa=LatnNG
 aab=LatnNG
