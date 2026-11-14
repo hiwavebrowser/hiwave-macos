@@ -1,7 +1,7 @@
 //! `super.x = v` sets `x` with `this` as the receiver: a data property found on the home object's
-//! prototype is defined on `this`, never written on the prototype, however the site was first run.
-//! Unmodified Boa 0.22 let a `SetPropertyByName` cache hit ignore the receiver, so a site whose
-//! first call had `this` equal to that prototype later wrote the prototype. Expected values: Chrome
+//! prototype chain is defined on `this`, never written where it was found, however the site was
+//! first run; a setter on the chain is called with `this`. Unmodified Boa 0.22 let a
+//! `SetPropertyByName` cache hit ignore the receiver and write a prototype's data slot in place. Expected values: Chrome
 //! for Testing 148.0.7778.216 (`tools/parity_oracle/super_set_cases.json`, `js_cases_log.mjs
 //! --write`). Each case runs on its own runtime and thread, so a panic is reported by name.
 
