@@ -49,6 +49,11 @@ pub(crate) struct LayoutCtx {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
+    /// The SVG images of `svg_cache` (fetched or data: URLs, not inline
+    /// `<svg>`), shared with the canvas image loader: a canvas
+    /// `drawImage` of an SVG `<img>` rasterizes its path list (STR-7
+    /// slice 3).
+    pub(crate) canvas_svgs: crate::canvas_paint::CanvasSvgs,
     /// The SVG paint declarations (`fill`, `stroke`, `stop-color`, ...)
     /// author rules give each element inside an inline `<svg>`, by raw
     /// NodeId. Filled by `cache_svg_paint_styles` before each build (a
@@ -74,6 +79,7 @@ impl Default for LayoutCtx {
             style_trace: RefCell::default(),
             building: RefCell::default(),
             svg_cache: RefCell::default(),
+            canvas_svgs: Default::default(),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
             nested_contexts: std::cell::Cell::new(false),

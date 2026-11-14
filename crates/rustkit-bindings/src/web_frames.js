@@ -9,7 +9,7 @@
 // into the document, its `src` set while it is in, it leaving), and answers
 // `contentWindow` / `contentDocument` with the window the engine attached.
 // The engine does the fetching, the origin check, the child realm, the
-// child's scripts and the `load` event (`__rustkit_frames.loaded`).
+// child's scripts and the `load` event (`__rk.frames.loaded`).
 //
 // Stated limits of this stage: `contentWindow` is `null` until the engine
 // has drained the request (after the script that inserted the frame
@@ -17,12 +17,12 @@
 // left blank: `contentWindow` and `contentDocument` stay `null`, and `load`
 // fires. `srcdoc`, `name` targeting and `window.frames[i]` are not here.
 (function (g) {
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     var request = g.__rustkit_frame_request;
-    if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || g.__rustkit_frames) return;
+    if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || __rk.frames) return;
     delete g.__rustkit_frame_request;
     // Captured before page script can replace them.
-    var URL_ = g.URL, Event_ = g.Event, forEach = Array.prototype.forEach, doc = g.document;
+    var URL_ = g.URL, forEach = Array.prototype.forEach, doc = g.document;
     var frames = Object.create(null); // node id -> { el, win }
 
     function isFrame(n) {
@@ -61,41 +61,41 @@
         }
     };
 
-    // The engine's side.
-    Object.defineProperty(g, '__rustkit_frames', {
-        value: {
-            // The parser's iframes, once the document is in.
-            scan: function () {
-                forEach.call(doc.querySelectorAll('iframe'), function (f) {
-                    var id = HOOKS.nodeId(f);
-                    if (id >= 0 && !frames[id] && f.isConnected) navigate(f);
-                });
-            },
-            attach: function (id, win) {
-                var r = frames[id];
-                if (r) r.win = win;
-                return !!r;
-            },
-            loaded: function (id) {
-                var r = frames[id];
-                if (r) r.el.dispatchEvent(new Event_('load'));
-                return !!r;
-            },
-            // The child's viewport until layout sizes frames (Stage 3): the
-            // element's own CSS px width/height, its attributes, or 300x150.
-            size: function (id) {
-                var r = frames[id], w = 300, h = 150;
-                if (!r) return '300x150';
-                var el = r.el, st = el.style;
-                function px(v) { var m = /^\s*([0-9.]+)px\s*$/.exec(v || ''); return m ? Math.round(parseFloat(m[1])) : 0; }
-                function attr(n) { var v = el.getAttribute(n); return v && /^\s*[0-9]+\s*$/.test(v) ? parseInt(v, 10) : 0; }
-                w = px(st && st.width) || attr('width') || w;
-                h = px(st && st.height) || attr('height') || h;
-                return w + 'x' + h;
-            }
+    // The engine's side, on the host object.
+    __rk.frames = {
+        // The parser's iframes, once the document is in.
+        scan: function () {
+            forEach.call(doc.querySelectorAll('iframe'), function (f) {
+                var id = HOOKS.nodeId(f);
+                if (id >= 0 && !frames[id] && f.isConnected) navigate(f);
+            });
         },
-        configurable: true
-    });
+        // The frame's element when it took the window, or null.
+        attach: function (id, win) {
+            var r = frames[id];
+            if (r) r.win = win;
+            return r ? r.el : null;
+        },
+        loaded: function (id) {
+            var r = frames[id];
+            // The engine's own event, through its own dispatch: whatever
+            // the page has put on the element or the prototypes since.
+            if (r) __rk.dispatchTo(r.el, __rk.trust(__rk.make('Event', 'load')));
+            return !!r;
+        },
+        // The child's viewport until layout sizes frames (Stage 3): the
+        // element's own CSS px width/height, its attributes, or 300x150.
+        size: function (id) {
+            var r = frames[id], w = 300, h = 150;
+            if (!r) return '300x150';
+            var el = r.el, st = el.style;
+            function px(v) { var m = /^\s*([0-9.]+)px\s*$/.exec(v || ''); return m ? Math.round(parseFloat(m[1])) : 0; }
+            function attr(n) { var v = el.getAttribute(n); return v && /^\s*[0-9]+\s*$/.test(v) ? parseInt(v, 10) : 0; }
+            w = px(st && st.width) || attr('width') || w;
+            h = px(st && st.height) || attr('height') || h;
+            return w + 'x' + h;
+        }
+    };
 
     var F = g.HTMLIFrameElement && g.HTMLIFrameElement.prototype;
     if (F) {

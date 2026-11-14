@@ -80,7 +80,7 @@
         [[E, 'animate'], [E, 'getAnimations'], [Doc, 'getAnimations'], [g.document, 'getAnimations']],
         [[g.document, 'timeline']]);
     var C = g.HTMLCanvasElement && g.HTMLCanvasElement.prototype;
-    lazy('canvas', ['CanvasRenderingContext2D', 'CanvasGradient', 'CanvasPattern', 'TextMetrics'],
+    lazy('canvas', ['CanvasRenderingContext2D', 'CanvasGradient', 'CanvasPattern', 'TextMetrics', 'ImageData'],
         [[C, 'getContext'], [C, 'toDataURL'], [C, 'toBlob']],
         [[C, 'width'], [C, 'height']]);
 })(globalThis);

@@ -301,6 +301,7 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod console_log;
+pub mod console_file;
 mod relayout_cause;
 mod selection;
 mod focus_pseudo;
@@ -393,6 +394,8 @@ use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
 mod canvas_paint;
+#[cfg(test)]
+mod canvas_frame_cost_tests;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
@@ -417,6 +420,8 @@ mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
 #[cfg(all(test, feature = "headless"))]
+mod console_file_tests;
+#[cfg(all(test, feature = "headless"))]
 mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_lifecycle_tests;
@@ -437,6 +442,8 @@ mod script_stream_tests;
 mod error_page_script_tests;
 #[cfg(all(test, feature = "headless"))]
 mod resource_url_log_tests;
+#[cfg(all(test, feature = "headless"))]
+mod font_face_src_tests;
 #[cfg(all(test, feature = "headless"))]
 mod redirect_base_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -758,6 +765,12 @@ mod focus_pseudo_tests;
 mod form_setter_calls_tests;
 #[cfg(all(test, feature = "headless"))]
 mod document_title_tests;
+#[cfg(all(test, feature = "headless"))]
+mod template_in_head_tests;
+#[cfg(all(test, feature = "headless"))]
+mod dispatch_event_argument_tests;
+#[cfg(all(test, feature = "headless"))]
+mod submit_toggle_trusted_tests;
 
 #[cfg(test)]
 thread_local! {
@@ -827,6 +840,10 @@ mod grid_auto_repeat_percent_tests;
 mod grid_item_flex_percent_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_viewport_height_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_item_percent_block_tests;
+#[cfg(all(test, feature = "headless"))]
+mod grid_percent_height_cyclic_tests;
 #[cfg(all(test, feature = "headless"))]
 mod image_sizing_matrix_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1175,6 +1192,11 @@ async fn fetch_raster_image(
             response.status, url
         )));
     }
+    // Where the response came from, for a canvas's origin checks.
+    image_manager.record_response_urls(
+        &url,
+        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+    );
     let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
     let body = match response.bytes().await {
         Ok(body) => body,
@@ -5790,9 +5812,10 @@ impl Engine {
             return;
         };
         debug!(?id, %target, "Navigating to a fragment");
-        let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
+        // The URL is an argument, not script source.
+        let href = target.as_str().to_string();
         view.url = Some(target);
-        if let Err(e) = self.execute_script(id, &script) {
+        if let Err(e) = self.execute_host_turn(id, "return __rk.fragmentNavigation(__a[0]);", &[&href]) {
             debug!(?id, ?e, "hashchange listener threw");
         }
     }
@@ -5804,7 +5827,7 @@ impl Engine {
             view.scroll_offset == (0.0, 0.0) && view.url.as_ref().is_some_and(|url| url.fragment().is_some())
         });
         if due {
-            if let Err(e) = self.execute_script(id, "__rustkit_scroll_to_location_fragment()") {
+            if let Err(e) = self.execute_host_turn(id, "return __rk.scrollToLocationFragment();", &[]) {
                 debug!(?id, ?e, "scroll to the loaded fragment threw");
             }
         }
@@ -9206,14 +9229,14 @@ impl Engine {
             // set, records the same names so a log line can show the URL.
             let external: Option<String> = if label.starts_with("inline#") {
                 if let Some(url) = document_url.as_ref() {
-                    crate::console_log::alias(&label, url.as_str());
+                    crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
-                crate::console_log::alias(&name, &label);
+                crate::console_log::alias(inspector.view_id(), &name, &label);
                 Some(name)
             };
             let began = std::time::Instant::now();
@@ -10162,6 +10185,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
@@ -10192,7 +10216,7 @@ impl Engine {
                     )
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
@@ -10633,6 +10657,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
@@ -10649,7 +10674,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
@@ -11342,15 +11367,14 @@ impl Engine {
                     continue;
                 }
             }
-            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+            if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
                         let paint = canvas_paint::CanvasPaint::reuse_or_paint(
                             last_paints.remove(&node),
                             source,
                             node,
-                            *dest_rect,
-                            *content_box,
+                            &cmd,
                         );
                         if let Some(paint) = paint {
                             expanded.extend(paint.commands.iter().cloned());
@@ -20415,7 +20439,11 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), image_svg(doc));
+                let doc = image_svg(doc);
+                if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+                    svgs.insert(url.to_string(), std::sync::Arc::new(doc.clone()));
+                }
+                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), doc);
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -21051,6 +21079,11 @@ impl Engine {
             };
             return match fetched {
                 Ok(response) if response.ok() => {
+                    // Where the response came from, for a canvas's origin checks.
+                    image_manager.record_response_urls(
+                        &url,
+                        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+                    );
                     let received = guard.map(|g| g.received(&response));
                     match response.text().await {
                         Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
@@ -21185,6 +21218,9 @@ impl Engine {
             if let Some(view) = self.views.get(&id) {
                 view.lay.loaded_images.borrow_mut().due = true;
             }
+        }
+        if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+            svgs.extend(fetched.svgs.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))));
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
@@ -25233,6 +25269,30 @@ impl Engine {
         id: EngineViewId,
         script: &str,
     ) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.evaluate(script))
+    }
+
+    /// [`Self::execute_script`] for one of the engine's own entry points:
+    /// `body` is a function body whose `__rk` is the host object, which no
+    /// page script reaches (`return __rk.fragmentNavigation(__a[0]);`), and
+    /// `strings` are read in it as `__a[0]`, `__a[1]`, ... (text that must
+    /// not be in script source). The same turn: armed, flushed, recorded.
+    pub(crate) fn execute_host_turn(
+        &mut self,
+        id: EngineViewId,
+        body: &str,
+        strings: &[&str],
+    ) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.host_turn(body, strings))
+    }
+
+    /// One turn of script on view `id`: armed against a runaway, its DOM
+    /// writes flushed (also when it threw), a stop recorded.
+    fn script_turn(
+        &mut self,
+        id: EngineViewId,
+        run: impl FnOnce(&DomBindings) -> Result<rustkit_js::JsValue, rustkit_bindings::BindingError>,
+    ) -> Result<String, EngineError> {
         // The app runs page code from the window thread here (the chrome's
         // IPC path, a toolbar's `history.back()`): a W-gate entry, so a
         // listener that spins without writing to the DOM is still seen.
@@ -25251,7 +25311,7 @@ impl Engine {
         // only bound on a `while (true) {}` typed into the devtools console
         // (or sent by the chrome) is the loop-iteration cap (JS1).
         let armed = arm_live_turn(&self.config, bindings);
-        let result = bindings.evaluate(script);
+        let result = run(bindings);
         let stopped = end_live_turn(&self.config, armed, bindings, "eval");
         drop(turn);
         self.flush_script_dom_writes(id, None)?;

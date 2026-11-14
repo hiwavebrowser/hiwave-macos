@@ -177,6 +177,20 @@ impl Drop for DiagJob {
     }
 }
 
+/// HIWAVE PATCH (vm-stats): the interpreter's counters as text (opcode counts, inline-cache misses
+/// by site, receiver kind and identifier-like property name), collected when `RUSTKIT_VM_STATS=1` is
+/// set in the environment; empty otherwise. Diagnostic only.
+#[cfg(feature = "boa")]
+pub fn vm_stats_report() -> String {
+    boa_engine::vm_stats::report()
+}
+
+/// Without the Boa engine there is nothing to report.
+#[cfg(not(feature = "boa"))]
+pub fn vm_stats_report() -> String {
+    String::new()
+}
+
 /// Install the function Boa calls when an interrupt path fires. A null hook
 /// leaves those paths silent. The hook itself decides whether to write.
 #[cfg(feature = "boa")]
@@ -1387,6 +1401,42 @@ impl JsRuntime {
             stamp.end_turn();
             let grace = stamp.begin_turn(&control, control::STOP_GRACE);
             self.set_turn(grace);
+        }
+    }
+
+    /// [`evaluate_bookkeeping`](Self::evaluate_bookkeeping) for what the
+    /// embedder's scripts keep on the host object: `body` is a function
+    /// body whose `__rk` is the host object (`return __rk.now();`). The
+    /// same rules: the interrupt word does not stop it, no promise jobs
+    /// run, and it must call none of the page's functions.
+    pub fn evaluate_host_bookkeeping(&mut self, body: &str) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
+        #[cfg(feature = "boa")]
+        {
+            let armed = self.deadline.armed.get();
+            self.arm(false);
+            let wrapped = format!("(function (__rk) {{\n{body}\n}})");
+            // The host object of the realm entered: each document of a
+            // frame tree keeps its own entry points.
+            let host = self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone());
+            let host = boa_engine::JsValue::from(host);
+            let result = self
+                .context
+                .eval(boa_engine::Source::from_bytes(wrapped.as_bytes()))
+                .and_then(|function| match function.as_callable() {
+                    Some(function) => function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context),
+                    None => Ok(boa_engine::JsValue::undefined()),
+                });
+            self.arm(armed);
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(err.to_string())),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = body;
+            Err(JsError::NotInitialized)
         }
     }
 

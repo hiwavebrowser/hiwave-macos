@@ -160,6 +160,16 @@ pub trait TreeSink {
         self.append_child(parent, table);
     }
 
+    /// Make `node`, already in the tree, the insertion point again (pushed
+    /// on the sink's stack of open elements): HTML §13.2.6.4.6, a head
+    /// element after `</head>` goes back into the head. The default does
+    /// nothing.
+    fn reopen(&mut self, _node: Self::NodeId) {}
+
+    /// Take `node` off the sink's stack of open elements, wherever it is on
+    /// it (the head, once such an element is in). The default does nothing.
+    fn remove_open(&mut self, _node: Self::NodeId) {}
+
     /// Add each of `attrs` that `target` does not already have (HTML
     /// §13.2.6.4.7, a second `<html>` or `<body>` start tag). The existing
     /// value wins. The default ignores them.
