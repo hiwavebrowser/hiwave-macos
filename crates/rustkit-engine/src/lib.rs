@@ -301,6 +301,7 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod console_log;
+pub mod console_file;
 mod relayout_cause;
 mod selection;
 mod focus_pseudo;
@@ -414,6 +415,8 @@ mod script_net_body_size_tests;
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod console_file_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
