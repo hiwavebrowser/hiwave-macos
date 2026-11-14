@@ -585,3 +585,20 @@ fn flooding_workers_share_one_turns_budget_and_each_is_served() {
         "out of order"
     );
 }
+
+/// The structured clone helper is held by the scripts that use it, not left on a global: the page's
+/// window (an engine global a page could enumerate or call; the engine's
+/// a_web_page_enumerates_no_engine_globals_on_window found `__rk_sc`, batch 75) and the worker's global
+/// scope. postMessage still clones both ways (the other worker tests).
+#[test]
+fn the_structured_clone_helper_is_on_neither_global() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "Object.getOwnPropertyNames(globalThis).filter(function (n) { return n.indexOf('__rk_sc') === 0; }).join(' ')"),
+        ""
+    );
+    b.evaluate("var seen = null, w = new Worker('http://a.test/sc.js'); w.onmessage = function (e) { seen = e.data; };").unwrap();
+    serve(&b, "postMessage({ sc: typeof __rk_sc, own: Object.getOwnPropertyNames(self).indexOf('__rk_sc') });");
+    assert!(pump_until(&b, "seen !== null"), "no answer");
+    assert_eq!(ev(&b, "JSON.stringify(seen)"), "{\"sc\":\"undefined\",\"own\":-1}");
+}
