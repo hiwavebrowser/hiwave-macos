@@ -470,8 +470,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "followLink", "fragmentNavigation", "hasCtor", "historyReset", "imageFailed", "imageFailedFor", "imageGaveUp",
     "imageLoaded", "imageLoadedFor", "imageWritten", "implicitSubmit", "isDispatching", "keepCtor", "keepFinish",
     "locationHashSync", "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net",
-    "newTextEvent", "nextTimer", "now", "observersTick", "pickOption", "runTimers", "runTimersFramed",
-    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
+    "newTextEvent", "nextTimer", "now", "observersTick", "perfNow", "pickOption", "runTimers", "runTimersFramed",
+    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus",
     "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
     "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
     // Reserved for the workers script (not installed in every realm).
