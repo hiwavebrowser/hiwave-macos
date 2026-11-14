@@ -396,6 +396,18 @@ mod tests {
         assert_eq!(utc(4_102_444_799, 999), "2099-12-31T23:59:59.999Z");
     }
 
+    /// R1 nit 4: only `inline#` and digits is a label; anything else that
+    /// starts that way is a URL or a specifier, and is cut like one.
+    #[test]
+    fn only_a_strict_inline_label_is_written_as_it_is() {
+        assert_eq!(source("inline#1"), "inline#1");
+        assert_eq!(source("inline#204"), "inline#204");
+        for not_a_label in ["inline#", "inline#1?token=secret", "inline#x#secret", "inline#1/../u:secret@h/x?secret"] {
+            let shown = source(not_a_label);
+            assert!(!shown.contains("secret"), "{not_a_label:?} was written as {shown:?}");
+        }
+    }
+
     #[test]
     fn a_cut_lands_on_a_character() {
         assert_eq!(cap_bytes("abc", 3), ("abc", false));

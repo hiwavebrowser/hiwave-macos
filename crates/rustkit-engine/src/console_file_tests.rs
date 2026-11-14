@@ -541,3 +541,29 @@ impl Drop for RemoveDir {
         let _ = std::fs::remove_dir(&self.0);
     }
 }
+
+// ---- R1 nit 4: a value that is neither the mirror's nor a path ----
+
+#[test]
+fn a_value_that_is_neither_a_word_nor_a_path_is_not_a_path() {
+    use crate::console_file::{setting, Setting};
+    use std::ffi::OsStr;
+    for wrong in ["console.jsonl", "C:\\logs\\console.jsonl", "console log", "~"] {
+        assert_eq!(setting(OsStr::new(wrong)), Setting::NotAPath, "{wrong:?}");
+    }
+}
+
+#[test]
+fn a_value_that_is_not_a_path_is_said_once_with_the_rule_and_not_the_value() {
+    let _reset = Reset(scratch("not-a-path"));
+    let log = tracing_log(|| {
+        crate::console_file::force_for_test(Some(configured(None, Some("secret-name.jsonl"))));
+        assert!(!crate::console_file::enabled());
+        load(vec![Route::html("/", PAGE)], "/");
+    });
+    let warnings = console_file_warnings(&log);
+    assert_eq!(warnings.len(), 1, "{log}");
+    // The rule: what the variable takes, and how to name a file here.
+    assert!(warnings[0].contains("HIWAVE_CONSOLE_LOG") && warnings[0].contains("`/`") && warnings[0].contains("./"), "{log}");
+    assert!(!log.contains("secret"), "the value or page text is in the log:\n{log}");
+}
