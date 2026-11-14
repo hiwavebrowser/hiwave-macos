@@ -346,6 +346,68 @@ The log is meant to be pasted into public issues and PRs.
   URLs in it scrubbed, never interpreted: never for a log that will be
   shared.
 
+## The console file (`HIWAVE_CONSOLE_LOG=<path>`)
+
+For debugging a page with its own words in front of you. Off by default.
+
+**This file contains page content.** Console messages and error messages are
+written as the page produced them: they can hold cookies, tokens, form
+values, names and addresses. Never attach it to a public issue, PR or chat;
+delete it when you are done. It is the one diagnostic in this document that
+is not safe to share.
+
+- `HIWAVE_CONSOLE_LOG=/path/to/console.jsonl` in the environment of the app
+  or of any tool that makes an engine, or `parity-capture --console-log
+  <path>` (the flag wins over the variable). The value is a path only when
+  it has a `/` in it: write `./console.jsonl` for the current directory.
+  `HIWAVE_CONSOLE_LOG=1` is a different, older switch (the tracing mirror
+  the stress harness reads); it, `0`, and every other bare word mean what
+  they did before and make no file. Anything else without a `/`
+  (`console.jsonl`, `C:\logs\x`) makes no file either, and one warning in
+  the tracing log says the rule (never the value).
+- One JSON line per console call (`log`, `info`, `warn`, `error`, `debug`),
+  uncaught exception and unhandled promise rejection, appended:
+
+  ```json
+  {"t":"2026-11-13T21:40:01.123Z","view":1,"page":"https://shop.example/cart","kind":"console","level":"error","message":"checkout failed 12","source":"https://shop.example/app.js","line":88,"column":13}
+  {"t":"2026-11-13T21:40:01.130Z","view":1,"page":"https://shop.example/cart","kind":"uncaught","level":"error","message":"Uncaught TypeError: x is not a function","source":"inline#2","line":4,"column":7}
+  {"t":"2026-11-13T21:40:01.131Z","view":1,"page":"https://shop.example/cart","kind":"unhandled_rejection","level":"error","message":"Uncaught (in promise) RangeError: too far","source":"https://shop.example/app.js","line":3,"column":16}
+  ```
+
+  `t` is wall time, UTC. `view` is the engine's view id. `page` is the
+  document's URL when it was committed (a later `pushState` does not change
+  it on console lines; an error line has the URL at the time). `kind` is
+  `console`, `uncaught` or `unhandled_rejection`; the last two are always
+  `level` `error`. `source` is the script's URL, or the engine's label for a
+  script with none (`inline#n`, `inserted#n` when its URL is not known);
+  `source`, `line` and `column` are `null` when the runtime has no place for
+  the call or the throw (an `eval`, an `on*` attribute's handler).
+- `page` and `source` keep scheme, host, port and path only: the query,
+  fragment, `;params` and `user:password@` are dropped, as in every other
+  devtools URL. The message is not scrubbed: a URL the page logs is written
+  as the page logged it.
+- It is the same feed the Inspector's console reads
+  (`inspector_glue.rs`). A console call is written as it is made, panel
+  open or not, so a script that hangs or is stopped at the budget leaves
+  the lines it logged. The feed's limits apply: at most 200 hand-overs a
+  second; calls past that wait for the script's end, at most 1024 of them
+  (a `warn` line says how many were dropped), and a script that hangs
+  after such a burst never writes the ones that were waiting.
+- The file is separate from the tracing log, and nothing is added to the
+  tracing log when it is on. The Inspector is unchanged by it: its records
+  stay shapes unless its own settings keep text.
+- The file is created readable and writable by its owner only (0600); a
+  file that already exists is narrowed to that.
+- A message is cut at 8 KB (`"cut":true` on the line). The file stops at
+  50 MB with one last line, `{"t":…,"truncated":true,"limit_bytes":52428800}`,
+  and stays stopped: delete it to record again.
+- Not in the feed, so not in the file: dedicated workers (the engine runs
+  none on this branch) and scripts inside `<iframe>` documents (no nested
+  script contexts yet). When either lands on the Inspector's console feed
+  it lands here with it. `console` methods other than the five above
+  (`group`, `table`, `count`, `time`, `assert`, `trace`) are written only
+  where the engine maps them onto one of the five.
+
 ## `parity-capture --event-log <file> --event-summary`
 
 `--event-log` writes the whole load's records (nothing dropped) as JSON Lines.

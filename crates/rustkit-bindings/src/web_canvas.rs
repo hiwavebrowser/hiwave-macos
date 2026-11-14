@@ -5,13 +5,15 @@
 //! web_canvas.js is the script surface; every call lands in the one host
 //! function `__rustkit_canvas(gen, id, op, ...)`.
 //!
-//! Nothing is rasterized here: the recording is the canvas's content, and
-//! the engine paints it as vector display commands in the canvas's box.
+//! The engine paints the recording as vector display commands in the
+//! canvas's box; rustkit-canvas also rasterizes every draw into a bitmap,
+//! which `getImageData` reads (STR-7).
 
 use crate::dom::{DomHost, SharedDomHost};
 use rustkit_canvas::{
-    parse_canvas_color, serialize_canvas_color, CanvasFont, CanvasRenderingContext2D, CanvasStyle,
-    DrawCommand, LineCap, LineJoin, LinearGradient, TextAlign, TextBaseline,
+    parse_canvas_color, serialize_canvas_color, CanvasBitmap, CanvasFont, CanvasPattern, CanvasRenderingContext2D,
+    CanvasStyle, DrawCommand, ImageData, LineCap, LineJoin, LinearGradient, PatternRepetition, RadialGradient,
+    TextAlign, TextBaseline, Transform2D,
 };
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
@@ -30,6 +32,19 @@ pub struct CanvasTextExtent {
 
 /// Measures `text` in `font` (see [`CanvasTextExtent`]).
 pub type CanvasTextMeasurer = Box<dyn Fn(&CanvasFont, &str) -> CanvasTextExtent>;
+
+/// An `<img>`'s decoded pixels by its URL, `None` when not decoded
+/// (installed by the engine, `DomBindings::set_canvas_image_loader`).
+///
+/// The size is the device-pixel size the image is drawn at, `(0, 0)` for
+/// its natural size: a vector image (SVG) is rasterized at the size it is
+/// drawn, as Chrome does; a raster image ignores it.
+///
+/// With the bitmap come the URLs of the response it was decoded from: every
+/// redirect hop and the final URL (empty when no request was made, as for a
+/// `data:` URL). A canvas that draws it is origin-clean only when all of
+/// them are of the document's origin (Chrome decides on the response).
+pub type CanvasImageLoader = Box<dyn Fn(&str, (u32, u32)) -> Option<(CanvasBitmap, Vec<url::Url>)>>;
 
 /// What the engine reads of one canvas: its bitmap size and the drawing
 /// recorded on it since it was last cleared.
@@ -51,6 +66,10 @@ pub(crate) struct CanvasStore {
     /// A context drew, cleared or was resized since the engine last took this.
     painted: bool,
     measurer: Option<CanvasTextMeasurer>,
+    pub(crate) images: Option<CanvasImageLoader>,
+    /// The document's origin (`DomBindings::set_location`): an image of
+    /// any other origin leaves a canvas that draws it not origin-clean.
+    pub(crate) origin: Option<url::Origin>,
 }
 
 pub(crate) type SharedCanvases = Rc<RefCell<CanvasStore>>;
@@ -71,6 +90,14 @@ impl CanvasSource {
     /// when this moves.
     pub fn generation(&self, node: usize) -> Option<u64> {
         self.0.borrow().contexts.get(&node).map(|c| c.generation())
+    }
+
+    /// The canvas element `node`'s bitmap as premultiplied RGBA rows:
+    /// `(width, height, pixels)`. `None` with no 2D context.
+    pub fn pixels(&self, node: usize) -> Option<(u32, u32, Vec<u8>)> {
+        let store = self.0.borrow();
+        let ctx = store.contexts.get(&node)?;
+        Some((ctx.width, ctx.height, ctx.premultiplied_pixels()))
     }
 
     /// An estimate of the heap the page's canvases hold, in bytes: their
@@ -99,7 +126,7 @@ impl CanvasStore {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.contexts.values().map(|c| c.recorded_bytes()).sum()
+        self.contexts.values().map(|c| c.recorded_bytes() + c.bitmap_bytes()).sum()
     }
 
     pub(crate) fn take_painted(&mut self) -> bool {
@@ -151,6 +178,43 @@ fn text(args: &[JsValue], i: usize) -> Option<&str> {
         Some(JsValue::String(s)) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// "offset|colour|offset|colour..." as colour stops.
+fn color_stops(stops: &str) -> Vec<(f32, rustkit_css::Color)> {
+    let mut out = Vec::new();
+    let mut parts = stops.split('|').filter(|p| !p.is_empty());
+    while let (Some(offset), Some(color)) = (parts.next(), parts.next()) {
+        if let (Ok(offset), Some(color)) = (offset.parse::<f32>(), parse_canvas_color(color)) {
+            out.push((offset, color));
+        }
+    }
+    out
+}
+
+/// Comma-separated numbers, `None` unless there are `N` finite ones.
+fn number_list<const N: usize>(s: Option<&str>) -> Option<[f32; N]> {
+    let mut out = [0.0; N];
+    let mut it = s?.split(',');
+    for slot in out.iter_mut() {
+        let v: f32 = it.next()?.parse().ok()?;
+        if !v.is_finite() {
+            return None;
+        }
+        *slot = v;
+    }
+    Some(out)
+}
+
+fn unhex(hex: &str) -> Vec<u8> {
+    let b = hex.as_bytes();
+    let val = |c: u8| match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    };
+    b.chunks_exact(2).map(|p| val(p[0]) << 4 | val(p[1])).collect()
 }
 
 fn flag(args: &[JsValue], i: usize) -> bool {
@@ -215,12 +279,75 @@ pub(crate) fn install(
                 let e = store.measure_font(&font, t);
                 return JsValue::String(format!("{} {} {}", e.width, e.ascent, e.descent));
             }
+            // A source bitmap named by ("canvas", node) or ("image", url),
+            // read before the context is borrowed for writing.
+            // Whether the source is not origin-clean: a canvas that is not,
+            // or an image of another origin than the document's (a data:
+            // URL is the document's own). There is no CORS-mode image
+            // fetch, so a crossorigin image counts as another origin.
+            let mut tainted = false;
+            let source = if matches!(op, "drawImage" | "fillPattern" | "strokePattern") {
+                tainted = match (text(args, 3), args.get(4)) {
+                    (Some("canvas"), Some(JsValue::Number(n))) => {
+                        store.contexts.get(&(*n as usize)).is_some_and(|c| !c.is_origin_clean())
+                    }
+                    (Some("image"), Some(JsValue::String(url))) => match url::Url::parse(url) {
+                        Ok(u) if u.scheme() == "data" => false,
+                        Ok(u) => store.origin.as_ref() != Some(&u.origin()) || !u.origin().is_tuple(),
+                        Err(_) => true,
+                    },
+                    _ => false,
+                };
+                let found = match (text(args, 3), args.get(4)) {
+                    (Some("canvas"), Some(JsValue::Number(n))) => {
+                        let (w, hh) = store.contexts.get(&(*n as usize)).map(|c| (c.width, c.height)).unwrap_or((0, 0));
+                        store.contexts.get(&(*n as usize)).and_then(|c| c.bitmap()).or_else(|| {
+                            // A canvas nothing was drawn on: transparent, its size.
+                            CanvasBitmap::from_rgba(w, hh, &vec![0; w as usize * hh as usize * 4])
+                        })
+                    }
+                    (Some("image"), Some(JsValue::String(url))) => {
+                        // drawImage: the size the whole image is drawn at, from
+                        // the dest/source ratio and the transform's scale.
+                        let size = match (op, number_list::<8>(text(args, 5)), number_list::<2>(text(args, 6))) {
+                            ("drawImage", Some([_, _, sw, sh, _, _, dw, dh]), Some([nw, nh])) if sw != 0.0 && sh != 0.0 => {
+                                let t = store.contexts.get(&node).map(|c| c.get_transform()).unwrap_or_else(Transform2D::identity);
+                                let kx = (dw / sw).abs() * t.a.hypot(t.b);
+                                let ky = (dh / sh).abs() * t.c.hypot(t.d);
+                                let w = (nw * kx).round();
+                                let h = (nh * ky).round();
+                                if w >= 1.0 && h >= 1.0 && w <= 8192.0 && h <= 8192.0 { (w as u32, h as u32) } else { (0, 0) }
+                            }
+                            _ => (0, 0),
+                        };
+                        let loaded = store.images.as_ref().and_then(|load| load(url, size));
+                        // Any response URL of another origin than the
+                        // document's (a redirect through one) taints too.
+                        if let Some((_, hops)) = &loaded {
+                            if hops.iter().any(|u| u.scheme() != "data" && store.origin.as_ref() != Some(&u.origin())) {
+                                tainted = true;
+                            }
+                        }
+                        loaded.map(|(bitmap, _)| bitmap)
+                    }
+                    _ => None,
+                };
+                if found.is_none() {
+                    return JsValue::Undefined;
+                }
+                found
+            } else {
+                None
+            };
             let CanvasStore {
                 contexts, painted, ..
             } = &mut *store;
             let Some(ctx) = contexts.get_mut(&node) else {
                 return JsValue::Undefined;
             };
+            if tainted {
+                ctx.taint();
+            }
             let mut drew = true;
             let mut result = JsValue::Undefined;
             match op {
@@ -283,18 +410,68 @@ pub(crate) fn install(
                     // x0 y0 x1 y1, then "offset|colour|offset|colour...".
                     if let Some([x0, y0, x1, y1]) = nums::<4>(args, 3) {
                         let mut g = LinearGradient::new(x0, y0, x1, y1);
-                        let stops = text(args, 7).unwrap_or("");
-                        let mut parts = stops.split('|').filter(|p| !p.is_empty());
-                        while let (Some(offset), Some(color)) = (parts.next(), parts.next()) {
-                            if let (Ok(offset), Some(color)) = (offset.parse::<f32>(), parse_canvas_color(color)) {
-                                g.add_color_stop(offset, color);
-                            }
+                        for (offset, color) in color_stops(text(args, 7).unwrap_or("")) {
+                            g.add_color_stop(offset, color);
                         }
                         let style = CanvasStyle::LinearGradient(g);
                         if op == "fillGradient" {
                             ctx.set_fill_style(style);
                         } else {
                             ctx.set_stroke_style(style);
+                        }
+                    }
+                }
+                "fillRadial" | "strokeRadial" => {
+                    drew = false;
+                    // x0 y0 r0 x1 y1 r1, then the stops.
+                    if let Some([x0, y0, r0, x1, y1, r1]) = nums::<6>(args, 3) {
+                        let mut g = RadialGradient::new(x0, y0, r0, x1, y1, r1);
+                        for (offset, color) in color_stops(text(args, 9).unwrap_or("")) {
+                            g.add_color_stop(offset, color);
+                        }
+                        let style = CanvasStyle::RadialGradient(g);
+                        if op == "fillRadial" {
+                            ctx.set_fill_style(style);
+                        } else {
+                            ctx.set_stroke_style(style);
+                        }
+                    }
+                }
+                "fillPattern" | "strokePattern" => {
+                    drew = false;
+                    let repetition = match text(args, 5) {
+                        Some("repeat-x") => PatternRepetition::RepeatX,
+                        Some("repeat-y") => PatternRepetition::RepeatY,
+                        Some("no-repeat") => PatternRepetition::NoRepeat,
+                        _ => PatternRepetition::Repeat,
+                    };
+                    if let Some(bitmap) = source {
+                        let style = CanvasStyle::Pattern(CanvasPattern { bitmap: std::sync::Arc::new(bitmap), repetition });
+                        if op == "fillPattern" {
+                            ctx.set_fill_style(style);
+                        } else {
+                            ctx.set_stroke_style(style);
+                        }
+                    }
+                }
+                "drawImage" => {
+                    if let (Some(bitmap), Some([sx, sy, sw, sh, dx, dy, dw, dh])) = (source, number_list::<8>(text(args, 5))) {
+                        // A bitmap rasterized at another size than the
+                        // image's natural one (an SVG): the source rect in
+                        // its pixels.
+                        let (fx, fy) = match number_list::<2>(text(args, 6)) {
+                            Some([nw, nh]) if nw > 0.0 && nh > 0.0 => (bitmap.width() as f32 / nw, bitmap.height() as f32 / nh),
+                            _ => (1.0, 1.0),
+                        };
+                        ctx.draw_bitmap(&bitmap, [sx * fx, sy * fy, sw * fx, sh * fy], [dx, dy, dw, dh]);
+                    }
+                }
+                "putImageData" => {
+                    // hex, width, height, dx, dy, then "x,y,w,h" (the dirty rect, cut to the image).
+                    if let (Some(hex), Some([w, hh, dx, dy])) = (text(args, 3), nums::<4>(args, 4)) {
+                        if let Some([x, y, dw, dh]) = number_list::<4>(text(args, 8)) {
+                            let data = ImageData { width: w as u32, height: hh as u32, data: unhex(hex) };
+                            ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]);
                         }
                     }
                 }
@@ -459,9 +636,27 @@ pub(crate) fn install(
                         ctx.rect(x, y, w, hh);
                     }
                 }
+                "getImageData" => {
+                    drew = false;
+                    if !ctx.is_origin_clean() {
+                        return JsValue::String("SecurityError".into());
+                    }
+                    if let Some([x, y, w, hh]) = nums::<4>(args, 3) {
+                        if rustkit_canvas::rgba_len(w as u32, hh as u32).is_none() || w > u32::MAX as f32 || hh > u32::MAX as f32 {
+                            return JsValue::String("RangeError".into());
+                        }
+                        let d = ctx.get_image_data(x as i32, y as i32, w as u32, hh as u32);
+                        let mut hex = String::with_capacity(d.data.len() * 2);
+                        for b in &d.data {
+                            use std::fmt::Write;
+                            let _ = write!(hex, "{b:02x}");
+                        }
+                        result = JsValue::String(hex);
+                    }
+                }
                 "fill" => ctx.fill_with_rule(text(args, 3) == Some("evenodd")),
                 "stroke" => ctx.stroke(),
-                "clip" => ctx.clip(),
+                "clip" => ctx.clip_with_rule(text(args, 3) == Some("evenodd")),
                 "fillText" | "strokeText" => {
                     if let (Some(t), Some([x, y])) = (text(args, 3), nums::<2>(args, 4)) {
                         let max = num(args, 6);
