@@ -449,7 +449,7 @@ panicked the page thread on 17 of 17 loads.
 
 **What.** `src/builtins/array/mod.rs`: `sort_indexed_properties` calls
 `merge_sort_fallible`, a stable merge sort that never panics for any comparator
-and stops at the first abrupt completion (marked `HIWAVE PATCH (sort)`). It
+and stops at the first abrupt completion (marked `HIWAVE PATCH (sort)`; replaced by the V8 port below). It
 serves `Array.prototype.sort`/`toSorted` and the typed-array `sort`/`toSorted`.
 Pinned in `crates/rustkit-engine/src/sort_comparator_tests.rs`.
 
@@ -466,6 +466,35 @@ The vendored crate's own parser tests are not run by the workspace, and `cargo t
 on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
 of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
 1 ignored, with the STR-5 patch).
+
+## Patch: a native-stack budget for built-ins that recurse in Rust (native recursion)
+
+A page could kill the process: `var a=[]; for (...) a=[a]; JSON.stringify(a)` recursed in Rust until the
+real stack overflowed (so did `flat(Infinity)`, `join`/`toString`/`==` through nested arrays, Proxy and
+prototype chains, deeply nested source in the parser). Chrome throws a catchable `RangeError`.
+
+`src/native_stack.rs`: the stack address where the outermost engine entry on a thread began
+(`Context::run`, `JsObject::call`, `Script::parse`), and `check(budget)`, which throws `RangeError:
+Maximum call stack size exceeded` once more than the budget has been used since. Checked in
+`CallValue::resolve` (every call, native or JS), `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/`try_get` (Proxy
+and prototype chains), `JSON.stringify`'s `serialize_json_property` and `flatten_into_array`.
+`RuntimeLimits::set_native_stack_budget` (default 1 MiB, which fits any 2 MiB thread); `rustkit-js`'s
+`set_thread_native_stack_budget` sets it from the stack size a thread was spawned with (the content
+thread and `spawn_script_thread` use half of it). A thread that never sets it gets 1 MiB: in a debug
+build the parser needs several KiB per nesting level, so roughly 100 levels of `[[[...]]]` fit.
+
+`third_party/boa_parser` (marked `HIWAVE PATCH (native recursion)`): `Cursor::check_depth` at
+`AssignmentExpression`, `UnaryExpression`, `Statement` and `StatementListItem`, using the engine's probe
+(`set_stack_probe`) or the parse's own start when there is none; and `MAX_CHAIN` (8192) on the loops that
+build a left-nested chain (`1+1+...`, `a.b.c...`, `f()()()...`), because the finished tree is dropped,
+analysed and compiled recursively and a 30 000-link chain overflowed a 2 MiB thread. The error is
+`Error::is_stack_overflow`; `From<ParseError> for JsNativeError` and the `Function` constructor turn it into
+a `RangeError`.
+
+Pin: `crates/rustkit-js/tests/native_recursion.rs` (each case in a child process, since an overflow
+aborts; 40 cases, expected values from Chrome for Testing 148.0.7778.216). Where Chrome answers and this
+engine throws a RangeError instead, or where `JSON.parse` keeps its old SyntaxError ceiling, the test names
+the case and the answer it accepts.
 
 ## Patch: a catchable stack overflow (STR-10)
 
@@ -534,3 +563,44 @@ happens when the receiver is the array itself (`super[i] = v` on an array home o
 `Reflect.set(arr, i, v, other)` define the element on the receiver). Both holes were in the general
 path before this patch too (its string shortcut answered `undefined` past the end, its array store
 ignored the receiver); fixed in both paths, with the five cases added to the Chrome-148 set.
+
+## Patch: global lexical scope across scripts
+
+**Why.** ES2024 GlobalDeclarationInstantiation: every classic script of a realm shares one global
+declarative environment, so a function compiled in an earlier script sees a top-level
+`const`/`let`/`class` a LATER script declares. Boa resolves a name no enclosing scope declares to the
+global OBJECT at compile time, so the earlier function threw `ReferenceError` for it forever
+(Speedometer 3's Perf-Dashboard: a function from one `<script>` reads `RemoteAPI`, a class declared by
+the next).
+
+**What.** Marked `HIWAVE PATCH (global-lexical-scope)`:
+`src/environments/runtime/mod.rs` (`find_runtime_binding` re-points a global-object locator at the
+realm's lexical binding of that name, in `resolve_late_global_lexical`), `src/realm.rs`
+(`late_global_lexical`, a per-realm name cache that is dropped when the global scope gains bindings, so
+a read of `Math` or `document` costs one hash lookup), and `src/vm/opcode/set/name.rs`
+(`verify_initialized` throws TypeError when such a late-resolved binding is a `const`, which the
+compiler could not know). Pins: `crates/rustkit-js/tests/global_lexical_scope.rs` (runtime) and
+`crates/rustkit-engine/src/script_global_lexical_tests.rs` (page scripts). Cost: one cached hash lookup
+per global-object name read once any script has a top-level lexical declaration; a 1M-iteration loop
+of three global reads with 300 top-level consts went 1.41 s to 1.6 s (release, Linux).
+
+## Patch: sort in V8's order (`sort-v8`)
+
+**Why.** With a comparator that is not a consistent total order (`(a, b) => a > b`, a NaN or
+`undefined` result, `-1` always, `Math.random() - 0.5`) ECMA-262 leaves the order unspecified, and
+pages see V8's. observable-plot keeps a different top-N when ours differs. The merge sort above never
+panics but orders such input differently, and calls the comparator in a different sequence.
+
+**What.** `src/builtins/array/v8_timsort.rs` (new) ports V8's `array-sort.tq` (TimSort: run
+detection, binary insertion under the minimum run, galloping merges) and its
+`typed-array-sort.tq` top-down merge sort. `sort_indexed_properties` partitions off the `undefined`s
+(V8 never passes one to the comparator) and puts them last. Chrome 148.0.7778.216 measured two
+facts the Torque source does not show: `Array.prototype.sort` on fewer than 8 elements goes straight
+to binary insertion, and `toSorted` does not. Also fixed in the typed-array comparator: a result of
+`0`, `-0` or `false` was taken as "greater" (`is_sign_positive`). `merge_sort_fallible` is gone.
+Pins: `crates/rustkit-js/tests/sort_v8_order.rs` compares 180 cases (sizes 2 to 500, ten comparator
+shapes, plus typed arrays) with Chrome's sorted result AND its comparator call log, call for call
+(`tools/parity_oracle/sort_nan_cases.json`, regenerated by `sort_cases_log.mjs --write`), and fuzzes
+stability and totality with a seeded generator. Not pinned: comparators with side effects other
+than logging, arrays over ~500 elements, and proxies or array-likes with getters (the algorithm does
+not depend on them, but they were not measured).

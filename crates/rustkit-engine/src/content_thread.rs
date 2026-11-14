@@ -148,6 +148,8 @@ impl ContentThread {
             .name("page".into())
             .stack_size(stack_bytes)
             .spawn(move || {
+                // Half the stack is the native-recursion budget (JSON, parser, proxy chains).
+                rustkit_js::set_thread_native_stack_budget(Some(stack_bytes / 2));
                 let built = (|| -> Result<(), String> {
                     let mut engine = builder
                         .build_page(nav_for_thread)
