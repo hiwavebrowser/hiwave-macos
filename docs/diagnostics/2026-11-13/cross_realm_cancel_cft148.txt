@@ -1,0 +1,2 @@
+Chrome for Testing 148.0.7778.216, headless (Playwright), 2026-11-13:
+A false true | B false true | C false true | D false true

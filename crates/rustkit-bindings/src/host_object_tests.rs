@@ -39,8 +39,34 @@ fn engine_names() -> String {
         }
     }
     names.extend(REGISTRY_NAMES.split_whitespace().map(str::to_string));
+    names.extend(shared_names());
     names.into_iter().collect::<Vec<_>>().join(" ")
 }
+
+/// The names this crate's scripts use on the frame tree's shared state
+/// (one object for every document of the tree), read from the sources.
+fn shared_names() -> std::collections::BTreeSet<String> {
+    let mut names: std::collections::BTreeSet<String> =
+        "handoff timerQueue".split_whitespace().map(str::to_string).collect();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file in ["lib.rs", "dom.rs"] {
+        let source = std::fs::read_to_string(dir.join(file)).unwrap();
+        for marker in ["SHARED.", "__rk.shared."] {
+            for part in source.split(marker).skip(1) {
+                let member: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                if !member.is_empty() {
+                    names.insert(member);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Member names of what the engine keeps for a frame tree: the timer
+/// queue's, a frame record's, the registries' frame members. (Not
+/// `loaded`: it is also a ProgressEvent's, set on the page's own event.)
+const FRAME_NAMES: &str = "now nextId timers count up top el win tree changed scan attach size nodeId byTag";
 
 /// The page: an accessor on `Object.prototype` for every name, counting
 /// its calls. `mine` holds what the page made or was given; a receiver
@@ -50,12 +76,19 @@ fn engine_names() -> String {
 const TRAP: &str = r#"
 var calls = 0, notMine = 0, which = {}, inTrap = false;
 var mine = new WeakSet([window, document, Object.prototype]);
+var others = [];
+// Another window of the frame tree, which the page was given.
+function adopt(w) { mine.add(w); mine.add(w.document); mine.add(w.Object.prototype); others.push(w); }
+function given(o) {
+    for (var i = 0; i < others.length; i++) if (o instanceof others[i].Node || o instanceof others[i].Event) return true;
+    return false;
+}
 var defineProperty = Object.defineProperty;
 function note(name, kind, o) {
     if (inTrap) return;
     inTrap = true;
     calls++;
-    var page = o === null || (typeof o !== 'object') || mine.has(o) || o instanceof Node || o instanceof Event;
+    var page = o === null || (typeof o !== 'object') || mine.has(o) || o instanceof Node || o instanceof Event || given(o);
     if (!page) notMine++;
     which[name + ':' + kind + (page ? '' : ':not-the-page\'s')] = true;
     inTrap = false;
@@ -276,7 +309,7 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
 /// The natives the runtime puts on the host object itself (rustkit-js).
 const HOST_NATIVES: &[&str] = &[
     "reportError", "unsupported", "base64Decode", "base64Encode", "binaryDecode", "binaryEncode", "blobGet",
-    "blobNumber", "blobPut", "blobRevoke", "takeBytes", "utf8Decode", "utf8Encode",
+    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode",
 ];
 
 /// Every name this crate's sources read or write on the host object is a
@@ -357,4 +390,178 @@ fn the_queue_takes_a_request_made_by_a_response_handler() {
         b.run_jobs().unwrap();
     }
     assert_eq!((rounds, text(b.evaluate("path.join()").unwrap())), (vec![1, 1, 1, 0], "1:0,2:0,3:0".to_string()));
+}
+
+// ---------------------------------------------------------------------
+// The same, for a frame tree: a page and a frame of its origin, each a
+// document with its own window, and what the engine keeps once for both.
+// ---------------------------------------------------------------------
+
+fn frame_page() -> String {
+    PAGE.replace("</body>", "<iframe id=\"fr\" src=\"frame.html\" width=\"120\" height=\"40\"></iframe></body>")
+}
+
+struct Tree {
+    parent: DomBindings,
+    doc: Rc<Document>,
+    child: DomBindings,
+    child_doc: Rc<Document>,
+    node: usize,
+}
+
+/// A page with frames on, its frame asked for, and the frame's document
+/// made, not yet attached. `before_child` runs in the page first, as its
+/// script does before a frame of it exists.
+fn tree(net: bool, before_child: &str) -> Tree {
+    let parent = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(&frame_page()).unwrap());
+    parent.set_document(doc.clone()).unwrap();
+    parent.set_location(&Url::parse("https://example.test/page").unwrap()).unwrap();
+    if net {
+        parent.enable_net_bridge().unwrap();
+    }
+    parent.enable_frames().unwrap();
+    parent.evaluate(before_child).unwrap();
+    let _ = parent.scan_frames();
+    let _ = parent.take_frame_requests();
+    let child = parent.new_child().unwrap();
+    let child_doc = Rc::new(Document::parse_html(PAGE).unwrap());
+    child.set_document(child_doc.clone()).unwrap();
+    child.set_location(&Url::parse("https://example.test/frame.html").unwrap()).unwrap();
+    if net {
+        child.enable_net_bridge().unwrap();
+    }
+    child.enable_frames().unwrap();
+    let node = doc.get_element_by_id("fr").unwrap().id.raw();
+    Tree { parent, doc, child, child_doc, node }
+}
+
+/// The accessor calls in the page and in its frame, with the accessors
+/// on both windows' `Object.prototype`, through every engine path of both
+/// documents and the frame's whole life.
+fn accessor_calls_in_a_frame_tree(net: bool) -> (String, String) {
+    let names = format!("var NAMES = {:?};", format!("{} {FRAME_NAMES}", engine_names()));
+    let t = tree(net, &format!("{names}{TRAP}"));
+    t.child.evaluate(&names).unwrap();
+    t.child.evaluate(TRAP).unwrap();
+    let _ = t.parent.frame_size(t.node);
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(matches!(attached, Ok(true)), "the frame is attached: {attached:?}");
+    t.parent.evaluate("adopt(document.getElementById('fr').contentWindow);").unwrap();
+    t.child.evaluate("adopt(parent);").unwrap();
+    let _ = t.parent.frame_loaded(t.node);
+    exercise(&t.child, &t.child_doc, net);
+    exercise(&t.parent, &t.doc, net);
+    // Each window's script in the other's document.
+    let _ = t.parent.evaluate(
+        "(function () { try { var w = document.getElementById('fr').contentWindow; w.setTimeout(function () {}, 0); \
+         w.requestAnimationFrame(function () {}); w.document.getElementById('p').dispatchEvent(new Event('x')); \
+         w.document.body.appendChild(document.createElement('i')); w.document.getElementById('b').click(); } catch (e) {} })();",
+    );
+    let _ = t.child.evaluate(
+        "(function () { try { parent.setTimeout(function () {}, 0); parent.document.getElementById('b').click(); \
+         parent.document.body.appendChild(document.createElement('i')); frameElement.setAttribute('src', 'other.html'); } catch (e) {} })();",
+    );
+    let _ = t.parent.advance_timers(50, 100);
+    let _ = t.child.advance_timers(50, 100);
+    let _ = t.parent.run_animation_round(100);
+    let _ = t.child.run_animation_round(100);
+    let _ = t.child.next_timer_delay();
+    let _ = t.parent.run_timers(5000, 100);
+    let _ = t.parent.take_frame_requests();
+    let in_frame = text(t.child.evaluate(VERDICT).unwrap());
+    let Tree { parent, child, .. } = t;
+    parent.drop_child(child);
+    let _ = parent.next_timer_delay();
+    let _ = parent.run_timers(9000, 100);
+    (text(parent.evaluate(VERDICT).unwrap()), in_frame)
+}
+
+#[test]
+fn engine_code_invokes_no_page_defined_accessor_in_a_frame_tree() {
+    let (page, frame) = accessor_calls_in_a_frame_tree(true);
+    assert_eq!((page.as_str(), frame.as_str()), ("0 0 ", "0 0 "), "accessor calls, receivers not the page's, which: in the page, in its frame");
+}
+
+#[test]
+fn engine_code_invokes_no_page_defined_accessor_in_a_frame_tree_without_the_net_bridge() {
+    let (page, frame) = accessor_calls_in_a_frame_tree(false);
+    assert_eq!((page.as_str(), frame.as_str()), ("0 0 ", "0 0 "), "accessor calls, receivers not the page's, which: in the page, in its frame");
+}
+
+/// A frame's host object is as the page's: it inherits nothing and owns
+/// every reserved slot. What the frame tree keeps once inherits nothing
+/// either, and owns every name the scripts use on it from the start.
+#[test]
+fn a_frames_host_object_and_the_trees_shared_state_inherit_nothing() {
+    let t = tree(true, "");
+    let slots = HOST_SLOTS.iter().chain(HOST_NATIVES).map(|s| format!("{s:?}")).collect::<Vec<_>>().join(",");
+    let shared = shared_names().iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(",");
+    let body = format!(
+        "var proto = Object.getPrototypeOf, has = Object.prototype.hasOwnProperty, out = [];
+         if (proto(__rk) !== null) out.push('host');
+         [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
+         ['domHooks', 'net', 'dragStore', 'frames', 'shared'].forEach(function (n) {{ if (!__rk[n] || proto(__rk[n]) !== null) out.push(n); }});
+         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'nodeId', 'byTag', 'frames'].forEach(function (n) {{
+             if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
+         }});
+         if (__rk.domHooks.frames && proto(__rk.domHooks.frames) !== null) out.push('domHooks.frames');
+         [{shared}].forEach(function (n) {{ if (!__rk.shared || !has.call(__rk.shared, n)) out.push('shared.' + n); }});
+         var queue = __rk.shared && __rk.shared.timerQueue;
+         if (!queue || proto(queue) !== null) out.push('shared.timerQueue');
+         return out.join(' ');"
+    );
+    let page = text(t.parent.host_turn(&body, &[]).unwrap());
+    let frame = text(t.child.host_turn(&body, &[]).unwrap());
+    assert_eq!((page.as_str(), frame.as_str()), ("", ""), "what is not so: in the page, in its frame");
+    let same = t.parent.host_turn("__rk.shared.probe = 1; return '';", &[]).and_then(|_| t.child.host_turn("var one = __rk.shared.probe === 1; delete __rk.shared.probe; return String(one);", &[]));
+    assert_eq!(text(same.unwrap()), "true", "the two documents hold one shared state");
+}
+
+/// A timer set in a frame joins the tree's queue through nothing a page
+/// has replaced or defined, and runs.
+#[test]
+fn a_frames_timer_joins_the_queue_through_nothing_a_page_replaced() {
+    let replaced = "var ran = 0; Array.prototype.push = function () { ran++; return 0; }; \
+        ['0', '1', '2'].forEach(function (i) { \
+            Object.defineProperty(Array.prototype, i, { get: function () { ran++; }, set: function () { ran++; }, configurable: true }); \
+        }); ran = 0;";
+    let t = tree(false, replaced);
+    t.parent.evaluate("var hits = 0; setTimeout(function () { hits++; }, 5);").unwrap();
+    t.child.evaluate("var hits = 0; setTimeout(function () { hits++; }, 5); setTimeout(function () { hits++; }, 6);").unwrap();
+    let _ = t.child.next_timer_delay();
+    t.parent.run_timers(100, 100).unwrap();
+    let got = (
+        text(t.parent.evaluate("String(ran)").unwrap()),
+        text(t.parent.evaluate("String(hits)").unwrap()),
+        text(t.child.evaluate("String(hits)").unwrap()),
+    );
+    assert_eq!(got, ("0".to_string(), "1".to_string(), "2".to_string()), "calls of what the page replaced, the page's timers run, the frame's");
+}
+
+/// Attaching a frame hands two windows over. Whatever the outcome, nothing
+/// is left where they changed hands, and a frame that was not attached
+/// holds no window.
+#[test]
+fn an_attach_leaves_no_window_behind() {
+    let frame_window = "document.getElementById('fr').contentWindow === null ? 'none' : 'the frame'";
+    let left = "return String(__rk.shared.handoff === null || __rk.shared.handoff === undefined);";
+    // One that goes through.
+    let t = tree(false, "");
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(matches!(attached, Ok(true)), "{attached:?}");
+    assert_eq!(text(t.parent.host_turn(left, &[]).unwrap()), "true", "nothing left after an attach");
+    assert_eq!(text(t.parent.evaluate(frame_window).unwrap()), "the frame");
+    // One whose frame's window refuses its new properties.
+    let t = tree(false, "");
+    t.child.evaluate("Object.defineProperty = function () { throw new Error('refused'); };").unwrap();
+    let attached = matches!(t.parent.attach_frame(t.node, &t.child), Ok(true));
+    assert_eq!(text(t.parent.host_turn(left, &[]).unwrap()), "true", "nothing left after an attach that was refused");
+    let expected = if attached { "the frame" } else { "none" };
+    assert_eq!(text(t.parent.evaluate(frame_window).unwrap()), expected, "attached: {attached}");
+    // One for a node that is not a frame.
+    let t = tree(false, "");
+    let para = t.doc.get_element_by_id("p").unwrap().id.raw();
+    assert!(matches!(t.parent.attach_frame(para, &t.child), Ok(false)));
+    assert_eq!(text(t.child.host_turn(left, &[]).unwrap()), "true", "nothing left after an attach to no frame");
 }

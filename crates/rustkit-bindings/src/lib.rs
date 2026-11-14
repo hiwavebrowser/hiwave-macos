@@ -133,6 +133,10 @@ mod web_messaging_tests;
 #[cfg(test)]
 mod web_named_access_tests;
 #[cfg(test)]
+mod child_realm_tests;
+#[cfg(test)]
+mod child_realm_hardening_tests;
+#[cfg(test)]
 mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
@@ -442,7 +446,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
     ("Element", "animate(pseudoElement)"),
     ("CSSAnimation", "currentTime"),
     ("CSSAnimation", "playbackRate"),
@@ -453,6 +457,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("ReadableStream", "getReader(byob)"),
     ("DOMParser", "parseFromString(XML)"),
     ("Window", "named access (iframe name)"),
+    ("URL", "createObjectURL (blob store full)"),
 ];
 
 /// Every name the embedder's scripts keep on the host object (`__rk`).
@@ -462,18 +467,35 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "compose", "decodeWait", "dispatchTo",
-    "domDirty", "domHooks", "domReset", "dragStore", "editKey", "finishComposing", "fire", "fireAnimation",
-    "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn", "fireTextInput", "fireTransition", "fireWheel",
-    "followLink", "fragmentNavigation", "hasCtor", "historyReset", "imageFailed", "imageFailedFor", "imageGaveUp",
-    "imageLoaded", "imageLoadedFor", "imageWritten", "implicitSubmit", "isDispatching", "keepCtor", "keepFinish",
-    "locationHashSync", "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net",
-    "newTextEvent", "nextTimer", "now", "observersTick", "pickOption", "runTimers", "runTimersFramed",
-    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
-    "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
-    "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
+    "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
+    "implicitSubmit", "isDispatching", "keepCtor", "keepFinish", "locationHashSync", "locationSync", "make",
+    "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer", "now", "observersTick",
+    "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment", "scrollToLocationFragment",
+    "setAdoptedStyles", "setCurrentScript", "setFocus", "setSelection", "setSheetDisabled", "sheetGeneration",
+    "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit", "userScrolled", "userScrolledElement",
+    "viewFocused", "wheelBlocks",
+    // Installed only with nested browsing contexts on (web_frames.js).
+    "frames",
+    // The frame tree's shared state, which the runtime puts there itself.
+    "shared",
     // Reserved for the workers script (not installed in every realm).
     "workersPump",
+];
+
+/// Every name the embedder's scripts keep on the frame tree's shared state
+/// (the host object's `shared`, one object for every document of the
+/// tree). Each is an own property of it before the first script runs
+/// ([`JsRuntime::reserve_shared_slots`]), and it inherits from nothing: a
+/// read or a first write of one, from whichever document, stays on the
+/// object itself. `host_object_tests` checks the list against the scripts.
+pub(crate) const SHARED_SLOTS: &[&str] = &[
+    "canceled", "cancelables", "dispatching", "evCurrent", "evPhase", "evTarget", "evType", "eventProtos", "handoff",
+    "kind", "legacyType", "made", "origin", "path", "stamped", "stop", "stopNow", "timerQueue", "trustGet", "trusted",
+    "undispatched",
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
@@ -515,7 +537,28 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(window);
     makeEventTarget(document);
 
-    var now = 0, nextId = 1, timers = [];
+    // The timer queue and its clock. The documents of a frame tree share one
+    // (same-origin frames are one event loop, HTML 8.1.7): a frame's realm
+    // finds its parent's on the host object's `shared`, which every realm
+    // of a runtime holds. Each entry runs in the realm that set it.
+    // The queue's record inherits from nothing, and an entry joins the
+    // queue as an own element defined with the built-ins of install: a
+    // frame's timer goes through nothing of the first document's.
+    var SHARED = __rk.shared, objCreate = Object.create, defineOwn = Object.defineProperty;
+    var Q = SHARED.timerQueue;
+    if (!Q) {
+        Q = SHARED.timerQueue = objCreate(null);
+        Q.now = 0; Q.nextId = 1; Q.timers = [];
+    }
+    var timers = Q.timers;
+    function enqueue(timer) {
+        var d = objCreate(null);
+        d.value = timer; d.writable = true; d.enumerable = true; d.configurable = true;
+        defineOwn(timers, timers.length, d);
+    }
+    // `Q.now` is the frame tree's one clock: lifecycle `timeStamp` and the
+    // rAF argument read it. When #1104's page clock lands, `Q.now` moves
+    // onto it (one page clock for the tree), not a second clock beside it.
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
@@ -523,7 +566,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var target = targetName === 'document' ? document : window;
         var event = {
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
-            target: target, currentTarget: null, timeStamp: now, isTrusted: true,
+            target: target, currentTarget: null, timeStamp: Q.now, isTrusted: true,
             preventDefault: function () { this.defaultPrevented = true; },
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         };
@@ -540,14 +583,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function schedule(cb, ms, args, repeat, frame) {
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
-        var id = nextId++;
-        timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
+        var id = Q.nextId++;
+        enqueue({ id: id, seq: id, due: Q.now + delay, cb: cb, args: args,
+                  every: repeat ? Math.max(delay, 1) : 0, frame: !!frame, win: window, run: call });
         return id;
     }
     function clearTimer(id) {
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].id === id) { timers.splice(i, 1); return; }
+            if (timers[i].id === id && timers[i].win === window) { timers.splice(i, 1); return; }
         }
     }
     window.setTimeout = function (cb, ms) {
@@ -559,7 +602,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, [], false, true);
+        return schedule(function () { cb(Q.now); }, 16, [], false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -594,17 +637,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var timer = timers[best];
             // A timer a cut-short live turn owed runs after the clock has
             // moved on; the clock does not go back for it.
-            if (timer.due > now) now = timer.due;
+            if (timer.due > Q.now) Q.now = timer.due;
             // An interval that fell behind (a live turn held it back) is not
             // caught up: its next run counts from now, as in a browser.
             if (timer.every) {
                 timer.due += timer.every;
-                if (timer.due <= now) timer.due = now + timer.every;
-                timer.seq = nextId++;
+                if (timer.due <= Q.now) timer.due = Q.now + timer.every;
+                timer.seq = Q.nextId++;
             }
             else timers.splice(best, 1);
             ran++;
-            call(timer);
+            timer.run(timer);
         }
         return ran;
     }
@@ -644,17 +687,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
-        var target = now + delta;
+        var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
         if (ran >= max) {
-            if (now < target) now = target;
+            if (Q.now < target) Q.now = target;
             return ran;
         }
-        if (now < target) now = target;
+        if (Q.now < target) Q.now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
         }
         for (var j = 0; j < round.length && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
@@ -662,7 +705,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (at < 0) continue;
             timers.splice(at, 1);
             ran++;
-            call(round[j]);
+            round[j].run(round[j]);
         }
         return ran;
     };
@@ -683,7 +726,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
     __rk.advanceTimersFramed = function (delta, max, frameMs) {
-        var target = now + delta;
+        var target = Q.now + delta;
         var start = Date.now();
         var ran = 0;
         var yielded = false;
@@ -696,30 +739,51 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 break;
             }
         }
-        if (now < target) now = target;
+        if (Q.now < target) Q.now = target;
         if (ran >= max) return yielded ? -ran : ran;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
         }
         for (var j = 0; j < round.length && ran < max; j++) {
             var at = timers.indexOf(round[j]);
             if (at < 0) continue;
             timers.splice(at, 1);
             ran++;
-            call(round[j]);
+            round[j].run(round[j]);
         }
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
-    __rk.now = function () { return now; };
+    __rk.now = function () { return Q.now; };
+    // The animation-frame round of a frame tree's turn that stopped for
+    // its time with timers still due (`Engine::pump_live`): the frame
+    // callbacks due now run once, as a turn's round does.
+    __rk.animationRound = function (max) {
+        var round = [], ran = 0;
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            round[j].run(round[j]);
+        }
+        return ran;
+    };
+    // A frame's document is going away: its timers go with it.
+    __rk.dropTimers = function () {
+        for (var i = timers.length - 1; i >= 0; i--) if (timers[i].win === window) timers.splice(i, 1);
+    };
     __rk.nextTimer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
         }
-        return due < 0 ? -1 : Math.max(0, due - now);
+        return due < 0 ? -1 : Math.max(0, due - Q.now);
     };
 })();
 "#;
@@ -1081,8 +1145,72 @@ impl MutationLog {
 }
 
 /// DOM bindings context.
+/// A page's hold on the JavaScript runtime: the runtime, which the
+/// documents of one frame tree share, and the realm that is this page's.
+/// Every use goes through [`PageRuntime::borrow_mut`], which enters the
+/// page's realm for as long as the borrow lasts, so the rest of the
+/// bindings read as if the runtime were the page's alone.
+pub(crate) struct PageRuntime {
+    shared: Rc<RefCell<JsRuntime>>,
+    realm: rustkit_js::RealmId,
+}
+
+/// The runtime, with one page's realm entered until this is dropped.
+pub(crate) struct InRealm<'a> {
+    runtime: std::cell::RefMut<'a, JsRuntime>,
+    outer: rustkit_js::RealmId,
+}
+
+impl PageRuntime {
+    fn main(runtime: JsRuntime) -> Self {
+        Self { shared: Rc::new(RefCell::new(runtime)), realm: rustkit_js::RealmId::MAIN }
+    }
+
+    pub(crate) fn borrow_mut(&self) -> InRealm<'_> {
+        let mut runtime = self.shared.borrow_mut();
+        let outer = runtime.enter_realm(self.realm);
+        InRealm { runtime, outer }
+    }
+
+    /// For what reads the runtime without evaluating (no realm matters).
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, JsRuntime> {
+        self.shared.borrow()
+    }
+}
+
+impl std::ops::Deref for InRealm<'_> {
+    type Target = JsRuntime;
+    fn deref(&self) -> &JsRuntime {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for InRealm<'_> {
+    fn deref_mut(&mut self) -> &mut JsRuntime {
+        &mut self.runtime
+    }
+}
+
+impl Drop for InRealm<'_> {
+    fn drop(&mut self) {
+        self.runtime.enter_realm(self.outer);
+    }
+}
+
+/// What a page asked of its frames (web_frames.js): show `url` in the
+/// iframe element `node` (`Some`), or that element left the document
+/// (`None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameRequest {
+    pub node: usize,
+    pub url: Option<String>,
+}
+
 pub struct DomBindings {
-    runtime: RefCell<JsRuntime>,
+    runtime: PageRuntime,
+    /// Frame requests not yet taken (`take_frame_requests`); filled only
+    /// once `enable_frames` ran.
+    frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
     window: RefCell<WindowState>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
@@ -1125,7 +1253,172 @@ impl DomBindings {
         Self::build(runtime, true)
     }
 
-    fn build(mut runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+    fn build(runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+        Self::build_in(PageRuntime::main(runtime), app_bridge, false)
+    }
+
+    /// Bindings for a document nested in this one's frame tree and of its
+    /// origin (a same-origin `<iframe>`): a new realm of the same runtime,
+    /// with everything a page has installed again in it, bound to its own
+    /// document. The two pages' objects can hold and call each other.
+    /// The child outlives neither the runtime nor its realm: drop it with
+    /// [`Self::drop_child`].
+    pub fn new_child(&self) -> Result<Self, BindingError> {
+        let realm = self.runtime.shared.borrow_mut().create_realm()?;
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, true)
+    }
+
+    /// Give this page's global a property `name` that is `other`'s global
+    /// object (`contentWindow` on one side, `parent` on the other). Both
+    /// must share a runtime.
+    pub fn expose_window(&self, name: &str, other: &DomBindings) -> Result<(), BindingError> {
+        if !Rc::ptr_eq(&self.runtime.shared, &other.runtime.shared) {
+            return Err(JsError::ExecutionError("the two pages do not share a runtime".into()).into());
+        }
+        self.runtime
+            .shared
+            .borrow_mut()
+            .expose_realm_global(self.runtime.realm, name, other.runtime.realm)
+            .map_err(Into::into)
+    }
+
+    /// Turn on the page half of `<iframe>` (web_frames.js): frame requests
+    /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
+    /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
+    /// Off, nothing of it exists (`EngineConfig::nested_contexts`).
+    pub fn enable_frames(&self) -> Result<(), BindingError> {
+        let queue = self.frame_requests.clone();
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function(
+            "__rustkit_frame_request",
+            2,
+            Box::new(move |args| {
+                if let Some(JsValue::Number(node)) = args.first() {
+                    let url = match args.get(1) {
+                        Some(JsValue::String(url)) => Some(url.clone()),
+                        _ => None,
+                    };
+                    let mut queue = queue.borrow_mut();
+                    // Bounds what a page can park between two drains.
+                    if queue.len() < 256 {
+                        queue.push(FrameRequest { node: *node as usize, url });
+                    }
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_with_host(include_str!("web_frames.js"))?;
+        Ok(())
+    }
+
+    /// Whether the page has asked something of its frames that
+    /// [`Self::take_frame_requests`] has not taken yet.
+    pub fn has_frame_requests(&self) -> bool {
+        !self.frame_requests.borrow().is_empty()
+    }
+
+    /// The frame requests since the last call, in the order made.
+    pub fn take_frame_requests(&self) -> Vec<FrameRequest> {
+        std::mem::take(&mut *self.frame_requests.borrow_mut())
+    }
+
+    /// Ask this document for its parser's iframes (after the document is
+    /// bound): each becomes a frame request.
+    pub fn scan_frames(&self) -> Result<(), BindingError> {
+        // A turn like any other of the engine's that touches the page's
+        // nodes: it can be interrupted.
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_turn("return __rk.frames ? __rk.frames.scan() : null;", &[])?;
+        Ok(())
+    }
+
+    /// The viewport `node`'s frame gets until layout sizes frames:
+    /// (width, height) in CSS px.
+    pub fn frame_size(&self, node: usize) -> (f64, f64) {
+        let answer = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.size({node}) : '';"), &[]);
+        if let Ok(JsValue::String(size)) = answer {
+            if let Some((w, h)) = size.split_once('x') {
+                if let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) {
+                    return (w, h);
+                }
+            }
+        }
+        (300.0, 150.0)
+    }
+
+    /// Make `child` (a page of this runtime, from [`Self::new_child`]) the
+    /// window of this document's iframe `node`: its `contentWindow` and
+    /// `contentDocument`, and in the child `parent`, `top` and
+    /// `frameElement`. `false` when `node` is no longer a frame here.
+    pub fn attach_frame(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
+        let attached = self.hand_over(node, child);
+        // Whatever happened, nothing stays where the windows changed hands,
+        // and a frame that was not attached holds no window.
+        let clear = "__rk.shared.handoff = null;";
+        if self.runtime.borrow_mut().evaluate_host_bookkeeping(clear).is_err() {
+            let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping(clear);
+        }
+        if !matches!(attached, Ok(true)) {
+            let _ = self
+                .runtime
+                .borrow_mut()
+                .evaluate_host_bookkeeping(&format!("if (__rk.frames) __rk.frames.attach({node}, null);"));
+        }
+        attached
+    }
+
+    /// The three steps of [`Self::attach_frame`]. The two windows change
+    /// hands on the frame tree's shared state, which only the embedder's
+    /// scripts hold: nothing is put on either window for it. Each step
+    /// that takes what was handed over empties the place in a `finally`.
+    fn hand_over(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
+        child.runtime.borrow_mut().evaluate_host_bookkeeping("__rk.shared.handoff = globalThis;")?;
+        let attached = self.runtime.borrow_mut().evaluate_host_bookkeeping(&format!(
+            "var S = __rk.shared, w = S.handoff, h = null; \
+             try {{ h = __rk.frames ? __rk.frames.attach({node}, w) : null; }} finally {{ S.handoff = null; }} \
+             if (h) {{ h.top = __rk.realTop; S.handoff = h; }} \
+             return !!h;"
+        ))?;
+        if !matches!(attached, JsValue::Boolean(true)) {
+            return Ok(false);
+        }
+        let framed = child.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "var S = __rk.shared, h = S.handoff; \
+             try { if (h) __rk.becomeFrame(h.up, h.top, h.el); } finally { S.handoff = null; } \
+             return !!h;",
+        )?;
+        Ok(matches!(framed, JsValue::Boolean(true)))
+    }
+
+    /// Fire `load` at this document's iframe `node` (the child's load is
+    /// done, or a cross-origin frame was left blank).
+    pub fn frame_loaded(&self, node: usize) -> Result<bool, BindingError> {
+        let fired = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}) : false;"), &[])?;
+        Ok(matches!(fired, JsValue::Boolean(true)))
+    }
+
+    /// End a child made with [`Self::new_child`]: its realm can no longer be
+    /// evaluated in. Objects of it the parent still holds stay alive.
+    pub fn drop_child(&self, child: DomBindings) -> bool {
+        // Its timers are in the tree's queue: they go with it.
+        let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping("if (__rk.dropTimers) __rk.dropTimers();");
+        let realm = child.runtime.realm;
+        drop(child);
+        self.runtime.shared.borrow_mut().drop_realm(realm)
+    }
+
+    /// `lazy` (a child realm): Intl, Streams, Web Animations and the canvas
+    /// 2D context are installed on first use (web_lazy.js), not now.
+    fn build_in(page: PageRuntime, app_bridge: bool, lazy: bool) -> Result<Self, BindingError> {
+        let mut entered = page.borrow_mut();
+        let runtime: &mut JsRuntime = &mut entered;
         debug!(app_bridge, "Initializing DOM bindings");
 
         // `window.ipc.postMessage` lands here (CH2.E9), in an app-owned
@@ -1133,6 +1426,7 @@ impl DomBindings {
         // global added after them made every page load measurably slower
         // (two app tests 1.4 s -> 3.0 s).
         runtime.reserve_host_slots(HOST_SLOTS)?;
+        runtime.reserve_shared_slots(SHARED_SLOTS)?;
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
@@ -1151,18 +1445,18 @@ impl DomBindings {
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut runtime, app_bridge)?;
+        Self::inject_globals(&mut *runtime, app_bridge, lazy)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
         let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
-        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
+        dom::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_with_host(include_str!("web_interfaces.js"))?;
         // getBBox, getTotalLength, getPointAtLength on SVG shapes (svg_geometry.rs,
         // web_svg_geometry.js); needs the SVG interfaces node_apis.js made.
-        svg_geometry::install(&mut runtime)?;
+        svg_geometry::install(runtime)?;
         // XMLSerializer (web_xml_serializer.js).
         runtime.evaluate_script(include_str!("web_xml_serializer.js"))?;
         // FileReader over web_blob.js's Blob (web_file_reader.js); an EventTarget.
@@ -1177,7 +1471,7 @@ impl DomBindings {
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
-        web_match_media::install(&mut runtime)?;
+        web_match_media::install(&mut *runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -1199,18 +1493,18 @@ impl DomBindings {
         // execCommand, navigator.clipboard and the user's edit commands over
         // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
         let edit = Rc::new(dom::editing::EditContext::default());
-        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
+        dom::editing::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_with_host(include_str!("web_history.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
-        web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        web_scroll::install(&mut *runtime, &scroll, &dom_host, &dirty)?;
         // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
         // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
         let canvases = web_canvas::SharedCanvases::default();
-        web_canvas::install(&mut runtime, &canvases, &dom_host)?;
+        web_canvas::install(&mut *runtime, &canvases, &dom_host, !lazy)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -1223,7 +1517,21 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
-        runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        if lazy {
+            // The four lazily installed interfaces' sources, for web_lazy.js.
+            let sources = serde_json::json!({
+                "intl": include_str!("web_intl.js"),
+                "streams": include_str!("web_streams.js"),
+                "animations": include_str!("web_animations.js"),
+                "canvas": web_canvas::SCRIPT,
+            });
+            runtime.evaluate_script(&format!(
+                "Object.defineProperty(globalThis, '__rustkit_lazy_sources', {{ value: {sources}, configurable: true }});"
+            ))?;
+            runtime.evaluate_with_host(include_str!("web_lazy.js"))?;
+        } else {
+            runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        }
         // CH3.A7: the engine's own globals (`__rustkit_*`, `__rk*`) stay
         // out of `Object.keys(window)` and for-in, which list none of them
         // in Chromium. They stay configurable: setup scripts redefine some.
@@ -1235,8 +1543,10 @@ impl DomBindings {
              });",
         )?;
 
+        drop(entered);
         Ok(Self {
-            runtime: RefCell::new(runtime),
+            runtime: page,
+            frame_requests: Rc::new(RefCell::new(Vec::new())),
             window: RefCell::new(WindowState::default()),
             dom_host,
             ipc_queue,
@@ -1373,7 +1683,7 @@ impl DomBindings {
     pub fn blob_url_text(&self, url: &str) -> Option<String> {
         // The host's store, read in Rust: no script runs, so nothing of
         // the page's can be on this path.
-        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        let bytes = self.runtime.borrow().blob_bytes(self.runtime.realm, url)?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1533,7 +1843,7 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool) -> Result<(), BindingError> {
+    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool, lazy: bool) -> Result<(), BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -1643,13 +1953,16 @@ impl DomBindings {
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
-        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
-
-        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js),
-        // with CLDR's likely subtags behind Intl.Locale's maximize()/minimize().
+        // ReadableStream, WritableStream, TransformStream and strategies
+        // (web_streams.js), and Intl (en-US only) with the toLocale*String
+        // methods over it (web_intl.js), with CLDR's likely subtags behind
+        // Intl.Locale's maximize()/minimize(): a child realm installs the
+        // scripts on first use (web_lazy.js); the lookup is there for it.
         web_intl_likely::install(runtime)?;
-        runtime.evaluate_script(include_str!("web_intl.js"))?;
+        if !lazy {
+            runtime.evaluate_with_host(include_str!("web_streams.js"))?;
+            runtime.evaluate_script(include_str!("web_intl.js"))?;
+        }
 
         // IPC bridge for communication with Rust: the app's own documents
         // only (CH3.A7). A web page gets none of it, as in Chromium.
@@ -2187,6 +2500,9 @@ impl DomBindings {
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
+        // The origin the blob store keeps for this document: the engine's,
+        // not what script can read or write on `location`.
+        runtime.set_realm_origin(self.runtime.realm, &location.origin);
         runtime.evaluate_host_turn(&format!(
             r#"
             if (__rk.locationSync) __rk.locationSync({:?});
@@ -2923,6 +3239,19 @@ impl DomBindings {
 
     /// The page's virtual clock, in ms: what its timers and animation
     /// frames have run up to. The engine's CSS transitions run on it.
+    /// Run the animation-frame callbacks that are due (a turn's round),
+    /// at most `max` of them. Returns how many ran.
+    pub fn run_animation_round(&self, max: u32) -> Result<u32, BindingError> {
+        let ran = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.animationRound({max});"), &[])?;
+        Ok(match ran {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
     pub fn clock_now_ms(&self) -> f64 {
         match self
             .runtime
@@ -3597,6 +3926,7 @@ mod tests {
     fn the_unsupported_list_matches_the_reporting_scripts() {
         let sources = [
             include_str!("web_xhr.js"),
+            include_str!("web_url.js"),
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
             include_str!("web_named_access.js"),

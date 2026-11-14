@@ -2862,6 +2862,9 @@ const WRAPPERS_JS: &str = r#"
     // The DOM's dirty flag (a native registered as a global), for
     // web_observers_live.js.
     __rk.domDirty = g.__rustkit_dom_dirty;
+    // The frame tree's top window as the engine knows it: this window,
+    // until it is attached as a frame (`DomBindings::attach_frame`).
+    __rk.realTop = g;
     delete g.__rustkit_dom_dirty;
 
     // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
@@ -2872,15 +2875,38 @@ const WRAPPERS_JS: &str = r#"
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
-    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    // The documents of a frame tree share these (`__rk.shared` is
+    // one object for every realm of the runtime): an event made in one
+    // window and dispatched in another is stamped once, and reads the same.
+    var SHARED = __rk.shared;
+    var TRUSTED = SHARED.trusted || (SHARED.trusted = new WeakSet()),
+        UNDISPATCHED = SHARED.undispatched || (SHARED.undispatched = new WeakSet()),
+        STAMPED = SHARED.stamped || (SHARED.stamped = new WeakSet());
+    var TRUST_GET = SHARED.trustGet || (SHARED.trustGet =
+        Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get);
     // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
     // `defaultPrevented` is read-only and only `preventDefault()` (or
     // `returnValue = false`, or an on<type> handler returning false) by a
-    // listener that may cancel sets it: a passive listener cannot.
-    var CANCELED = new WeakSet(), CANCELABLE = new WeakSet();
+    // listener that may cancel sets it: a passive listener cannot. Shared
+    // by the frame tree, as the trust sets are: an event cancelled in one
+    // window reads cancelled in the window that made it.
+    var CANCELED = SHARED.canceled || (SHARED.canceled = new WeakSet());
+    // Whether an event may be cancelled (WHL3): shared the same way, so
+    // `cancelable` reads the same in every window of the frame tree. (The
+    // slot's name is not an event member's name.)
+    var CANCELABLE = SHARED.cancelables || (SHARED.cancelables = new WeakSet());
     function setCancelable(ev, on) { if (on) setAdd(CANCELABLE, ev); else setDrop(CANCELABLE, ev); }
+    // A real event is one whose prototype chain holds the `Event.prototype`
+    // of some window of the frame tree, not only this one's: an event made
+    // in a frame and dispatched here keeps the canceled flag, not a
+    // `defaultPrevented` property. Each realm adds its own prototype when
+    // its `Event` is defined (below).
     var isProto = uncurry(Object.prototype.isPrototypeOf);
-    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    var EVENT_PROTOS = SHARED.eventProtos || (SHARED.eventProtos = []);
+    function isRealEvent(ev) {
+        for (var k = 0; k < EVENT_PROTOS.length; k++) if (isProto(EVENT_PROTOS[k], ev)) return true;
+        return false;
+    }
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
     // for an object that will not take it.
@@ -2896,7 +2922,14 @@ const WRAPPERS_JS: &str = r#"
     // Only an event this code just made with a constructor kept at install
     // (`make`) can be trusted, and once: whatever a page has put on the
     // window since never builds an event the engine marks.
-    var CTORS = Object.create(null), MADE = new WeakSet();
+    //
+    // The constructors and prototypes are each window's own (an event is
+    // built on the prototype of the window that makes it). What is kept
+    // about an event is the frame tree's, as the trust sets are: one
+    // window makes an event, another may dispatch it, and a listener may
+    // reach it through either window's prototypes; all of them read and
+    // write the one record.
+    var CTORS = Object.create(null), MADE = SHARED.made || (SHARED.made = new WeakSet());
     // The engine builds its events with nothing a page can reach: these
     // built-ins are taken now, and every descriptor has no prototype.
     var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
@@ -2921,17 +2954,37 @@ const WRAPPERS_JS: &str = r#"
             defineOwn(ev, k, d);
         }
     }
+    // This window becomes a frame's (`DomBindings::attach_frame`): its
+    // `parent`, the frame tree's `top` and its `frameElement`, defined with
+    // the built-ins of install whatever the frame's page has done since.
+    __rk.becomeFrame = function (up, top, el) {
+        function own(name, value, writable) {
+            var d = objCreate(null);
+            d.value = value; d.writable = writable; d.enumerable = true; d.configurable = true;
+            defineOwn(g, name, d);
+        }
+        own('parent', up, true);
+        own('top', top, false);
+        own('frameElement', el, false);
+        __rk.realTop = top;
+    };
     // An interface's own fields (`[name, default]` pairs), its parent and
     // a finishing step (a direct call; WheelEvent's legacy deltas).
     var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
-    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    var PROTOS = Object.create(null), EVTYPE = SHARED.evType || (SHARED.evType = new WeakMap()),
+        KIND = SHARED.kind || (SHARED.kind = new WeakMap());
     // An event's dispatch state, private: `target`, `currentTarget` and
     // `eventPhase` are read-only getters over these (as in Chrome), and an
     // event being dispatched is in DISPATCHING, which the initializers
-    // check.
-    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    // check. Shared by the frame tree: an event in flight in one window
+    // is in flight for every window's `initEvent` and `dispatchEvent`, and
+    // its target reads the same through every window's `Event.prototype`.
+    var EV_TARGET = SHARED.evTarget || (SHARED.evTarget = new WeakMap()),
+        EV_CURRENT = SHARED.evCurrent || (SHARED.evCurrent = new WeakMap()),
+        EV_PHASE = SHARED.evPhase || (SHARED.evPhase = new WeakMap()),
+        DISPATCHING = SHARED.dispatching || (SHARED.dispatching = new WeakSet());
     __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
     var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
     __rk.keepCtor = function (name, C, parent, fields) {
@@ -3032,10 +3085,16 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
+    // For web_frames.js (installed only with nested browsing contexts on):
+    // the node id of a wrapper of this document, or -1.
+    HOOKS.nodeId = function (el) {
+        var s = el != null ? el[SLOT] : undefined;
+        return s && s.gen === gen ? s.id : -1;
+    };
     var cache = new Map();
 
     function illegal() { throw new TypeError('Illegal constructor'); }
@@ -3192,6 +3251,25 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: n });
         return out;
     }
+    // The document's elements of one tag, for the embedder's scripts
+    // (web_frames.js's scan): the native's answer read with plain loops,
+    // no string or array method.
+    HOOKS.byTag = function (tag) {
+        var s = doc ? doc[SLOT] : undefined, out = objCreate(null), n = 0;
+        out.length = 0;
+        if (!s || s.gen !== gen) return out;
+        var ids = N.collect(s.gen, s.id, 'tag', tag);
+        if (typeof ids !== 'string') return out;
+        var id = -1;
+        for (var i = 0; i <= ids.length; i++) {
+            var c = i < ids.length ? ids[i] : ' ';
+            if (c >= '0' && c <= '9') { id = (id < 0 ? 0 : id * 10) + (+c); continue; }
+            if (id >= 0) { var w = wrap(id); if (w) out[n++] = w; }
+            id = -1;
+        }
+        out.length = n;
+        return out;
+    };
     function collect(o, kind, arg) {
         var s = slotOf(o);
         return s.gen === gen ? N.collect(s.gen, s.id, kind, String(arg)) : '';
@@ -3231,6 +3309,7 @@ const WRAPPERS_JS: &str = r#"
         if (m) m();
         if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+        if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
         return r;
     }
     function create(kind, data, method) {
@@ -3296,6 +3375,7 @@ const WRAPPERS_JS: &str = r#"
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
+        if (HOOKS.frames) HOOKS.frames.tree(op, node);
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -6094,7 +6174,10 @@ const WRAPPERS_JS: &str = r#"
     // Engine input events still dispatch Rust-side (events.rs, pin §4);
     // this is what page script registers and fires itself.
     var LISTENERS = new WeakMap();
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    // The frame tree's, like the event state above: an event stopped
+    // through one window's prototype is stopped in another's dispatch.
+    var STOP = SHARED.stop || (SHARED.stop = Symbol('rustkit.stop')),
+        STOP_NOW = SHARED.stopNow || (SHARED.stopNow = Symbol('rustkit.stopNow'));
     function thisTarget(o) { return o == null ? g : o; }
     function flag(opts, key) {
         return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
@@ -6121,7 +6204,9 @@ const WRAPPERS_JS: &str = r#"
         N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
     }
     function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
-    var LEGACY_TYPE = new WeakMap();
+    // The frame tree's, as the type map is: the window that dispatches an
+    // event may not be the one that made it.
+    var LEGACY_TYPE = SHARED.legacyType || (SHARED.legacyType = new WeakMap());
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -6373,7 +6458,8 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
         Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
     });
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    var ORIGIN = SHARED.origin || (SHARED.origin = Symbol('rustkit.origin')),
+        PATH = SHARED.path || (SHARED.path = Symbol('rustkit.path'));
     function invoke(t, event, phase, capture) {
         mapSet(EV_CURRENT, event, t);
         mapSet(EV_PHASE, event, phase);
@@ -6406,7 +6492,7 @@ const WRAPPERS_JS: &str = r#"
         // The on<type> handler runs with the non-capture listeners.
         var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
         if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
-            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
+            if (isRealEvent(event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
@@ -6472,7 +6558,7 @@ const WRAPPERS_JS: &str = r#"
         }
         // The canceled flag, not a property a listener can redefine; an
         // object that is not an Event keeps its own.
-        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        var canceled = isRealEvent(event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
         if (activated) activated(!canceled);
         return !canceled;
     };
@@ -6566,6 +6652,8 @@ const WRAPPERS_JS: &str = r#"
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
+    // Defined by index: no array method of another window's realm runs.
+    fixed(EVENT_PROTOS, EVENT_PROTOS.length, Event.prototype);
     g.CustomEvent = CustomEvent;
     __rk.keepCtor('Event', Event);
     __rk.keepCtor('CustomEvent', CustomEvent);

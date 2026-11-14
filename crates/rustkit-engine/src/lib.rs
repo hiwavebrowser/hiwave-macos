@@ -414,6 +414,8 @@ mod script_net_t7_tests;
 #[cfg(test)]
 mod script_net_body_size_tests;
 #[cfg(test)]
+mod frames_stage2_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -1378,32 +1380,13 @@ const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_s
 /// already the story.
 const MAX_PENDING_INPUTS: usize = 256;
 
-struct ViewState {
-    /// What the last wheel moved, while a run of wheels holds to it.
-    wheel_gesture: Option<WheelGesture>,
-    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
-    /// the release.
-    scrollbar_drag: Option<ScrollbarDrag>,
-    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
-    scrollbar_hover: Option<WheelTarget>,
-    /// CH2.E7: the element a press on a styled scrollbar went to (the
-    /// scroller, or the root element for the viewport's bar). Until the
-    /// release, the press's mouse events target it, and the release fires
-    /// no `click` (Chrome).
-    scrollbar_pressed: Option<usize>,
-    id: EngineViewId,
-    /// Counts the display lists this view has been given.
-    frame_generation: u64,
-    presented: Option<PresentedFrame>,
-    /// Counts the frames this view has presented (a diagnostic: the threads
-    /// plan's per-view frame count; the tests read it to see how many draws
-    /// one input cost).
-    frames_presented: u64,
-    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
-    /// document the app loads into such a view (`load_html`) gets the app
-    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
-    app_owned: bool,
-    viewhost_id: ViewId,
+/// What a view holds for the document it shows: the document, its script
+/// bindings, style and layout data, display list, scroll position and the
+/// bookkeeping of its load. Split out of [`ViewState`] (Stage 0 of the
+/// nested-browsing-contexts plan) so that a nested document can own one
+/// too. A pure move: no field changed name, type or meaning, and
+/// `ViewState` derefs to it, so `view.document` reads as before.
+struct DocState {
     url: Option<Url>,
     title: Option<String>,
     /// The HTTP status the view's document came with; None for a document
@@ -1423,19 +1406,6 @@ struct ViewState {
     /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
     display_list: Option<Arc<DisplayList>>,
-    /// The element the developer tools outline on this page
-    /// (`Engine::devtools_highlight`), drawn over the display list.
-    devtools_highlight: Option<usize>,
-    /// The inputs the view took since its last commit
-    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
-    /// the next commit for the input-to-present log (LAT1c), or are
-    /// counted `no_frame` when their turn changed no frame.
-    input_pending: Vec<InputMark>,
-    /// Inputs since the last commit that presented no frame of their own.
-    inputs_unpresented: u32,
-    /// The host of the view's current visit, as `wgate::begin_visit` was
-    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
-    visit_host: Arc<str>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The canvases of the page's bindings, held apart from them: the
@@ -1446,36 +1416,6 @@ struct ViewState {
     /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
     /// not change is not painted again.
     canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
-    /// The view's stop state: the interrupt word another thread (the
-    /// watchdog, later the user's Stop) sets to end its running script.
-    /// Lives as long as the view; each new document's bindings get it.
-    control: Arc<rustkit_js::ViewControl>,
-    navigation: NavigationStateMachine,
-    /// This view's newest navigation (threads plan M3b): one more for each
-    /// `load_url` or `load_html`, never for Stop. A load captures it before
-    /// its first await and re-checks it, and the view's cancel watermark
-    /// (`ViewControl::cancel_nav`), at every await and between its scripts
-    /// and subresource phases. A newer navigation, `Engine::stop` or a
-    /// [`NavCanceller`] on another thread makes the load stale, and a stale
-    /// load abandons without touching view state.
-    ///
-    /// Fetches still out when a load is cancelled are dropped with the
-    /// load's future; their responses never reach the engine.
-    nav_id: u64,
-    /// Wakes a load waiting on the network when its navigation is
-    /// cancelled from another thread ([`NavCanceller`]).
-    nav_signal: Arc<tokio::sync::Notify>,
-    /// The decode pool's key (D1): a decode that comes back with an older
-    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
-    /// with every new `nav_id` and also on every Stop and observed cancel,
-    /// so Stop on a loaded page still drops the decodes it has out while
-    /// later images on the same document (and `nav_id`) decode normally.
-    decode_epoch: u64,
-    #[allow(dead_code)]
-    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
-    /// A listener cancelled the `pointerdown` of the press in progress:
-    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
-    compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
     /// What the script writes flushed for the next relayout could restyle
@@ -1489,15 +1429,6 @@ struct ViewState {
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
-    /// CH2.E22: the last focus the user moved was moved by the pointer
-    /// (Chromium's last focus type): script's focus then matches
-    /// `:focus-visible` only on a control that takes typed text. False
-    /// until the first, and after a focus moved from the keyboard. Kept
-    /// across documents, as Chromium keeps it per page.
-    focus_by_pointer: bool,
-    /// CH2.E22: the focused button a Space keydown went to; its keyup
-    /// clicks it.
-    space_armed: Option<usize>,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -1505,41 +1436,9 @@ struct ViewState {
     /// What the last full layout was built with: the chains and the view's
     /// size (`Engine::repaint_restyled`).
     laid_with: Option<LaidWith>,
-    /// Where the pointer was at its last move, in viewport coordinates.
-    pointer_at: Option<(f32, f32)>,
-    /// The frame (`frame_generation`, scroll offset) the hovered chain was
-    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
-    /// moved since hit-tests the still pointer again.
-    hover_hit_at: Option<(u64, (f32, f32))>,
-    /// The primary button is held: between a press and its release.
-    primary_button_down: bool,
-    /// The element the press in progress landed on (raw NodeId).
-    press_target: Option<usize>,
     /// The document selection as the engine paints it (`selection.rs`),
     /// and the drag that is moving it.
     doc_selection: Option<selection::DocSelection>,
-    select_drag: Option<selection::SelectDrag>,
-    /// Which press of a multi-click the button went down for (1 single,
-    /// 2 double...): the release fires `dblclick` after the second.
-    press_clicks: u32,
-    /// The click count the press or release being dispatched reports as
-    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
-    event_clicks: u32,
-    /// What the window was last told about the pointer: the cursor and
-    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
-    hover_reported: Option<HoverFeedback>,
-    /// HTML drag and drop: the press's drag candidate, or the drag in
-    /// progress (drag_drop.rs).
-    drag: drag_drop::DragState,
-    /// The press in progress has had its say on the focus (it moved it, or
-    /// a listener cancelled the press): the release leaves the focus alone.
-    press_settled_focus: bool,
-    /// Whether the view itself has focus.
-    view_focused: bool,
-    /// The view host said the view lost the system focus and has not said
-    /// it came back: `document.hasFocus()` is false. A view that was never
-    /// told either way (a headless one) reads as focused.
-    view_blurred: bool,
     /// Current scroll offset (x, y) in pixels.
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
@@ -1554,15 +1453,6 @@ struct ViewState {
     /// with no sheets was cascaded in full and then thrown away.
     /// `load_subresources` takes this and lays out even if every sheet failed.
     initial_layout_deferred: bool,
-    /// Headless bounds (only set for headless views, None for window-based views).
-    headless_bounds: Option<Bounds>,
-    /// Bounds the view was given since its last layout (`set_view_bounds`):
-    /// the next live turn lays out once, at these, and fires `resize`.
-    pending_resize: Option<Bounds>,
-    /// The viewport last published to the page (`window.innerWidth` /
-    /// `innerHeight`). A later resize at this size is not an event, and a
-    /// queued size the view has already left is not dispatched.
-    announced_viewport: Option<(u32, u32)>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -1636,12 +1526,174 @@ struct ViewState {
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
     relayout_stats: RelayoutStats,
-    /// The view's Inspector record (see `inspector`).
-    inspector: Arc<Inspector>,
     /// What the style and layout build reads and writes of this view
     /// (`layout_ctx::ViewLayout`): focus, the pointer chains, control
     /// state, the sheet cache, the rule index, html's overflow.
     lay: Rc<layout_ctx::ViewLayout>,
+}
+
+/// A same-origin `<iframe>`'s document, loaded into a child realm of its
+/// view's runtime (nested browsing contexts, Stage 2; only with
+/// `EngineConfig::nested_contexts`).
+struct FrameState {
+    /// The frame's document as an offscreen view of this engine: its own
+    /// style, layout, display list, timers and script network, with the
+    /// child realm's bindings (Stage 3). Its display list is painted into
+    /// the parent's at the iframe's content box.
+    view: EngineViewId,
+    #[allow(dead_code)]
+    url: Url,
+}
+
+/// The display-list key of the iframe element `node`'s replaced box.
+fn frame_key(node: usize) -> String {
+    format!("rustkit-frame:{node}")
+}
+
+fn frame_node(key: &str) -> Option<usize> {
+    key.strip_prefix("rustkit-frame:").and_then(|n| n.parse().ok())
+}
+
+struct ViewState {
+    /// The top-level document's state (see [`DocState`]).
+    doc: DocState,
+    /// The view's frames by the parent document's iframe node id
+    /// (`EngineConfig::nested_contexts`), and the navigation they belong to.
+    frames: HashMap<usize, FrameState>,
+    frames_nav: u64,
+    /// What the last wheel moved, while a run of wheels holds to it.
+    wheel_gesture: Option<WheelGesture>,
+    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
+    /// the release.
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
+    scrollbar_hover: Option<WheelTarget>,
+    /// CH2.E7: the element a press on a styled scrollbar went to (the
+    /// scroller, or the root element for the viewport's bar). Until the
+    /// release, the press's mouse events target it, and the release fires
+    /// no `click` (Chrome).
+    scrollbar_pressed: Option<usize>,
+    id: EngineViewId,
+    /// Counts the display lists this view has been given.
+    frame_generation: u64,
+    presented: Option<PresentedFrame>,
+    /// Counts the frames this view has presented (a diagnostic: the threads
+    /// plan's per-view frame count; the tests read it to see how many draws
+    /// one input cost).
+    frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
+    viewhost_id: ViewId,
+    /// The element the developer tools outline on this page
+    /// (`Engine::devtools_highlight`), drawn over the display list.
+    devtools_highlight: Option<usize>,
+    /// The inputs the view took since its last commit
+    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
+    /// the next commit for the input-to-present log (LAT1c), or are
+    /// counted `no_frame` when their turn changed no frame.
+    input_pending: Vec<InputMark>,
+    /// Inputs since the last commit that presented no frame of their own.
+    inputs_unpresented: u32,
+    /// The host of the view's current visit, as `wgate::begin_visit` was
+    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
+    visit_host: Arc<str>,
+    /// The view's stop state: the interrupt word another thread (the
+    /// watchdog, later the user's Stop) sets to end its running script.
+    /// Lives as long as the view; each new document's bindings get it.
+    control: Arc<rustkit_js::ViewControl>,
+    navigation: NavigationStateMachine,
+    /// This view's newest navigation (threads plan M3b): one more for each
+    /// `load_url` or `load_html`, never for Stop. A load captures it before
+    /// its first await and re-checks it, and the view's cancel watermark
+    /// (`ViewControl::cancel_nav`), at every await and between its scripts
+    /// and subresource phases. A newer navigation, `Engine::stop` or a
+    /// [`NavCanceller`] on another thread makes the load stale, and a stale
+    /// load abandons without touching view state.
+    ///
+    /// Fetches still out when a load is cancelled are dropped with the
+    /// load's future; their responses never reach the engine.
+    nav_id: u64,
+    /// Wakes a load waiting on the network when its navigation is
+    /// cancelled from another thread ([`NavCanceller`]).
+    nav_signal: Arc<tokio::sync::Notify>,
+    /// The decode pool's key (D1): a decode that comes back with an older
+    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
+    /// with every new `nav_id` and also on every Stop and observed cancel,
+    /// so Stop on a loaded page still drops the decodes it has out while
+    /// later images on the same document (and `nav_id`) decode normally.
+    decode_epoch: u64,
+    #[allow(dead_code)]
+    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
+    /// CH2.E22: the last focus the user moved was moved by the pointer
+    /// (Chromium's last focus type): script's focus then matches
+    /// `:focus-visible` only on a control that takes typed text. False
+    /// until the first, and after a focus moved from the keyboard. Kept
+    /// across documents, as Chromium keeps it per page.
+    focus_by_pointer: bool,
+    /// CH2.E22: the focused button a Space keydown went to; its keyup
+    /// clicks it.
+    space_armed: Option<usize>,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The frame (`frame_generation`, scroll offset) the hovered chain was
+    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
+    /// moved since hit-tests the still pointer again.
+    hover_hit_at: Option<(u64, (f32, f32))>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
+    /// The click count the press or release being dispatched reports as
+    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
+    event_clicks: u32,
+    /// What the window was last told about the pointer: the cursor and
+    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
+    hover_reported: Option<HoverFeedback>,
+    /// HTML drag and drop: the press's drag candidate, or the drag in
+    /// progress (drag_drop.rs).
+    drag: drag_drop::DragState,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
+    /// Whether the view itself has focus.
+    view_focused: bool,
+    /// The view host said the view lost the system focus and has not said
+    /// it came back: `document.hasFocus()` is false. A view that was never
+    /// told either way (a headless one) reads as focused.
+    view_blurred: bool,
+    /// Headless bounds (only set for headless views, None for window-based views).
+    headless_bounds: Option<Bounds>,
+    /// Bounds the view was given since its last layout (`set_view_bounds`):
+    /// the next live turn lays out once, at these, and fires `resize`.
+    pending_resize: Option<Bounds>,
+    /// The viewport last published to the page (`window.innerWidth` /
+    /// `innerHeight`). A later resize at this size is not an event, and a
+    /// queued size the view has already left is not dispatched.
+    announced_viewport: Option<(u32, u32)>,
+    /// The view's Inspector record (see `inspector`).
+    inspector: Arc<Inspector>,
+}
+
+impl std::ops::Deref for ViewState {
+    type Target = DocState;
+    fn deref(&self) -> &DocState {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for ViewState {
+    fn deref_mut(&mut self) -> &mut DocState {
+        &mut self.doc
+    }
 }
 
 impl ViewState {
@@ -1859,6 +1911,11 @@ pub struct EngineConfig {
     /// start more requests; whatever is still pending after the last round
     /// completes with a network error.
     pub script_network_rounds: u32,
+    /// Same-origin `<iframe>` documents (nested browsing contexts, Stage 2
+    /// of docs/diagnostics/2026-11-11/nested-browsing-contexts-plan.md).
+    /// Off by default: an iframe stays an empty box with `contentWindow`
+    /// null, as before.
+    pub nested_contexts: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -1921,6 +1978,9 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
+            // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
+            // frames in a built app or parity-capture before the flip.
+            nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -2366,6 +2426,79 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+}
+
+/// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
+/// for Testing 148 renders a same-origin frame's response: only HTML types
+/// are parsed as markup; text and JSON become a text document, an image an
+/// image document, and anything else is downloaded (no document).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameDocumentKind {
+    Html,
+    Text,
+    Json,
+    Image,
+    Download,
+}
+
+impl FrameDocumentKind {
+    /// From the response's MIME essence (`type/subtype`, lowercased).
+    fn of(essence: Option<&str>) -> Self {
+        let Some(essence) = essence else {
+            // No type: sniffed as HTML, as a page with none is.
+            return Self::Html;
+        };
+        let (top, sub) = essence.split_once('/').unwrap_or((essence, ""));
+        match (top, sub) {
+            ("text", "html") | ("application", "xhtml+xml") => Self::Html,
+            ("application", "json") => Self::Json,
+            (_, sub) if sub.ends_with("+json") => Self::Json,
+            ("text", _) => Self::Text,
+            ("application", "javascript" | "ecmascript" | "x-javascript") => Self::Text,
+            // An SVG image is shown as an image here (Chrome renders it as
+            // an SVG document; a stated deviation).
+            ("image", _) => Self::Image,
+            _ => Self::Download,
+        }
+    }
+
+    /// The markup the frame's document is parsed from.
+    fn markup(self, body: String, url: &Url) -> String {
+        fn escape(text: &str) -> String {
+            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        }
+        match self {
+            Self::Html | Self::Download => body,
+            Self::Text => format!(
+                "<html><head></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{}</pre></body></html>",
+                escape(&body)
+            ),
+            Self::Json => format!(
+                "<html><head></head><body><pre>{}</pre><div class=\"json-formatter-container\"></div></body></html>",
+                escape(&body)
+            ),
+            Self::Image => {
+                let name = url.path_segments().and_then(|mut s| s.next_back()).unwrap_or("").to_string();
+                let src = escape(url.as_str()).replace('"', "&quot;");
+                format!(
+                    "<html><head><title>{}</title></head><body><img style=\"display: block;-webkit-user-select: none;\" src=\"{src}\"></body></html>",
+                    escape(&name)
+                )
+            }
+        }
+    }
+}
+
+/// Fold a later turn of the frames into what the frames' turns so far
+/// said: its next timer is the one that stands (the earlier answer's has
+/// run or moved), the rest add up.
+fn merge_live(into: &mut LivePump, later: LivePump) {
+    into.timers_ran += later.timers_ran;
+    into.requests += later.requests;
+    into.in_flight = later.in_flight;
+    into.relaid_out |= later.relaid_out;
+    into.yielded_for_frame |= later.yielded_for_frame;
+    into.next_timer_ms = later.next_timer_ms;
 }
 
 /// How far [`Engine::load_url_yielding`] got before it returned.
@@ -3152,6 +3285,10 @@ impl SiblingContext {
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
+    /// The most timer callbacks a view's live turn runs: one per task while
+    /// a frame tree's page runs the tree's timers, none for its frames
+    /// (`pump_live`), else the usual cap.
+    live_timer_cap: u32,
     /// The window thread's half: view host, compositor, renderer. The
     /// page side (everything below) hands it frames; see `presenter.rs`.
     presenter: Option<Presenter>,
@@ -3431,7 +3568,9 @@ impl Engine {
 
         console_log::install_console_diag();
         let system_clipboard = config.system_clipboard;
+        let nested_contexts = config.nested_contexts;
         Ok(Self {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config,
             presenter,
             page_commits: HashMap::new(),
@@ -3447,7 +3586,11 @@ impl Engine {
             views: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
-            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+            lctx: Rc::new({
+                let lctx = layout_ctx::LayoutCtx::default();
+                lctx.nested_contexts.set(nested_contexts);
+                lctx
+            }),
         })
     }
 
@@ -3506,18 +3649,56 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3525,9 +3706,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3538,15 +3716,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3556,36 +3727,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3629,18 +3776,56 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3648,9 +3833,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3661,15 +3843,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3679,36 +3854,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3769,18 +3920,56 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3788,9 +3977,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3801,15 +3987,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3819,36 +3998,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3997,7 +4152,7 @@ impl Engine {
             // As `fire_mouse`: a document being left hears no `resize`;
             // `innerWidth`/`innerHeight` are kept current all the same.
             let leaving = view.control.stops_all();
-            if let Some(bindings) = view.bindings.as_ref() {
+            if let Some(bindings) = view.doc.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
                 if leaving {
                     debug!(?id, "Resize event not dispatched: the document is being left");
@@ -4017,7 +4172,7 @@ impl Engine {
                     // A stopped listener's error is the stop itself, which has
                     // its own record.
                     let fired = if stopped.is_some() { Ok(()) } else { fired };
-                    view.script_log.extend(stopped);
+                    view.doc.script_log.extend(stopped);
                     if let Err(e) = fired {
                         let record = ScriptRecord {
                             source: "event:resize".into(),
@@ -4025,9 +4180,9 @@ impl Engine {
                             elapsed_ms: 0,
                             outcome: ScriptOutcome::Threw(e.to_string()),
                         };
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5851,7 +6006,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return fallback;
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return fallback;
         };
         // The window has asked to leave this document (`navigate`,
@@ -5884,13 +6039,13 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
                     };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                 }
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
-        view.script_log.extend(stopped);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, &source, 0);
+        view.doc.script_log.extend(stopped);
         answer
     }
 
@@ -6302,7 +6457,399 @@ impl Engine {
         Ok(())
     }
 
+    /// Nested browsing contexts, Stage 2: take what this view's document
+    /// asked of its iframes and do it. A same-origin `src` (or none:
+    /// about:blank) is fetched, parsed and bound in a new realm of the
+    /// view's runtime; its classic scripts run in document order, then its
+    /// `DOMContentLoaded` and `load`, then `load` at the iframe element.
+    /// A cross-origin `src` is not fetched: the frame stays blank and the
+    /// element hears `load`. A frame whose element left, or that is
+    /// navigated again, is dropped first. Not here yet (later stages):
+    /// layout and paint of the frame, the child's timers and network
+    /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
+    /// waiting for its frames.
+    async fn drive_frames(&mut self, id: EngineViewId) {
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let (requests, page_url, policy) = {
+            let Some(view) = self.views.get_mut(&id) else { return };
+            let Some(parent) = view.doc.bindings.as_ref() else { return };
+            let mut stale = Vec::new();
+            if view.frames_nav != view.nav_id {
+                // A new document: the old one's frames went with its runtime.
+                stale.extend(view.frames.drain().map(|(_, f)| f.view));
+                view.frames_nav = view.nav_id;
+                if let Err(e) = parent.scan_frames() {
+                    debug!(error = %e, "frames: the scan for the parser's iframes failed");
+                }
+            }
+            let requests = parent.take_frame_requests();
+            let out = (requests, view.doc.url.clone(), view.doc.script_policy.clone());
+            for fid in stale {
+                self.views.remove(&fid);
+            }
+            out
+        };
+        let mut changed = false;
+        for request in requests {
+            changed |= self.drop_frame(id, request.node);
+            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let blank = target.scheme() == "about";
+            let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
+            fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+                engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+            }
+            if !blank && !same_origin {
+                // The cross-origin floor: no request, no document, one `load`.
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node);
+                }
+                continue;
+            }
+            // The document's URL is the response's, after redirects; it is
+            // same-origin only when every URL of the chain is the page's
+            // origin (one that left and came back is not).
+            let (html, target) = if blank {
+                ("<html><head></head><body></body></html>".to_string(), target)
+            } else {
+                let fetched = loader.fetch(referrer.get_for(target.clone(), RequestDestination::Other)).await;
+                let page_origin = page_url.as_ref().map(|page| page.origin());
+                let ours = |url: &Url| page_origin.as_ref().is_some_and(|origin| *origin == url.origin());
+                match fetched {
+                    Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
+                        // The cross-origin floor, as for a cross-origin `src`.
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node);
+                        }
+                        continue;
+                    }
+                    Ok(response) if response.ok() => {
+                        let url = response.url.clone();
+                        let essence = response.content_type.as_ref().map(|m| m.essence_str().to_ascii_lowercase());
+                        let kind = FrameDocumentKind::of(essence.as_deref());
+                        if kind == FrameDocumentKind::Download {
+                            // Chrome downloads it: the frame keeps its
+                            // initial document and hears no `load`.
+                            continue;
+                        }
+                        let body = response.text().await.unwrap_or_default();
+                        (kind.markup(body, &url), url)
+                    }
+                    Ok(response) => (String::new(), response.url.clone()),
+                    // No response to decide on (the loader refused a
+                    // redirect, or the request failed): the floor too.
+                    Err(_) => {
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node);
+                        }
+                        continue;
+                    }
+                }
+            };
+            // With the engine's scripting setting, as the top-level load
+            // parses (HTML §13.2.3.5: `<noscript>` content is text).
+            let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node);
+                }
+                continue;
+            };
+            let document = Rc::new(document);
+            let Some((child, (width, height))) = parent_of(self, id).and_then(|parent| {
+                let child = parent.new_child().ok()?;
+                Some((child, parent.frame_size(request.node)))
+            }) else {
+                continue;
+            };
+            let bound = child
+                .set_document(document.clone())
+                .and_then(|_| child.set_location(&target))
+                .and_then(|_| child.set_dimensions(width, height))
+                .and_then(|_| child.enable_net_bridge());
+            let attached = bound.is_ok()
+                && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
+            if !attached {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
+                continue;
+            }
+            // The frame's own page state, offscreen, at its viewport.
+            let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
+            let Ok(fid) = self.insert_offscreen_view(bounds) else {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
+                continue;
+            };
+            child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            // What a top-level page's bindings are given at load, for the
+            // frame's: the engine's selector matcher (without it script's
+            // `querySelector` fell back to the bindings' own, which does not
+            // look inside a shadow tree), the microtask cap, and the view's
+            // interrupt word, so a stop reaches a script running in a frame.
+            child.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
+            let lay = self.views.get(&fid).map(|view| view.lay.clone());
+            child.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                let _focus = lay
+                    .as_ref()
+                    .filter(|_| selector.contains(":focus"))
+                    .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
+                SelectorMatcher.node_matches(node, selector, checked)
+            }));
+            if let Some(control) = self.views.get(&id).map(|view| view.control.clone()) {
+                child.set_view_control(Some(control));
+            }
+            self.attach_editing(fid, &child);
+            if let Some(frame) = self.views.get_mut(&fid) {
+                frame.canvases = Some(child.canvas_source());
+                frame.doc.url = Some(target.clone());
+                frame.doc.document = Some(document.clone());
+                frame.doc.script_policy = policy.clone();
+                frame.announced_viewport = Some((bounds.width, bounds.height));
+            }
+            // The child's classic scripts, in document order.
+            let listed = child.evaluate_named(
+                "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
+                   var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
+                   return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
+                "rustkit#frames",
+            );
+            let scripts: Vec<(Option<String>, String, String)> = match listed {
+                Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            // Module scripts are deferred: after the classic ones, in order.
+            let mut modules: Vec<(String, String)> = Vec::new();
+            for (index, (src, text, kind)) in scripts.into_iter().enumerate() {
+                if kind.is_empty() {
+                    continue;
+                }
+                let is_module = kind == "module";
+                let (source, name) = match src {
+                    Some(src) => {
+                        let Ok(url) = target.join(&src) else { continue };
+                        if url.origin() != target.origin() {
+                            continue;
+                        }
+                        let fetched = loader.fetch(referrer.get_for(url.clone(), RequestDestination::Script)).await;
+                        match fetched {
+                            Ok(response) if response.ok() => (response.text().await.unwrap_or_default(), url.to_string()),
+                            _ => continue,
+                        }
+                    }
+                    None if is_module => (text, format!("{target}#inline-module-{}", index + 1)),
+                    None => (text, format!("frame-inline#{}", index + 1)),
+                };
+                if is_module {
+                    modules.push((name, source));
+                    continue;
+                }
+                if let Err(e) = child.evaluate_named(&source, &name) {
+                    debug!(error = %e, "frames: a child script threw");
+                }
+            }
+            if !modules.is_empty() {
+                // The module map and base are the runtime's: the frame's
+                // graph is loaded with the frame's URL as base, then the
+                // page's base is put back.
+                child.set_module_base(target.as_str());
+                for (url, source) in modules {
+                    let Ok(handle) = child.begin_module(&url, &source) else { continue };
+                    for _ in 0..64 {
+                        let wanted = child.take_module_requests();
+                        if wanted.is_empty() {
+                            break;
+                        }
+                        for requested in wanted {
+                            let outcome = match Url::parse(&requested) {
+                                Ok(u) if u.origin() == target.origin() => {
+                                    match loader.fetch(referrer.get_for(u.clone(), RequestDestination::Script)).await {
+                                        Ok(response) if response.ok() => {
+                                            let final_url = response.url.to_string();
+                                            response
+                                                .text()
+                                                .await
+                                                .map(|source| rustkit_js::FetchedModule { final_url, source })
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        Ok(response) => Err(format!("status {}", response.status.as_u16())),
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                }
+                                _ => Err("not same-origin with the frame".to_string()),
+                            };
+                            child.supply_module(&requested, outcome);
+                        }
+                    }
+                    if let rustkit_js::ModuleState::Failed(why) | rustkit_js::ModuleState::Threw(why) = child.poll_module(&handle) {
+                        debug!(module = %url, %why, "frames: a child module did not run");
+                    }
+                }
+                if let Some(page) = &page_url {
+                    child.set_module_base(page.as_str());
+                }
+            }
+            if let Some(frame) = self.views.get_mut(&fid) {
+                frame.doc.bindings = Some(child);
+            }
+            if let Err(e) = self.relayout_for(fid, RelayoutCause::InitialLoad) {
+                debug!(error = %e, "frames: the frame's first layout failed");
+            }
+            if let Some(child) = self.views.get(&fid).and_then(|v| v.doc.bindings.as_ref()) {
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load");
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                view.frames.insert(request.node, FrameState { view: fid, url: target });
+            }
+            if let Some(parent) = parent_of(self, id) {
+                let _ = parent.frame_loaded(request.node);
+            }
+            changed = true;
+        }
+        if changed {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame change failed");
+            }
+        }
+    }
+
+    /// Drop the frame of iframe `node` of view `id`, if it has one: its
+    /// offscreen view goes, and its realm with it.
+    fn drop_frame(&mut self, id: EngineViewId, node: usize) -> bool {
+        let Some(frame) = self.views.get_mut(&id).and_then(|v| v.frames.remove(&node)) else { return false };
+        let child = self.views.remove(&frame.view).and_then(|mut v| v.doc.bindings.take());
+        if let (Some(child), Some(parent)) = (child, self.views.get(&id).and_then(|v| v.doc.bindings.as_ref())) {
+            parent.drop_child(child);
+        }
+        true
+    }
+
+    /// The frames' own live turns, after the parent's frame requests: each
+    /// frame's timers, animation frames, script network and relayouts. The
+    /// parent is laid out again when a frame was (its paint includes the
+    /// frame's).
+    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        let frames: Vec<EngineViewId> = self
+            .views
+            .get(&id)
+            .map(|v| v.frames.values().map(|f| f.view).collect())
+            .unwrap_or_default();
+        let mut all = LivePump::default();
+        for fid in frames {
+            let turn = Box::pin(self.pump_live(fid, elapsed_ms)).await;
+            all.relaid_out |= turn.relaid_out;
+            all.in_flight += turn.in_flight;
+            all.next_timer_ms = match (all.next_timer_ms, turn.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        if all.relaid_out {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame's failed");
+            }
+        }
+        all
+    }
+
+    /// One live turn of view `id` and, with nested browsing contexts on,
+    /// of its frames first: what the page asked of its iframes is done,
+    /// each frame takes its own turn, then the page takes its. What the
+    /// frames still need joins the answer, because nothing else wakes the
+    /// loop for them: a frame's next timer, its requests that are out, and a
+    /// frame request the page made during this turn (a `load` handler that
+    /// sets `src` again: Speedometer's runner between workloads) ask for the
+    /// next turn at once.
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        if !self.config.nested_contexts {
+            return self.pump_live_turn(id, elapsed_ms).await;
+        }
+        self.drive_frames(id).await;
+        let has_frames = self.views.get(&id).is_some_and(|v| !v.frames.is_empty());
+        // A frame's own frames are the tree's: only its top runs the timers.
+        let is_frame = self.views.values().any(|v| v.frames.values().any(|f| f.view == id));
+        if !has_frames || is_frame {
+            let frames = self.pump_frames(id, elapsed_ms).await;
+            let mut out = self.pump_live_turn(id, elapsed_ms).await;
+            out.relaid_out |= frames.relaid_out;
+            out.in_flight += frames.in_flight;
+            out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            return self.frame_requests_wake(id, out);
+        }
+        // A frame tree is one event loop (HTML 8.1.7): one timer queue and
+        // clock for every document in it (the page's lifecycle script shares
+        // them), run from the page's turn alone. Each timer task is its own
+        // evaluation, so its microtasks run before the next task, whichever
+        // document set it; the frames' turns take no timers and do what
+        // their documents' scripts asked of the network and of layout. The
+        // turn's time is the tree's.
+        let started = std::time::Instant::now();
+        self.live_timer_cap = 0;
+        let mut frames = self.pump_frames(id, 0).await;
+        self.live_timer_cap = 1;
+        let mut out = self.pump_live_turn(id, elapsed_ms).await;
+        let mut stopped = false;
+        while out.timers_ran > 0 && out.next_timer_ms == Some(0) {
+            if started.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                stopped = true;
+                break;
+            }
+            let turn = self.pump_live_turn(id, 0).await;
+            out.timers_ran += turn.timers_ran;
+            out.requests += turn.requests;
+            out.in_flight = turn.in_flight;
+            out.relaid_out |= turn.relaid_out;
+            out.next_timer_ms = turn.next_timer_ms;
+            if turn.timers_ran == 0 {
+                break;
+            }
+        }
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        if stopped {
+            // The turn's frame still comes (#776): the tree's due animation
+            // frame callbacks run once before it returns.
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
+                    debug!(error = %e, "frames: the tree's animation round failed");
+                }
+            }
+            out.yielded_for_frame = true;
+        }
+        // The frames lay out and send what this turn's tasks wrote and asked.
+        self.live_timer_cap = 0;
+        let after = self.pump_frames(id, 0).await;
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        merge_live(&mut frames, after);
+        out.relaid_out |= frames.relaid_out;
+        out.in_flight += frames.in_flight;
+        out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.frame_requests_wake(id, out)
+    }
+
+    /// A frame request the page made during this turn asks for the next
+    /// turn at once (see [`Self::pump_live`]).
+    fn frame_requests_wake(&self, id: EngineViewId, mut out: LivePump) -> LivePump {
+        let asked = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .is_some_and(|bindings| bindings.has_frame_requests());
+        if asked {
+            out.next_timer_ms = Some(0);
+        }
+        out
+    }
+
+    async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
@@ -6330,23 +6877,24 @@ impl Engine {
             && self
                 .views
                 .get(&id)
-                .is_some_and(|view| view.load_tail.is_none());
+                .is_some_and(|view| view.doc.load_tail.is_none());
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
+        let live_timer_cap = self.live_timer_cap;
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
         let _turn = rustkit_js::DiagTurn::enter("live");
         rustkit_js::set_diag_nav(view.nav_id);
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return out;
         };
-        let policy = view.script_policy.clone();
-        let document = view.url.clone();
+        let policy = view.doc.script_policy.clone();
+        let document = view.doc.url.clone();
         let inspector = view.inspector.clone();
-        let live_requests = &mut view.live_requests;
-        let live_modules = &mut view.live_modules;
-        let live_modules_started = &mut view.live_modules_started;
+        let live_requests = &mut view.doc.live_requests;
+        let live_modules = &mut view.doc.live_modules;
+        let live_modules_started = &mut view.doc.live_modules_started;
         // A module supplied this turn can ask for more, or for the network:
         // the next turn is due at once.
         let mut supplied_modules = false;
@@ -6387,7 +6935,7 @@ impl Engine {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let (ran, yielded) = bindings.advance_timers_for_frame(
                         elapsed_ms,
-                        MAX_LIVE_TIMER_CALLBACKS,
+                        live_timer_cap,
                         LIVE_FRAME_MS,
                     )?;
                     frame_yield.set(yielded);
@@ -6412,7 +6960,7 @@ impl Engine {
         // The animation clock is the timer clock as the timers left it, so
         // the layout below (and the one `settle_animations` makes) reads
         // the transitions at this turn's time.
-        view.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
+        view.doc.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -6568,8 +7116,8 @@ impl Engine {
             // `in_flight`. A turn whose JavaScript budget is already spent
             //             only enqueues.
             // The open tail already ran its one script for this turn.
-            if view.load_tail.is_none() {
-                let inserted = view.live_inserted.clone();
+            if view.doc.load_tail.is_none() {
+                let inserted = view.doc.live_inserted.clone();
                 let execute = !script_js_exhausted();
                 let found = script_net::drive_inserted_scripts(
                     bindings,
@@ -6587,8 +7135,8 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
                 for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    if view.doc.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
                 }
             }
@@ -6618,12 +7166,12 @@ impl Engine {
         } else {
             bindings.next_timer_delay()
         };
-        view.script_log.extend(stopped);
+        view.doc.script_log.extend(stopped);
         let threw = threw
             .into_iter()
             .chain(reported.into_iter().map(|message| ("timers", ScriptOutcome::Threw(message))));
         for (source, outcome) in threw {
-            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+            if view.doc.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 // The log is full; the Inspector's buffer bounds itself (the
                 // page's errors reached it from their reports above).
                 if let ScriptOutcome::EngineFailed(failure) = &outcome {
@@ -6637,7 +7185,7 @@ impl Engine {
                 elapsed_ms: 0,
                 outcome,
             };
-            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+            inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -9638,6 +10186,11 @@ impl Engine {
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10105,6 +10658,11 @@ impl Engine {
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10680,20 +11238,20 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        view.held_fixed = Some(root_box.held_fixed_paths());
+        view.doc.held_fixed = Some(root_box.held_fixed_paths());
         // Which boxes hold something outside their own box is found again
         // at the next hit test (`LayoutBox::forget_hit_overflow`).
         root_box.forget_hit_overflow();
-        view.layout = Some(Rc::new(root_box));
-        if let Some(layout) = view.layout.as_ref() {
-            incremental_layout::adopt(&view.lay, layout);
+        view.doc.layout = Some(Rc::new(root_box));
+        if let Some(layout) = view.doc.layout.as_ref() {
+            incremental_layout::adopt(&view.doc.lay, layout);
         }
-        view.laid_with = Some(LaidWith {
-            hover: view.lay.hover_chain.borrow().clone(),
-            active: view.lay.active_chain.borrow().clone(),
-            focused: view.lay.focused_node.get().map(|node| node.raw()),
-            focus_chain: view.lay.focus_chain.borrow().clone(),
-            focus_visible: view.lay.focus_visible.get(),
+        view.doc.laid_with = Some(LaidWith {
+            hover: view.doc.lay.hover_chain.borrow().clone(),
+            active: view.doc.lay.active_chain.borrow().clone(),
+            focused: view.doc.lay.focused_node.get().map(|node| node.raw()),
+            focus_chain: view.doc.lay.focus_chain.borrow().clone(),
+            focus_visible: view.doc.lay.focus_visible.get(),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -10786,6 +11344,29 @@ impl Engine {
         for mut cmd in dl.commands.drain(..) {
             // A canvas paints what script drew on it (canvas_paint), again
             // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, content_box: dest_rect, .. } = &cmd {
+                if let Some(node) = frame_node(url) {
+                    // A frame paints its own display list, clipped to the
+                    // iframe's content box and moved to it.
+                    let frame_list = self
+                        .views
+                        .get(&id)
+                        .and_then(|v| v.frames.get(&node))
+                        .and_then(|f| self.views.get(&f.view))
+                        .and_then(|frame| frame.doc.display_list.clone());
+                    if let Some(list) = frame_list {
+                        expanded.push(rustkit_layout::DisplayCommand::PushClip(*dest_rect));
+                        expanded.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, dest_rect.x, dest_rect.y],
+                            origin: (0.0, 0.0),
+                        });
+                        expanded.extend(list.commands.iter().cloned());
+                        expanded.push(rustkit_layout::DisplayCommand::PopTransform);
+                        expanded.push(rustkit_layout::DisplayCommand::PopClip);
+                    }
+                    continue;
+                }
+            }
             if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
@@ -13515,6 +14096,31 @@ impl layout_ctx::LayoutCtx {
                 // axis gives the other through the bitmap's ratio. What
                 // script draws on its 2D context replaces the image command
                 // in the display list (canvas_paint).
+                // <iframe> (nested browsing contexts, Stage 3): a replaced
+                // element, 300x150 without width/height (which are
+                // presentational hints here), whose paint is its frame's
+                // display list (`frame_key`).
+                if tag_lower == "iframe" && self.nested_contexts.get() {
+                    let attr = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                            .filter(|v| *v >= 0.0)
+                    };
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: frame_key(node.id.raw()),
+                            natural_width: attr("width").unwrap_or(300.0),
+                            natural_height: attr("height").unwrap_or(150.0),
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
                 if tag_lower == "canvas" {
                     let (natural_width, natural_height) =
                         canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
@@ -15719,6 +16325,24 @@ impl layout_ctx::LayoutCtx {
             }
             "iframe" => {
                 style.display = rustkit_css::Display::Inline;
+                // `iframe { border: 2px inset }` (Chrome 148: 2px inset,
+                // currentColor), with nested browsing contexts on only.
+                // The paint styles have no `inset` (rustkit-css
+                // BorderStyle): it paints solid until they do.
+                if self.nested_contexts.get() {
+                    style.border_top_width = rustkit_css::Length::Px(2.0);
+                    style.border_right_width = rustkit_css::Length::Px(2.0);
+                    style.border_bottom_width = rustkit_css::Length::Px(2.0);
+                    style.border_left_width = rustkit_css::Length::Px(2.0);
+                    style.border_top_style = rustkit_css::BorderStyle::Solid;
+                    style.border_right_style = rustkit_css::BorderStyle::Solid;
+                    style.border_bottom_style = rustkit_css::BorderStyle::Solid;
+                    style.border_left_style = rustkit_css::BorderStyle::Solid;
+                    style.border_top_color = style.color;
+                    style.border_right_color = style.color;
+                    style.border_bottom_color = style.color;
+                    style.border_left_color = style.color;
+                }
             }
             // Misc
             "br" => {
@@ -24791,7 +25415,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        if !std::mem::take(&mut view.title_stale) {
+        if !std::mem::take(&mut view.doc.title_stale) {
             return;
         }
         #[cfg(test)]
@@ -24817,22 +25441,22 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
         // Read before the take, which clears it.
         let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        let had_title = view.title.is_some();
-        if log.full || log.records.iter().any(|record| Self::touches_title(view.document.as_deref(), had_title, record)) {
-            view.title_stale = true;
+        let had_title = view.doc.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.doc.document.as_deref(), had_title, record)) {
+            view.doc.title_stale = true;
         }
-        Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
-        Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
-        let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
-        let element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+        Self::note_forced_layouts(id, &mut view.doc.relayout_stats, bindings);
+        Self::apply_script_control_writes(&mut view.doc.lay.edit_states.borrow_mut(), &mut view.doc.lay.checked_states.borrow_mut(), bindings);
+        let max = Self::script_scroll_clamp(view.doc.max_scroll_offset, dirty);
+        let scrolled = Self::apply_script_scroll(&mut view.doc.scroll_offset, max, bindings);
+        let element_scrolled = std::mem::take(&mut view.doc.lay.element_scrolls.borrow_mut().unpainted);
         let canvas_painted = bindings.take_canvas_painted();
         // LAT2: script's animated-style layer is all that was written (a
         // Web Animations frame): a frame that moves only paint keeps the
@@ -24862,11 +25486,11 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
         if dirty != DomDirty::Clean {
-            view.pending_dirty = Some(view.dirty_set(&log));
+            view.doc.pending_dirty = Some(view.dirty_set(&log));
         }
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
@@ -25894,6 +26518,12 @@ impl EngineBuilder {
 
     /// Requests made after the `load` event go to the live loop
     /// (`EngineConfig::post_load_requests_live`).
+    /// Load same-origin `<iframe>` documents (`EngineConfig::nested_contexts`).
+    pub fn nested_contexts(mut self, on: bool) -> Self {
+        self.config.nested_contexts = on;
+        self
+    }
+
     pub fn post_load_requests_live(mut self, live: bool) -> Self {
         self.config.post_load_requests_live = live;
         self
@@ -31120,6 +31750,7 @@ mod tests {
         let compositor = crate::test_compositor().ok()?;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Some(Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -31903,6 +32534,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -31975,6 +32607,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -32063,6 +32696,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -32276,6 +32910,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32370,6 +33005,7 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32484,6 +33120,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32562,6 +33199,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32634,6 +33272,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -32720,6 +33359,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -32823,7 +33463,8 @@ mod tests {
             let compositor = crate::test_compositor().expect("compositor");
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let engine = Engine {
-                config: EngineConfig::default(),
+                live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
+                    config: EngineConfig::default(),
                 views: HashMap::new(),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
@@ -32926,6 +33567,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33007,6 +33649,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -33094,6 +33737,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33177,6 +33821,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33251,6 +33896,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33303,6 +33949,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33495,6 +34142,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -33574,6 +34222,7 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
@@ -36163,6 +36812,7 @@ mod web_font_tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),

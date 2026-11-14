@@ -204,16 +204,19 @@
     // under its own budget), and only a real Blob's own bytes go in.
     // Anything that is not a Blob (a MediaSource) gets a URL nothing
     // stands behind.
-    var blobNumber = __rk.blobNumber, blobInternals = g.__rkBlobInternals, blobPut = __rk.blobPut, blobRevoke = __rk.blobRevoke;
+    // The host names the URL (`blob:<origin>/<uuid>`, with the origin the
+    // engine knows for this document) and keeps the record for that origin.
+    var blobInternals = g.__rkBlobInternals, blobUrl = __rk.blobUrl, blobRevoke = __rk.blobRevoke, realm = __realm;
     delete g.__rkBlobInternals;
     URL.createObjectURL = function (object) {
-        var url = 'blob:' + (g.location && g.location.origin || 'null') + '/' + blobNumber();
         var record = blobInternals ? blobInternals.record(object) : null;
-        if (record) blobPut(url, record.bytes, record.type);
-        return url;
+        var made = record ? blobUrl(realm, record.bytes, record.type) : blobUrl(realm);
+        // Not kept (the store is full): the URL has nothing behind it.
+        if (!made[1]) __rk.unsupported('URL', 'createObjectURL (blob store full)');
+        return made[0];
     };
     URL.revokeObjectURL = function (url) {
-        blobRevoke(String(url).split('#')[0]);
+        blobRevoke(realm, String(url).split('#')[0]);
     };
 
     g.URL = URL;

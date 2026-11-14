@@ -493,8 +493,28 @@ impl ExecutionDeadline {
     }
 }
 
+/// One global environment of a [`JsRuntime`]: its own global object, its own
+/// `Object`, `Array` and every other intrinsic. A runtime starts with one
+/// ([`RealmId::MAIN`]); a same-origin nested document gets another
+/// ([`JsRuntime::create_realm`]). Realms of one runtime share its heap, its
+/// job queue and its limits, so their objects can hold each other and call
+/// each other directly (HTML: one agent, several realms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RealmId(usize);
+
+impl RealmId {
+    /// The realm the runtime was created with.
+    pub const MAIN: RealmId = RealmId(0);
+}
+
 /// JavaScript runtime that wraps the underlying engine.
 pub struct JsRuntime {
+    /// The realms made so far, by id; `None` once dropped. `[0]` is the
+    /// main realm.
+    #[cfg(feature = "boa")]
+    realms: Vec<Option<boa_engine::realm::Realm>>,
+    /// The realm evaluation and host-function registration act in.
+    current_realm: RealmId,
     #[cfg(feature = "boa")]
     context: boa_engine::Context,
     /// The module host (see `module`): imports the graph asks for are
@@ -524,6 +544,11 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// The host object of each realm after the first, by realm index: the
+    /// embedder's scripts keep their entry points on it, so each document
+    /// needs its own.
+    #[cfg(feature = "boa")]
+    realm_hosts: Vec<Option<boa_engine::JsObject>>,
     /// Bytes left for the embedder's scripts to take by key (`__rk.takeBytes`):
     /// a response body crosses into script as one buffer, not as text.
     #[cfg(feature = "boa")]
@@ -604,8 +629,22 @@ impl JsRuntime {
         let blobs = bytes::Blobs::default();
         #[cfg(feature = "boa")]
         let host = host_object(&diag, &byte_stash, &blobs, &mut context);
+        // One object every realm's host object holds as `shared`:
+        // what the documents of a frame tree must agree on (which events
+        // are the engine's) is kept there, not once per realm. Like the
+        // host object it inherits from nothing: it is made in the first
+        // realm and read in every one.
+        #[cfg(feature = "boa")]
+        {
+            let shared = boa_engine::object::ObjectInitializer::new(&mut context).build();
+            shared.set_prototype(None);
+            let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut context);
+        }
 
         let mut runtime = Self {
+            #[cfg(feature = "boa")]
+            realms: vec![Some(context.realm().clone())],
+            current_realm: RealmId::MAIN,
             #[cfg(feature = "boa")]
             context,
             #[cfg(feature = "boa")]
@@ -627,6 +666,8 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             host,
             #[cfg(feature = "boa")]
+            realm_hosts: vec![None],
+            #[cfg(feature = "boa")]
             byte_stash,
             #[cfg(feature = "boa")]
             blobs,
@@ -643,6 +684,117 @@ impl JsRuntime {
 
         debug!("JavaScript runtime initialized");
         Ok(runtime)
+    }
+
+    /// Make a new realm in this runtime: a fresh global object with the
+    /// language's own globals and this runtime's `console`. Everything the
+    /// embedder installs per page (host functions, its scripts) it installs
+    /// again while the realm is entered.
+    pub fn create_realm(&mut self) -> Result<RealmId, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let realm = self
+                .context
+                .create_realm()
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            self.realms.push(Some(realm));
+            let id = RealmId(self.realms.len() - 1);
+            let outer = self.enter_realm(id);
+            let console = self.setup_console();
+            // The new realm's own host object, made in it.
+            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &mut self.context);
+            if let Ok(shared) = self.host.get(boa_engine::js_string!("shared"), &mut self.context) {
+                let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut self.context);
+            }
+            self.realm_hosts.push(Some(host));
+            self.enter_realm(outer);
+            console?;
+            Ok(id)
+        }
+        #[cfg(not(feature = "boa"))]
+        Err(JsError::NotInitialized)
+    }
+
+    /// Make `realm` the one evaluation and host-function registration act
+    /// in, and return the one that was. A dropped or unknown realm leaves
+    /// things as they are. Only between evaluations: a script that is
+    /// running keeps the realm it was started in.
+    pub fn enter_realm(&mut self, realm: RealmId) -> RealmId {
+        let outer = self.current_realm;
+        #[cfg(feature = "boa")]
+        match self.realms.get(realm.0) {
+            Some(Some(target)) => {
+                self.context.enter_realm(target.clone());
+                self.current_realm = realm;
+            }
+            // A dropped realm is entered as gone: evaluation errors until
+            // the outer realm is entered again (see `realm_gone`).
+            Some(None) => self.current_realm = realm,
+            None => {}
+        }
+        outer
+    }
+
+    /// The realm entered is one that was dropped: nothing may run in it,
+    /// and nothing of another realm may stand in for it.
+    fn realm_gone(&self) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        if matches!(self.realms.get(self.current_realm.0), Some(None)) {
+            return Err(JsError::ExecutionError("the realm was dropped".into()));
+        }
+        Ok(())
+    }
+
+    /// The realm evaluation acts in now.
+    pub fn current_realm(&self) -> RealmId {
+        self.current_realm
+    }
+
+    /// Define `name` on `holder`'s global object as `target`'s global
+    /// object: how one document reaches another's `window` (a frame's
+    /// `contentWindow`, a child's `parent`).
+    pub fn expose_realm_global(&mut self, holder: RealmId, name: &str, target: RealmId) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let known = |id: RealmId, realms: &[Option<boa_engine::realm::Realm>]| matches!(realms.get(id.0), Some(Some(_)));
+            if !known(holder, &self.realms) || !known(target, &self.realms) {
+                return Err(JsError::ExecutionError("no such realm".into()));
+            }
+            let outer = self.enter_realm(target);
+            let global = self.context.global_object();
+            self.enter_realm(holder);
+            let set = self.context.global_object().set(
+                boa_engine::JsString::from(name),
+                boa_engine::JsValue::from(global),
+                true,
+                &mut self.context,
+            );
+            self.enter_realm(outer);
+            set.map(|_| ()).map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (holder, name, target);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Forget a realm this runtime made (never the main one, never the
+    /// current one). Objects of it that other realms still hold stay alive
+    /// and usable, as any object does; nothing can be evaluated in it again.
+    pub fn drop_realm(&mut self, realm: RealmId) -> bool {
+        if realm == RealmId::MAIN || realm == self.current_realm {
+            return false;
+        }
+        #[cfg(feature = "boa")]
+        if let Some(slot) = self.realms.get_mut(realm.0) {
+            self.blobs.borrow_mut().drop_realm(realm.0);
+            if let Some(host) = self.realm_hosts.get_mut(realm.0) {
+                *host = None;
+            }
+            return slot.take().is_some();
+        }
+        false
     }
 
     /// Get the runtime configuration.
@@ -852,40 +1004,76 @@ impl JsRuntime {
         self.call_with_host(source, &[], false)
     }
 
-    /// Give the host object these names as own properties (`undefined`
-    /// until an embedder's script fills one in), before any script runs:
-    /// what the embedder probes (`__rk.net ? ... : ...`) is then always an
-    /// own property. A name the host already has is left alone.
+    /// Give the host object of the realm entered these names as own
+    /// properties (`undefined` until an embedder's script fills one in),
+    /// before any script runs in it: what the embedder probes
+    /// (`__rk.net ? ... : ...`) is then always an own property. A name the
+    /// host already has is left alone.
     pub fn reserve_host_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        self.realm_gone()?;
         #[cfg(feature = "boa")]
         {
-            use boa_engine::{property::PropertyDescriptor, JsString};
-            for name in names {
-                let key = JsString::from(*name);
-                let owned = self
-                    .host
-                    .has_own_property(key.clone(), &mut self.context)
-                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-                if owned {
-                    continue;
-                }
-                let slot = PropertyDescriptor::builder()
-                    .value(boa_engine::JsValue::undefined())
-                    .writable(true)
-                    .enumerable(true)
-                    .configurable(true)
-                    .build();
-                self.host
-                    .define_property_or_throw(key, slot, &mut self.context)
-                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
-            }
-            Ok(())
+            let host = self.entered_host();
+            self.reserve_slots(&host, names)
         }
         #[cfg(not(feature = "boa"))]
         {
             let _ = names;
             Err(JsError::NotInitialized)
         }
+    }
+
+    /// [`reserve_host_slots`](Self::reserve_host_slots) for the object
+    /// every realm's host object holds as `shared`: each name is an own
+    /// property of it from now on. A name it already has (a later realm
+    /// reserving again) is left alone.
+    pub fn reserve_shared_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let shared = self
+                .host
+                .get(boa_engine::js_string!("shared"), &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            let Some(shared) = shared.as_object() else {
+                return Err(JsError::ExecutionError("no shared state".into()));
+            };
+            self.reserve_slots(&shared.clone(), names)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = names;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// The host object of the realm entered.
+    #[cfg(feature = "boa")]
+    fn entered_host(&self) -> boa_engine::JsObject {
+        self.realm_hosts.get(self.current_realm.0).cloned().flatten().unwrap_or_else(|| self.host.clone())
+    }
+
+    #[cfg(feature = "boa")]
+    fn reserve_slots(&mut self, object: &boa_engine::JsObject, names: &[&str]) -> Result<(), JsError> {
+        use boa_engine::{property::PropertyDescriptor, JsString};
+        for name in names {
+            let key = JsString::from(*name);
+            let owned = object
+                .has_own_property(key.clone(), &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            if owned {
+                continue;
+            }
+            let slot = PropertyDescriptor::builder()
+                .value(boa_engine::JsValue::undefined())
+                .writable(true)
+                .enumerable(true)
+                .configurable(true)
+                .build();
+            object
+                .define_property_or_throw(key, slot, &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Run a function body that holds the host object (`__rk`, as
@@ -904,13 +1092,14 @@ impl JsRuntime {
     }
 
     fn call_with_host(&mut self, source: &str, args: &[&str], turn: bool) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         if let Some(tap) = self.source_tap.as_ref() {
             tap(source);
         }
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let wrapped = format!("(function (__rk, __a) {{\n{source}\n}})");
+            let wrapped = format!("(function (__rk, __a, __realm) {{\n{source}\n}})");
             let function = self
                 .context
                 .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
@@ -919,7 +1108,8 @@ impl JsRuntime {
                 .as_object()
                 .filter(|f| f.is_callable())
                 .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
-            let host = boa_engine::JsValue::from(self.host.clone());
+            let host = self.entered_host();
+            let host = boa_engine::JsValue::from(host);
             let strings = boa_engine::object::builtins::JsArray::from_iter(
                 args.iter().map(|a| boa_engine::JsValue::from(boa_engine::JsString::from(*a))),
                 &mut self.context,
@@ -927,7 +1117,10 @@ impl JsRuntime {
             if turn {
                 self.context.reset_recursion_max();
             }
-            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into()], &mut self.context);
+            // `__realm`: the realm the script is installed in, for the
+            // natives that act for one document (the blob store).
+            let realm = boa_engine::JsValue::from(self.current_realm.0 as f64);
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into(), realm], &mut self.context);
             if turn {
                 self.consume_interrupt();
             }
@@ -1057,6 +1250,7 @@ impl JsRuntime {
     }
 
     fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         trace!(len = source.len(), "Evaluating script");
         if let Some(tap) = self.source_tap.as_ref() {
             tap(source);
@@ -1291,12 +1485,16 @@ impl JsRuntime {
     /// same rules: the interrupt word does not stop it, no promise jobs
     /// run, and it must call none of the page's functions.
     pub fn evaluate_host_bookkeeping(&mut self, body: &str) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         #[cfg(feature = "boa")]
         {
             let armed = self.deadline.armed.get();
             self.arm(false);
             let wrapped = format!("(function (__rk) {{\n{body}\n}})");
-            let host = boa_engine::JsValue::from(self.host.clone());
+            // The host object of the realm entered: each document of a
+            // frame tree keeps its own entry points.
+            let host = self.entered_host();
+            let host = boa_engine::JsValue::from(host);
             let result = self
                 .context
                 .eval(boa_engine::Source::from_bytes(wrapped.as_bytes()))
@@ -1325,6 +1523,7 @@ impl JsRuntime {
     /// the page's, and run at the next evaluation); [`ALL`](control::ALL)
     /// still stops it.
     pub fn evaluate_bookkeeping(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.realm_gone()?;
         #[cfg(feature = "boa")]
         {
             let armed = self.deadline.armed.get();
@@ -1459,20 +1658,53 @@ impl JsRuntime {
         }
     }
 
-    /// The bytes behind a blob URL of this runtime's pages (its fragment,
-    /// if any, is not part of the name), or `None` when nothing stands
-    /// behind it. Reads the host's store: no script runs.
-    pub fn blob_bytes(&self, url: &str) -> Option<Vec<u8>> {
+    /// The bytes behind a blob URL (its fragment, if any, is not part of
+    /// the name), for the document in `realm`: `None` when nothing stands
+    /// behind it or it belongs to another origin. Reads the host's store:
+    /// no script runs.
+    pub fn blob_bytes(&self, realm: RealmId, url: &str) -> Option<Vec<u8>> {
         #[cfg(feature = "boa")]
         {
             let name = url.split('#').next().unwrap_or(url);
-            self.blobs.borrow().get(name).map(|(bytes, _)| bytes.clone())
+            self.blobs.borrow().get(realm.0, name).map(|record| record.bytes.clone())
         }
         #[cfg(not(feature = "boa"))]
         {
-            let _ = url;
+            let _ = (realm, url);
             None
         }
+    }
+
+    /// The origin of the document in `realm` (`null` for an opaque one),
+    /// as the embedder knows it. Blob URLs made there carry it, and only
+    /// documents of it reach them. A realm never told is opaque.
+    pub fn set_realm_origin(&mut self, realm: RealmId, origin: &str) {
+        #[cfg(feature = "boa")]
+        self.blobs.borrow_mut().set_origin(realm.0, origin);
+        #[cfg(not(feature = "boa"))]
+        let _ = (realm, origin);
+    }
+
+    /// Where the random part of a blob URL comes from: `n` bytes of the
+    /// OS random source. Without one, nothing is kept behind a blob URL.
+    pub fn set_blob_random(&mut self, random: fn(usize) -> Option<Vec<u8>>) {
+        #[cfg(feature = "boa")]
+        {
+            self.blobs.borrow_mut().random = Some(random);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = random;
+    }
+
+    /// Bound what this runtime's blob URLs keep alive, in bytes (the
+    /// default is 256 MiB).
+    pub fn set_blob_store_limit(&mut self, bytes: usize) {
+        #[cfg(feature = "boa")]
+        {
+            self.blobs.borrow_mut().limit = Some(bytes);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = bytes;
     }
 
     /// Forget the bytes stashed under `key`, if script did not take them.

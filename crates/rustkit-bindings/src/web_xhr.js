@@ -34,9 +34,10 @@
     // A delivered response's body: the bytes the bridge took from the
     // host, or (a result built by hand) its base64.
     function bodyBytes(r) { return r.bytes instanceof Uint8Array ? r.bytes : fromBase64(r.body_b64); }
-    // What stands behind a blob URL (the host's store): { bytes, type } or null.
+    // What stands behind a blob URL for this document (the host's store,
+    // which answers only the origin that made it): { bytes, type } or null.
     function blobBehind(url) {
-        var found = __rk.blobGet(String(url).split('#')[0]);
+        var found = __rk.blobGet(__realm, String(url).split('#')[0]);
         return found ? { bytes: new Uint8Array(found[0]), type: found[1] } : null;
     }
     function utf8(str) { return new g.TextEncoder().encode(str); }

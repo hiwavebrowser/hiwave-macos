@@ -230,10 +230,16 @@ fn dimension(args: &[JsValue], i: usize, default: u32) -> u32 {
     }
 }
 
+/// The 2D context's script (web_canvas.js), for a lazy install.
+pub(crate) const SCRIPT: &str = include_str!("web_canvas.js");
+
+/// The canvas host functions, and with `script` the 2D context's script
+/// (a child realm runs it on first use instead: web_lazy.js).
 pub(crate) fn install(
     runtime: &mut JsRuntime,
     store: &SharedCanvases,
     host: &SharedDomHost,
+    script: bool,
 ) -> Result<(), JsError> {
     let (s, h) = (store.clone(), host.clone());
     runtime.register_host_function(
@@ -691,7 +697,8 @@ pub(crate) fn install(
             result
         }),
     )?;
-    runtime
-        .evaluate_script(include_str!("web_canvas.js"))
-        .map(|_| ())
+    if !script {
+        return Ok(());
+    }
+    runtime.evaluate_script(SCRIPT).map(|_| ())
 }
