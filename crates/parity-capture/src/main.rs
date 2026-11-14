@@ -519,6 +519,9 @@ struct SettleStats {
     virtual_ms: u64,
     /// The settle stopped at its real-time budget before `STEPPED_SETTLE_MS` of virtual time.
     cut_short: bool,
+    /// The settle was cut short, so the frame, display list and layout are the ones taken before it (the
+    /// page as the load left it), not a state part-way through the page's own reveal.
+    fell_back: bool,
 }
 
 /// Run `STEPPED_SETTLE_MS` of virtual time in fixed steps. While a request the page started is open,
@@ -3284,6 +3287,68 @@ Connection: close
             stats.wall_ms <= SETTLE_REAL_BUDGET.as_millis() as u64,
             "a turn started that ended past the budget: {stats:?}"
         );
+    }
+
+    /// A settle cut short must not freeze a page part-way through its own reveal (batch 75's A/B:
+    /// squarespace's settle ran one 3.7 s turn, whose scripts hid the content, and was cut before the
+    /// timers that reveal it, so the frame was the header on black where the load-only capture had the
+    /// page). When the settle is cut short, the capture's frame, display list and layout are the ones
+    /// taken after the load, before the settle. Here a timer early in the settle takes the content out,
+    /// every turn after it costs about 900 ms, and the content comes back only 3 s later.
+    #[test]
+    fn a_settle_cut_short_falls_back_to_the_page_as_the_load_left_it() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><div id='content-from-the-load' style='height:120px'>content</div><script>setTimeout(function () { setTimeout(function () { var c = document.getElementById('content-from-the-load'); c.remove(); setInterval(function () { var t = Date.now(); while (Date.now() - t < 900) {} }, 16); setTimeout(function () { document.body.appendChild(c); }, 3000); }, 200); }, 4990);</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settle-fallback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let layout = dir.join("layout.json");
+        let display_list = dir.join("display-list.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+            "--dump-display-list",
+            display_list.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
+        assert!(stats.cut_short, "the settle was not cut short: {stats:?}");
+        assert!(stats.fell_back, "a cut-short settle did not fall back: {stats:?}");
+        let dumped = fs::read_to_string(&layout).unwrap();
+        assert!(dumped.contains("content-from-the-load"), "the layout is the half-revealed state: {}", &dumped[..dumped.len().min(300)]);
+        let drawn = fs::read_to_string(&display_list).unwrap();
+        assert!(drawn.contains("\"content\""), "the display list is the half-revealed state");
     }
 
     /// When the load has used the capture's timeout down to the margin the frame needs, the settle does not
