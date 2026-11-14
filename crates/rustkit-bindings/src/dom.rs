@@ -2862,6 +2862,9 @@ const WRAPPERS_JS: &str = r#"
     // The DOM's dirty flag (a native registered as a global), for
     // web_observers_live.js.
     __rk.domDirty = g.__rustkit_dom_dirty;
+    // The frame tree's top window as the engine knows it: this window,
+    // until it is attached as a frame (`DomBindings::attach_frame`).
+    __rk.realTop = g;
     delete g.__rustkit_dom_dirty;
 
     // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
@@ -3229,6 +3232,25 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: n });
         return out;
     }
+    // The document's elements of one tag, for the embedder's scripts
+    // (web_frames.js's scan): the native's answer read with plain loops,
+    // no string or array method.
+    HOOKS.byTag = function (tag) {
+        var s = doc ? doc[SLOT] : undefined, out = objCreate(null), n = 0;
+        out.length = 0;
+        if (!s || s.gen !== gen) return out;
+        var ids = N.collect(s.gen, s.id, 'tag', tag);
+        if (typeof ids !== 'string') return out;
+        var id = -1;
+        for (var i = 0; i <= ids.length; i++) {
+            var c = i < ids.length ? ids[i] : ' ';
+            if (c >= '0' && c <= '9') { id = (id < 0 ? 0 : id * 10) + (+c); continue; }
+            if (id >= 0) { var w = wrap(id); if (w) out[n++] = w; }
+            id = -1;
+        }
+        out.length = n;
+        return out;
+    };
     function collect(o, kind, arg) {
         var s = slotOf(o);
         return s.gen === gen ? N.collect(s.gen, s.id, kind, String(arg)) : '';
@@ -6133,7 +6155,10 @@ const WRAPPERS_JS: &str = r#"
     // Engine input events still dispatch Rust-side (events.rs, pin §4);
     // this is what page script registers and fires itself.
     var LISTENERS = new WeakMap();
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    // The frame tree's, like the event state above: an event stopped
+    // through one window's prototype is stopped in another's dispatch.
+    var STOP = SHARED.stop || (SHARED.stop = Symbol('rustkit.stop')),
+        STOP_NOW = SHARED.stopNow || (SHARED.stopNow = Symbol('rustkit.stopNow'));
     function thisTarget(o) { return o == null ? g : o; }
     function flag(opts, key) {
         return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
@@ -6414,7 +6439,8 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
         Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
     });
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    var ORIGIN = SHARED.origin || (SHARED.origin = Symbol('rustkit.origin')),
+        PATH = SHARED.path || (SHARED.path = Symbol('rustkit.path'));
     function invoke(t, event, phase, capture) {
         mapSet(EV_CURRENT, event, t);
         mapSet(EV_PHASE, event, phase);
@@ -6607,7 +6633,8 @@ const WRAPPERS_JS: &str = r#"
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
-    EVENT_PROTOS.push(Event.prototype);
+    // Defined by index: no array method of another window's realm runs.
+    fixed(EVENT_PROTOS, EVENT_PROTOS.length, Event.prototype);
     g.CustomEvent = CustomEvent;
     __rk.keepCtor('Event', Event);
     __rk.keepCtor('CustomEvent', CustomEvent);

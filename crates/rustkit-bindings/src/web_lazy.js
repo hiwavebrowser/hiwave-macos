@@ -9,13 +9,31 @@
 // and answers through it, so script sees the same values either way.
 //
 // The sources come in `__rustkit_lazy_sources` (taken and deleted here);
-// each runs as the eager install would have run it, with the host object
-// (`__rk`) as its argument.
+// each runs as the eager install would have run it. What this file needs
+// to do that is taken now, at realm creation, before any page script: the
+// built-ins it calls, and the natives the scripts take from the window
+// (which are not left there meanwhile). A lazily installed script is not
+// given the host object: the two that report through it get its two
+// reporting natives, the others nothing.
 (function (g) {
     var SOURCES = g.__rustkit_lazy_sources;
     delete g.__rustkit_lazy_sources;
     if (!SOURCES) return;
-    var host = __rk, Fn = Function, gOPD = Object.getOwnPropertyDescriptor, dP = Object.defineProperty;
+    var Fn = Function, gOPD = Object.getOwnPropertyDescriptor, dP = Object.defineProperty,
+        apply = Reflect.apply, create = Object.create, setProto = Object.setPrototypeOf;
+    function bare(o) { return o ? setProto(o, null) : o; }
+    var reporting = create(null);
+    reporting.reportError = __rk.reportError;
+    reporting.unsupported = __rk.unsupported;
+    // The natives a script takes from the window when it installs.
+    var NATIVES = { animations: '__rustkit_animated_style', intl: '__rustkit_likely_subtags' };
+    var held = create(null);
+    ['animations', 'intl'].forEach(function (key) {
+        var name = NATIVES[key];
+        held[key] = bare(gOPD(g, name));
+        delete g[name];
+    });
+    var REPORTS = bare({ animations: true, streams: true });
 
     function lazy(key, globals, methods, accessors) {
         var src = SOURCES[key], done = false, undo = [];
@@ -24,11 +42,13 @@
             if (done) return;
             done = true;
             for (var i = undo.length - 1; i >= 0; i--) undo[i]();
-            Fn('__rk', src).call(g, host);
+            var run = Fn('__rk', src), native = held[key], name = NATIVES[key], args = bare([REPORTS[key] ? reporting : undefined]);
+            if (native) dP(g, name, native);
+            try { apply(run, g, args); } finally { if (native) delete g[name]; }
         }
         function keep(obj, name) {
-            var had = gOPD(obj, name);
-            undo.push(function () {
+            var had = bare(gOPD(obj, name));
+            undo[undo.length] = (function () {
                 if (had) dP(obj, name, had);
                 else delete obj[name];
             });
@@ -47,7 +67,7 @@
             if (!obj) return;
             keep(obj, name);
             dP(obj, name, {
-                value: function () { install(); return obj[name].apply(this, arguments); },
+                value: function () { install(); return apply(obj[name], this, arguments); },
                 writable: true, enumerable: false, configurable: true
             });
         });

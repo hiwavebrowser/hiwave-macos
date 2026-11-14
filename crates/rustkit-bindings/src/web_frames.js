@@ -21,27 +21,50 @@
     var request = g.__rustkit_frame_request;
     if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || __rk.frames) return;
     delete g.__rustkit_frame_request;
-    // Captured before page script can replace them.
-    var URL_ = g.URL, forEach = Array.prototype.forEach, doc = g.document;
-    var frames = Object.create(null); // node id -> { el, win }
+    // Taken now, before page script: the engine's side below (the scan,
+    // a frame's size) calls only these and plain loops.
+    var URL_ = g.URL, doc = g.document;
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var getProto = Object.getPrototypeOf, gOPD = Object.getOwnPropertyDescriptor, create = Object.create;
+    // The getter of an accessor found on `o` or its prototypes, uncurried.
+    function getterOf(o, name) {
+        for (; o; o = getProto(o)) {
+            var d = gOPD(o, name);
+            if (d) return typeof d.get === 'function' ? uncurry(d.get) : null;
+        }
+        return null;
+    }
+    function methodOf(o, name) { return o && typeof o[name] === 'function' ? uncurry(o[name]) : null; }
+    var E = g.Element && g.Element.prototype;
+    var docAll = methodOf(doc, 'querySelectorAll'), elAll = methodOf(E, 'querySelectorAll'),
+        getAttr = methodOf(E, 'getAttribute'), connected = getterOf(g.Node && g.Node.prototype, 'isConnected'),
+        baseURI = getterOf(doc, 'baseURI'), trim = uncurry(String.prototype.trim),
+        exec = uncurry(RegExp.prototype.exec), round = Math.round, toFloat = parseFloat, toInt = parseInt;
+    var frames = create(null); // node id -> { el, win }
+    function isConnected(n) { return connected ? connected(n) : n.isConnected; }
+    function record(el) { var r = create(null); r.el = el; r.win = null; return r; }
 
     function isFrame(n) {
         return n != null && n.nodeType === 1 && n.localName === 'iframe';
     }
     function each(n, f) {
         if (isFrame(n)) return f(n);
-        if (n != null && typeof n.querySelectorAll === 'function') forEach.call(n.querySelectorAll('iframe'), f);
+        if (n == null) return;
+        var list = n === doc && docAll ? docAll(n, 'iframe')
+            : n.nodeType === 1 && elAll ? elAll(n, 'iframe')
+            : typeof n.querySelectorAll === 'function' ? n.querySelectorAll('iframe') : null;
+        for (var i = 0; list && i < list.length; i++) f(list[i]);
     }
     // The URL the frame is to show: its `src` resolved, or about:blank.
     function target(el) {
-        var src = el.getAttribute('src');
-        if (src === null || src.trim() === '') return 'about:blank';
-        try { return new URL_(src, doc.baseURI || g.location.href).href; } catch (e) { return 'about:blank'; }
+        var src = getAttr(el, 'src');
+        if (src === null || trim(src) === '') return 'about:blank';
+        try { return new URL_(src, (baseURI ? baseURI(doc) : doc.baseURI) || g.location.href).href; } catch (e) { return 'about:blank'; }
     }
     function navigate(el) {
         var id = HOOKS.nodeId(el);
         if (id < 0) return;
-        frames[id] = { el: el, win: null };
+        frames[id] = record(el);
         request(id, target(el));
     }
     function gone(el) {
@@ -53,22 +76,23 @@
 
     HOOKS.frames = {
         tree: function (op, node) {
-            if (op === 'insert') each(node, function (f) { if (f.isConnected) navigate(f); });
+            if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f); });
             else if (op === 'remove') each(node, gone);
         },
         changed: function (node, op, name) {
-            if (isFrame(node) && node.isConnected && op === 'setAttr' && String(name).toLowerCase() === 'src') navigate(node);
+            if (isFrame(node) && isConnected(node) && op === 'setAttr' && String(name).toLowerCase() === 'src') navigate(node);
         }
     };
 
     // The engine's side, on the host object.
-    __rk.frames = {
+    __rk.frames = Object.setPrototypeOf({
         // The parser's iframes, once the document is in.
         scan: function () {
-            forEach.call(doc.querySelectorAll('iframe'), function (f) {
-                var id = HOOKS.nodeId(f);
-                if (id >= 0 && !frames[id] && f.isConnected) navigate(f);
-            });
+            var list = HOOKS.byTag('iframe');
+            for (var i = 0; i < list.length; i++) {
+                var f = list[i], id = HOOKS.nodeId(f);
+                if (id >= 0 && !frames[id] && isConnected(f)) navigate(f);
+            }
         },
         // The frame's element when it took the window, or null.
         attach: function (id, win) {
@@ -88,14 +112,15 @@
         size: function (id) {
             var r = frames[id], w = 300, h = 150;
             if (!r) return '300x150';
-            var el = r.el, st = el.style;
-            function px(v) { var m = /^\s*([0-9.]+)px\s*$/.exec(v || ''); return m ? Math.round(parseFloat(m[1])) : 0; }
-            function attr(n) { var v = el.getAttribute(n); return v && /^\s*[0-9]+\s*$/.test(v) ? parseInt(v, 10) : 0; }
-            w = px(st && st.width) || attr('width') || w;
-            h = px(st && st.height) || attr('height') || h;
+            // The inline style is read from the `style` attribute's text.
+            var el = r.el, st = getAttr(el, 'style') || '';
+            function px(re) { var m = exec(re, st); return m ? round(toFloat(m[1])) : 0; }
+            function attr(n) { var v = getAttr(el, n); return v && exec(/^\s*[0-9]+\s*$/, v) ? toInt(v, 10) : 0; }
+            w = px(/(?:^|;)\s*width\s*:\s*([0-9.]+)px\s*(?:;|$)/i) || attr('width') || w;
+            h = px(/(?:^|;)\s*height\s*:\s*([0-9.]+)px\s*(?:;|$)/i) || attr('height') || h;
             return w + 'x' + h;
         }
-    };
+    }, null);
 
     var F = g.HTMLIFrameElement && g.HTMLIFrameElement.prototype;
     if (F) {

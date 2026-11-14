@@ -1273,9 +1273,11 @@ impl DomBindings {
     /// Ask this document for its parser's iframes (after the document is
     /// bound): each becomes a frame request.
     pub fn scan_frames(&self) -> Result<(), BindingError> {
+        // A turn like any other of the engine's that touches the page's
+        // nodes: it can be interrupted.
         self.runtime
             .borrow_mut()
-            .evaluate_host_bookkeeping("return __rk.frames ? __rk.frames.scan() : null;")?;
+            .evaluate_host_turn("return __rk.frames ? __rk.frames.scan() : null;", &[])?;
         Ok(())
     }
 
@@ -1285,7 +1287,7 @@ impl DomBindings {
         let answer = self
             .runtime
             .borrow_mut()
-            .evaluate_host_bookkeeping(&format!("return __rk.frames ? __rk.frames.size({node}) : '';"));
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.size({node}) : '';"), &[]);
         if let Ok(JsValue::String(size)) = answer {
             if let Some((w, h)) = size.split_once('x') {
                 if let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) {
@@ -1308,16 +1310,16 @@ impl DomBindings {
         let attached = self.runtime.borrow_mut().evaluate_host_bookkeeping(&format!(
             "var w = __rk.shared.handoff; __rk.shared.handoff = null; \
              var el = __rk.frames ? __rk.frames.attach({node}, w) : null; \
-             if (el) __rk.shared.handoff = {{ up: globalThis, el: el }}; \
+             if (el) __rk.shared.handoff = {{ up: globalThis, top: __rk.realTop, el: el }}; \
              return !!el;"
         ))?;
         if !matches!(attached, JsValue::Boolean(true)) {
             return Ok(false);
         }
         child.runtime.borrow_mut().evaluate_host_bookkeeping(
-            "var h = __rk.shared.handoff; __rk.shared.handoff = null; var up = h.up, el = h.el; \
+            "var h = __rk.shared.handoff; __rk.shared.handoff = null; var up = h.up, el = h.el; __rk.realTop = h.top; \
              Object.defineProperty(window, 'parent', { value: up, writable: true, configurable: true, enumerable: true }); \
-             Object.defineProperty(window, 'top', { value: up.top, writable: false, configurable: true, enumerable: true }); \
+             Object.defineProperty(window, 'top', { value: h.top, writable: false, configurable: true, enumerable: true }); \
              Object.defineProperty(window, 'frameElement', { value: el, writable: false, configurable: true, enumerable: true });",
         )?;
         Ok(true)

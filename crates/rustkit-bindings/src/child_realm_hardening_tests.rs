@@ -79,7 +79,8 @@ fn a_lazy_interface_installs_with_the_built_ins_of_realm_creation() {
 }
 
 /// The scan for the parser's iframes and a frame's size are read with the
-/// built-ins of install time: none of the page's replacements runs.
+/// built-ins of install time: none of these replacements runs, and the
+/// answers are the same.
 #[test]
 fn the_frame_scan_and_size_run_no_page_function() {
     let (parent, doc) = parent();
@@ -175,7 +176,8 @@ fn stopping_and_the_path_work_across_windows() {
 #[test]
 fn a_frames_page_reaches_none_of_the_engines_names() {
     let parent = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    let doc = Rc::new(Document::parse_html(PARENT).unwrap());
+    let page = internal_names_tests::PAGE.replace("<div id=\"host\">", "<iframe id=\"f\"></iframe><div id=\"host\">");
+    let doc = Rc::new(Document::parse_html(&page).unwrap());
     parent.set_document(doc.clone()).unwrap();
     parent.set_location(&Url::parse("https://example.test/page").unwrap()).unwrap();
     parent.enable_frames().unwrap();
