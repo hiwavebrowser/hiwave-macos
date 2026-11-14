@@ -60,7 +60,7 @@
         if (p === g.SVGSVGElement.prototype) return p;
         return SVG_PROTOS[I.local(id)] || g.SVGElement.prototype;
     });
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     Document.prototype.createElementNS = function (ns, qualified) {
         var r = NS(I.gen(), 'create', ns == null ? '' : String(ns), String(qualified));
         if (typeof r === 'string') fail('createElementNS', 'Document', r);
@@ -263,7 +263,7 @@
 
     // ---- document.activeElement with focus()/blur() (HTML §6.6). One
     // focus for script and the user: the engine moves it on a click
-    // (`__rkSetFocus`) and follows what script did (`__rkTakeFocus`).
+    // (`__rk.setFocus`) and follows what script did (`__rk.takeFocus`).
     // Nothing focused, or the focused element gone from the document,
     // answers the body.
     var focused = null, moved = false;
@@ -286,26 +286,30 @@
     }
     function current() { return focused && inDocument(focused) ? focused : null; }
     var EventCtor = g.Event, dispatchNow = g.EventTarget.prototype.dispatchEvent;
+    // The engine's focus events: built with the constructor of install
+    // time and dispatched as the engine dispatches, whatever a page has put
+    // in place of either since.
     function fire(el, type, related) {
-        var FE = g.FocusEvent || g.Event;
-        el.dispatchEvent(new FE(type, { bubbles: type === 'focusin' || type === 'focusout',
-                                        composed: true, relatedTarget: related }));
+        // FocusEvent is made after this script (web_interfaces.js); the
+        // engine's reference is on the host object.
+        var FocusEventCtor = __rk.FocusEvent || EventCtor;
+        __rk.dispatchTo(el, new FocusEventCtor(type, { bubbles: type === 'focusin' || type === 'focusout',
+                                                       composed: true, relatedTarget: related }));
     }
     // A field the user edited commits when it loses the focus: `change`
     // (HTML §4.10.5.5). `__rkFireInput` marks the edit.
     function commit(el) {
-        if (!el.__rkEdited) return;
-        el.__rkEdited = false;
+        if (!__rk.takeEdited(el)) return;
         // The engine's event: trusted, built with the Event of install
         // time and dispatched as the engine dispatches.
-        var e = new EventCtor('change', { bubbles: true });
+        var e = __rk.make('Event', 'change', { bubbles: true });
         __rk.trust(e);
-        dispatchNow.call(el, e);
+        __rk.dispatchTo(el, e);
     }
     // A composition in the element losing the focus ends first (CH2.E3).
     function finishComposing(el) {
-        var f = Document.prototype.__rkFinishComposing;
-        if (typeof f === 'function') f.call(document, el);
+        var f = __rk.finishComposing;
+        if (typeof f === 'function') f(el);
     }
     // The focus update steps: change, then blur/focusout on the old
     // element (with nothing focused), then focus/focusin on the new one.
@@ -330,28 +334,22 @@
     }
     // The user's click focused an element (by node id), or landed on
     // nothing focusable (null): the same steps script's focus() runs.
-    Object.defineProperty(Document.prototype, '__rkSetFocus', {
-        value: function (id) {
-            var el = typeof id === 'number' ? I.wrap(id) : null;
-            var old = current();
-            if (el) focus.call(el);
-            if (old && current() === old && old !== el) blur.call(old);
-            // The engine always asks afterwards: the page may have refused.
-            moved = true;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setFocus = function (id) {
+        var el = typeof id === 'number' ? I.wrap(id) : null;
+        var old = current();
+        if (el) focus.call(el);
+        if (old && current() === old && old !== el) blur.call(old);
+        // The engine always asks afterwards: the page may have refused.
+        moved = true;
+    };
     // Where the focus is, when it moved since the engine last asked: the
     // node id, -1 for nothing; undefined when it has not moved.
-    Object.defineProperty(Document.prototype, '__rkTakeFocus', {
-        value: function () {
-            if (!moved) return undefined;
-            moved = false;
-            var el = current(), s = el && I.slotOf(el);
-            return s && s.gen === I.gen() ? s.id : -1;
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.takeFocus = function () {
+        if (!moved) return undefined;
+        moved = false;
+        var el = current(), s = el && I.slotOf(el);
+        return s && s.gen === I.gen() ? s.id : -1;
+    };
     [g.HTMLElement, g.SVGElement].forEach(function (C) {
         C.prototype.focus = focus;
         C.prototype.blur = blur;

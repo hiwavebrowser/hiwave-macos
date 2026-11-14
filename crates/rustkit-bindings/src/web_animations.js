@@ -644,7 +644,11 @@
     };
     Animation.prototype._dispatch = function (type) {
         var ev = Object.create(AnimationPlaybackEvent.prototype);
-        ev.type = type; ev.target = this; ev.currentTarget = this; ev.bubbles = false;
+        ev.type = type; ev.bubbles = false;
+        // Own values: Event.prototype's target and currentTarget are
+        // read-only getters over the DOM dispatch's state.
+        Object.defineProperty(ev, 'target', { value: this, enumerable: true, configurable: true });
+        Object.defineProperty(ev, 'currentTarget', { value: this, enumerable: true, configurable: true });
         ev.currentTime = type === 'cancel' ? null : this.currentTime;
         ev.timelineTime = timeNow; ev.timeStamp = timeNow; ev.isTrusted = true;
         var h = this['on' + type];
