@@ -10,7 +10,7 @@ console.log('chrome ' + browser.version());
 for (const c of data.cases) {
   const page = await browser.newPage();
   await page.setContent('<html><body></body></html>');
-  c.chrome = await page.evaluate((js) => String((0, eval)(js)), c.js);
+  c.chrome = await page.evaluate((js) => Promise.resolve((0, eval)(js)).then(String), c.js);
   await page.close();
   console.log(c.name + '  ' + c.chrome.slice(0, 120));
 }

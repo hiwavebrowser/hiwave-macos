@@ -230,7 +230,8 @@
     // The drag in progress: its DataTransfer, and whether its source is a
     // link (for the uninitialized effectAllowed).
     var current = null, linkSource = false;
-    __rk.dragStore = {
+    // Inherits from nothing: the engine's own object, read by `fireDrag`.
+    __rk.dragStore = Object.setPrototypeOf({
         // dragstart: a fresh store, with the data the user agent puts in
         // for a link or an image (§6.11.5 step "drag data store item list").
         begin: function (source) {
@@ -278,5 +279,5 @@
             }
             return op;
         }
-    };
+    }, null);
 })(globalThis);
