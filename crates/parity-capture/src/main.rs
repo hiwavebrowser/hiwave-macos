@@ -125,6 +125,13 @@ struct Args {
     #[arg(long)]
     animations: bool,
 
+    /// Step the page clock in a load-only capture: `performance.now()`, frame and event timestamps are
+    /// virtual time plus 0.1 ms per read, with no real time in them, so two captures of a page read the
+    /// same values. Off by default: the page reads develop's real-flowing clock (batch 75: under the
+    /// stepped clock squarespace's capture drew a blank frame). Never with `--live-ms`.
+    #[arg(long)]
+    deterministic_clock: bool,
+
     /// Before the `--url` load, load this URL in the same view and turn the
     /// live loop for `--prelude-live-ms`, as a page visited earlier in a
     /// browsing session would have been; then navigate to `--url`. For
@@ -2193,8 +2200,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     if args.animations {
         config.disable_animations = false;
     }
-    // The stepped clock is for a stepped capture; a live run reads a clock that flows.
-    config.deterministic_page_clock = args.live_ms.is_none();
+    // The stepped clock only when asked for, and only for a stepped capture; a live run reads a clock
+    // that flows.
+    config.deterministic_page_clock = args.deterministic_clock && args.live_ms.is_none();
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -2419,10 +2427,11 @@ mod tests {
         assert!(capture_config(&parsed(&[]), None).disable_animations);
         assert!(capture_config(&parsed(&["--live-ms", "1000"]), None).disable_animations);
         assert!(!capture_config(&parsed(&["--animations"]), None).disable_animations);
-        // The stepped page clock is for a stepped capture; a live-ms run reads a clock that flows.
-        assert!(capture_config(&parsed(&[]), None).deterministic_page_clock);
-        assert!(!capture_config(&parsed(&["--live-ms", "1000"]), None).deterministic_page_clock);
-        assert!(capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
+        // The stepped page clock only with --deterministic-clock, and never in a live-ms run.
+        assert!(!capture_config(&parsed(&[]), None).deterministic_page_clock);
+        assert!(!capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
+        assert!(capture_config(&parsed(&["--deterministic-clock"]), None).deterministic_page_clock);
+        assert!(!capture_config(&parsed(&["--deterministic-clock", "--live-ms", "1000"]), None).deterministic_page_clock);
     }
 
     /// LAT14: the prelude page and how long it runs live before the
@@ -3491,6 +3500,21 @@ Connection: close
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let dumped = fs::read_to_string(&layout).unwrap();
         assert!(dumped.contains("clock-flows"), "a plain capture stepped the page clock: {}", &dumped[..dumped.len().min(300)]);
+        // Asked for, the stepped clock is there.
+        let stepped = dir.join("layout-stepped.json");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--deterministic-clock",
+            "--dump-layout",
+            stepped.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let dumped = fs::read_to_string(&stepped).unwrap();
+        assert!(dumped.contains("clock-stepped"), "--deterministic-clock did not step the clock");
     }
 
     /// When the load has used the capture's timeout down to the margin the frame needs, the settle does not
