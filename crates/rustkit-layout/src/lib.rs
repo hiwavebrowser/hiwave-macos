@@ -9030,11 +9030,23 @@ impl LayoutBox {
         order
     }
 
-    /// Keep the painter's order of this box for the hit test, in generation `generation` (0: not kept).
-    fn keep_stack_order(&self, generation: u64, order: &std::sync::Arc<StackOrder>) {
+    /// The painter's order of this box: the one kept in generation `generation` with these flags, with the
+    /// bounds the hit test has read into it (a list rebuilt over the same boxes, after an element scroll,
+    /// keeps them: R4 MED C on #1151), else a new one, kept (0: not kept).
+    fn paint_stack_order(&self, generation: u64, lifts: bool, reached: bool) -> std::sync::Arc<StackOrder> {
+        if generation != 0 {
+            let kept = self.stack_order.0.borrow().as_ref().and_then(|(g, o)| {
+                (*g == generation && o.flags == (lifts, reached)).then(|| o.clone())
+            });
+            if let Some(order) = kept {
+                return order;
+            }
+        }
+        let order = std::sync::Arc::new(self.stack_entries(lifts, reached));
         if generation != 0 {
             *self.stack_order.0.borrow_mut() = Some((generation, order.clone()));
         }
+        order
     }
 
     /// The positioned boxes and stacking contexts inside this box that belong to the stacking context
@@ -9466,15 +9478,15 @@ impl LayoutBox {
         // Each entry's own bounds rule it out too, before its box is read: the point is the entry's own
         // here (no scroll escaped), and a box with bounds neither moves nor holds anything outside them.
         let order = self.stack_order_kept(lifts, reached);
-        let missed = order.missed_at(self, (inner_x, inner_y), inner_escaped == (0.0, 0.0));
-        let mut chain = Vec::new();
+        let prune = inner_escaped == (0.0, 0.0);
+        let (missed, boxes) = order.scan(self, (inner_x, inner_y), prune);
         for e in order.rev_entries() {
             if missed[e.node as usize] {
                 continue;
             }
-            let path = order.path_to(self, e.node, &mut chain);
+            let Some(b) = boxes[e.node as usize] else { continue };
             let entry = StackEntry {
-                b: path[path.len() - 1],
+                b,
                 lifted: e.lifted,
                 context: e.context,
                 positioned_like: e.positioned_like,
@@ -9497,6 +9509,17 @@ impl LayoutBox {
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
+            // Under a scroll this box escapes, the scan skips nothing; a child of this box is still skipped by
+            // its own box at its own point (the test `hit_test_in` starts with, without its transform).
+            if !prune
+                && e.via_len == 0
+                && child.hit_overflow.get() == 1
+                && !child.holds_fixed_boxes()
+                && child.sticky_rule.get().is_none()
+                && !child.dimensions.border_box().contains(child_x, child_y)
+            {
+                continue;
+            }
             let child_clipped = match child.position {
                 _ if held_here => (flow_clipped, flow_clipped, fixed_clipped),
                 Position::Absolute => (absolute_clipped, absolute_clipped, fixed_clipped),
@@ -9510,10 +9533,13 @@ impl LayoutBox {
             {
                 // A box taken in from inside a child: the boxes between are its ancestors too.
                 let mut below = child;
-                for &between in path[..path.len() - 1].iter().rev() {
+                let mut up = order.nodes[e.node as usize].0;
+                while up != NO_NODE {
+                    let Some(between) = boxes[up as usize] else { break };
                     between.note_scroller_of_hit(below, &mut result);
                     between.add_as_ancestor(&mut result);
                     below = between;
+                    up = order.nodes[up as usize].0;
                 }
                 let child = below;
                 self.note_scroller_of_hit(child, &mut result);
@@ -9771,23 +9797,22 @@ impl StackOrder {
         (layer(&self.neg), layer(&self.normal), layer(&self.pos))
     }
 
-    /// For each node, whether the point (in the context's space) misses it and all it holds: it, or a box
-    /// above it, has bounds (`Bound`) the point is outside. A missed node's subtree is skipped whole; a node
-    /// is read only the first time a scan reaches it (the boxes must be marked). With `prune` off, none is
-    /// missed.
-    pub(crate) fn missed_at(&self, owner: &LayoutBox, point: (f32, f32), prune: bool) -> Vec<bool> {
+    /// One scan of the nodes for a point (in the context's space): for each node, whether the point misses it
+    /// and all it holds (it, or a box above it, has bounds (`Bound`) the point is outside), and the box of
+    /// every node the scan reached. A missed node's subtree is skipped whole; a node's bounds are read only
+    /// the first time a scan reaches it (the boxes must be marked). With `prune` off, every node is reached
+    /// and none is missed.
+    pub(crate) fn scan<'a>(&self, owner: &'a LayoutBox, point: (f32, f32), prune: bool) -> (Vec<bool>, Vec<Option<&'a LayoutBox>>) {
         let n = self.nodes.len();
         let mut missed = vec![false; n];
-        if !prune {
-            return missed;
-        }
+        let mut boxes: Vec<Option<&'a LayoutBox>> = vec![None; n];
         let mut bounds = self.bounds.lock().unwrap_or_else(|e| e.into_inner());
         if bounds.len() != n {
             bounds.clear();
             bounds.resize(n, Bound::Unknown);
         }
         // The boxes above the node being read, each with the end of its subtree.
-        let mut above: Vec<(usize, &LayoutBox)> = Vec::new();
+        let mut above: Vec<(usize, &'a LayoutBox)> = Vec::new();
         let mut i = 0;
         while i < n {
             while above.last().is_some_and(|&(end, _)| end <= i) {
@@ -9796,43 +9821,24 @@ impl StackOrder {
             let (parent, index) = self.nodes[i];
             let holder = if parent == NO_NODE { owner } else { above[above.len() - 1].1 };
             let b = &holder.children[index as usize];
-            if let Bound::Unknown = bounds[i] {
-                bounds[i] = Bound::of(b);
-            }
+            boxes[i] = Some(b);
             let end = self.ends[i] as usize;
-            if let Bound::Closed(r) = bounds[i] {
-                if !r.contains(point.0, point.1) {
-                    missed[i..end].fill(true);
-                    i = end;
-                    continue;
+            if prune {
+                if let Bound::Unknown = bounds[i] {
+                    bounds[i] = Bound::of(b);
+                }
+                if let Bound::Closed(r) = bounds[i] {
+                    if !r.contains(point.0, point.1) {
+                        missed[i..end].fill(true);
+                        i = end;
+                        continue;
+                    }
                 }
             }
             above.push((end, b));
             i += 1;
         }
-        missed
-    }
-
-    /// The boxes from the context's child down to `node`, under `owner`: one walk up the nodes (into
-    /// `chain`, reused) and one down the tree.
-    pub(crate) fn path_to<'a>(&self, owner: &'a LayoutBox, node: u32, chain: &mut Vec<u32>) -> Vec<&'a LayoutBox> {
-        chain.clear();
-        let mut n = node;
-        loop {
-            let (parent, index) = self.nodes[n as usize];
-            chain.push(index);
-            if parent == NO_NODE {
-                break;
-            }
-            n = parent;
-        }
-        let mut out = Vec::with_capacity(chain.len());
-        let mut at = owner;
-        for &index in chain.iter().rev() {
-            at = &at.children[index as usize];
-            out.push(at);
-        }
-        out
+        (missed, boxes)
     }
 
     /// The entries from the top of the paint order down.
@@ -12080,8 +12086,7 @@ impl DisplayList {
         // children taken in when this box is a stacking context (`LayoutBox::stack_entries`, which the
         // hit test reads too, so the picture and the hit agree).
         *layer += layout_box.children.len() as u32;
-        let order = std::sync::Arc::new(layout_box.stack_entries(lifts, reached));
-        layout_box.keep_stack_order(self.stack_gen.0, &order);
+        let order = layout_box.paint_stack_order(self.stack_gen.0, lifts, reached);
         let boxes = order.boxes(layout_box);
         let (negative_z, normal_flow, positive_z) = order.entries(&boxes);
         let passes_lift = lifts || reached;
