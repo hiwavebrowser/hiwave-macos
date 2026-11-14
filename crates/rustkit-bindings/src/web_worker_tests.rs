@@ -680,3 +680,34 @@ fn one_malformed_item_does_not_drop_the_rest_of_the_poll() {
     assert!(pump_until(&b, "got.length >= 2"), "lost: {}", ev(&b, "JSON.stringify(got)"));
     assert_eq!(ev(&b, "JSON.stringify(got.slice().sort())"), "[\"a:1\",\"c:2\"]");
 }
+
+/// A worker's `location` has WorkerLocation's members only (Chrome's has no `ua`); the prelude used a `ua`
+/// field on it to build `navigator` and left it there (R1 LOW on #1105). `navigator.userAgent` stays.
+#[test]
+fn a_worker_location_carries_no_user_agent_field() {
+    let b = bound();
+    b.evaluate("var seen = null, w = new Worker('http://a.test/l.js'); w.onmessage = function (e) { seen = e.data; };").unwrap();
+    serve(&b, "postMessage({ ua: 'ua' in location, nav: typeof navigator.userAgent, href: location.href });");
+    assert!(pump_until(&b, "seen !== null"), "no answer");
+    assert_eq!(ev(&b, "JSON.stringify(seen)"), "{\"ua\":false,\"nav\":\"string\",\"href\":\"http://a.test/l.js\"}");
+}
+
+/// The malformed script-request branch, pinned as the malformed error branch is: a request item the page
+/// cannot read costs only itself (R1 LOW on #1105; the guard is in the worker scope hardening fix).
+#[test]
+fn a_malformed_script_request_does_not_drop_the_rest_of_the_poll() {
+    let b = bound();
+    b.evaluate(
+        "var got = []; \
+         var a = new Worker('http://a.test/a2.js'), c = new Worker('http://a.test/c2.js'); \
+         a.onmessage = function (e) { got.push('a:' + e.data); }; c.onmessage = function (e) { got.push('c:' + e.data); };",
+    )
+    .unwrap();
+    serve(&b, "self.onmessage = function (e) { postMessage(e.data); };");
+    std::thread::sleep(Duration::from_millis(200));
+    b.workers.inject_all(|| crate::worker_host::FromWorker::Fetch { rid: 999_999, urls: "not json [".into() });
+    b.evaluate("a.postMessage('1'); c.postMessage('2');").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(pump_until(&b, "got.length >= 2"), "lost: {}", ev(&b, "JSON.stringify(got)"));
+    assert_eq!(ev(&b, "JSON.stringify(got.slice().sort())"), "[\"a:1\",\"c:2\"]");
+}
