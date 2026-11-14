@@ -771,6 +771,7 @@ impl Presenter {
         let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
             Vec::new();
         let mut urls_seen = HashSet::new();
+        let mut canvas_uploads = Vec::new();
 
         for cmd in commands {
             // Extract URL from BackgroundImage, Image and MaskedColor commands
@@ -787,6 +788,15 @@ impl Presenter {
 
             // Skip if already in renderer
             if if mask { renderer.has_mask_image(url) } else { renderer.has_image(url) } {
+                continue;
+            }
+
+            // A canvas bitmap (STR-7b) comes from the engine's canvas
+            // paints, not the image cache.
+            if crate::canvas_paint::is_bitmap_key(url) {
+                if let Some(frame) = crate::canvas_paint::bitmap_frame(url) {
+                    canvas_uploads.push((url.clone(), frame));
+                }
                 continue;
             }
 
@@ -819,8 +829,20 @@ impl Presenter {
             }
         }
 
+        // A canvas's earlier bitmaps go once a list no longer names them:
+        // every new bitmap has a key of its own.
+        renderer.retain_images(|key| {
+            !crate::canvas_paint::is_bitmap_key(key) || urls_seen.contains(&(key.to_string(), false))
+        });
+
         // Now upload all collected images
         let mut uploaded_count = 0;
+        for (key, frame) in canvas_uploads {
+            match renderer.upload_premultiplied_image(&key, frame.width, frame.height, &frame.rgba) {
+                Ok(()) => uploaded_count += 1,
+                Err(e) => tracing::warn!(?e, "Failed to upload a canvas bitmap"),
+            }
+        }
         for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
             let uploaded = if mask {

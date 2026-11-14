@@ -1436,7 +1436,7 @@ fn layout_flex_container_at(
                 if !item.auto_min_main || item.layout_box.children.is_empty() {
                     continue;
                 }
-                let mut auto_min = content_border_height(item.layout_box);
+                let mut auto_min = content_suggestion_border_height(item.layout_box);
                 // Specified size suggestion: a definite height caps it.
                 if let Some(h) = item.specified_main {
                     auto_min = auto_min.min(h);
@@ -3358,9 +3358,28 @@ fn spec_height_to_border_box(b: &LayoutBox, h: f32) -> f32 {
 /// viewport, and reading that as content floored x's `flex-1` main row at
 /// 1011, pushing its footer out of the first viewport.
 fn content_border_height(b: &LayoutBox) -> f32 {
+    content_border_height_impl(b, false)
+}
+
+/// §4.5's content size suggestion for step 11d: the border-box height the
+/// item's CONTENT needs, whatever its own `height` says. With
+/// `content_border_height` a `height: 300px` item measured its specified
+/// 300, so its automatic minimum, min(content, specified), was 300 even
+/// around 100px of content and the item never shrank (FX1: two 300px items
+/// in a 500px column stayed 300/300; Chrome 148 300/200).
+fn content_suggestion_border_height(b: &LayoutBox) -> f32 {
+    content_border_height_impl(b, true)
+}
+
+fn content_border_height_impl(b: &LayoutBox, ignore_own_height: bool) -> f32 {
     let d = &b.dimensions;
     let pb = d.padding.vertical() + d.border_with_gutter().vertical();
-    let pct_height = match b.style.height {
+    let pct_height = if ignore_own_height {
+        // The box's used height is not a content measure here, so an empty
+        // extent means no content: never fall back to `content.height`
+        // unless the height is `auto` (as `content_border_height` does).
+        !matches!(b.style.height, Length::Auto | Length::FitContent)
+    } else { match b.style.height {
         Length::Px(h) => return spec_height_to_border_box(b, h),
         // `fit-content` is content-sized like `auto`. On the `_` arm it read
         // the box's own height, which for a squeezed `flex: 1` item is the 0
@@ -3371,7 +3390,7 @@ fn content_border_height(b: &LayoutBox) -> f32 {
         Length::Percent(_) => true,
         // Any other length (vh, em, calc…) is already resolved.
         _ => return d.content.height + pb,
-    };
+    } };
     let min = match b.style.min_height {
         Length::Px(h) => spec_height_to_border_box(b, h),
         ref l if crate::grid::is_font_or_viewport_relative(l) => {
