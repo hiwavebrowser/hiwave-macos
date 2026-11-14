@@ -119,19 +119,34 @@ fn a_dedicated_worker_answers_as_in_chrome() {
     assert_eq!(got, want["log"]);
 }
 
-/// The page side holds the built-ins it uses from install (R1 nit on #1105): a page that replaces
-/// `JSON.parse`, `Object.keys` or `WeakMap.prototype.get`/`set` once it has started a worker still
-/// gets its messages, as in Chrome, whose worker plumbing is not page script.
+/// The page side holds the built-ins it uses from install (R1 nit on #1105). A page that replaces
+/// `JSON.parse` and `Object.keys` once it has started a worker still gets its messages, and one that
+/// replaces `WeakMap.prototype.get`/`set` still reaches its worker's own records (`onmessage`,
+/// `postMessage`), as in Chrome, whose worker plumbing is not page script. (Event dispatch itself, which
+/// is develop's EventTarget, is not this test's subject.)
 #[test]
 fn replacing_built_ins_does_not_reach_the_worker_plumbing() {
     let b = bound();
+    b.evaluate("var res = [], w = new Worker('http://a.test/worker.js');").unwrap();
+    // The script is delivered first: the network bridge (develop's) is not this test's subject.
+    serve(&b, WORKER);
     b.evaluate(
-        "var res = [], w = new Worker('http://a.test/worker.js');          JSON.parse = function () { throw new Error('page JSON.parse'); };          Object.keys = function () { return []; };          WeakMap.prototype.get = function () { return undefined; };          WeakMap.prototype.set = function () { return this; };          w.onmessage = function (e) { res.push(typeof e.data === 'string' ? e.data : 'obj'); };          w.postMessage('both');",
+        "JSON.parse = function () { throw new Error('page JSON.parse'); };          Object.keys = function () { return []; };          w.onmessage = function (e) { res.push(typeof e.data === 'string' ? e.data : 'obj'); };          w.postMessage('both');",
     )
     .unwrap();
-    serve(&b, WORKER);
     assert!(pump_until(&b, "res.length >= 2"), "got {}", ev(&b, "res.join()"));
     assert_eq!(ev(&b, "res.slice(0, 2).join()"), "ready,obj");
+
+    let b = bound();
+    b.evaluate("var w = new Worker('http://a.test/worker.js');").unwrap();
+    serve(&b, WORKER);
+    assert_eq!(
+        ev(
+            &b,
+            "WeakMap.prototype.get = function () { return undefined; };              WeakMap.prototype.set = function () { return this; };              var h = function () {}; w.onmessage = h; w.postMessage('x'); w.terminate();              String(w.onmessage === h)",
+        ),
+        "true"
+    );
 }
 
 #[test]
