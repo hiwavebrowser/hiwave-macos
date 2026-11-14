@@ -61,11 +61,14 @@ fn a_page_cannot_reach_the_engines_event_internals_or_forge_trust() {
         "var e = new Event('x'); try { e.isTrusted = true; } catch (_) {} document.dispatchEvent(e); \
          var k = new KeyboardEvent('keydown', { key: 'z' }); try { k.isTrusted = true; } catch (_) {} document.dispatchEvent(k); \
          try { Object.defineProperty(k, 'isTrusted', { value: true }); } catch (_) {} seen.push('redefined ' + k.isTrusted); \
-         document.dispatchEvent({ type: 'x', isTrusted: true, bubbles: false, cancelable: false, target: null }); 0",
+         try { document.dispatchEvent({ type: 'x', isTrusted: true, bubbles: false, cancelable: false, target: null }); } \
+         catch (e) { seen.push('look-alike ' + e.name); } 0",
     );
     assert_eq!(
         js(&mut engine, view, "seen.join(' | ')"),
-        "mousemove r true | keydown true | textInput true q | x false | keydown false | redefined false | x false"
+        // (A look-alike event is not dispatched at all: a TypeError, as in
+        // Chrome 148; pinned in dispatch_event_argument_tests.)
+        "mousemove r true | keydown true | textInput true q | x false | keydown false | redefined false | look-alike TypeError"
     );
 }
 

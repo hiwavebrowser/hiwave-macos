@@ -2,7 +2,7 @@
 //! commits, the Edit menu's commands and Cmd chords, as the content view's
 //! `NSTextInputClient` and responder methods hand them to the page.
 //!
-//! The composition's events are script's (`document.__rkCompose` in
+//! The composition's events are script's (`__rk.compose` in
 //! rustkit-bindings' `dom/editing.js`); the order is Chrome 143's, logged
 //! by `tools/parity_oracle/composition_log.mjs`.
 
@@ -40,7 +40,7 @@ impl Engine {
         (self.focused_is_text_control(id) && !self.is_editing_host(id, focused)).then_some(focused)
     }
 
-    /// Run `__rkCompose` in the focused text control, then lay out what
+    /// Run `__rk.compose` in the focused text control, then lay out what
     /// its listeners and the edit changed. `None` when no text control has
     /// focus or script answered nothing.
     fn compose(&mut self, id: EngineViewId, action: &str, text: &str) -> Option<serde_json::Value> {

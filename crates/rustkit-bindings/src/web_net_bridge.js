@@ -5,12 +5,12 @@
 // on the queue and wait; the engine takes the queue, runs each request under
 // its FetchPolicy (the one allow/deny layer, in rustkit-net), and delivers
 // the result back. A bindings instance the engine never enabled the bridge
-// on has no __rustkit_net, so nothing built on it can exist there: never a
+// on has no __rk.net, so nothing built on it can exist there: never a
 // permissive stand-in.
 //
 // Installed by DomBindings::enable_net_bridge, not at startup.
 (function () {
-    if (window.__rustkit_net) return;
+    if (__rk.net) return;
 
     // Bounds what a page can park before the engine drains: past it a
     // request is refused (0) and the surface reports a network error. The
@@ -159,5 +159,5 @@
         }
     };
 
-    Object.defineProperty(window, '__rustkit_net', { value: bridge });
+    __rk.net = bridge;
 })();

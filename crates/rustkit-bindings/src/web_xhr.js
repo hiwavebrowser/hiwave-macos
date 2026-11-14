@@ -1,7 +1,7 @@
 // XMLHttpRequest, built on the script-network bridge (web_net_bridge.js).
 //
 // This file has no network access of its own: send() queues a request on
-// window.__rustkit_net and waits for the engine to deliver the outcome, after
+// __rk.net and waits for the engine to deliver the outcome, after
 // the request has been vetted and fetched under the page's FetchPolicy (the
 // one allow/deny layer). It is installed only after the bridge, so a page the
 // engine did not enable the bridge on has no XMLHttpRequest at all.
@@ -12,7 +12,7 @@
 // 'document' / responseXML are not supported (the response is null); no
 // cookies (the policy sends none).
 (function (g) {
-    var net = g.__rustkit_net;
+    var net = __rk.net;
     if (!net || typeof g.XMLHttpRequest === 'function') return;
 
     var UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
