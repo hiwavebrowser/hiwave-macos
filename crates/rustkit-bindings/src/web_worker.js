@@ -18,6 +18,11 @@
     // Captured once; page script does not get the bridge.
     ['spawn', 'post', 'poll', 'reply', 'terminate'].forEach(function (n) { delete g['__rustkit_worker_' + n]; });
     var states = new WeakMap();
+    // The built-ins this script uses, held from install as the event code holds its own: later page
+    // script that replaces them does not reach the worker records.
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var stateOf = uncurry(WeakMap.prototype.get), setState = uncurry(WeakMap.prototype.set);
+    var objKeys = Object.keys, isArray = Array.isArray, jsonParse = JSON.parse, jsonStringify = JSON.stringify;
     var live = {};
     var MAX_QUEUED = 1024;
 
@@ -59,17 +64,17 @@
     // answer the worker, which waits for the whole set.
     function serviceFetch(st, rid, urlsJson) {
         var urls = null, id = st.id;
-        try { urls = JSON.parse(urlsJson); } catch (_) {}
+        try { urls = jsonParse(urlsJson); } catch (_) {}
         // A malformed request is answered with nothing loaded (importScripts then fails with its
         // NetworkError); the worker waits for an answer, so it always gets one.
-        if (!Array.isArray(urls) || !urls.length) {
+        if (!isArray(urls) || !urls.length) {
             if (!st.dead) reply(id, rid, '[]');
             return;
         }
         var out = [], left = urls.length, net = __rk.net;
         function settle(i, value) {
             out[i] = value;
-            if (--left === 0 && !st.dead && st.id === id) reply(id, rid, JSON.stringify(out));
+            if (--left === 0 && !st.dead && st.id === id) reply(id, rid, jsonStringify(out));
         }
         urls.forEach(function (raw, i) {
             var href;
@@ -87,7 +92,7 @@
     // number). Each turn starts after the worker the last one ended on, so a busy worker cannot starve the rest.
     var TURN_ITEMS = 256, nextWorker = 0;
     function pump() {
-        var ran = 0, left = TURN_ITEMS, keys = Object.keys(live), n = keys.length;
+        var ran = 0, left = TURN_ITEMS, keys = objKeys(live), n = keys.length;
         var start = n ? nextWorker % n : 0;
         for (var j = 0; j < n && left > 0; j++) {
             var key = keys[(start + j) % n];
@@ -99,8 +104,8 @@
             // One malformed item costs only itself: the rest of this worker's items and the other
             // workers' still run this turn.
             var items = null;
-            try { items = JSON.parse(raw); } catch (_) {}
-            if (!Array.isArray(items)) continue;
+            try { items = jsonParse(raw); } catch (_) {}
+            if (!isArray(items)) continue;
             left -= items.length;
             for (var i = 0; i < items.length; i++) {
                 if (st.dead) break;
@@ -112,7 +117,7 @@
                     fire(st.w, new g.MessageEvent('message', { data: data, origin: '' }));
                 } else if (it.k === 'e') {
                     var info = null, ev;
-                    try { info = JSON.parse(it.m); } catch (_) {}
+                    try { info = jsonParse(it.m); } catch (_) {}
                     if (info === null || typeof info !== 'object') info = {};
                     if (typeof g.ErrorEvent === 'function') {
                         ev = new g.ErrorEvent('error', {
@@ -136,9 +141,9 @@
         return {
             configurable: true,
             enumerable: true,
-            get: function () { var st = states.get(this); return st ? st.on[type] || null : null; },
+            get: function () { var st = stateOf(states, this); return st ? st.on[type] || null : null; },
             set: function (fn) {
-                var st = states.get(this);
+                var st = stateOf(states, this);
                 if (!st) return;
                 st.on[type] = typeof fn === 'function' ? fn : null;
                 if (!st.reg[type]) {
@@ -173,7 +178,7 @@
                 throw dom("Failed to construct 'Worker': Script at '" + u.href + "' cannot be accessed from origin '" + pageOrigin + "'.", 'SecurityError');
             }
             var st = { w: this, href: u.href, id: 0, dead: false, queue: [], net: 0, on: {}, reg: {} };
-            states.set(this, st);
+            setState(states, this, st);
             var name = options && options.name !== undefined ? String(options.name) : '';
             var self = this;
             // The source is in hand (blob:, data:) or comes over the bridge.
@@ -184,7 +189,7 @@
                     port: u.port, pathname: u.pathname, search: u.search, hash: u.hash,
                     ua: g.navigator ? String(g.navigator.userAgent) : ''
                 };
-                var id = spawn(source, name, JSON.stringify(loc));
+                var id = spawn(source, name, jsonStringify(loc));
                 if (!id) { failLoad(self, st); return; }
                 st.id = id;
                 live[id] = st;
@@ -223,7 +228,7 @@
             if (arguments.length < 1) {
                 throw new TypeError("Failed to execute 'postMessage' on 'Worker': 1 argument required, but only 0 present.");
             }
-            var st = states.get(this);
+            var st = stateOf(states, this);
             if (!st) throw new TypeError('Illegal invocation');
             var json = encode(message, transfer);
             if (st.dead) return;
@@ -231,7 +236,7 @@
             else if (st.queue.length < MAX_QUEUED) st.queue.push(json);
         }
         terminate() {
-            var st = states.get(this);
+            var st = stateOf(states, this);
             if (!st) throw new TypeError('Illegal invocation');
             if (st.dead) return;
             st.dead = true;

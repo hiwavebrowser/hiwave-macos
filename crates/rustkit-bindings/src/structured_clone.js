@@ -13,6 +13,11 @@
 // buffer with the same bytes. Only once the whole graph has serialized.
 (function (g) {
     'use strict';
+    // The built-ins the codec leans on, held from install: page script that later replaces them does not
+    // reach a message (R1 nit on #1105). The array methods it calls are not held yet (a follow-up).
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var jsonParse = JSON.parse, jsonStringify = JSON.stringify, objKeys = Object.keys, isArray = Array.isArray;
+    var defineProp = Object.defineProperty, objCreate = Object.create, toStr = uncurry(Object.prototype.toString);
     var HEX = [];
     for (var h = 0; h < 256; h++) HEX.push((h < 16 ? '0' : '') + h.toString(16));
     var ERROR_NAMES = ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError'];
@@ -28,7 +33,7 @@
     function describe(v) {
         try { return typeof v === 'function' ? String(v).slice(0, 40) : String(v); } catch (_) { return '#<Object>'; }
     }
-    function tagOf(v) { return Object.prototype.toString.call(v).slice(8, -1); }
+    function tagOf(v) { return toStr(v).slice(8, -1); }
     function isDomNode(v) {
         return typeof g.Node === 'function' && v instanceof g.Node;
     }
@@ -49,7 +54,7 @@
         var ids = new Map(), nodes = [];
         var list = [];
         if (transfer !== undefined && transfer !== null) {
-            if (typeof transfer === 'object' && !Array.isArray(transfer) && 'transfer' in transfer) transfer = transfer.transfer;
+            if (typeof transfer === 'object' && !isArray(transfer) && 'transfer' in transfer) transfer = transfer.transfer;
             if (transfer === undefined || transfer === null) transfer = [];
             for (var t = 0; t < transfer.length; t++) {
                 var b = transfer[t];
@@ -95,13 +100,13 @@
                 rec.t = 'W'; rec.k = tag; rec.v = enc(v.valueOf());
             } else if (UNCLONEABLE.indexOf(tag) >= 0 || isDomNode(v)) {
                 throw cloneError(describe(v) + ' could not be cloned.', where);
-            } else if (Array.isArray(v)) {
+            } else if (isArray(v)) {
                 rec.t = 'a'; rec.l = v.length; rec.k = [];
-                var keys = Object.keys(v);
+                var keys = objKeys(v);
                 for (var i = 0; i < keys.length; i++) rec.k.push([keys[i], enc(v[keys[i]])]);
             } else {
                 rec.t = 'o'; rec.k = [];
-                var own = Object.keys(v);
+                var own = objKeys(v);
                 for (var j = 0; j < own.length; j++) rec.k.push([own[j], enc(v[own[j]])]);
             }
             return { '@': id };
@@ -123,7 +128,7 @@
         }
 
         var root = enc(value);
-        var text = JSON.stringify({ r: root, n: nodes });
+        var text = jsonStringify({ r: root, n: nodes });
         // Detach only once everything serialized.
         for (var d = 0; d < list.length; d++) list[d].transfer();
         return text;
@@ -132,7 +137,7 @@
     // The decoder builds only what the encoder describes: own markers, ids that are records of this
     // payload, the allowed view and error constructors, and own data properties for keys. Anything else
     // is a DataCloneError (the page turns it into a `messageerror`); nothing is built from it.
-    var own = Object.prototype.hasOwnProperty;
+    var own = uncurry(Object.prototype.hasOwnProperty);
     function refused() {
         var D = g.DOMException;
         return typeof D === 'function'
@@ -140,25 +145,25 @@
             : new Error('DataCloneError: the message could not be deserialized.');
     }
     function define(out, key, v) {
-        Object.defineProperty(out, String(key), { value: v, writable: true, enumerable: true, configurable: true });
+        defineProp(out, String(key), { value: v, writable: true, enumerable: true, configurable: true });
     }
     function deserialize(text) {
-        var data = JSON.parse(text);
-        if (data === null || typeof data !== 'object' || !own.call(data, 'r') || !Array.isArray(data.n)) throw refused();
-        var nodes = data.n, made = Object.create(null);
-        function list(v) { if (!Array.isArray(v)) throw refused(); return v; }
+        var data = jsonParse(text);
+        if (data === null || typeof data !== 'object' || !own(data, 'r') || !isArray(data.n)) throw refused();
+        var nodes = data.n, made = objCreate(null);
+        function list(v) { if (!isArray(v)) throw refused(); return v; }
         function dec(e) {
             if (e === null || typeof e !== 'object') return e;
-            if (own.call(e, '@')) return build(e['@']);
-            if (own.call(e, 'u')) return undefined;
-            if (own.call(e, 'z')) return -0;
-            if (own.call(e, 'n')) return e.n === 'NaN' ? NaN : e.n === 'Inf' ? Infinity : -Infinity;
-            if (own.call(e, 'b')) return g.BigInt(e.b);
+            if (own(e, '@')) return build(e['@']);
+            if (own(e, 'u')) return undefined;
+            if (own(e, 'z')) return -0;
+            if (own(e, 'n')) return e.n === 'NaN' ? NaN : e.n === 'Inf' ? Infinity : -Infinity;
+            if (own(e, 'b')) return g.BigInt(e.b);
             throw refused();
         }
         function build(id) {
             if (typeof id !== 'number' || id !== Math.floor(id) || id < 0 || id >= nodes.length) throw refused();
-            if (own.call(made, id)) return made[id];
+            if (own(made, id)) return made[id];
             var rec = nodes[id], out, i;
             if (rec === null || typeof rec !== 'object') throw refused();
             switch (rec.t) {
