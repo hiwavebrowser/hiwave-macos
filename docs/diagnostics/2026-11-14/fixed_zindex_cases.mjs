@@ -18,6 +18,18 @@ const cases = {
   fixed_z9_in_z0_context_under_fixed_z1: `<div style='position:relative;z-index:0'><div ${A}position:fixed;z-index:9'></div></div><div ${B}position:fixed;z-index:1'></div>`,
   absolute_z2_over_fixed_z1_later: `<div ${A}position:absolute;z-index:2'></div><div ${B}position:fixed;z-index:1'></div>`,
   fixed_header_auto_over_fixed_bg_negative_in_wrapper: `<div ${A}position:fixed'></div><div><div ${B}position:fixed;z-index:-1'></div></div>`,
+  // R1 on #1151. A static flex item with a z-index paints as if positioned (netflix's hero).
+  flex_item_z3_over_earlier_absolute: `<div style='position:relative;display:flex;width:300px;height:300px'><div id=a style='position:absolute;inset:0;background:rgb(255,0,0)'></div><div id=b style='z-index:3;width:300px;height:300px;flex:none;background:rgb(0,0,255)'></div></div>`,
+  flex_item_z3_over_absolute_one_layer_down: `<div style='position:relative;display:flex;width:300px;height:300px'><div style='position:absolute;inset:0'><div id=a style='width:300px;height:300px;background:rgb(255,0,0)'></div></div><div id=b style='z-index:3;width:300px;height:300px;flex:none;background:rgb(0,0,255)'></div></div>`,
+  // A non-positioned stacking context paints at z 0 in tree order with the positioned boxes.
+  opacity_block_after_earlier_absolute_in_wrapper: `<div><div id=a style='position:absolute;left:0;top:0;width:300px;height:300px;background:rgb(255,0,0)'></div></div><div id=b style='opacity:.99;width:300px;height:300px;background:rgb(0,0,255)'></div>`,
+  transform_block_after_earlier_absolute_in_wrapper: `<div><div id=a style='position:absolute;left:0;top:0;width:300px;height:300px;background:rgb(255,0,0)'></div></div><div id=b style='transform:translateX(0);width:300px;height:300px;background:rgb(0,0,255)'></div>`,
+  // body { overflow-x: hidden } does not clip (the root's overflow is visible: it goes to the viewport).
+  body_overflow_x_hidden_fixed_z5_in_wrapper: `<style>body{overflow-x:hidden}</style><div><div ${A}position:fixed;z-index:5'></div></div><div ${B}position:fixed;z-index:1'></div>`,
+  // Absolute boxes: the picture and elementFromPoint must agree.
+  absolute_z5_in_static_wrapper_over_absolute_z1: `<div><div ${A}position:absolute;z-index:5'></div></div><div ${B}position:absolute;z-index:1'></div>`,
+  // Not lifted by this change (a clipping wrapper stops the lift); recorded so the test names it.
+  fixed_z5_in_overflow_hidden_wrapper_over_fixed_z1: `<div style='overflow:hidden;height:10px'><div ${A}position:fixed;z-index:5'></div></div><div ${B}position:fixed;z-index:1'></div>`,
 };
 fs.writeFileSync(casesOut, JSON.stringify(cases, null, 1));
 const b = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu"] });
