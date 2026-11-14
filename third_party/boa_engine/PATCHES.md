@@ -679,3 +679,20 @@ plain object that is its own element prints `[object Object]`, as in Chrome). `t
 with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
 (19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
 cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
+
+## Patch: a dead zone for `let`/`const`/`class` declared in a `switch` case (`switch-tdz`)
+
+**Why.** A binding declared in one `switch` case is reached by jumps that skip its declaration
+(`case 0: let z = 1; break; case 1: z`). Boa kept it in a register, and registers have no run-time
+dead zone: compilation follows source order, so the later case's access compiled as initialised and
+read whatever the reused register last held (another local's value, the switch value), where Chrome
+throws ReferenceError. A non-local `const` there had the same hole through `const_binding_cache`.
+
+**What.** In vendored `boa_ast` (`src/scope_analyzer.rs`, `visit_switch_mut` of the escape analysis,
+marked `HIWAVE PATCH (switch-tdz)`): a switch scope's bindings always escape, so they live in a
+declarative environment (as they already did under direct `eval`), whose uninitialised binding throws.
+In `src/bytecompiler/mod.rs` and `statement/switch.rs`: a `const` of a switch scope is not cached in a
+register (`switch_scope_ids`). The cost is limited to `switch` statements that declare a lexical
+binding in a case. Pin: `crates/rustkit-js/tests/switch_tdz.rs` (14 cases from Chrome 148.0.7778.216,
+including fallthrough, same-case access, hoisted functions, closures and a fresh binding per loop
+iteration; 9 differed before).

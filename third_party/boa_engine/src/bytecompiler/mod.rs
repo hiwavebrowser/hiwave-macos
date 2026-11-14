@@ -541,6 +541,12 @@ pub struct ByteCompiler<'ctx> {
     /// Avoids repeated `GetName` environment lookups for immutable bindings.
     const_binding_cache: FxHashMap<BindingLocator, u32>,
 
+    /// HIWAVE PATCH (switch-tdz): the unique ids of the switch scopes being compiled. A `const`
+    /// declared directly in one is not cached in a register: a later case can be reached without
+    /// the declaration having run, and the cached register would hold a stale value instead of
+    /// raising the dead-zone ReferenceError the environment raises.
+    pub(crate) switch_scope_ids: Vec<u32>,
+
     jump_info: Vec<JumpControlInfo>,
 
     /// Used to handle exception throws that escape the async function types.
@@ -668,6 +674,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             names_map: FxHashMap::default(),
             bindings_map: FxHashMap::default(),
             const_binding_cache: FxHashMap::default(),
+            switch_scope_ids: Vec::new(),
             jump_info: Vec::new(),
             async_handler: None,
             json_parse,
@@ -2323,11 +2330,17 @@ impl<'ctx> ByteCompiler<'ctx> {
                                 );
                                 // Cache non-local const bindings in a persistent register
                                 // so subsequent reads avoid GetName environment lookups.
-                                let cache_reg = self.register_allocator.alloc_persistent();
-                                self.bytecode
-                                    .emit_move(cache_reg.variable(), value.variable());
-                                self.const_binding_cache
-                                    .insert(binding.locator(), cache_reg.index());
+                                // HIWAVE PATCH (switch-tdz): not for a const of a switch scope.
+                                if !self
+                                    .switch_scope_ids
+                                    .contains(&binding.locator().unique_scope_id())
+                                {
+                                    let cache_reg = self.register_allocator.alloc_persistent();
+                                    self.bytecode
+                                        .emit_move(cache_reg.variable(), value.variable());
+                                    self.const_binding_cache
+                                        .insert(binding.locator(), cache_reg.index());
+                                }
                                 self.register_allocator.dealloc(value);
                             }
                         }
