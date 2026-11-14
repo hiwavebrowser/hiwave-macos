@@ -2918,7 +2918,14 @@ const WRAPPERS_JS: &str = r#"
     // Only an event this code just made with a constructor kept at install
     // (`make`) can be trusted, and once: whatever a page has put on the
     // window since never builds an event the engine marks.
-    var CTORS = Object.create(null), MADE = new WeakSet();
+    //
+    // The constructors and prototypes are each window's own (an event is
+    // built on the prototype of the window that makes it). What is kept
+    // about an event is the frame tree's, as the trust sets are: one
+    // window makes an event, another may dispatch it, and a listener may
+    // reach it through either window's prototypes; all of them read and
+    // write the one record.
+    var CTORS = Object.create(null), MADE = SHARED.made || (SHARED.made = new WeakSet());
     // The engine builds its events with nothing a page can reach: these
     // built-ins are taken now, and every descriptor has no prototype.
     var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
@@ -2948,12 +2955,18 @@ const WRAPPERS_JS: &str = r#"
     var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
-    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    var PROTOS = Object.create(null), EVTYPE = SHARED.evType || (SHARED.evType = new WeakMap()),
+        KIND = SHARED.kind || (SHARED.kind = new WeakMap());
     // An event's dispatch state, private: `target`, `currentTarget` and
     // `eventPhase` are read-only getters over these (as in Chrome), and an
     // event being dispatched is in DISPATCHING, which the initializers
-    // check.
-    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    // check. Shared by the frame tree: an event in flight in one window
+    // is in flight for every window's `initEvent` and `dispatchEvent`, and
+    // its target reads the same through every window's `Event.prototype`.
+    var EV_TARGET = SHARED.evTarget || (SHARED.evTarget = new WeakMap()),
+        EV_CURRENT = SHARED.evCurrent || (SHARED.evCurrent = new WeakMap()),
+        EV_PHASE = SHARED.evPhase || (SHARED.evPhase = new WeakMap()),
+        DISPATCHING = SHARED.dispatching || (SHARED.dispatching = new WeakSet());
     __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
     var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
     __rk.keepCtor = function (name, C, parent, fields) {
@@ -6147,7 +6160,9 @@ const WRAPPERS_JS: &str = r#"
         N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
     }
     function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
-    var LEGACY_TYPE = new WeakMap();
+    // The frame tree's, as the type map is: the window that dispatches an
+    // event may not be the one that made it.
+    var LEGACY_TYPE = SHARED.legacyType || (SHARED.legacyType = new WeakMap());
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
