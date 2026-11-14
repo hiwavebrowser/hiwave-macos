@@ -406,3 +406,50 @@ fn with_the_file_on_the_inspector_still_gets_shapes_only() {
     }
     assert_eq!(lines(&path).len(), 3);
 }
+
+// ---- R1 nit 1: a script that never ends ----
+
+/// With no panel open the calls waited for the script's end, so a script
+/// that hung, or was stopped at the budget, left nothing in the file.
+#[test]
+fn a_line_is_written_when_it_is_logged_not_when_its_script_ends() {
+    let path = scratch("live");
+    let _reset = Reset(path.clone());
+    crate::console_file::force_for_test(Some(Forced::On(path.clone(), MAX_FILE_BYTES)));
+    // Logs, then spins (callbacks, not a loop statement, so the
+    // loop-iteration limit does not end it) until the budget interrupt
+    // stops it at a host call.
+    let page = "<html><body><p id=\"p\"></p><script>
+console.log('logged-before-the-spin');
+var spun = 0; var row = new Array(4000).fill(0);
+row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); });
+console.log('never-reached');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let config = EngineConfig { script_budget_ms: 1000, interrupt_scripts_at_budget: true, ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 }).expect("view");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (stop, path) = (stop.clone(), path.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("logged-before-the-spin")) {
+                    return Some(std::time::Instant::now());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    runtime().block_on(engine.load_url(view, server.url("/"))).expect("load_url");
+    let ended = std::time::Instant::now();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = reader.join().unwrap();
+    assert_eq!(engine.script_log(view).unwrap()[0].outcome, ScriptOutcome::OverBudget, "the script was not stopped at the budget");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("logged-before-the-spin"), "the stopped script's line is not in the file: {text:?}");
+    assert!(!text.contains("never-reached"));
+    let early = ended.saturating_duration_since(seen.expect("the line was not in the file while the load ran"));
+    assert!(early >= std::time::Duration::from_millis(400), "the line was written only {early:?} before the load ended");
+}
