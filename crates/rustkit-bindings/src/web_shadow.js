@@ -26,7 +26,7 @@
 // The event hooks are installed only once a document has a shadow root
 // (attachShadow, or a declarative one when the document is bound).
 (function (g) {
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     var document = g.document;
     var S = g.__rkShadowInternals;
     delete g.__rkShadowInternals;
@@ -83,9 +83,9 @@
         HOOKS.retarget = retarget;
     }
     // A newly bound document may come with declarative shadow roots.
-    var reset = g.__rustkit_dom_reset;
+    var reset = __rk.domReset;
     if (typeof reset === 'function') {
-        g.__rustkit_dom_reset = function (newGen) {
+        __rk.domReset = function (newGen) {
             var r = reset.apply(this, arguments);
             if (S.call('any', document) === true) installHooks();
             return r;
