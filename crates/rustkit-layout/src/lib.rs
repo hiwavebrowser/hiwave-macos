@@ -1644,7 +1644,11 @@ pub enum BoxType {
 /// Which sides a float has been placed on so far in a formatting context
 /// (`collapses_through`): a `clear` can only take clearance from a float on
 /// a side it clears.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// What one walk decided about whether boxes collapse through (`LayoutBox::collapses_through_in`): by
+/// box address and the floats before it. Lives for one walk over a tree it does not change.
+type CollapseMemo = HashMap<(usize, FloatSides), bool>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct FloatSides {
     left: bool,
     right: bool,
@@ -5149,6 +5153,23 @@ impl LayoutBox {
     /// (`floats_before`). Neither collapses through here. A `clear` with no
     /// float before it, an empty clearfix, still does.
     fn collapses_through(&self, width: f32, floats_before: FloatSides) -> bool {
+        self.collapses_through_in(width, floats_before, &mut CollapseMemo::new())
+    }
+
+    /// `collapses_through`, with what was decided about the boxes below in `memo` (one walk of one tree:
+    /// boxes by address, with the floats before them; the width is the walk's). A chain of nested blocks
+    /// asks about the same boxes at every level: each is decided once.
+    fn collapses_through_in(&self, width: f32, floats_before: FloatSides, memo: &mut CollapseMemo) -> bool {
+        let key = (self as *const LayoutBox as usize, floats_before);
+        if let Some(&known) = memo.get(&key) {
+            return known;
+        }
+        let through = self.collapses_through_uncached(width, floats_before, memo);
+        memo.insert(key, through);
+        through
+    }
+
+    fn collapses_through_uncached(&self, width: f32, floats_before: FloatSides, memo: &mut CollapseMemo) -> bool {
         count_margin_walk();
         matches!(self.box_type, BoxType::Block)
             && self.style.display != rustkit_css::Display::Inline
@@ -5174,8 +5195,11 @@ impl LayoutBox {
                         return true;
                     }
                     let through = !floats_before.cleared_by(c.style.clear)
-                        && c.collapses_through(width, floats_before);
-                    c.holds_float(&mut floats_before);
+                        && c.collapses_through_in(width, floats_before, memo);
+                    // `all` stops at the first that does not: its floats are not needed then.
+                    if through {
+                        c.holds_float(&mut floats_before);
+                    }
                     through
                 })
             }
@@ -5255,6 +5279,7 @@ impl LayoutBox {
         let mut chain = Vec::new();
         let mut node = self;
         let mut float_before = floats_before;
+        let mut memo = CollapseMemo::new();
         loop {
             let border_top = node.length_to_px(&node.style.border_top_width, width);
             let padding_top = node.length_to_px(&node.style.padding_top, width);
@@ -5275,7 +5300,7 @@ impl LayoutBox {
                 }
                 // A `clear` with no float on its side before it gets no
                 // clearance: the chain walks past it as past any empty box.
-                if !c.collapses_through(width, float_before)
+                if !c.collapses_through_in(width, float_before, &mut memo)
                     || float_before.cleared_by(c.style.clear)
                 {
                     first = Some(c);
