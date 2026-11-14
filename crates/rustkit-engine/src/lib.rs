@@ -692,6 +692,8 @@ mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod app_bridge_tests;
 #[cfg(all(test, feature = "headless"))]
+mod deep_relayout_cost_tests;
+#[cfg(all(test, feature = "headless"))]
 mod text_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod text_control_select_tests;

@@ -5149,6 +5149,7 @@ impl LayoutBox {
     /// (`floats_before`). Neither collapses through here. A `clear` with no
     /// float before it, an empty clearfix, still does.
     fn collapses_through(&self, width: f32, floats_before: FloatSides) -> bool {
+        count_margin_walk();
         matches!(self.box_type, BoxType::Block)
             && self.style.display != rustkit_css::Display::Inline
             && !self.style.display.is_atomic_inline()
@@ -5220,6 +5221,7 @@ impl LayoutBox {
     /// Adds the sides of the floats in this box, and in any non-root box
     /// inside it, to `sides`.
     fn holds_float(&self, sides: &mut FloatSides) {
+        count_margin_walk();
         for c in &self.children {
             sides.add(c.float);
             if c.float == Float::None && !establishes_bfc(&c.style, c.float) {
@@ -23202,6 +23204,22 @@ thread_local! {
 #[inline]
 fn count_layout_visit() {
     LAYOUT_VISITS.with(|n| n.set(n.get() + 1));
+}
+
+std::thread_local! {
+    /// Calls of `collapses_through` and `holds_float` on this thread: the margin-collapse walk's work
+    /// (a deep chain of blocks once made it grow with the fourth power of the depth).
+    static MARGIN_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_margin_walk() {
+    MARGIN_WALKS.with(|n| n.set(n.get() + 1));
+}
+
+/// Calls of the margin-collapse walk (`collapses_through`, `holds_float`) on this thread so far.
+pub fn margin_walks() -> u64 {
+    MARGIN_WALKS.with(|n| n.get())
 }
 
 /// The number of box layouts on this thread since the last call, and a fresh count.
