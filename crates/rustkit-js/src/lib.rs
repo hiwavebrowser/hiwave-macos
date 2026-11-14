@@ -438,9 +438,19 @@ struct PendingTimer {
 /// Default maximum number of loop iterations/pumps per `run_jobs` call.
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
 
-/// A function the embedder keeps in a runtime ([`JsRuntime::keep_function`]) and calls by handle.
+/// A function the embedder keeps in a runtime ([`JsRuntime::keep_function`]) and calls by handle. The
+/// handle names the runtime that issued it; another runtime refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeptFunction(usize);
+pub struct KeptFunction {
+    runtime: u64,
+    index: usize,
+}
+
+/// A process-wide id for each runtime, which its kept-function handles carry.
+fn next_runtime_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// JavaScript runtime configuration.
 #[derive(Clone, Debug)]
@@ -543,6 +553,8 @@ pub struct JsRuntime {
     /// Functions the embedder kept ([`JsRuntime::keep_function`]), called by handle.
     #[cfg(feature = "boa")]
     kept: Vec<boa_engine::JsObject>,
+    /// This runtime's id, carried by the handles it issues.
+    kept_owner: u64,
 }
 
 /// M2: dropping a runtime lets its realm go. The realm's natives (console,
@@ -641,6 +653,7 @@ impl JsRuntime {
             source_tap: None,
             #[cfg(feature = "boa")]
             kept: Vec::new(),
+            kept_owner: next_runtime_id(),
         };
 
         // Set up built-in APIs
@@ -1124,7 +1137,7 @@ impl JsRuntime {
                 return Err(JsError::ExecutionError(format!("{source} is not a function")));
             };
             self.kept.push(function.clone());
-            Ok(KeptFunction(self.kept.len() - 1))
+            Ok(KeptFunction { runtime: self.kept_owner, index: self.kept.len() - 1 })
         }
         #[cfg(not(feature = "boa"))]
         {
@@ -1140,7 +1153,10 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             use boa_engine::{JsString, JsValue as BoaValue};
-            let Some(callee) = self.kept.get(function.0).cloned() else {
+            if function.runtime != self.kept_owner {
+                return Err(JsError::ExecutionError("a kept function from another runtime".into()));
+            }
+            let Some(callee) = self.kept.get(function.index).cloned() else {
                 return Err(JsError::ExecutionError("no such kept function".into()));
             };
             let args: Vec<BoaValue> = args

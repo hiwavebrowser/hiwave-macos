@@ -208,10 +208,12 @@
     });
     hide('__rk_worker_setup', function (name, locJson) {
         g.name = String(name);
-        var loc = JSON.parse(locJson);
+        var loc = JSON.parse(locJson), ua = loc.ua || '';
+        // `ua` carries the page's user agent for `navigator`; WorkerLocation has no such member.
+        delete loc.ua;
         loc.toString = function () { return loc.href; };
         hide('location', loc);
-        hide('navigator', { userAgent: loc.ua || '', hardwareConcurrency: 1, onLine: true, language: 'en-US', languages: ['en-US'] });
+        hide('navigator', { userAgent: ua, hardwareConcurrency: 1, onLine: true, language: 'en-US', languages: ['en-US'] });
     });
     hide('__rk_worker_dispatch', function (json) {
         if (closing) return;
