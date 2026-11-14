@@ -385,11 +385,12 @@ is not safe to share.
   devtools URL. The message is not scrubbed: a URL the page logs is written
   as the page logged it.
 - It is the same feed the Inspector's console reads
-  (`inspector_glue.rs`), so it has the same limits: a console call is
-  written when the Inspector would be handed it (at the script's end when
-  no panel is open, so a script that hangs after logging writes nothing),
-  and at most 1024 calls are held between flushes (a `warn` line says how
-  many were dropped).
+  (`inspector_glue.rs`). A console call is written as it is made, panel
+  open or not, so a script that hangs or is stopped at the budget leaves
+  the lines it logged. The feed's limits apply: at most 200 hand-overs a
+  second; calls past that wait for the script's end, at most 1024 of them
+  (a `warn` line says how many were dropped), and a script that hangs
+  after such a burst never writes the ones that were waiting.
 - The file is separate from the tracing log, and nothing is added to the
   tracing log when it is on. The Inspector is unchanged by it: its records
   stay shapes unless its own settings keep text.

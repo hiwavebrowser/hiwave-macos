@@ -61,9 +61,12 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>, view: u
     // T6d: while somebody listens, each call reaches the Inspector as it is
     // made, so a panel reads the console of a script still running (the
     // devtools thread answers it; the page is never asked). Otherwise the
-    // calls wait for the flush at the script's end, as before.
+    // calls wait for the flush at the script's end, as before. The console
+    // file is always handed them as they are made: a script that hangs, or
+    // that the budget stops, has no end to wait for, and its lines are the
+    // ones wanted. The runtime's cap on hand-overs a second bounds it.
     let live = inspector.clone();
-    bindings.set_console_live(Some(Box::new(move || live.is_active())));
+    bindings.set_console_live(Some(Box::new(move || file || live.is_active())));
     // Past the live cap calls are held for the flush; a script that hangs
     // after a hot loop never flushes, so the count is readable meanwhile.
     bindings.set_console_held_counter(Some(inspector.console_held_counter()));
