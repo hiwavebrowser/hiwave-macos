@@ -350,6 +350,8 @@ fn classify_every_field(b: &LayoutBox) {
         // A note the hit test keeps beside the layout: made from the root on the first hit test
         // (`mark_hit_overflow` walks the whole tree) and forgotten by the engine on each new layout.
         hit_overflow: _,
+        // The paint order the hit test keeps, emptied by that same walk.
+        stack_order: _,
     } = b;
 }
 

@@ -2139,6 +2139,10 @@ pub struct LayoutBox {
     /// as `mark_hit_overflow` found it for this layout: 0 not known (the
     /// hit test looks), 1 nothing (the hit test stops here), 2 something.
     pub hit_overflow: HitOverflowMark,
+    /// This box's paint order (`LayoutBox::stack_entries`) as the hit test last read it, for this
+    /// layout: every pointer move is a hit test. Emptied by `mark_hit_overflow`, which runs after the
+    /// boxes change, before the next hit test.
+    pub stack_order: StackOrderCache,
 }
 
 thread_local! {
@@ -2153,6 +2157,23 @@ thread_local! {
 /// whether or not a point was ever asked of them, so it prints as nothing.
 #[derive(Default)]
 pub struct HitOverflowMark(std::cell::Cell<u8>);
+
+/// A box's kept paint order (`LayoutBox::stack_order`). A copy starts empty, as `HitOverflowMark` does.
+/// Printed as `_`, as `HitOverflowMark` is: a layout's dump does not depend on whether a hit test ran.
+#[derive(Default)]
+pub struct StackOrderCache(std::cell::RefCell<Option<std::sync::Arc<StackOrder>>>);
+
+impl std::fmt::Debug for StackOrderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+impl Clone for StackOrderCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
 
 /// A copy starts with no mark: the engine copies a laid-out tree to move
 /// boxes on it (an animation frame answered to a forced read), and a mark
@@ -2262,6 +2283,7 @@ impl LayoutBox {
             formatting_root: false,
             text_line_pitch: None,
             hit_overflow: HitOverflowMark::default(),
+            stack_order: StackOrderCache::default(),
         }
     }
 
@@ -8888,8 +8910,11 @@ impl LayoutBox {
     /// (opacity, transform, filter, ...) at z-index 0, and such a direct child is painted in the z 0
     /// layer rather than in flow. `reached`: the stacking context above took this box's children of
     /// that kind already, so they are left out here.
-    pub(crate) fn stack_entries(&self, lifts: bool, reached: bool) -> (Vec<StackEntry<'_>>, Vec<StackEntry<'_>>, Vec<StackEntry<'_>>) {
-        let (mut neg, mut normal, mut pos) = (Vec::new(), Vec::new(), Vec::new());
+    ///
+    /// The boxes are named by their place under this box (`StackOrder::boxes`), so the order can be kept
+    /// with the layout (`stack_order_kept`) and a lifted box shares the path above it with its siblings.
+    pub(crate) fn stack_entries(&self, lifts: bool, reached: bool) -> StackOrder {
+        let mut order = StackOrder { flags: (lifts, reached), ..StackOrder::default() };
         for (i, child) in self.children.iter().enumerate() {
             let i = i as u32;
             let context = self.child_forms_stacking_context(child);
@@ -8897,78 +8922,93 @@ impl LayoutBox {
             if reached && (paint_z.is_some() || context) {
                 continue;
             }
-            let entry = |z: i32, positioned_like: bool| StackEntry {
-                b: child,
+            let node = order.node(NO_NODE, i);
+            let entry = |z: i32, positioned_like: bool| OrderEntry {
+                node,
                 key: (i, 0),
                 z,
                 lifted: false,
                 context,
                 positioned_like,
-                via: Vec::new(),
                 held_on_path: false,
+                via_len: 0,
             };
             if let Some(z) = paint_z {
                 if z < 0 {
-                    neg.push(entry(z, true));
+                    order.neg.push(entry(z, true));
                 } else {
-                    pos.push(entry(z, true));
+                    order.pos.push(entry(z, true));
                 }
             } else if context && lifts {
-                pos.push(entry(0, true));
+                order.pos.push(entry(0, true));
             } else if child.float != Float::None {
                 // Floats paint between in-flow content and the positioned layers, at 0 as before.
-                pos.push(entry(0, false));
+                order.pos.push(entry(0, false));
             } else {
-                normal.push(entry(0, false));
+                order.normal.push(entry(0, false));
             }
             if lifts && !context && !child.clips_for_stacking() {
                 let mut sub = 0u32;
-                let mut via = vec![child];
-                child.lift_into(i, &mut sub, &mut via, &mut neg, &mut pos);
+                let mut path = vec![(node, i)];
+                child.lift_into(i, &mut sub, &mut path, child.holds_absolute_boxes() as u32, &mut order);
             }
         }
-        neg.sort_by(|a, b| a.z.cmp(&b.z).then(a.key.cmp(&b.key)));
-        pos.sort_by(|a, b| a.z.cmp(&b.z).then(a.key.cmp(&b.key)));
-        (neg, normal, pos)
+        order.neg.sort_by(|a, b| a.z.cmp(&b.z).then(a.key.cmp(&b.key)));
+        order.pos.sort_by(|a, b| a.z.cmp(&b.z).then(a.key.cmp(&b.key)));
+        order
+    }
+
+    /// `stack_entries` for the hit test, kept with the layout (`LayoutBox::stack_order`).
+    fn stack_order_kept(&self, lifts: bool, reached: bool) -> std::sync::Arc<StackOrder> {
+        if let Some(order) = self.stack_order.0.borrow().as_ref().filter(|o| o.flags == (lifts, reached)) {
+            return order.clone();
+        }
+        let order = std::sync::Arc::new(self.stack_entries(lifts, reached));
+        *self.stack_order.0.borrow_mut() = Some(order.clone());
+        order
     }
 
     /// The positioned boxes and stacking contexts inside this box that belong to the stacking context
     /// above (see `stack_entries`), in tree order: one is taken, and the walk goes on through boxes that
-    /// form no stacking context and do not clip. `via` is the path from the context's child down to here.
-    fn lift_into<'a>(
-        &'a self,
-        i: u32,
-        sub: &mut u32,
-        via: &mut Vec<&'a LayoutBox>,
-        neg: &mut Vec<StackEntry<'a>>,
-        pos: &mut Vec<StackEntry<'a>>,
-    ) {
-        for child in &self.children {
+    /// form no stacking context and do not clip. `path` is the boxes from the context's child down to
+    /// here, each with its node once something under it is taken (`NO_NODE` before) and its index in its
+    /// parent; `holders` counts those that hold absolute boxes.
+    fn lift_into(&self, i: u32, sub: &mut u32, path: &mut Vec<(u32, u32)>, holders: u32, order: &mut StackOrder) {
+        for (ci, child) in self.children.iter().enumerate() {
+            let ci = ci as u32;
             let context = self.child_forms_stacking_context(child);
             let paint_z = self.child_paint_z(child);
+            let mut node = NO_NODE;
             if paint_z.is_some() || context {
                 *sub += 1;
                 let z = paint_z.unwrap_or(0);
-                let entry = StackEntry {
-                    b: child,
+                // The boxes above get their nodes the first time one under them is taken.
+                for k in 1..path.len() {
+                    if path[k].0 == NO_NODE {
+                        path[k].0 = order.node(path[k - 1].0, path[k].1);
+                    }
+                }
+                node = order.node(path[path.len() - 1].0, ci);
+                let entry = OrderEntry {
+                    node,
                     key: (i, *sub),
                     z,
                     lifted: true,
                     context,
                     positioned_like: true,
-                    held_on_path: via.iter().any(|v| v.holds_absolute_boxes()),
-                    via: via.clone(),
+                    held_on_path: holders > 0,
+                    via_len: path.len() as u32,
                 };
                 if z < 0 {
-                    neg.push(entry);
+                    order.neg.push(entry);
                 } else {
-                    pos.push(entry);
+                    order.pos.push(entry);
                 }
             }
             if !context && !child.clips_for_stacking() {
-                via.push(child);
-                child.lift_into(i, sub, via, neg, pos);
-                via.pop();
+                path.push((node, ci));
+                child.lift_into(i, sub, path, holders + child.holds_absolute_boxes() as u32, order);
+                path.pop();
             }
         }
     }
@@ -9213,6 +9253,8 @@ impl LayoutBox {
     }
 
     fn hit_reach(&self) -> HitReach {
+        // The boxes changed since the paint order was kept (`LayoutBox::stack_order`).
+        self.stack_order.0.borrow_mut().take();
         let own = self.dimensions.border_box();
         let (mut flow, mut absolute, mut fixed, mut below_moves) = (None, None, None, false);
         for child in &self.children {
@@ -9327,9 +9369,7 @@ impl LayoutBox {
         // Check children in reverse paint order (topmost first)
         let skip_held_fixed = skip_held_fixed && !self.carries_fixed_boxes();
         let (lifts, reached) = stacking;
-        let (negative_z, normal_flow, positive_z) = self.stack_entries(lifts, reached);
         let passes_lift = lifts || reached;
-        let paint_order: Vec<&StackEntry> = negative_z.iter().chain(normal_flow.iter()).chain(positive_z.iter()).collect();
         // What this box's own scroll adds to the point, for its children.
         let scroll = self.element_scroll.get();
         let (inner_x, inner_y) = (x + scroll.0, y + scroll.1);
@@ -9338,7 +9378,15 @@ impl LayoutBox {
         } else {
             (escaped.0 + scroll.0, escaped.1 + scroll.1)
         };
-        for entry in paint_order.iter().rev() {
+        // The boxes between a lifted box and this one neither move nor clip what they hold (the walk
+        // stops at those), so the point is theirs as it is here; with no scroll escaped, a box among them
+        // that holds nothing outside itself and misses the point rules out every box under it.
+        let order = self.stack_order_kept(lifts, reached);
+        let (boxes, missed) = order.boxes_at(self, (inner_x, inner_y), inner_escaped == (0.0, 0.0));
+        for entry in order.paint_order_rev(&boxes) {
+            if order.parent_of(entry.node).is_some_and(|parent| missed[parent as usize]) {
+                continue;
+            }
             let child = entry.b;
             if skip_held_fixed && child.position == Position::Fixed {
                 continue;
@@ -9357,17 +9405,20 @@ impl LayoutBox {
                 Position::Fixed => (false, false),
                 _ => (flow_clipped, absolute_clipped),
             };
-            let child_depth = depth + 1 + entry.via.len() as u32;
+            let child_depth = depth + 1 + entry.via_len;
             let stacking = entry.child_flags(passes_lift);
             if let Some(mut result) =
                 child.hit_test_in(child_x, child_y, child_escaped, child_depth, skip_held_fixed, child_clipped, stacking)
             {
                 // A box taken in from inside a child: the boxes between are its ancestors too.
                 let mut below = child;
-                for between in entry.via.iter().rev() {
+                let mut up = order.parent_of(entry.node);
+                while let Some(node) = up {
+                    let between = boxes[node as usize];
                     between.note_scroller_of_hit(below, &mut result);
                     between.add_as_ancestor(&mut result);
                     below = between;
+                    up = order.parent_of(node);
                 }
                 let child = below;
                 self.note_scroller_of_hit(child, &mut result);
@@ -9525,26 +9576,134 @@ pub enum ScrollerGap {
     ToTransform,
 }
 
-/// One box in a stacking context's paint order (`LayoutBox::stack_entries`).
+/// No node: a box of the stacking context itself (`StackOrder::nodes`).
+const NO_NODE: u32 = u32::MAX;
+
+/// A stacking context's paint order (`LayoutBox::stack_entries`), its boxes named by their place in the
+/// tree so the order can be kept with the layout.
+#[derive(Debug, Default)]
+pub struct StackOrder {
+    /// The `(lifts, reached)` it was made for.
+    flags: (bool, bool),
+    /// Every box an entry names, and every box between a lifted one and the context: its parent's node
+    /// (`NO_NODE` for the context itself) and its index there. A parent comes before its children.
+    nodes: Vec<(u32, u32)>,
+    neg: Vec<OrderEntry>,
+    normal: Vec<OrderEntry>,
+    pos: Vec<OrderEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OrderEntry {
+    node: u32,
+    key: (u32, u32),
+    z: i32,
+    lifted: bool,
+    context: bool,
+    positioned_like: bool,
+    held_on_path: bool,
+    via_len: u32,
+}
+
+impl StackOrder {
+    fn node(&mut self, parent: u32, index: u32) -> u32 {
+        self.nodes.push((parent, index));
+        (self.nodes.len() - 1) as u32
+    }
+
+    /// The box of each node, under `owner` (the box this order was made for).
+    pub(crate) fn boxes<'a>(&self, owner: &'a LayoutBox) -> Vec<&'a LayoutBox> {
+        let mut boxes: Vec<&'a LayoutBox> = Vec::with_capacity(self.nodes.len());
+        for &(parent, index) in &self.nodes {
+            let above = if parent == NO_NODE { owner } else { boxes[parent as usize] };
+            boxes.push(&above.children[index as usize]);
+        }
+        boxes
+    }
+
+    /// The three layers (negative, in flow, the rest), with their boxes (`boxes`).
+    pub(crate) fn entries<'a>(&self, boxes: &[&'a LayoutBox]) -> (Vec<StackEntry<'a>>, Vec<StackEntry<'a>>, Vec<StackEntry<'a>>) {
+        let layer = |list: &[OrderEntry]| -> Vec<StackEntry<'a>> {
+            list.iter()
+                .map(|e| StackEntry {
+                    b: boxes[e.node as usize],
+                    node: e.node,
+                    z: e.z,
+                    lifted: e.lifted,
+                    context: e.context,
+                    positioned_like: e.positioned_like,
+                    held_on_path: e.held_on_path,
+                    via_len: e.via_len,
+                })
+                .collect()
+        };
+        (layer(&self.neg), layer(&self.normal), layer(&self.pos))
+    }
+
+    /// `boxes`, and for each node whether the point (in the context's space) misses it and all it holds:
+    /// it, or a box above it, holds nothing outside its border box (`LayoutBox::hit_overflow`), which the
+    /// point is outside. With `prune` off, none is missed.
+    pub(crate) fn boxes_at<'a>(&self, owner: &'a LayoutBox, point: (f32, f32), prune: bool) -> (Vec<&'a LayoutBox>, Vec<bool>) {
+        let mut boxes: Vec<&'a LayoutBox> = Vec::with_capacity(self.nodes.len());
+        let mut missed = Vec::with_capacity(self.nodes.len());
+        for &(parent, index) in &self.nodes {
+            let (above, above_missed) =
+                if parent == NO_NODE { (owner, false) } else { (boxes[parent as usize], missed[parent as usize]) };
+            let b: &'a LayoutBox = &above.children[index as usize];
+            boxes.push(b);
+            missed.push(
+                prune && (above_missed || (b.hit_overflow.get() == 1 && !b.dimensions.border_box().contains(point.0, point.1))),
+            );
+        }
+        (boxes, missed)
+    }
+
+    /// The entries from the top of the paint order down, with their boxes (`boxes`).
+    pub(crate) fn paint_order_rev<'s, 'a>(&'s self, boxes: &'s [&'a LayoutBox]) -> impl Iterator<Item = StackEntry<'a>> + 's {
+        self.neg
+            .iter()
+            .chain(self.normal.iter())
+            .chain(self.pos.iter())
+            .rev()
+            .map(move |e| StackEntry {
+                b: boxes[e.node as usize],
+                node: e.node,
+                z: e.z,
+                lifted: e.lifted,
+                context: e.context,
+                positioned_like: e.positioned_like,
+                held_on_path: e.held_on_path,
+                via_len: e.via_len,
+            })
+    }
+
+    /// The node above `node`, unless that is the context.
+    pub(crate) fn parent_of(&self, node: u32) -> Option<u32> {
+        let parent = self.nodes[node as usize].0;
+        (parent != NO_NODE).then_some(parent)
+    }
+}
+
+/// One box in a stacking context's paint order (`StackOrder::entries`).
 #[derive(Debug, Clone)]
 pub struct StackEntry<'a> {
     /// The box to paint or hit test.
     pub(crate) b: &'a LayoutBox,
-    /// Tree order: the context's child, then the order of the boxes taken from inside it.
-    key: (u32, u32),
+    /// Its node in the order (`StackOrder::parent_of` walks up to the context).
+    pub(crate) node: u32,
     /// The z-index it is painted at.
     pub(crate) z: i32,
-    /// Taken from inside a child (`via` holds the boxes between).
+    /// Taken from inside a child (the `via_len` boxes between are its ancestors too).
     pub(crate) lifted: bool,
     /// It is a stacking context.
     pub(crate) context: bool,
     /// Positioned, a z-indexed item, or a stacking context: paints over the outlines so far.
     pub(crate) positioned_like: bool,
-    /// The boxes from the context's child down to this box's parent, when lifted.
-    pub(crate) via: Vec<&'a LayoutBox>,
-    /// Lifted, and a box in `via` holds absolute boxes: an absolute box's containing block is inside
-    /// the context, so the context's clips (and its scroll) apply to it.
+    /// Lifted, and a box between it and the context holds absolute boxes: an absolute box's containing
+    /// block is inside the context, so the context's clips (and its scroll) apply to it.
     pub(crate) held_on_path: bool,
+    /// How many boxes are between it and the context.
+    pub(crate) via_len: u32,
 }
 
 impl StackEntry<'_> {
@@ -11745,7 +11904,9 @@ impl DisplayList {
         // children taken in when this box is a stacking context (`LayoutBox::stack_entries`, which the
         // hit test reads too, so the picture and the hit agree).
         *layer += layout_box.children.len() as u32;
-        let (negative_z, normal_flow, positive_z) = layout_box.stack_entries(lifts, reached);
+        let order = layout_box.stack_entries(lifts, reached);
+        let boxes = order.boxes(layout_box);
+        let (negative_z, normal_flow, positive_z) = order.entries(&boxes);
         let passes_lift = lifts || reached;
 
         let items_paint_as_units = matches!(
