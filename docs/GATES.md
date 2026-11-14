@@ -18,3 +18,36 @@ it is the value it is. Change the constant and this table together.
 Rules of thumb: an absolute pixel gate is only honest where we control both sides of the
 page (the chrome board). Engine correctness is gated by regression (campaign, A/B) and by
 assertions (WPT). Live sites get a loose bound because their content moves.
+
+## Release gate: third-party notices
+
+`THIRD_PARTY_NOTICES.md` at the repository root carries the copyright and licence
+notices of every third-party work in the shipped binary. It is a release gate, not a
+parity threshold: before `develop` is promoted to `master`, and in any PR that changes
+`Cargo.lock`, `third_party/`, or a file embedded with `include_str!` / `include_bytes!`
+that came from somewhere else, run this from the repository root. It prints each crate
+and version the file does not cover, and nothing when the file is complete:
+
+```bash
+for t in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo tree -p hiwave-app -e normal --prefix none --format '{p}' --target $t --locked
+done | sed 's/ (\*)$//' | grep -v '/crates/' | sort -u | awk '{print $1" "substr($2,2)}' |
+  while read -r c; do grep -qF "**$c**" THIRD_PARTY_NOTICES.md || echo "missing: $c"; done
+```
+
+If it prints anything, regenerate the file. The inventory it was built from (name,
+version, declared licence, repository) is:
+
+```bash
+for t in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo tree -p hiwave-app -e normal --prefix none --format '{p}|{l}|{r}' --target $t --locked
+done | sed 's/ (\*)$//' | sort -u
+```
+
+Each new crate goes under its licence in section 4 with the copyright lines from the
+licence files in its published source (`~/.cargo/registry/src/*/<crate>-<version>/`);
+entries for versions no longer in the tree come out. A crate under a GPL, LGPL, AGPL or
+SSPL licence, or with no licence, is not added: it stops the release and goes to Pete.
+Section 7 of the file says how the first version (2026-11-14) was made and what was not
+verified. The check covers crates only; Chart.js, the CLDR tables and anything else
+copied into the source (section 2 of the file) are checked by hand.
