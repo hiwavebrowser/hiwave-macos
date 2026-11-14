@@ -138,6 +138,8 @@ mod internal_names_tests;
 mod engine_event_origin_tests;
 #[cfg(test)]
 mod host_object_tests;
+#[cfg(test)]
+mod bookkeeping_paths_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
