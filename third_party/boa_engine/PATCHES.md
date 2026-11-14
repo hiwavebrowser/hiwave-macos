@@ -679,3 +679,19 @@ plain object that is its own element prints `[object Object]`, as in Chrome). `t
 with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
 (19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
 cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
+
+## Patch: `++`/`--` convert their operand, and a throwing conversion keeps it (`update-conversion`)
+
+**Why.** Two bugs found by an independent R1 on #1149, confirmed against Chrome 148. (1) The in-place
+fast path for a register local emitted `Move(dst, local); Inc(local, local)` for a postfix used as a
+value, so the value was the old value UNconverted: `let s = '5'; s++` gave `'5'` (Chrome 5),
+`let u; u++` gave `undefined` (NaN), `n--` on `'5'` then `+ 1` gave `'51'` (6). (2) `Inc`/`Dec` take
+their source register before ToNumeric and did not put it back when the conversion threw, so
+`x++` with a throwing `valueOf` (or a Symbol) left `x` as `undefined`.
+
+**What.** `expression/update.rs` (marked `HIWAVE PATCH (update-conversion)`): the postfix value form is
+`Move(dst, local); Inc(local, dst)`, so `Inc` writes the converted old value to dst and the new value
+to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/increment.rs` and
+`decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
+`crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
+a parameter, a global and a member; 12 differed before).
