@@ -123,6 +123,7 @@ mod traversal_tests;
 mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
+mod web_intl_likely;
 #[cfg(test)]
 mod web_match_media_tests;
 #[cfg(test)]
@@ -1651,7 +1652,9 @@ impl DomBindings {
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
         runtime.evaluate_with_host(include_str!("web_streams.js"))?;
 
-        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
+        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js),
+        // with CLDR's likely subtags behind Intl.Locale's maximize()/minimize().
+        web_intl_likely::install(runtime)?;
         runtime.evaluate_script(include_str!("web_intl.js"))?;
 
         // IPC bridge for communication with Rust: the app's own documents
