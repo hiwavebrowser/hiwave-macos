@@ -41,6 +41,7 @@ function tree(node) { return names(node.childNodes); }
 var lines = [];
 Object.keys(cases).forEach(function (k) {
   var d = new DOMParser().parseFromString(cases[k], 'text/html');
+  if (whole.test(k)) { lines.push(k + ': ' + deep(d.documentElement)); return; }
   var out = k + ': head=[' + tree(d.head) + '] body=[' + tree(d.body) + ']';
   Array.prototype.forEach.call(d.querySelectorAll('template'), function (t) { out += ' ' + (t.id || '?') + '.content=[' + tree(t.content) + '] in ' + t.parentNode.localName; });
   // A template inside another's content is not in the document: list those too.
@@ -54,8 +55,7 @@ Object.keys(cases).forEach(function (k) {
     Array.prototype.forEach.call(root.querySelectorAll('td'), function () { cells++; });
     Array.prototype.forEach.call(root.querySelectorAll('template'), function (t) { count(t.content); });
   })(d);
-  if (cells && !whole.test(k)) out += ' cells=' + cells;
-  if (whole.test(k)) out = k + ': ' + deep(d.documentElement);
+  if (cells) out += ' cells=' + cells;
   lines.push(out);
 });
 window.report = function () { return lines.join('\n'); };

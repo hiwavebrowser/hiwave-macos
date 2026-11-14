@@ -181,6 +181,13 @@ pub struct TreeBuilder<S: TreeSink> {
     /// The scripting flag (HTML §13.2.3.5). On for a page that runs script:
     /// `<noscript>` then holds text and builds no elements.
     scripting: bool,
+    /// The stack depth of the raw text or RCDATA element the "in head"
+    /// rules opened last (`title`, `style`, `script`, `noframes`, and
+    /// `noscript` with scripting on), while it may still be open. The spec
+    /// parses such an element's contents in the "text" insertion mode; the
+    /// "in head" rules do that here, from whichever mode opened it (see
+    /// `process_token`).
+    head_raw_text_depth: Option<usize>,
 }
 
 impl<S: TreeSink> TreeBuilder<S> {
@@ -202,6 +209,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             head_element: None,
             html_element: None,
             scripting: false,
+            head_raw_text_depth: None,
             body_element: None,
             form_element: None,
         }
@@ -253,6 +261,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             head_element: None,
             html_element: None,
             scripting: false,
+            head_raw_text_depth: None,
             body_element: None,
             form_element: None,
         }
@@ -776,6 +785,24 @@ impl<S: TreeSink> TreeBuilder<S> {
     fn process_token(&mut self, token: Token) -> ParseResult<()> {
         trace!(mode = ?self.mode, token = ?token, "Processing token");
 
+        // A raw text or RCDATA element the "in head" rules opened is the
+        // current node: its characters and its own end tag are those rules'
+        // in every mode (the spec's "text" mode, §13.2.6.4.8). The modes
+        // that borrow "in head" for the start tag otherwise got the text
+        // back: "in frameset" dropped it and ignored `</noframes>`, so the
+        // next `</frameset>` closed the noframes; "after head" implied the
+        // body inside a late `<style>`.
+        if let Some(depth) = self.head_raw_text_depth {
+            if self.open_elements.len() != depth {
+                self.head_raw_text_depth = None;
+            } else if matches!(token, Token::Character(_)) {
+                return self.handle_in_head(token);
+            } else if matches!((&token, self.current_node_name()), (Token::EndTag { name }, Some(open)) if name == open) {
+                self.head_raw_text_depth = None;
+                return self.handle_in_head(token);
+            }
+        }
+
         match self.mode {
             InsertionMode::Initial => self.handle_initial(token)?,
             InsertionMode::BeforeHtml => self.handle_before_html(token)?,
@@ -971,7 +998,9 @@ impl<S: TreeSink> TreeBuilder<S> {
             } if matches!(name.as_str(), "title" | "style" | "script" | "noframes") => {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
                 self.open_elements.push((name, node_id));
-                // Note: In a full implementation, we'd switch to RCDATA/RAWTEXT mode here
+                // No "text" mode here: `process_token` sends this element's
+                // text and end tag back to these rules from any mode.
+                self.head_raw_text_depth = Some(self.open_elements.len());
             }
             // §13.2.6.4.4 "noscript": with scripting on, a raw text element
             // (the tokenizer hands its contents over as characters); with it
@@ -983,7 +1012,9 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.flush_text();
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
                 self.open_elements.push((name, node_id));
-                if !self.scripting {
+                if self.scripting {
+                    self.head_raw_text_depth = Some(self.open_elements.len());
+                } else {
                     self.mode = InsertionMode::InHeadNoscript;
                 }
             }
@@ -1063,18 +1094,6 @@ impl<S: TreeSink> TreeBuilder<S> {
     }
 
     fn handle_after_head(&mut self, token: Token) -> ParseResult<()> {
-        // A raw text element put back into the head (below) is still open:
-        // its text and its end tag are the "in head" rules' (the spec's
-        // "text" mode, which this builder does not have). Without this the
-        // first character of a late <style> implied the body inside it.
-        if let Some((open, _)) = self.open_elements.last() {
-            if matches!(open.as_str(), "title" | "style" | "script" | "noframes") {
-                let its_end = matches!(&token, Token::EndTag { name } if name == open);
-                if its_end || matches!(token, Token::Character(_)) {
-                    return self.handle_in_head(token);
-                }
-            }
-        }
         match token {
             Token::Character(ch) if ch.is_whitespace() => {
                 self.text_buffer.push(ch);
@@ -1111,6 +1130,11 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.handle_in_head(token)?;
                 if let Some(at) = self.open_elements.iter().rposition(|(n, _)| n == "head") {
                     self.open_elements.remove(at);
+                    // A raw text element opened above the head is one
+                    // entry lower now.
+                    if let Some(depth) = self.head_raw_text_depth.as_mut().filter(|d| **d > at) {
+                        *depth -= 1;
+                    }
                 }
                 self.sink.remove_open(head);
             }
@@ -2391,9 +2415,10 @@ impl<S: TreeSink> TreeBuilder<S> {
     // ==================== IN HEAD NOSCRIPT HANDLER ====================
 
     fn handle_in_head_noscript(&mut self, token: Token) -> ParseResult<()> {
-        // Inside a `<style>` this mode handed to "in head": its text and
-        // its end tag are that element's (the "text" insertion mode), not
-        // a reason to close the noscript.
+        // Inside a `<style>` this mode handed to "in head", its text and
+        // its end tag never get here (`process_token`). What is left is the
+        // end of the file in an unclosed one: "in head" ignores it, so the
+        // pending text stays the style's rather than the noscript's.
         if self.open_elements.last().is_some_and(|(tag, _)| tag != "noscript") {
             return self.handle_in_head(token);
         }

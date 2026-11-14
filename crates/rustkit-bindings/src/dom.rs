@@ -1097,12 +1097,13 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             // An HTML document always has a body, but rustkit-html drops
             // it (and the text) for text-only input; supply an empty one.
+            // A frameset document's body element is its frameset (§3.1.3).
             if let Some(html) = doc
                 .children()
                 .into_iter()
                 .find(|n| n.tag_name() == Some("html"))
             {
-                if !html.children().iter().any(|n| n.tag_name() == Some("body")) {
+                if !html.children().iter().any(|n| matches!(n.tag_name(), Some("body") | Some("frameset"))) {
                     html.append_child(document.create_node(NodeType::Element {
                         tag_name: String::from("body"),
                         namespace: String::from("http://www.w3.org/1999/xhtml"),
