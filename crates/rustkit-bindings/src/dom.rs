@@ -2971,7 +2971,8 @@ const WRAPPERS_JS: &str = r#"
         setCancelable(ev, !!arg('cancelable'));
         fixed(ev, 'composed', !!arg('composed'));
         stamp(ev);
-        fixed(ev, 'timeStamp', dateNow());
+        // On performance.now()'s clock, the page clock (`__rk.perfNow`, out of page script's reach).
+        fixed(ev, 'timeStamp', typeof __rk.perfNow === 'function' ? __rk.perfNow() : dateNow());
         // The fields, the root interface's first.
         var chain = objCreate(null), depth = 0, n;
         for (n = name; n !== 'Event' && FIELDS[n]; n = PARENT[n]) chain[depth++] = n;
@@ -6498,7 +6499,8 @@ const WRAPPERS_JS: &str = r#"
         setCancelable(this, !!init.cancelable);
         own(this, 'composed', !!init.composed);
         stamp(this);
-        own(this, 'timeStamp', Date.now());
+        // On performance.now()'s clock (ms from the time origin), as Chrome's DOMHighResTimeStamp.
+        own(this, 'timeStamp', typeof __rk.perfNow === 'function' ? __rk.perfNow() : Date.now());
     }
     var TYPE_GET = Object.getOwnPropertyDescriptor({ get type() { return mapGet(EVTYPE, this); } }, 'type').get;
     function own(o, k, v) { defineOwn(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
