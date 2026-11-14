@@ -26,7 +26,13 @@ fn set_by_name(
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    if let Some((shape, slot)) = ic.get(object_borrowed.shape())
+        // HIWAVE PATCH (super-set-receiver): a cached slot belongs to the object itself, so the
+        // cache answers only when the receiver is that object. `super.x = v` (receiver `this`,
+        // object the home object's prototype) filled the cache on a call whose `this` was that
+        // prototype, and a later hit wrote the prototype instead of defining `x` on `this`.
+        && receiver.as_object().is_some_and(|r| JsObject::equals(&r, &object))
+    {
         let slot_index = slot.index as usize;
 
         if slot.attributes.is_accessor_descriptor() {

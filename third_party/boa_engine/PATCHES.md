@@ -718,3 +718,18 @@ to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/
 `decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
 `crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
 a parameter, a global and a member; 12 differed before).
+## Patch: a name-write cache hit requires the receiver to be the object (`super-set-receiver`)
+
+**Why.** Unmodified Boa 0.22 bug, flagged by Atlas in the R1 on #1157 and confirmed against Chrome 148.
+`SetPropertyByName`'s cache hit checked only the object's shape and ignored the receiver. `super.x = v`
+uses the home object's prototype as the object and `this` as the receiver. A site whose first call had
+`this` equal to that prototype filled the cache, and later calls wrote `x` on the prototype instead of
+defining it on `this` (`B.prototype.m.call(A.prototype, 5); b.m(7)` left `A.prototype.x` at 7 and `b`
+with no own `x`).
+
+**What.** `vm/opcode/set/property.rs` `set_by_name` (marked `HIWAVE PATCH (super-set-receiver)`): the
+cache answers only when the receiver is the object itself; otherwise the write takes the ordinary
+[[Set]]. An ordinary `o.x = v` always has the receiver equal to the object, so its hits are unchanged
+(checked with the vm-stats counters: 4,000 writes to an object, an array, a function and a class
+instance, 4 cold misses). Pin: `crates/rustkit-js/tests/super_set.rs` (8 cases from Chrome for
+Testing 148.0.7778.216, class and object-literal `super`, a setter on the prototype; 3 differed before).

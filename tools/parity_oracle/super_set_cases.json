@@ -1,0 +1,45 @@
+{
+ "cases": [
+  {
+   "name": "super_set_receiver",
+   "js": "(function(){class A{};A.prototype.x=1;class B extends A{m(v){super.x=v;return this.x+'/'+Object.hasOwn(this,'x')+'/'+A.prototype.x}};var r='';for(var i=0;i<3;i++){r+=new B().m(i+10)+',';}return r})()",
+   "chrome": "10/true/1,11/true/1,12/true/1,"
+  },
+  {
+   "name": "super_set_shared_receiver",
+   "js": "(function(){class A{};A.prototype.x=1;class B extends A{m(v){super.x=v;return this.x}};var b=new B(),r='';for(var i=0;i<3;i++)r+=b.m(i)+',';return r+A.prototype.x+Object.hasOwn(b,'x')})()",
+   "chrome": "0,1,2,1true"
+  },
+  {
+   "name": "super_set_obj_literal",
+   "js": "(function(){var proto={y:1};var o={__proto__:proto,m(v){super.y=v;return this.y+'/'+proto.y}};var r='';for(var i=0;i<3;i++)r+=o.m(i)+',';return r})()",
+   "chrome": "0/1,1/1,2/1,"
+  },
+  {
+   "name": "super_set_own_on_this",
+   "js": "(function(){class A{};class B extends A{constructor(){super();this.x=0}m(v){super.x=v;return this.x}};var r='';for(var i=0;i<3;i++){var b=new B();r+=b.m(i)+'/'+A.prototype.x+',';}return r})()",
+   "chrome": "0/undefined,1/undefined,2/undefined,"
+  },
+  {
+   "name": "super_set_setter",
+   "js": "(function(){var log=[];class A{set x(v){log.push(this===t?'t':'o');}};class B extends A{m(v){super.x=v}};var t=new B();for(var i=0;i<3;i++)t.m(i);return log.join('')})()",
+   "chrome": "ttt"
+  },
+  {
+   "name": "super_set_first_this_is_proto",
+   "js": "(function(){class A{};A.prototype.x=1;class B extends A{m(v){super.x=v}};var b=new B();B.prototype.m.call(A.prototype,5);B.prototype.m.call(A.prototype,6);b.m(7);return A.prototype.x+'/'+b.x+'/'+Object.hasOwn(b,'x')})()",
+   "chrome": "6/7/true"
+  },
+  {
+   "name": "super_set_obj_literal_first_proto",
+   "js": "(function(){var proto={y:1};var o={__proto__:proto,m(v){super.y=v}};o.m.call(proto,2);o.m.call(proto,3);o.m(4);return proto.y+'/'+o.y+'/'+Object.hasOwn(o,'y')})()",
+   "chrome": "3/4/true"
+  },
+  {
+   "name": "super_set_other_receiver_after",
+   "js": "(function(){class A{};A.prototype.x=1;class B extends A{m(v){super.x=v}};var t={};B.prototype.m.call(A.prototype,5);B.prototype.m.call(A.prototype,5);B.prototype.m.call(t,9);return A.prototype.x+'/'+t.x})()",
+   "chrome": "5/9"
+  }
+ ],
+ "chrome_version": "148.0.7778.216"
+}
