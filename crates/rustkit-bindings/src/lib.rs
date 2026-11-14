@@ -131,6 +131,8 @@ mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 #[cfg(test)]
+mod web_worker_tests;
+#[cfg(test)]
 mod web_named_access_tests;
 #[cfg(test)]
 mod internal_names_tests;
@@ -139,6 +141,7 @@ mod engine_event_origin_tests;
 #[cfg(test)]
 mod host_object_tests;
 mod web_canvas;
+mod worker_host;
 #[cfg(test)]
 mod web_canvas_tests;
 #[cfg(test)]
@@ -581,7 +584,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
-        var ran = 0;
+        // What a worker has sent since the last turn is delivered first.
+        var ran = typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0;
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
@@ -1102,6 +1106,8 @@ pub struct DomBindings {
     edit: Rc<dom::editing::EditContext>,
     /// Canvas 2D contexts and what they drew (see `web_canvas`).
     canvases: web_canvas::SharedCanvases,
+    /// Stops this page's workers when it goes away (see `worker_host`).
+    workers: worker_host::Guard,
 }
 
 impl DomBindings {
@@ -1219,6 +1225,11 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_mutation_observer.js"))?;
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
+        // Dedicated workers: a thread and a runtime each (worker_host.rs, web_worker.js).
+        let workers = worker_host::install(&mut runtime)?;
+        // The structured clone algorithm postMessage uses (structured_clone.js).
+        runtime.evaluate_script(include_str!("structured_clone.js"))?;
+        runtime.evaluate_with_host(include_str!("web_worker.js"))?;
         // Script elements script inserts are prepared and run (web_scripts.js).
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
@@ -1246,6 +1257,7 @@ impl DomBindings {
             scroll,
             edit,
             canvases,
+            workers,
         })
     }
 
@@ -2236,6 +2248,11 @@ impl DomBindings {
 
         Ok(())
     }
+    /// How many worker threads are still running (tests and diagnostics).
+    pub fn worker_threads_running(&self) -> usize {
+        self.workers.running()
+    }
+
 
     /// Run one of the engine's own entry points as a turn of page script.
     /// `body` is a function body whose `__rk` is the host object, which

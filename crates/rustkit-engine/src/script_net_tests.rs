@@ -141,9 +141,16 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 };
                 // `/missing...` is a 404, for the failure cases.
                 let status = if fixed.is_none() && path.starts_with("/missing") { "404 Not Found" } else { "200 OK" };
+                // `/redir_<name>` is a 302 to `/<name>`, for the redirect cases.
+                let location = path.strip_prefix("/redir_").filter(|_| fixed.is_none());
+                let (status, body) = match location {
+                    Some(_) => ("302 Found", Vec::new()),
+                    None => (status, body),
+                };
+                let location = location.map(|to| format!("Location: /{to}\r\n")).unwrap_or_default();
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(&body);

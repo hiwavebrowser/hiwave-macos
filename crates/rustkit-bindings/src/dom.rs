@@ -3011,8 +3011,15 @@ const WRAPPERS_JS: &str = r#"
             this.message = message === undefined ? '' : String(message);
             this.name = name === undefined ? 'Error' : String(name);
         };
+        // The legacy `code` of the named errors (DOMException.code), as Chrome reports them.
+        var DOM_CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+            NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+            InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15,
+            TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+            QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
         g.DOMException.prototype = Object.create(Error.prototype, {
-            constructor: { value: g.DOMException, writable: true, configurable: true }
+            constructor: { value: g.DOMException, writable: true, configurable: true },
+            code: { get: function () { return DOM_CODES[this.name] || 0; }, configurable: true, enumerable: true }
         });
     }
     var DOMException = g.DOMException;
