@@ -279,6 +279,56 @@
    "name": "generator-var-init-yield",
    "js": "function* g() { var x = 1; var x = yield x; x = x * 2; yield x } var it = g(); it.next(); String(it.next(21).value)",
    "chrome": "42"
+  },
+  {
+   "name": "async-compound-await",
+   "js": "(async function () { var a = 1; a += await 2; var b = a; b++; var c = '5'; var d = c++; return a + ',' + b + ',' + typeof d + d })()",
+   "chrome": "3,4,number5"
+  },
+  {
+   "name": "async-var-init-await",
+   "js": "(async function () { var x = 3; var x = await Promise.resolve(x * 2); x++; return String(x) })()",
+   "chrome": "7"
+  },
+  {
+   "name": "async-member-store",
+   "js": "(async function () { var o = {}, v = 2; o.p = await v; o.q = v; return o.p + ',' + o.q })()",
+   "chrome": "2,2"
+  },
+  {
+   "name": "throwing-new-keeps-old",
+   "js": "function T() { throw new Error('x') } function f() { var x = 5; try { x = new T() } catch (e) {} return String(x) } f()",
+   "chrome": "5"
+  },
+  {
+   "name": "throwing-new-var-init-keeps-old",
+   "js": "function T() { throw new Error('x') } function f() { var y = 3; try { var y = new T() } catch (e) {} return String(y) } f()",
+   "chrome": "3"
+  },
+  {
+   "name": "destructuring-swap-var",
+   "js": "function f() { var a = 1, b = 2; [a, b] = [b, a]; return a + ',' + b } f()",
+   "chrome": "2,1"
+  },
+  {
+   "name": "destructuring-swap-let",
+   "js": "function f() { let a = 'p', b = 'q'; [a, b] = [b, a]; return a + ',' + b } f()",
+   "chrome": "q,p"
+  },
+  {
+   "name": "destructuring-object-swap",
+   "js": "function f() { var a = 1, b = 2; ({ a, b } = { a: b, b: a }); return a + ',' + b } f()",
+   "chrome": "2,1"
+  },
+  {
+   "name": "postfix-null-boolean",
+   "js": "function f() { var n = null, t = true; var r1 = n++, r2 = t--; return typeof r1 + r1 + ',' + typeof r2 + r2 + ',' + n + ',' + t } f()",
+   "chrome": "number0,number1,1,0"
+  },
+  {
+   "name": "postfix-symbol-keeps",
+   "js": "function f() { var s = Symbol('k'), r = 'none'; try { r = s++ } catch (e) {} return typeof s + ',' + r } f()",
+   "chrome": "symbol,none"
   }
  ],
  "chrome_version": "148.0.7778.216"

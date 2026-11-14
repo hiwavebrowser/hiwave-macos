@@ -51,9 +51,21 @@ fn scoping_hazards_for_register_locals_match_chrome() {
         let name = c["name"].as_str().unwrap();
         let chrome = c["chrome"].as_str().expect("run js_cases_log.mjs --write");
         let mut rt = JsRuntime::new().unwrap();
-        let got = match rt.evaluate_script(c["js"].as_str().unwrap()) {
-            Ok(JsValue::String(s)) => s,
-            other => format!("{other:?}"),
+        let js = c["js"].as_str().unwrap();
+        // An `async-` case is an expression for a promise: Chrome's harness awaits it; here the
+        // value is kept in a global and read by a second script, after the jobs have run.
+        let got = if name.starts_with("async-") {
+            let wrapped = format!("globalThis.__out = 'pending'; ({js}).then(function (v) {{ globalThis.__out = String(v); }}, function (e) {{ globalThis.__out = 'rejected ' + e; }}); 0");
+            let _ = rt.evaluate_script(&wrapped);
+            match rt.evaluate_script("String(globalThis.__out)") {
+                Ok(JsValue::String(s)) => s,
+                other => format!("{other:?}"),
+            }
+        } else {
+            match rt.evaluate_script(js) {
+                Ok(JsValue::String(s)) => s,
+                other => format!("{other:?}"),
+            }
         };
         if got != chrome {
             wrong.push(format!("{name}:\n  rustkit {got}\n  chrome  {chrome}"));
