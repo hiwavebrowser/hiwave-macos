@@ -119,6 +119,21 @@ fn a_dedicated_worker_answers_as_in_chrome() {
     assert_eq!(got, want["log"]);
 }
 
+/// The page side holds the built-ins it uses from install (R1 nit on #1105): a page that replaces
+/// `JSON.parse`, `Object.keys` or `WeakMap.prototype.get`/`set` once it has started a worker still
+/// gets its messages, as in Chrome, whose worker plumbing is not page script.
+#[test]
+fn replacing_built_ins_does_not_reach_the_worker_plumbing() {
+    let b = bound();
+    b.evaluate(
+        "var res = [], w = new Worker('http://a.test/worker.js');          JSON.parse = function () { throw new Error('page JSON.parse'); };          Object.keys = function () { return []; };          WeakMap.prototype.get = function () { return undefined; };          WeakMap.prototype.set = function () { return this; };          w.onmessage = function (e) { res.push(typeof e.data === 'string' ? e.data : 'obj'); };          w.postMessage('both');",
+    )
+    .unwrap();
+    serve(&b, WORKER);
+    assert!(pump_until(&b, "res.length >= 2"), "got {}", ev(&b, "res.join()"));
+    assert_eq!(ev(&b, "res.slice(0, 2).join()"), "ready,obj");
+}
+
 #[test]
 fn a_terminated_worker_never_answers() {
     let b = bound();
