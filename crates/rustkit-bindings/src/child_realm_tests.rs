@@ -294,3 +294,181 @@ fn a_full_blob_store_is_reported() {
     let after = ev(&b, "URL.createObjectURL(new Blob(['x']))");
     assert_eq!(b.blob_url_text(&after).as_deref(), Some("x"), "revoking makes room");
 }
+
+// ---------------------------------------------------------------------
+// TRUST-SHARED: what the engine keeps about an event (which it made,
+// its type, its kind, its dispatch state) is the frame tree's, not each
+// window's: an event is one object whichever window made it, dispatches
+// it or reads it. The host object (`__rk`) is reached with `host`, as the
+// embedder's scripts reach it; page script (`ev`) cannot.
+// ---------------------------------------------------------------------
+
+fn host(b: &DomBindings, body: &str) -> String {
+    match b.host_turn(body, &[]) {
+        Ok(JsValue::String(s)) => s,
+        Ok(JsValue::Boolean(x)) => x.to_string(),
+        Ok(other) => format!("{other:?}"),
+        Err(e) => format!("ERROR {e}"),
+    }
+}
+
+/// (a) An event the engine made and trusted in the parent, dispatched at a
+/// node of the child's document: the child's listener reads it trusted,
+/// with its type, target, currentTarget and phase, and it is still the
+/// mouse click it was made as (a checkbox of the child's is checked by it).
+#[test]
+fn a_parent_made_trusted_event_keeps_its_trust_and_type_in_the_child() {
+    let t = tree();
+    ev(
+        &t.child,
+        "var heard = []; var c = document.getElementById('c'); \
+         c.addEventListener('click', function (e) { heard.push([e.isTrusted, e.type, e.target === this, e.currentTarget === this, e.eventPhase, e instanceof up.MouseEvent].join(':')); }); \
+         document.addEventListener('click', function (e) { heard.push(['doc', e.isTrusted, e.type, e.target === c, e.currentTarget === document, e.eventPhase].join(':')); }); 0",
+    );
+    assert_eq!(
+        host(
+            &t.parent,
+            "var c = child.document.getElementById('c'); \
+             var e = __rk.trust(__rk.make('MouseEvent', 'click', { bubbles: true, cancelable: true })); \
+             var r = c.dispatchEvent(e); \
+             return [r, e.isTrusted, e.type, e.target === c, e.currentTarget === null, e.eventPhase].join(':');"
+        ),
+        "true:true:click:true:true:0"
+    );
+    assert_eq!(ev(&t.child, "heard.join()"), "true:click:true:true:2:true,doc:true:click:true:true:3");
+    // Its one dispatch is spent whichever window dispatches it next.
+    assert_eq!(
+        host(
+            &t.parent,
+            "var seen = ''; var p = document.getElementById('p'); \
+             var e = __rk.trust(__rk.make('Event', 'ping')); \
+             child.document.getElementById('c').dispatchEvent(e); \
+             p.addEventListener('ping', function (x) { seen = String(x.isTrusted); }); p.dispatchEvent(e); return seen;"
+        ),
+        "false"
+    );
+    // The kind it was made as: the child's activation behaviour runs.
+    ev(&t.child, "var box = document.getElementById('i'); box.type = 'checkbox'; 0");
+    assert_eq!(
+        host(
+            &t.parent,
+            "var box = child.document.getElementById('i'); \
+             box.dispatchEvent(__rk.trust(__rk.make('MouseEvent', 'click', { bubbles: true, cancelable: true }))); \
+             return String(box.checked);"
+        ),
+        "true"
+    );
+}
+
+/// (b) A page's own event never becomes trusted, in either window: it was
+/// not made by the engine, whichever window's entry point is asked and
+/// whichever window's `Event` made it, and an engine event's one trust is
+/// spent for the whole tree.
+#[test]
+fn a_child_made_page_event_gains_no_trust_through_either_window() {
+    let t = tree();
+    ev(
+        &t.child,
+        "var pe = new Event('click', { bubbles: true }); var pm = new MouseEvent('click', { bubbles: true }); \
+         var fake = Object.create(up.Event.prototype); var seen = []; \
+         document.getElementById('c').addEventListener('click', function (e) { seen.push('child:' + e.isTrusted); }); 0",
+    );
+    ev(&t.parent, "var seen = []; document.getElementById('p').addEventListener('click', function (e) { seen.push('parent:' + e.isTrusted); }); 0");
+    let refuse = |b: &DomBindings, what: &str| {
+        host(b, &format!("try {{ __rk.trust({what}); return 'trusted'; }} catch (e) {{ return 'refused'; }}"))
+    };
+    for what in ["pe", "pm", "fake"] {
+        assert_eq!(refuse(&t.child, what), "refused", "the child's entry point, {what}");
+        assert_eq!(refuse(&t.parent, &format!("child.{what}")), "refused", "the parent's entry point, {what}");
+    }
+    assert_eq!(ev(&t.child, "[pe.isTrusted, pm.isTrusted].join()"), "false,false");
+    // Dispatched in each window, by each window's dispatch.
+    ev(&t.child, "document.getElementById('c').dispatchEvent(pe); up.document.getElementById('p').dispatchEvent(pe); up.document.getElementById('p').dispatchEvent(pm); 0");
+    assert_eq!(ev(&t.child, "seen.join()"), "child:false");
+    assert_eq!(ev(&t.parent, "seen.join()"), "parent:false,parent:false");
+    // An engine event is trusted once for the tree: made and trusted in
+    // the parent, the child's entry point cannot trust it again (not
+    // before its dispatch, not after).
+    host(&t.parent, "__rk.shared.testEvent = __rk.trust(__rk.make('Event', 'ping')); return '';");
+    assert_eq!(refuse(&t.child, "__rk.shared.testEvent"), "refused");
+    host(&t.parent, "document.getElementById('p').dispatchEvent(__rk.shared.testEvent); document.getElementById('p').dispatchEvent(__rk.shared.testEvent); return '';");
+    assert_eq!(refuse(&t.child, "__rk.shared.testEvent"), "refused");
+    assert_eq!(refuse(&t.parent, "__rk.shared.testEvent"), "refused");
+    assert_eq!(host(&t.parent, "return String(__rk.shared.testEvent.isTrusted);"), "false");
+    // An event one window made and not yet trusted is the tree's to trust.
+    host(&t.child, "__rk.shared.testEvent = __rk.make('Event', 'ping'); return '';");
+    assert_eq!(refuse(&t.parent, "__rk.shared.testEvent"), "trusted");
+    assert_eq!(host(&t.child, "return String(__rk.shared.testEvent.isTrusted);"), "true");
+}
+
+/// (c) An event being dispatched cannot be re-initialised or dispatched
+/// again through the other window's prototypes: `initEvent` during
+/// dispatch does nothing and a nested `dispatchEvent` is an
+/// InvalidStateError, whichever realm's method is called (Chrome: the
+/// dispatch flag is the event's).
+#[test]
+fn an_in_flight_event_is_not_retyped_through_the_other_windows_prototype() {
+    let t = tree();
+    ev(
+        &t.child,
+        "function retype(e) { try { Event.prototype.initEvent.call(e, 'keydown', false, true); return 'ran'; } catch (x) { return 'threw ' + x.name; } } \
+         function retypeCustom(e) { try { CustomEvent.prototype.initCustomEvent.call(e, 'keydown', false, true, 7); return 'ran'; } catch (x) { return 'threw ' + x.name; } } \
+         function again(e) { try { document.getElementById('c').dispatchEvent(e); return 'dispatched'; } catch (x) { return x.name; } } 0",
+    );
+    ev(
+        &t.parent,
+        "var log = []; var p = document.getElementById('p'); \
+         p.addEventListener('click', function (e) { log.push(child.retype(e), child.retypeCustom(e), child.again(e), e.type, e.bubbles, e.cancelable, e.isTrusted); }); \
+         document.addEventListener('click', function (e) { log.push('doc ' + e.type + ' ' + e.isTrusted + ' ' + (e.target === p)); }); \
+         document.addEventListener('keydown', function (e) { log.push('RETYPED'); }); 0",
+    );
+    // The engine's trusted click.
+    assert_eq!(
+        host(
+            &t.parent,
+            "var e = __rk.trust(__rk.make('MouseEvent', 'click', { bubbles: true, cancelable: false })); \
+             __rk.dispatchTo(document.getElementById('p'), e); return e.type + ' ' + e.cancelable;"
+        ),
+        "click false"
+    );
+    assert_eq!(ev(&t.parent, "log.join()"), "ran,ran,InvalidStateError,click,true,false,true,doc click true true");
+    // A page's own event, the same.
+    ev(&t.parent, "log = []; p.dispatchEvent(new MouseEvent('click', { bubbles: true })); 0");
+    assert_eq!(ev(&t.parent, "log.join()"), "ran,ran,InvalidStateError,click,true,false,false,doc click false true");
+    // And the other way: in flight in the child, the parent's prototype.
+    ev(
+        &t.child,
+        "var log = []; var c = document.getElementById('c'); \
+         c.addEventListener('click', function (e) { var r; try { up.Event.prototype.initEvent.call(e, 'keydown', false, true); r = 'ran'; } catch (x) { r = 'threw ' + x.name; } log.push(r, e.type, e.bubbles, e.cancelable); }); \
+         document.addEventListener('click', function (e) { log.push('doc ' + e.type); }); \
+         c.dispatchEvent(new Event('click', { bubbles: true })); 0",
+    );
+    assert_eq!(ev(&t.child, "log.join()"), "ran,click,true,false,doc click");
+}
+
+/// The embedder's bookkeeping reads (`evaluate_host_bookkeeping`) are
+/// given the host object of the document asked, as its turns are: each
+/// document's entry points are its own.
+#[test]
+fn a_bookkeeping_read_holds_the_host_object_of_its_own_document() {
+    let t = tree();
+    host(&t.parent, "__rk.testMark = 'parent'; return '';");
+    host(&t.child, "__rk.testMark = 'child'; return '';");
+    let read = |b: &DomBindings| match b.runtime.borrow_mut().evaluate_host_bookkeeping("return __rk.testMark;") {
+        Ok(JsValue::String(s)) => s,
+        other => format!("{other:?}"),
+    };
+    assert_eq!(read(&t.child), "child");
+    assert_eq!(read(&t.parent), "parent");
+}
+
+/// What the lazily installed scripts define is there in a child from the
+/// first read, whichever is touched first: `ImageData` (web_canvas.js) and
+/// `Intl.Locale`'s likely subtags (the lookup web_intl.js takes at load).
+#[test]
+fn a_childs_first_read_of_a_lazy_global_installs_it() {
+    let t = tree();
+    assert_eq!(ev(&t.child, "typeof ImageData + '|' + new ImageData(2, 1).data.length"), ev(&t.parent, "typeof ImageData + '|' + new ImageData(2, 1).data.length"));
+    assert_eq!(ev(&t.child, "typeof ImageData"), "function");
+    assert_eq!(ev(&t.child, "new Intl.Locale('zh').maximize().toString()"), "zh-Hans-CN");
+}
