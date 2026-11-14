@@ -7,10 +7,11 @@
 //
 // Phase 1 is the subset charting libraries draw with: state, transforms,
 // rects, paths, clip, solid colours and linear gradients, line styles and
-// dashes, text and measureText. Members not listed below are absent, not
-// stubbed: no createRadialGradient/createPattern, drawImage, shadows,
-// globalCompositeOperation, getImageData/putImageData, isPointInPath,
-// toDataURL. getContext of any other kind is null.
+// dashes, text and measureText; STR-7 added the raster's members
+// (getImageData, putImageData, createImageData, ImageData, drawImage of a
+// canvas or a loaded <img>, createPattern, createRadialGradient). Members
+// not listed are absent, not stubbed: no shadows, globalCompositeOperation,
+// isPointInPath, toDataURL. getContext of any other kind is null.
 (function (g) {
     var C = g.__rustkit_canvas, slot = g.__rustkit_canvas_slot;
     delete g.__rustkit_canvas;
@@ -83,6 +84,10 @@
     // it hands the Rust side a copy (PR #905 R1: no gradient table beside
     // the recording).
     var GRAD = new WeakMap();
+    // A CanvasPattern's source (a canvas's NodeId or an image's URL) and
+    // repetition; its pixels are read when it is set as a style.
+    var Pattern = iface('CanvasPattern');
+    var PAT = new WeakMap();
 
     method(Canvas.prototype, 'getContext', function getContext(kind) {
         need(1, arguments, 'HTMLCanvasElement', 'getContext');
@@ -158,7 +163,14 @@
             var d = data(this);
             var gi = v !== null && typeof v === 'object' ? GRAD.get(v) : undefined;
             if (gi !== undefined) {
-                call(d, gradientOp, gi.x0, gi.y0, gi.x1, gi.y1, gi.stops.join('|'));
+                if (gi.radial) call(d, gradientOp.replace('Gradient', 'Radial'), gi.x0, gi.y0, gi.r0, gi.x1, gi.y1, gi.r1, gi.stops.join('|'));
+                else call(d, gradientOp, gi.x0, gi.y0, gi.x1, gi.y1, gi.stops.join('|'));
+                d.st[name] = v;
+                return;
+            }
+            var pi = v !== null && typeof v === 'object' ? PAT.get(v) : undefined;
+            if (pi !== undefined) {
+                call(d, gradientOp.replace('Gradient', 'Pattern'), pi.kind, pi.src, pi.repetition);
                 d.st[name] = v;
                 return;
             }
@@ -178,6 +190,20 @@
         }
         var grad = Object.create(Gradient.prototype);
         GRAD.set(grad, { x0: a[0], y0: a[1], x1: a[2], y1: a[3], stops: [] });
+        return grad;
+    });
+    method(P, 'createRadialGradient', function createRadialGradient(x0, y0, r0, x1, y1, r1) {
+        need(6, arguments, 'CanvasRenderingContext2D', 'createRadialGradient');
+        data(this);
+        var a = [+x0, +y0, +r0, +x1, +y1, +r1];
+        for (var i = 0; i < 6; i++) {
+            if (!isFinite(a[i])) throw new TypeError("Failed to execute 'createRadialGradient' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+        }
+        if (a[2] < 0 || a[5] < 0) {
+            throw domError('IndexSizeError', "Failed to execute 'createRadialGradient' on 'CanvasRenderingContext2D': The " + (a[2] < 0 ? 'r0' : 'r1') + ' provided is less than 0.');
+        }
+        var grad = Object.create(Gradient.prototype);
+        GRAD.set(grad, { radial: true, x0: a[0], y0: a[1], r0: a[2], x1: a[3], y1: a[4], r1: a[5], stops: [] });
         return grad;
     });
     method(Gradient.prototype, 'addColorStop', function addColorStop(offset, color) {
@@ -312,4 +338,153 @@
     method(P, 'fill', function fill(r) { var d = data(this); call(d, 'fill', rule(r)); });
     method(P, 'stroke', function stroke() { call(data(this), 'stroke'); });
     method(P, 'clip', function clip(r) { var d = data(this); call(d, 'clip', rule(r)); });
+
+    // ---- Pixels: the bitmap rasterized behind the recording (STR-7).
+    var IMG = new WeakMap();
+    function sizeError(member, which) {
+        return domError('IndexSizeError', "Failed to construct 'ImageData': The " + which + ' is zero or not a number.');
+    }
+    // new ImageData(width, height) or new ImageData(data, width[, height]).
+    var Image = function ImageData(a, b, c) {
+        if (!new.target) throw new TypeError("Failed to construct 'ImageData': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        if (arguments.length < 2) throw new TypeError("Failed to construct 'ImageData': 2 arguments required, but only " + arguments.length + ' present.');
+        var w, h, bytes;
+        if (a instanceof Uint8ClampedArray) {
+            w = b >>> 0;
+            if (!w) throw sizeError('ImageData', 'source width');
+            if (!a.length || a.length % 4 || (a.length / 4) % w) {
+                throw domError('IndexSizeError', "Failed to construct 'ImageData': The input data length is not a multiple of (4 * width).");
+            }
+            h = a.length / 4 / w;
+            if (c !== undefined && (c >>> 0) !== h) {
+                throw domError('IndexSizeError', "Failed to construct 'ImageData': The input data length is not equal to (4 * width * height).");
+            }
+            bytes = a;
+        } else {
+            w = a >>> 0; h = b >>> 0;
+            if (!w) throw sizeError('ImageData', 'source width');
+            if (!h) throw sizeError('ImageData', 'source height');
+            bytes = new Uint8ClampedArray(w * h * 4);
+        }
+        IMG.set(this, { width: w, height: h, data: bytes });
+    };
+    Object.defineProperty(Image.prototype, Symbol.toStringTag, { value: 'ImageData', configurable: true });
+    Object.defineProperty(g, 'ImageData', { value: Image, writable: true, configurable: true, enumerable: false });
+    function imageData(w, h, bytes) {
+        var o = Object.create(Image.prototype);
+        IMG.set(o, { width: w, height: h, data: bytes });
+        return o;
+    }
+    function img(o) {
+        var v = o != null ? IMG.get(o) : undefined;
+        if (!v) throw new TypeError('Illegal invocation');
+        return v;
+    }
+    accessor(Image.prototype, 'width', function () { return img(this).width; });
+    accessor(Image.prototype, 'height', function () { return img(this).height; });
+    accessor(Image.prototype, 'data', function () { return img(this).data; });
+    method(P, 'getImageData', function getImageData(sx, sy, sw, sh) {
+        need(4, arguments, 'CanvasRenderingContext2D', 'getImageData');
+        var d = data(this);
+        var a = [+sx, +sy, +sw, +sh];
+        for (var i = 0; i < 4; i++) {
+            if (!isFinite(a[i])) throw new TypeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+        }
+        var w = Math.trunc(a[2]), h = Math.trunc(a[3]);
+        if (w === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source width is 0.");
+        if (h === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source height is 0.");
+        var x = Math.trunc(a[0]), y = Math.trunc(a[1]);
+        if (w < 0) { x += w; w = -w; }
+        if (h < 0) { y += h; h = -h; }
+        var hex = String(call(d, 'getImageData', x, y, w, h) || '');
+        if (hex === 'SecurityError') throw domError('SecurityError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.");
+        if (hex === 'RangeError') throw new RangeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation");
+        var bytes = new Uint8ClampedArray(w * h * 4);
+        for (var k = 0, n = Math.min(bytes.length, hex.length >> 1); k < n; k++) {
+            bytes[k] = parseInt(hex.substr(k * 2, 2), 16);
+        }
+        return imageData(w, h, bytes);
+    });
+    method(P, 'createImageData', function createImageData(a, b) {
+        need(1, arguments, 'CanvasRenderingContext2D', 'createImageData');
+        data(this);
+        if (a !== null && typeof a === 'object' && IMG.get(a)) {
+            var v = IMG.get(a);
+            return imageData(v.width, v.height, new Uint8ClampedArray(v.width * v.height * 4));
+        }
+        need(2, arguments, 'CanvasRenderingContext2D', 'createImageData');
+        var w = Math.abs(Math.trunc(+a)), h = Math.abs(Math.trunc(+b));
+        if (!w || !h) throw domError('IndexSizeError', "Failed to execute 'createImageData' on 'CanvasRenderingContext2D': The source " + (!w ? 'width' : 'height') + ' is 0.');
+        return imageData(w, h, new Uint8ClampedArray(w * h * 4));
+    });
+    function hexOf(bytes) {
+        var parts = new Array(bytes.length);
+        for (var i = 0; i < bytes.length; i++) { var v = bytes[i]; parts[i] = (v < 16 ? '0' : '') + v.toString(16); }
+        return parts.join('');
+    }
+    // putImageData(data, dx, dy[, dirtyX, dirtyY, dirtyWidth, dirtyHeight])
+    // (HTML §4.12.5.1.15): the dirty rect normalised and cut to the image here.
+    method(P, 'putImageData', function putImageData(img, dx, dy, x, y, w, h) {
+        need(3, arguments, 'CanvasRenderingContext2D', 'putImageData');
+        var d = data(this);
+        var v = img !== null && typeof img === 'object' ? IMG.get(img) : undefined;
+        if (!v) throw new TypeError("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': parameter 1 is not of type 'ImageData'.");
+        dx = Math.trunc(+dx); dy = Math.trunc(+dy);
+        if (!isFinite(dx) || !isFinite(dy)) return;
+        if (arguments.length < 7) { x = 0; y = 0; w = v.width; h = v.height; }
+        else { x = Math.trunc(+x); y = Math.trunc(+y); w = Math.trunc(+w); h = Math.trunc(+h); }
+        if (![x, y, w, h].every(isFinite)) return;
+        if (w < 0) { x += w; w = -w; }
+        if (h < 0) { y += h; h = -h; }
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > v.width) w = v.width - x;
+        if (y + h > v.height) h = v.height - y;
+        if (w <= 0 || h <= 0) return;
+        call(d, 'putImageData', hexOf(v.data), v.width, v.height, dx, dy, [x, y, w, h].join(','));
+    });
+    // An image source as [kind, id or URL, width, height]; null when it
+    // has nothing to draw yet (an image still loading).
+    function source(img, member) {
+        if (img instanceof Canvas) {
+            var s = slot(img);
+            if (!img.width || !img.height) {
+                throw domError('InvalidStateError', "Failed to execute '" + member + "' on 'CanvasRenderingContext2D': The image argument is a canvas element with a width or height of 0.");
+            }
+            return ['canvas', s[1], img.width, img.height];
+        }
+        if (typeof g.HTMLImageElement === 'function' && img instanceof g.HTMLImageElement) {
+            if (!img.complete || !img.naturalWidth) return null;
+            return ['image', img.currentSrc || img.src, img.naturalWidth, img.naturalHeight];
+        }
+        throw new TypeError("Failed to execute '" + member + "' on 'CanvasRenderingContext2D': The provided value is not of type '(HTMLCanvasElement or HTMLImageElement)'.");
+    }
+    method(P, 'drawImage', function drawImage(img, a, b, c, e, f, h, i, j) {
+        var n = arguments.length;
+        if (n !== 3 && n !== 5 && n !== 9) {
+            if (n < 3) need(3, arguments, 'CanvasRenderingContext2D', 'drawImage');
+            throw new TypeError("Failed to execute 'drawImage' on 'CanvasRenderingContext2D': Valid arities are: [3, 5, 9], but " + n + ' arguments provided.');
+        }
+        var d = data(this), src = source(img, 'drawImage');
+        if (!src) return;
+        var r;
+        if (n === 3) r = [0, 0, src[2], src[3], +a, +b, src[2], src[3]];
+        else if (n === 5) r = [0, 0, src[2], src[3], +a, +b, +c, +e];
+        else r = [+a, +b, +c, +e, +f, +h, +i, +j];
+        if (!r.every(isFinite)) return;
+        call(d, 'drawImage', src[0], src[1], r.join(','), src[2] + ',' + src[3]);
+    });
+    method(P, 'createPattern', function createPattern(img, repetition) {
+        need(2, arguments, 'CanvasRenderingContext2D', 'createPattern');
+        data(this);
+        var rep = repetition === null || repetition === '' ? 'repeat' : String(repetition);
+        if (['repeat', 'repeat-x', 'repeat-y', 'no-repeat'].indexOf(rep) < 0) {
+            throw domError('SyntaxError', "Failed to execute 'createPattern' on 'CanvasRenderingContext2D': The provided type ('" + rep + "') is not one of 'repeat', 'no-repeat', 'repeat-x', or 'repeat-y'.");
+        }
+        var src = source(img, 'createPattern');
+        if (!src) return null;
+        var p = Object.create(Pattern.prototype);
+        PAT.set(p, { kind: src[0], src: src[1], repetition: rep });
+        return p;
+    });
 })(typeof globalThis === 'object' ? globalThis : this);

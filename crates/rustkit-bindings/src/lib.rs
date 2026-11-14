@@ -135,6 +135,8 @@ mod web_named_access_tests;
 mod web_canvas;
 #[cfg(test)]
 mod web_canvas_tests;
+#[cfg(test)]
+mod web_canvas_raster_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
@@ -148,7 +150,7 @@ pub use dom::{
 };
 pub mod events;
 pub use rustkit_canvas as canvas;
-pub use web_canvas::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
+pub use web_canvas::{CanvasImageLoader, CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
     AnimationEventData, DataTransfer, DragEventData, DroppedFile, Event, EventDispatcher,
@@ -1284,6 +1286,12 @@ impl DomBindings {
         self.canvases.borrow_mut().set_measurer(measurer);
     }
 
+    /// Where `drawImage`/`createPattern` get an `<img>`'s decoded pixels
+    /// (by its URL): the engine's image cache.
+    pub fn set_canvas_image_loader(&self, loader: Option<CanvasImageLoader>) {
+        self.canvases.borrow_mut().images = loader;
+    }
+
     /// Measure `text` in the canvas `font` the way the canvas does.
     pub fn measure_canvas_text(&self, font: &str, text: &str) -> CanvasTextExtent {
         self.canvases.borrow().measure_font(font, text)
@@ -2189,6 +2197,7 @@ impl DomBindings {
 
         // Update state
         self.window.borrow_mut().location = location.clone();
+        self.canvases.borrow_mut().origin = Some(url.origin());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();

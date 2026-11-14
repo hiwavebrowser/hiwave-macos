@@ -112,8 +112,8 @@ fn drawing_members_are_there_and_the_rest_absent() {
         ev(&b, "var x = document.getElementById('c').getContext('2d'); \
                 var have = ['save','restore','scale','rotate','translate','transform','setTransform','resetTransform','fillRect','clearRect','strokeRect', \
                 'beginPath','moveTo','lineTo','arc','arcTo','bezierCurveTo','quadraticCurveTo','rect','closePath','fill','stroke','clip', \
-                'setLineDash','getLineDash','fillText','strokeText','measureText','createLinearGradient'].filter(function (m) { return typeof x[m] !== 'function'; }); \
-                var absent = ['drawImage','createPattern','createRadialGradient','getImageData','putImageData','isPointInPath'].filter(function (m) { return m in x; }); \
+                'setLineDash','getLineDash','fillText','strokeText','measureText','createLinearGradient','getImageData','putImageData','createImageData','drawImage','createPattern','createRadialGradient'].filter(function (m) { return typeof x[m] !== 'function'; }); \
+                var absent = ['isPointInPath','shadowBlur','globalCompositeOperation'].filter(function (m) { return m in x; }); \
                 JSON.stringify([have, absent, typeof document.getElementById('c').toDataURL])"),
         "[[],[],\"undefined\"]"
     );
@@ -179,7 +179,8 @@ fn ten_thousand_frames_of_gradients_hold_one_frame() {
     let node = document.get_element_by_id("c").unwrap().id.raw();
     let source = b.canvas_source();
     assert_eq!(b.canvas_snapshot(node).unwrap().commands.len(), 1);
-    assert!(source.retained_bytes() <= 4096, "{} bytes after 10k frames", source.retained_bytes());
+    // The recording, plus the 300x150 bitmap now counted with it.
+    assert!(source.retained_bytes() <= 4096 + 300 * 150 * 4, "{} bytes after 10k frames", source.retained_bytes());
     b.evaluate("x.clearRect(0, 0, 300, 150); x.fillStyle = kept; x.fillRect(0, 0, 10, 10);").unwrap();
     let snap = b.canvas_snapshot(node).unwrap();
     match &snap.commands[..] {
@@ -187,5 +188,119 @@ fn ten_thousand_frames_of_gradients_hold_one_frame() {
             assert_eq!((g.y1, g.stops.len()), (150.0, 2), "{g:?}");
         }
         other => panic!("{other:?}"),
+    }
+}
+
+/// Canvas size checks, Chrome 148 (tools/parity_oracle/canvas_taint_cases.json
+/// "huge-get-image-data", and a probe of oversized canvases):
+/// getImageData past the ImageData limit throws RangeError instead of
+/// allocating; a canvas over 16384x16384 pixels of area (or a side over the
+/// largest bitmap side) has no bitmap: it draws nothing and reads zeros.
+#[test]
+fn canvas_size_checks_match_chrome() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "var x = document.getElementById('d').getContext('2d'); \
+                try { x.getImageData(0, 0, 100000, 100000); 'no throw' } catch (e) { e.name + ': ' + e.message }"),
+        "RangeError: Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 16384; c.height = 16385; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "0,0,0,0"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 100000; c.height = 1; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "0,0,0,0"
+    );
+    assert_eq!(
+        ev(&b, "var c = document.createElement('canvas'); c.width = 32768; c.height = 1; var y = c.getContext('2d'); \
+                y.fillStyle = 'red'; y.fillRect(0, 0, 5, 5); Array.from(y.getImageData(0, 0, 1, 1).data).join()"),
+        "255,0,0,255"
+    );
+}
+
+/// Canvas origin checks, Chrome 148 (tools/parity_oracle/canvas_taint_cases.json,
+/// canvas_taint_log.mjs, which serves the page and a second origin from two
+/// local servers): after drawing an image from its own origin, another
+/// origin, or a data: URL, directly, through a pattern, or through another
+/// canvas, what getImageData throws ("ok" for nothing). Here the page is at
+/// https://a.test/, the images are `<img>` elements the engine reported
+/// loaded from those URLs, and the loader hands back one red pixel.
+/// "cors-anonymous-img" is left out: the image loader has no CORS mode, so
+/// a crossorigin image is treated as cross-origin (stricter than Chrome).
+#[test]
+fn canvas_origin_checks_match_chrome() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_taint_cases.json")).unwrap();
+    let mut failures = Vec::new();
+    for case in data["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        // Redirects are the fetch's (rustkit-engine canvas_context_tests).
+        if name == "cors-anonymous-img" || name == "huge-get-image-data" || name.starts_with("redirect-") {
+            continue;
+        }
+        let doc = Rc::new(Document::parse_html(
+            "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s><img id=o><img id=d></body></html>",
+        ).unwrap());
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
+        b.set_document(doc.clone()).unwrap();
+        b.set_canvas_image_loader(Some(Box::new(|_url: &str, _size: (u32, u32)| {
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|b| (b, Vec::new()))
+        })));
+        let id = |e: &str| doc.get_element_by_id(e).unwrap().id.raw();
+        b.fire_image_load(id("s"), 1, 1, "https://a.test/img.png").unwrap();
+        b.fire_image_load(id("o"), 1, 1, "https://b.test/img.png").unwrap();
+        b.fire_image_load(id("d"), 1, 1, "data:image/png;base64,AAAA").unwrap();
+        let script = case["script"].as_str().unwrap();
+        let ours = ev(
+            &b,
+            &format!(
+                "var B = 'https://b.test', x = document.getElementById('c').getContext('2d'), __r = 'none'; \
+                 function done(n) {{ __r = n; }} \
+                 function read() {{ try {{ x.getImageData(0, 0, 1, 1); done('ok'); }} catch (e) {{ done(e.name); }} }} \
+                 function img(src, co, f) {{ f(document.getElementById(src.indexOf(B) === 0 ? 'o' : src.indexOf('data:') === 0 ? 'd' : 's')); }} \
+                 {script}; __r"
+            ),
+        );
+        let chrome = case["chrome"]["name"].as_str().unwrap();
+        if ours != chrome {
+            failures.push(format!("{name}: ours {ours:?}, Chrome {chrome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// Canvas origin checks across redirects, Chrome 148
+/// (canvas_taint_cases.json "redirect-same-to-other-origin" /
+/// "redirect-same-to-same-origin"): an image the page asked for at its own
+/// origin whose response came through another origin leaves the canvas
+/// not origin-clean; one that stayed at the page's origin does not. The
+/// loader reports the response's URLs (each hop and the final one).
+#[test]
+fn canvas_origin_checks_follow_the_response_urls() {
+    for (hops, expected) in [
+        (["https://a.test/to-other", "https://b.test/img.png"], "SecurityError"),
+        (["https://a.test/to-same", "https://a.test/img.png"], "ok"),
+    ] {
+        let doc = Rc::new(Document::parse_html(
+            "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s></body></html>",
+        ).unwrap());
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
+        b.set_document(doc.clone()).unwrap();
+        let urls: Vec<url::Url> = hops.iter().map(|u| url::Url::parse(u).unwrap()).collect();
+        b.set_canvas_image_loader(Some(Box::new(move |_url: &str, _size: (u32, u32)| {
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|bm| (bm, urls.clone()))
+        })));
+        b.fire_image_load(doc.get_element_by_id("s").unwrap().id.raw(), 1, 1, hops[0]).unwrap();
+        let ours = ev(
+            &b,
+            "var x = document.getElementById('c').getContext('2d'); x.drawImage(document.getElementById('s'), 0, 0); \
+             try { x.getImageData(0, 0, 1, 1); 'ok' } catch (e) { e.name }",
+        );
+        assert_eq!(ours, expected, "hops {hops:?}");
     }
 }

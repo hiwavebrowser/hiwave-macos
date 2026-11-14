@@ -394,6 +394,8 @@ use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
 mod canvas_paint;
+#[cfg(test)]
+mod canvas_frame_cost_tests;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
@@ -1184,6 +1186,11 @@ async fn fetch_raster_image(
             response.status, url
         )));
     }
+    // Where the response came from, for a canvas's origin checks.
+    image_manager.record_response_urls(
+        &url,
+        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+    );
     let content_type = response.content_type.as_ref().map(|mime| mime.to_string());
     let body = match response.bytes().await {
         Ok(body) => body,
@@ -9625,6 +9632,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10091,6 +10099,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10772,15 +10781,14 @@ impl Engine {
         for mut cmd in dl.commands.drain(..) {
             // A canvas paints what script drew on it (canvas_paint), again
             // only when its recording or its box changed.
-            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+            if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
                         let paint = canvas_paint::CanvasPaint::reuse_or_paint(
                             last_paints.remove(&node),
                             source,
                             node,
-                            *dest_rect,
-                            *content_box,
+                            &cmd,
                         );
                         if let Some(paint) = paint {
                             expanded.extend(paint.commands.iter().cloned());
@@ -19802,7 +19810,11 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), image_svg(doc));
+                let doc = image_svg(doc);
+                if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+                    svgs.insert(url.to_string(), std::sync::Arc::new(doc.clone()));
+                }
+                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), doc);
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -20438,6 +20450,11 @@ impl Engine {
             };
             return match fetched {
                 Ok(response) if response.ok() => {
+                    // Where the response came from, for a canvas's origin checks.
+                    image_manager.record_response_urls(
+                        &url,
+                        response.redirect_chain.iter().map(|(u, _)| u.clone()).chain([response.url.clone()]),
+                    );
                     let received = guard.map(|g| g.received(&response));
                     match response.text().await {
                         Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
@@ -20572,6 +20589,9 @@ impl Engine {
             if let Some(view) = self.views.get(&id) {
                 view.lay.loaded_images.borrow_mut().due = true;
             }
+        }
+        if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
+            svgs.extend(fetched.svgs.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))));
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
