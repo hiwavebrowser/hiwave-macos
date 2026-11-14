@@ -509,47 +509,61 @@ struct PreSettle {
 
 impl PreSettle {
     /// Render the view and write each requested output (frame, layout, display list) beside its path.
-    /// `None` when nothing is requested or the render fails: there is nothing to fall back to.
+    /// `None` when nothing is requested or a step fails: there is nothing to fall back to, and the side
+    /// files already written are removed (`Drop`).
     fn take(engine: &mut rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId, args: &Args) -> Option<Self> {
         if args.dump_frame.is_none() && args.dump_layout.is_none() && args.dump_display_list.is_none() {
             return None;
         }
         engine.render_view(view_id).ok()?;
         let side = |path: &String| format!("{path}.pre-settle");
-        let mut files = Vec::new();
+        // Built as it goes, so a failure part-way drops it and its side files with it.
+        let mut pre = Self { files: Vec::new(), layout: args.dump_layout.clone() };
         if let Some(ref path) = args.dump_frame {
+            pre.files.push((side(path), path.clone()));
             engine.capture_frame(view_id, &side(path)).ok()?;
-            files.push((side(path), path.clone()));
         }
         if let Some(ref path) = args.dump_layout {
+            pre.files.push((side(path), path.clone()));
             engine.export_layout_json(view_id, &side(path)).ok()?;
-            files.push((side(path), path.clone()));
         }
         if let Some(ref path) = args.dump_display_list {
+            pre.files.push((side(path), path.clone()));
             engine.export_display_list_json(view_id, &side(path)).ok()?;
-            files.push((side(path), path.clone()));
         }
-        Some(Self { files, layout: args.dump_layout.clone() })
+        Some(pre)
     }
 
-    /// The settle finished its span: the outputs taken after it stand.
-    fn discard(self) {
-        for (side, _) in self.files {
-            let _ = fs::remove_file(side);
-        }
-    }
-
-    /// The settle was cut short: the outputs taken before it replace the ones taken after.
-    fn restore(self, result: &mut CaptureResult) {
+    /// The settle was cut short: the outputs taken before it replace the ones taken after. True only when
+    /// every one was restored; the result's paths and layout stats then describe the restored files.
+    fn restore(self, result: &mut CaptureResult, args: &Args) -> bool {
+        let mut all = true;
         for (side, path) in &self.files {
             if let Err(e) = fs::rename(side, path) {
                 error!("Failed to restore the pre-settle output: {:?}", e);
+                all = false;
             }
         }
-        if let Some(path) = self.layout {
-            if let Ok(layout_json) = fs::read_to_string(&path) {
-                result.layout_stats = analyze_layout_json(&layout_json);
+        if all {
+            result.frame_path = args.dump_frame.clone().or(result.frame_path.take());
+            result.layout_path = args.dump_layout.clone().or(result.layout_path.take());
+            result.display_list_path = args.dump_display_list.clone().or(result.display_list_path.take());
+            if let Some(ref path) = self.layout {
+                if let Ok(layout_json) = fs::read_to_string(path) {
+                    result.layout_stats = analyze_layout_json(&layout_json);
+                }
             }
+        }
+        all
+    }
+}
+
+impl Drop for PreSettle {
+    /// Whatever side file is still there (the settle finished, a restore failed, or the capture ended
+    /// early) is removed.
+    fn drop(&mut self) {
+        for (side, _) in &self.files {
+            let _ = fs::remove_file(side);
         }
     }
 }
@@ -984,9 +998,8 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 let mut stats = settle_stepped(&rt, &mut engine, view_id, budget);
                 stats.fell_back = stats.cut_short && pre_settle.is_some();
                 if !stats.fell_back {
-                    if let Some(pre) = pre_settle.take() {
-                        pre.discard();
-                    }
+                    // The settle finished its span: the outputs taken after it stand.
+                    pre_settle = None;
                 }
                 result.settle_held_open = (stats.held_open > 0).then_some(stats.held_open);
                 result.settle_stats = Some(stats);
@@ -1107,8 +1120,13 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     }
 
     // A settle cut short: the outputs as the load left the page replace the half-way ones.
+    // `fell_back` stays true only if every output was restored. Diagnostics and reports still describe the
+    // state after the settle; `fell_back` marks them as not the frame's state.
     if let Some(pre) = pre_settle.take() {
-        pre.restore(&mut result);
+        let restored = pre.restore(&mut result, args);
+        if let Some(stats) = result.settle_stats.as_mut() {
+            stats.fell_back = restored;
+        }
     }
 
     write_diagnostics(&engine, view_id, args, &mut result);
