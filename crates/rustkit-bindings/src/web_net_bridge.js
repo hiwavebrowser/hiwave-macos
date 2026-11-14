@@ -25,18 +25,26 @@
     var MAX_QUEUED_BODY = 64 * 1024 * 1024;
     var queuedBody = 0;
 
+    // The engine's side of this file (`take`, `shelve`, `unshelve`,
+    // `waiting`) runs where script is not interrupted, so it calls nothing
+    // a page can replace: the built-ins are taken now, before any page
+    // script, and the tables and what is queued inherit from nothing.
+    var create = Object.create, keys = Object.keys, stringify = JSON.stringify, parse = JSON.parse,
+        setProto = Object.setPrototypeOf, defineOwn = Object.defineProperty, U8 = Uint8Array,
+        takeBytes = __rk.takeBytes, base64Encode = __rk.base64Encode;
+    function bare(o) { return setProto(o, null); }
     var queue = [];
-    var pending = {};
+    var pending = create(null);
     // Callbacks set aside because the JavaScript budget was spent before
     // their answer could be delivered. fail_all does not settle them; the
     // engine puts them back when a later turn can run them.
-    var shelved = {};
+    var shelved = create(null);
     var nextId = 1;
 
     function pairs(source) {
-        var out = [];
+        var out = bare([]);
         for (var i = 0; source && i < source.length; i++) {
-            out.push([String(source[i][0]), String(source[i][1])]);
+            out[i] = bare([String(source[i][0]), String(source[i][1])]);
         }
         return out;
     }
@@ -53,7 +61,7 @@
         return true;
     }
 
-    var bridge = {
+    var bridge = bare({
         // desc: { method, url, headers: [[name, value]], body_b64, mode,
         // credentials, redirect, destination }. `done` is called once with the
         // delivered result. Returns the request id, or 0 when refused.
@@ -64,7 +72,7 @@
             if (body !== null && queuedBody + body.length > MAX_QUEUED_BODY) return 0;
             if (body !== null) queuedBody += body.length;
             var id = nextId++;
-            queue.push({
+            queue[queue.length] = bare({
                 id: id,
                 method: String(desc.method || 'GET'),
                 url: String(desc.url),
@@ -95,21 +103,25 @@
         // Engine side.
         take: function () {
             queuedBody = 0;
-            return JSON.stringify(queue.splice(0));
+            var taken = bare(queue);
+            queue = [];
+            return stringify(taken);
         },
         // A response's body does not travel in `json`: the engine leaves
         // the bytes with the host and they are taken here, once, as
         // `result.bytes` (a Uint8Array). `result.body_b64` is still there
         // for whoever reads it, computed when read.
         deliver: function (json) {
-            var result = JSON.parse(json);
+            var result = bare(parse(json));
             if (result.ok && result.body_b64 === undefined && pending[result.id]) {
-                var bytes = new Uint8Array(__rk.takeBytes(result.id) || 0);
-                Object.defineProperty(result, 'bytes', { value: bytes });
-                Object.defineProperty(result, 'body_b64', {
-                    get: function () { return __rk.base64Encode(bytes); },
-                    enumerable: true, configurable: true
-                });
+                var bytes = new U8(takeBytes(result.id) || 0);
+                var d = create(null);
+                d.value = bytes;
+                defineOwn(result, 'bytes', d);
+                d = create(null);
+                d.get = function () { return base64Encode(bytes); };
+                d.enumerable = true; d.configurable = true;
+                defineOwn(result, 'body_b64', d);
             }
             return settle(result.id, result);
         },
@@ -128,7 +140,7 @@
                 pending[id] = shelved[id];
                 n++;
             }
-            shelved = {};
+            shelved = create(null);
             return n;
         },
         // Whatever is still waiting completes with an error (the engine's
@@ -139,25 +151,25 @@
         fail_all: function (reason) {
             var failed = 0;
             for (var pass = 0; pass < 3; pass++) {
-                queue.splice(0); queuedBody = 0;
-                var ids = Object.keys(pending);
+                queue = []; queuedBody = 0;
+                var ids = keys(pending);
                 if (ids.length === 0) break;
                 for (var i = 0; i < ids.length; i++) {
                     var id = Number(ids[i]);
-                    if (settle(id, { id: id, ok: false, error: String(reason) })) failed++;
+                    if (settle(id, bare({ id: id, ok: false, error: String(reason) }))) failed++;
                 }
             }
-            queue.splice(0); queuedBody = 0;
-            pending = {};
+            queue = []; queuedBody = 0;
+            pending = create(null);
             return failed;
         },
         waiting: function () {
-            return Object.keys(pending).length;
+            return keys(pending).length;
         },
         queued: function () {
             return queue.length;
         }
-    };
+    });
 
     __rk.net = bridge;
 })();

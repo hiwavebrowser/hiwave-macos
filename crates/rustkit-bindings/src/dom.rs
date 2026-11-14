@@ -3028,7 +3028,11 @@ const WRAPPERS_JS: &str = r#"
     // what to record once it has. `scripts` is web_scripts.js's: it hears of
     // each element script creates, each insert before it happens (and gets
     // back what to run once it has), and each write to a node's own data.
-    var HOOKS = {};
+    // It inherits from nothing and owns every hook from the start, so a
+    // hook nobody installed reads as its own `undefined`.
+    var HOOKS = objCreate(null);
+    HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -6600,7 +6604,8 @@ const WRAPPERS_JS: &str = r#"
         var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
                      pointerId: -1, pointerType: '' };
         var e = make(__rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', 'click', init);
-        e[SYNTHETIC_CLICK] = true;
+        // An own property, defined: no setter on a prototype sees the event.
+        fixed(e, SYNTHETIC_CLICK, true);
         if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
