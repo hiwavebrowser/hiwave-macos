@@ -13,3 +13,8 @@ script link meta after head: head=[script,link,meta] body=[p,div]
 style after head, no body tag: head=[style] body=[p,div]
 title after head: head=[title] body=[p]
 noframes after head: head=[noframes] body=[p]
+noframes in frameset: html(head frameset(noframes("Your browser does not support frames.") frame frame))
+noframes after frameset: html(head frameset(frame) noframes("after <b>x</b>"))
+noframes after after frameset: html(head frameset(frame) noframes("late"))
+noframes in template: html(head(template(noframes("n <i>x</i>") p("after"))) body)
+style in table in template: html(head body(template(table(style("td{color:red}") tbody(tr(td("c")))) p("after"))))

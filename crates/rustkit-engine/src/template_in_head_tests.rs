@@ -11,6 +11,9 @@
 //! formatting opened in a template stays in it (a marker), and a template
 //! started "in body" takes its own mode, so its end tag leaves the outer
 //! template's mode alone.
+//! From the second R1: a raw text element the "in head" rules opened from
+//! another mode (`<noframes>` in and after a frameset and in a template,
+//! `<style>` in a table in a template) keeps its text and its end tag.
 
 use super::*;
 

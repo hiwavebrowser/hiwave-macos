@@ -20,8 +20,22 @@ var cases = {
   'script link meta after head': '<head></head><script>var a = 1;<\/script><link rel="x" href="y"><meta name="m"><body><p>x</p><div>d</div></body>',
   'style after head, no body tag': '<head></head><style>p{}</style><p>x</p><div>d</div>',
   'title after head': '<head></head><title>late</title><body><p>x</p></body>',
-  'noframes after head': '<head></head><noframes>n</noframes><body><p>x</p></body>'
+  'noframes after head': '<head></head><noframes>n</noframes><body><p>x</p></body>',
+  // A raw text element opened by the "in head" rules from another mode
+  // keeps its text and its end tag (the whole tree is listed for these).
+  'noframes in frameset': '<frameset cols="50%,50%"><noframes>Your browser does not support frames.</noframes><frame src="a.html"><frame src="b.html"></frameset>',
+  'noframes after frameset': '<frameset><frame src="a.html"></frameset><noframes>after <b>x</b></noframes>',
+  'noframes after after frameset': '<frameset><frame src="a.html"></frameset></html><noframes>late</noframes>',
+  'noframes in template': '<head><template id="u"><noframes>n <i>x</i></noframes><p>after</p></template></head><body></body>',
+  'style in table in template': '<body><template id="u"><table><style>td{color:red}</style><tr><td>c</td></tr></table><p>after</p></template></body>'
 };
+var whole = /^(noframes in|noframes after (after )?frameset|style in table)/;
+function deep(node) {
+  if (node.nodeType === 3) return '"' + node.data.replace(/\s+/g, ' ') + '"';
+  if (node.nodeType !== 1) return '?';
+  var kids = Array.prototype.map.call((node.localName === 'template' ? node.content : node).childNodes, deep);
+  return node.localName + (kids.length ? '(' + kids.join(' ') + ')' : '');
+}
 function names(list) { return Array.prototype.map.call(list, function (e) { return e.nodeType === 1 ? e.localName + (e.id ? '#' + e.id : '') : e.nodeType === 3 ? '"' + e.data.replace(/\s+/g, ' ') + '"' : '?'; }).join(','); }
 function tree(node) { return names(node.childNodes); }
 var lines = [];
@@ -40,7 +54,8 @@ Object.keys(cases).forEach(function (k) {
     Array.prototype.forEach.call(root.querySelectorAll('td'), function () { cells++; });
     Array.prototype.forEach.call(root.querySelectorAll('template'), function (t) { count(t.content); });
   })(d);
-  if (cells) out += ' cells=' + cells;
+  if (cells && !whole.test(k)) out += ' cells=' + cells;
+  if (whole.test(k)) out = k + ': ' + deep(d.documentElement);
   lines.push(out);
 });
 window.report = function () { return lines.join('\n'); };
