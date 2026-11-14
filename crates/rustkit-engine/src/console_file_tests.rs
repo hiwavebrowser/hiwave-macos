@@ -453,3 +453,48 @@ console.log('never-reached');
     let early = ended.saturating_duration_since(seen.expect("the line was not in the file while the load ran"));
     assert!(early >= std::time::Duration::from_millis(400), "the line was written only {early:?} before the load ended");
 }
+
+// ---- R1 nit 2: script labels are per view ----
+
+/// Two tabs each have a `script#1`. The label map was keyed by label
+/// alone, so the tab that loaded last gave its URL to both.
+#[test]
+fn a_script_label_names_its_own_views_script_in_the_file_and_in_the_mirror() {
+    let path = scratch("views");
+    let _reset = Reset(path.clone());
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    crate::console_file::force_for_test(Some(Forced::On(path.clone(), MAX_FILE_BYTES)));
+    let doc = |script: &str| format!("<html><body><script src=\"{script}\"></script></body></html>");
+    let server = serve(vec![
+        Route::html("/a", doc("/a.js")),
+        Route::html("/b", doc("/b.js")),
+        Route::ok("/a.js", "text/javascript", "function fromA() { console.warn('said-by-a'); }"),
+        Route::ok("/b.js", "text/javascript", "function fromB() { console.warn('said-by-b'); }"),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let bounds = Bounds { x: 0, y: 0, width: 300, height: 200 };
+    let (a, b) = (engine.create_headless_view(bounds).expect("view"), engine.create_headless_view(bounds).expect("view"));
+    runtime().block_on(engine.load_url(a, server.url("/a"))).expect("load a");
+    runtime().block_on(engine.load_url(b, server.url("/b"))).expect("load b");
+    engine.execute_script(a, "fromA()").expect("a's function runs");
+    engine.execute_script(b, "fromB()").expect("b's function runs");
+
+    let lines = lines(&path);
+    let said = |text: &str| {
+        let found: Vec<_> = lines.iter().filter(|line| line["message"] == text).collect();
+        assert_eq!(found.len(), 1, "one {text} line expected in {lines:#?}");
+        found[0].clone()
+    };
+    let url = |path: &str| format!("http://127.0.0.1:{}{path}", server.port);
+    let (from_a, from_b) = (said("said-by-a"), said("said-by-b"));
+    assert_eq!((from_a["view"].as_u64(), from_a["source"].as_str()), (Some(a.raw()), Some(url("/a.js").as_str())));
+    assert_eq!((from_b["view"].as_u64(), from_b["source"].as_str()), (Some(b.raw()), Some(url("/b.js").as_str())));
+    assert_eq!(from_a["page"], url("/a").as_str());
+
+    let mirrored = mirrored.lock().unwrap();
+    let mirror_line = |text: &str| mirrored.iter().find(|line| line.contains(text)).unwrap_or_else(|| panic!("no {text} in {mirrored:#?}"));
+    assert!(mirror_line("said-by-a").contains("/a.js"), "{}", mirror_line("said-by-a"));
+    assert!(mirror_line("said-by-b").contains("/b.js"), "{}", mirror_line("said-by-b"));
+}
