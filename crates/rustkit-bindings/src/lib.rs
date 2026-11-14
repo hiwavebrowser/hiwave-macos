@@ -135,6 +135,8 @@ mod web_named_access_tests;
 #[cfg(test)]
 mod child_realm_tests;
 #[cfg(test)]
+mod child_realm_hardening_tests;
+#[cfg(test)]
 mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
