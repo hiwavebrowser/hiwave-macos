@@ -42,13 +42,28 @@ must name that SHA. If HEAD moves while you wait on CI, re-record and re-check.
 
 ### Required checks (gate 1)
 
-Treat these pull_request checks as required (must be SUCCESS, not pending):
+CI is batch-level since 2026-11-13 (#1125): the heavy macOS suites run once on
+the batch PR (head branch `batch/NN`), not on every member PR.
 
-- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`, `render-suites`
+On an ordinary PR, these checks are required (must be SUCCESS, not pending):
+
+- `audit`, `f1-test-compile`, `selector-key`, `script-guards`
+
+On a **batch PR** (head branch starts with `batch/`), these are required too:
+
+- `unit-suites`, `render-suites`, `capture-suites`, `js-suites`
 - `pr-swarm` (0–3), `pr-aggregate`
 
-Skipped on PRs and **not** failures: `nightly-swarm`, `nightly-aggregate`,
-`commit-gate`.
+Skipped and **not** failures:
+
+- on every PR: `nightly-swarm`, `nightly-aggregate`, `commit-gate`
+- on an ordinary (non-batch) PR: `unit-suites`, `render-suites`,
+  `capture-suites`, `js-suites`, `pr-swarm`, `pr-aggregate`. SKIPPED there is
+  the design, never a gate-1 FAIL and never evidence of green either.
+
+A batch PR needs no R1 of its own: its members carry `r1-clear` at the merged
+SHAs. Do not FAIL-stamp a batch PR for gate 6 or 7 (it is the sum of its
+members); stamp it on gate 1 and 2 only.
 
 ### FAIL if any of these is true
 
