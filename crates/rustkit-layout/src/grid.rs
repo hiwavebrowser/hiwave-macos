@@ -9181,6 +9181,56 @@ mod tests {
         );
     }
 
+    /// GR7: while rows are sized, a percentage `height` (plain or inside
+    /// `calc()`) is cyclic even when the grid's height is definite. Resolving
+    /// it against the grid made a `calc(50% + 0px)` item floor a 600px
+    /// `auto`/`1fr` row at 300; Chrome 148 sizes the row to the content.
+    #[test]
+    fn a_percentage_height_is_cyclic_while_grid_rows_are_sized() {
+        fn item_with_height(height: Length) -> f32 {
+            let mut style = ComputedStyle::new();
+            style.height = height;
+            let mut b = LayoutBox::new(BoxType::Block, style);
+            let mut child = ComputedStyle::new();
+            child.height = Length::Px(18.0);
+            b.children.push(LayoutBox::new(BoxType::Block, child));
+            GridItem::new(&b).get_height_contribution(600.0)
+        }
+
+        let plain = item_with_height(Length::Percent(50.0));
+        assert!(
+            (plain - 300.0).abs() > 1.0,
+            "Percent(50) must not resolve against the 600px grid (got {plain})"
+        );
+        assert!(
+            (plain - 18.0).abs() < 0.01,
+            "Percent(50) contributes the 18px content, got {plain}"
+        );
+
+        let calc = item_with_height(Length::Calc(Box::new(rustkit_css::CalcSum {
+            percent: 50.0,
+            ..Default::default()
+        })));
+        assert!(
+            (calc - 300.0).abs() > 1.0,
+            "calc(50%) must not resolve against the 600px grid (got {calc})"
+        );
+        assert!(
+            (calc - 18.0).abs() < 0.01,
+            "calc(50%) contributes the 18px content, got {calc}"
+        );
+
+        // Percentage-free calc still resolves (GR5 companion).
+        let px_calc = item_with_height(Length::Calc(Box::new(rustkit_css::CalcSum {
+            px: 40.0,
+            ..Default::default()
+        })));
+        assert!(
+            (px_calc - 40.0).abs() < 0.01,
+            "calc(40px) still resolves during row sizing, got {px_calc}"
+        );
+    }
+
     /// Columns size from the outer width for the same reason.
     #[test]
     fn a_column_contribution_includes_the_inline_margins() {

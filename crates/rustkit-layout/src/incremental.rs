@@ -613,6 +613,8 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         sticky_paths: _,
         scrollbar_thumb_hovered: _,
         hit_overflow: _,
+        stack_order: _,
+        stack_gen: _,
         scrollbar_overflows,
         pseudo_animation_key,
         formatting_root,

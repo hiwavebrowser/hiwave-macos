@@ -1,4 +1,4 @@
-# Vendored boa_engine 0.22.0, with one patch
+# Vendored boa_engine 0.22.0 (and boa_parser, boa_ast), with HiWave's patches
 
 Source: crates.io `boa_engine` 0.22.0 (upstream `boa-dev/boa` at `337a3668`,
 `core/engine`), the version `Cargo.lock` pins. The first commit that added this
@@ -758,3 +758,16 @@ iteration; 9 differed before).
 `src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
 transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
 (18 cases, Chrome for Testing 148.0.7778.216).
+
+**Follow-up (R1 on #1157).** The write cache could still be filled by an ordinary object that has an
+array's shape (an Array subclass instance is shaped like `Object.create(Q.prototype)` given a writable
+own `length`), and a later hit wrote a real array's `length` directly. `vm/opcode/set/property.rs`
+`set_by_name`: a cache hit writes the slot only when the object's [[DefineOwnProperty]] is the ordinary
+one, or the object is an array and the name is not `length` (so other named writes on arrays stay
+cached). `object/operations.rs` `length_of_array_like`: an array's length is read and the borrow
+released before it is converted. With the cache guard in place every array's `length` slot holds a
+number, so this second change has no failing case of its own; it is defensive. Pin:
+`crates/rustkit-js/tests/array_length_shapes.rs` (15 cases from Chrome 148.0.7778.216: subclass,
+`Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
+non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
+2 differed at #1157's head).
