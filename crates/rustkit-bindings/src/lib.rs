@@ -455,6 +455,25 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("Window", "named access (iframe name)"),
 ];
 
+/// Every name the embedder's scripts keep on the host object (`__rk`).
+/// Each is an own property of it before the first script runs
+/// ([`JsRuntime::reserve_host_slots`]), `undefined` until its script fills
+/// it in, so a probe of one that is not installed (`__rk.net`, a view
+/// never told its focus) reads the host object's own property.
+/// `host_object_tests` checks the list against the scripts.
+pub(crate) const HOST_SLOTS: &[&str] = &[
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "compose", "decodeWait", "dispatchTo",
+    "domDirty", "domHooks", "domReset", "dragStore", "editKey", "finishComposing", "fire", "fireAnimation",
+    "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn", "fireTextInput", "fireTransition", "fireWheel",
+    "followLink", "fragmentNavigation", "hasCtor", "historyReset", "imageFailed", "imageFailedFor", "imageGaveUp",
+    "imageLoaded", "imageLoadedFor", "imageWritten", "implicitSubmit", "isDispatching", "keepCtor", "keepFinish",
+    "locationHashSync", "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net",
+    "newTextEvent", "nextTimer", "now", "observersTick", "pickOption", "runTimers", "runTimersFramed",
+    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
+    "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
+    "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+];
+
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     // Described natively (no page code runs) and queued in the runtime.
@@ -1111,6 +1130,7 @@ impl DomBindings {
         // document only (CH3.A7). Registered before the setup scripts: a
         // global added after them made every page load measurably slower
         // (two app tests 1.4 s -> 3.0 s).
+        runtime.reserve_host_slots(HOST_SLOTS)?;
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);

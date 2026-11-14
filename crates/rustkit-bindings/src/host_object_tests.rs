@@ -267,3 +267,65 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
         "what the bookkeeping read"
     );
 }
+
+/// The natives the runtime puts on the host object itself (rustkit-js).
+const HOST_NATIVES: &[&str] = &[
+    "reportError", "unsupported", "base64Decode", "base64Encode", "binaryDecode", "binaryEncode", "blobGet",
+    "blobNumber", "blobPut", "blobRevoke", "takeBytes", "utf8Decode", "utf8Encode",
+];
+
+/// Every name this crate's sources read or write on the host object is a
+/// reserved slot or a native: a new one is added to `HOST_SLOTS` with it.
+#[test]
+fn every_host_name_is_reserved() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut missing = std::collections::BTreeSet::new();
+    let mut stack = vec![dir];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if name.ends_with("_tests.rs") || !(name.ends_with(".rs") || name.ends_with(".js")) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for part in source.split("__rk.").skip(1) {
+                let member: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                if !member.is_empty() && !HOST_SLOTS.contains(&member.as_str()) && !HOST_NATIVES.contains(&member.as_str()) {
+                    missing.insert(format!("{member} ({name})"));
+                }
+            }
+        }
+    }
+    assert!(missing.is_empty(), "host names that are not reserved slots: {missing:?}");
+}
+
+/// The host object and what hangs off it inherit from nothing, and every
+/// reserved slot is an own property from the start.
+#[test]
+fn the_host_object_inherits_nothing() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    b.enable_net_bridge().unwrap();
+    let slots = HOST_SLOTS.iter().chain(HOST_NATIVES).map(|s| format!("{s:?}")).collect::<Vec<_>>().join(",");
+    let got = b
+        .host_turn(
+            &format!(
+                "var proto = Object.getPrototypeOf, has = Object.prototype.hasOwnProperty, out = [];
+                 if (proto(__rk) !== null) out.push('host');
+                 [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
+                 ['domHooks', 'net', 'dragStore'].forEach(function (n) {{ if (proto(__rk[n]) !== null) out.push(n); }});
+                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener'].forEach(function (n) {{
+                     if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
+                 }});
+                 return out.join(' ');"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(text(got), "");
+}

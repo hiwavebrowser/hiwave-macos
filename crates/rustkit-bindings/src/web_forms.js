@@ -114,6 +114,14 @@
     var EventCtor = g.Event, dispatch = internals.dispatch, clickNow = internals.click, resetText = internals.reset;
     // `input` and `change` after a click's activation: trusted, whoever
     // made the click (Chrome 148: also after script's `click()`).
+    // What the engine adds to its own event: an own property, defined
+    // with built-ins taken now and a descriptor that inherits nothing.
+    var defineOwn = Object.defineProperty, objCreate = Object.create;
+    function own(o, k, v, open) {
+        var d = objCreate(null);
+        d.value = v; d.enumerable = true; d.writable = !!open; d.configurable = !!open;
+        defineOwn(o, k, d);
+    }
     function fire(el, type, init) {
         var e = __rk.make('Event', type, init || { bubbles: true });
         __rk.trust(e);
@@ -382,7 +390,7 @@
         // The engine's event (trusted, as Chrome's is whoever asked for the
         // submission), dispatched as the engine dispatches.
         var e = __rk.make('Event', 'submit', { bubbles: true, cancelable: true });
-        Object.defineProperty(e, 'submitter', { value: submitter, enumerable: true });
+        own(e, 'submitter', submitter);
         __rk.trust(e);
         if (dispatch(form, e)) noteSubmit(form, submitter);
     }
@@ -450,8 +458,8 @@
         details.toggleAttribute('open', open);
         Promise.resolve().then(function () {
             var e = __rk.make('Event', 'toggle');
-            e.oldState = was ? 'open' : 'closed';
-            e.newState = open ? 'open' : 'closed';
+            own(e, 'oldState', was ? 'open' : 'closed', true);
+            own(e, 'newState', open ? 'open' : 'closed', true);
             __rk.trust(e);
             dispatch(details, e);
         });
