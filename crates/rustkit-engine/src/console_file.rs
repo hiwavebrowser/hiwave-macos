@@ -64,10 +64,15 @@ pub(crate) enum Setting {
 }
 
 pub(crate) fn setting(value: &std::ffi::OsStr) -> Setting {
-    if value.as_encoded_bytes().contains(&b'/') {
+    let bytes = value.as_encoded_bytes();
+    if bytes.contains(&b'/') {
         return Setting::File(PathBuf::from(value));
     }
-    Setting::Off
+    // `1`, `0`, and the bare words people set a switch to (`true`, `on`).
+    if bytes.iter().all(u8::is_ascii_alphanumeric) {
+        return Setting::Off;
+    }
+    Setting::NotAPath
 }
 
 /// The file to write, opened: `chosen` (what `set_path` was given) wins
@@ -79,7 +84,16 @@ fn open_configured(chosen: Option<PathBuf>, env: Option<std::ffi::OsString>, lim
         Some(path) => path,
         None => match setting(&env?) {
             Setting::File(path) => path,
-            Setting::Off | Setting::NotAPath => return None,
+            Setting::Off => return None,
+            Setting::NotAPath => {
+                // The rule, never the value.
+                tracing::warn!(
+                    "HIWAVE_CONSOLE_LOG is set to something that is neither `1` (the tracing mirror) nor a path: \
+                     the console log file is written only to a value with a `/` in it (`./name` for the current directory); \
+                     nothing will be written to it"
+                );
+                return None;
+            }
         },
     };
     match Sink::open(&path, limit) {
@@ -306,11 +320,12 @@ fn write(page: &Page, kind: &str, level: &str, message: &str, at: Option<At<'_>>
 }
 
 /// A script of `view`'s place as the Inspector's console shows it: an inline
-/// script's label as it is (the document is `page`, and the line counts
+/// script's label (`inline#` and digits, nothing else) as it is (the document is `page`, and the line counts
 /// from the script's own start), anything else as the URL it was loaded
 /// from, cut like every devtools URL.
 fn source(view: u64, path: &str) -> String {
-    if path.starts_with("inline#") {
+    let inline = path.strip_prefix("inline#").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if inline {
         return path.to_string();
     }
     crate::console_log::resolve(view, path)

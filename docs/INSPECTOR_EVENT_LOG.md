@@ -362,7 +362,9 @@ is not safe to share.
   it has a `/` in it: write `./console.jsonl` for the current directory.
   `HIWAVE_CONSOLE_LOG=1` is a different, older switch (the tracing mirror
   the stress harness reads); it, `0`, and every other bare word mean what
-  they did before and make no file.
+  they did before and make no file. Anything else without a `/`
+  (`console.jsonl`, `C:\logs\x`) makes no file either, and one warning in
+  the tracing log says the rule (never the value).
 - One JSON line per console call (`log`, `info`, `warn`, `error`, `debug`),
   uncaught exception and unhandled promise rejection, appended:
 
