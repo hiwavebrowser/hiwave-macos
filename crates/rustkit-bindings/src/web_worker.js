@@ -38,6 +38,16 @@
         }
         return false;
     }
+    // A worker script of an image, audio, video or text/csv type is refused (Fetch, "should response to
+    // request be blocked due to its MIME type"), as in Chrome; any other type runs.
+    function blockedScriptType(headers) {
+        for (var i = 0; headers && i < headers.length; i++) {
+            if (String(headers[i][0]).toLowerCase() !== 'content-type') continue;
+            var essence = String(headers[i][1]).split(';')[0].trim().toLowerCase();
+            return /^(audio|image|video)\//.test(essence) || essence === 'text/csv';
+        }
+        return false;
+    }
     // A request descriptor with every key the bridge reads, so it reads none through a prototype.
     function scriptRequest(url, destination, mode) {
         var d = objCreate(null);
@@ -241,7 +251,7 @@
             st.net = net.request(scriptRequest(u.href, 'worker', 'same-origin'), function (r) {
                 st.net = 0;
                 if (st.dead) return;
-                if (!r.ok || r.status < 200 || r.status >= 300) { failLoad(self, st); return; }
+                if (!r.ok || r.status < 200 || r.status >= 300 || blockedScriptType(r.headers)) { failLoad(self, st); return; }
                 var source;
                 try { source = new g.TextDecoder().decode(fromBase64(r.body_b64)); } catch (_) { failLoad(self, st); return; }
                 begin(source);
