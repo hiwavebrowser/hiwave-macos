@@ -161,12 +161,12 @@ pub use events::{
     TransitionEventData, WheelDeltaMode, WheelEventData,
 };
 
-use rustkit_dom::{Document, NodeId};
+use rustkit_dom::Document;
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::debug;
 use url::Url;
 
 /// Errors that can occur in bindings.
