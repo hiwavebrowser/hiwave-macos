@@ -505,8 +505,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // timers' virtual clock, which a plain real clock was (`performance.now() - frameTime` was
     // negative in a load), and it flows between virtual moves, which a virtual clock does not (a
     // busy loop on performance.now() ends). The animation timeline stays on the virtual clock
-    // itself, so a capture that steps it is reproducible. The host clock is looked up at call
-    // time: it is installed after this script runs.
+    // itself, so a capture that steps it is reproducible. The host clock is the one web_platform.js
+    // put behind performance.now(); this clock replaces it there, and reaches the engine's own
+    // scripts as `__rk.perfNow` (no page-visible name, #1123).
     //
     // Capture mode (set_deterministic_clock): no real time at all. The clock is the virtual time
     // plus a fixed step per read since the virtual clock last moved, so a capture that steps the
@@ -515,6 +516,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // gets ahead of real time (a load that ran a 300 ms timeout at once). So the clock flows with real
     // time always (no wait is lost), is never behind virtual time, and never goes backwards.
     var skew = 0, lastPerf = 0, det = false, reads = 0, seenNow = 0, startedAt = realNow();
+    var hostClock = window.performance && typeof window.performance.now === 'function' ? window.performance.now : null;
     var DET_STEP = 0.1;
     function perfNow() {
         var t;
@@ -524,10 +526,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             reads++;
             if (t <= lastPerf) t = lastPerf + DET_STEP;
         } else {
-            var f = window.__rustkit_now_ms;
-            // Without the host clock (it is installed after this script): elapsed since this script
-            // began, never an epoch value (the never-backwards rule would pin it there).
-            var real = typeof f === 'function' ? f() : realNow() - startedAt;
+            // Without the host clock: elapsed since this script began, never an epoch value (the
+            // never-backwards rule would pin it there).
+            var real = hostClock ? hostClock() : realNow() - startedAt;
             t = real + skew;
             if (t < now) { skew += now - t; t = now; }
             if (t < lastPerf) { skew += lastPerf - t; t = lastPerf; }
@@ -539,8 +540,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // whatever the real clock did (a load runs frames back to back in microseconds), and the page
     // clock is never behind a frame stamp it handed out.
     var prevFrameTs = -1, prevFrameAt = 0;
-    window.__rustkit_perf_now = perfNow;
-    window.__rustkit_set_det_clock = function (on) { det = !!on; reads = 0; };
+    __rk.perfNow = perfNow;
+    __rk.setDetClock = function (on) { det = !!on; reads = 0; };
+    if (window.performance) window.performance.now = function now() { return perfNow(); };
     // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
     // taken when the first callback at a virtual time runs (the clock has moved to it by then), so
     // the frames of a load, which one runTimers call runs one after the other, are each their own
@@ -2883,7 +2885,7 @@ impl DomBindings {
         let _ = self
             .runtime
             .borrow_mut()
-            .evaluate_bookkeeping(&format!("window.__rustkit_set_det_clock({on})"));
+            .evaluate_host_bookkeeping(&format!("__rk.setDetClock({on});"));
     }
 
 

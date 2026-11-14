@@ -410,7 +410,7 @@
     // The engine's virtual clock as it stands (Chrome's timeline is live, not only at a frame): the
     // time the animations compute from.
     Object.defineProperty(timeline, 'currentTime', { get: function () {
-        var v = typeof g.__rustkit_now === 'function' ? g.__rustkit_now() : timeNow;
+        var v = typeof __rk.now === 'function' ? __rk.now() : timeNow;
         return v > timeNow ? v : timeNow;
     }, enumerable: true });
     function AnimationTimeline() { throw new TypeError('Illegal constructor'); }
@@ -428,7 +428,7 @@
         // The timeline runs on the engine's virtual frame clock, not on the callback's timestamp
         // (the page clock, which also moves in real time between virtual steps): a capture that
         // steps the clock reproduces.
-        var vt = typeof g.__rustkit_now === 'function' ? g.__rustkit_now() : ts;
+        var vt = typeof __rk.now === 'function' ? __rk.now() : ts;
         if (typeof vt === 'number' && vt > timeNow) timeNow = vt;
         var list = all.slice();
         var more = false;
