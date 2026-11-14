@@ -19,6 +19,7 @@ fn routes() -> Vec<(&'static str, &'static str, String)> {
         ("/plain.js", "text/plain", "postMessage('ran');".to_string()),
         ("/imports_plain.js", JS, "try { importScripts('/lib_plain.js'); postMessage('imported'); } catch (e) { postMessage('import:' + e.name); }".to_string()),
         ("/lib_plain.js", "text/plain", "var libValue = 'plain';".to_string()),
+        ("/image.js", "image/png", "postMessage('ran');".to_string()),
         ("/imports_redirect.js", JS, "importScripts('/redir_lib.js'); postMessage('ready:' + libValue);".to_string()),
         ("/imports_missing.js", JS, "try { importScripts('/missing.js'); postMessage('imported'); } catch (e) { postMessage('import:' + e.name); }".to_string()),
     ]
@@ -31,6 +32,10 @@ const CASES: &[(&str, &str)] = &[
     ("import_scripts_through_a_same_origin_redirect", "/imports_redirect.js"),
     ("import_scripts_of_a_missing_script", "/imports_missing.js"),
     ("worker_script_through_a_same_origin_redirect", "/redir_w.js"),
+    // Chrome refuses a worker script of an image, audio, video or text/csv type (Fetch, "should response
+    // to request be blocked due to its MIME type"). The Chrome file's `import_scripts_with_two_content_types`
+    // (Chrome runs it) needs two Content-Type headers, which this test's server does not send.
+    ("worker_script_served_as_image_png", "/image.js"),
 ];
 
 /// What the page logs for a worker started from `path`, after the live loop has run 1.5 s of turns.

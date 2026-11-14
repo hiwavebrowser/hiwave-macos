@@ -13,12 +13,16 @@ const routes = {
   "/plain.js": ["text/plain", "postMessage('ran');"],
   "/imports_plain.js": [JS, "try { importScripts('/lib_plain.js'); postMessage('imported'); } catch (e) { postMessage('import:' + e.name); }"],
   "/lib_plain.js": ["text/plain", "var libValue = 'plain';"],
+  "/image.js": ["image/png", "postMessage('ran');"],
+  "/imports_two_types.js": [JS, "try { importScripts('/lib_two_types.js'); postMessage('ready:' + libValue); } catch (e) { postMessage('import:' + e.name); }"],
   "/imports_redirect.js": [JS, "importScripts('/redir_lib.js'); postMessage('ready:' + libValue);"],
   "/imports_missing.js": [JS, "try { importScripts('/missing.js'); postMessage('imported'); } catch (e) { postMessage('import:' + e.name); }"],
 };
 const redirects = { "/redir_lib.js": "/lib.js", "/redir_w.js": "/w.js" };
 const server = http.createServer((req, res) => {
   const path = req.url.split("?")[0];
+  // Two Content-Type headers: a JavaScript type, then a non-JavaScript one.
+  if (path === "/lib_two_types.js") { res.setHeader("content-type", ["text/javascript", "text/plain"]); res.writeHead(200); return res.end("var libValue = 'two';"); }
   if (redirects[path]) { res.writeHead(302, { location: redirects[path] }); return res.end(); }
   if (path === "/") { res.writeHead(200, { "content-type": "text/html" }); return res.end("<!doctype html><title>w</title>"); }
   const r = routes[path];
@@ -35,6 +39,8 @@ const cases = {
   import_scripts_through_a_same_origin_redirect: "/imports_redirect.js",
   import_scripts_of_a_missing_script: "/imports_missing.js",
   worker_script_through_a_same_origin_redirect: "/redir_w.js",
+  worker_script_served_as_image_png: "/image.js",
+  import_scripts_with_two_content_types: "/imports_two_types.js",
 };
 const b = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu"] });
 const p = await b.newPage();

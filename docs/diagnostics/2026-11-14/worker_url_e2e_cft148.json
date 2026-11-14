@@ -18,5 +18,11 @@
  "worker_script_through_a_same_origin_redirect": [
   "msg:ready:lib",
   "msg:echo:hi"
+ ],
+ "worker_script_served_as_image_png": [
+  "error:Event"
+ ],
+ "import_scripts_with_two_content_types": [
+  "msg:ready:two"
  ]
 }
