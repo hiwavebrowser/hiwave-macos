@@ -968,7 +968,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             }
             Token::StartTag {
                 name, attrs, self_closing: _
-            } if matches!(name.as_str(), "title" | "style" | "script") => {
+            } if matches!(name.as_str(), "title" | "style" | "script" | "noframes") => {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
                 self.open_elements.push((name, node_id));
                 // Note: In a full implementation, we'd switch to RCDATA/RAWTEXT mode here
@@ -1024,7 +1024,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                     self.sink.end_element(tag_name);
                 }
             }
-            Token::EndTag { name } if matches!(name.as_str(), "title" | "style" | "script") => {
+            Token::EndTag { name } if matches!(name.as_str(), "title" | "style" | "script" | "noframes") => {
                 self.flush_text();
                 if let Some((tag_name, _)) = self.open_elements.pop() {
                     self.sink.end_element(tag_name);
@@ -1063,6 +1063,18 @@ impl<S: TreeSink> TreeBuilder<S> {
     }
 
     fn handle_after_head(&mut self, token: Token) -> ParseResult<()> {
+        // A raw text element put back into the head (below) is still open:
+        // its text and its end tag are the "in head" rules' (the spec's
+        // "text" mode, which this builder does not have). Without this the
+        // first character of a late <style> implied the body inside it.
+        if let Some((open, _)) = self.open_elements.last() {
+            if matches!(open.as_str(), "title" | "style" | "script" | "noframes") {
+                let its_end = matches!(&token, Token::EndTag { name } if name == open);
+                if its_end || matches!(token, Token::Character(_)) {
+                    return self.handle_in_head(token);
+                }
+            }
+        }
         match token {
             Token::Character(ch) if ch.is_whitespace() => {
                 self.text_buffer.push(ch);
