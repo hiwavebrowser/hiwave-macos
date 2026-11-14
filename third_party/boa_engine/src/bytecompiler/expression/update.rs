@@ -69,13 +69,17 @@ impl ByteCompiler<'_> {
                     }
 
                     if post {
-                        // Save old value to dst (post-increment returns old value).
+                        // HIWAVE PATCH (update-conversion): the value of `x++` is the old value
+                        // CONVERTED (ToNumeric: '5' -> 5, undefined -> NaN). Copy the old value to
+                        // dst, then increment FROM dst: `Inc` writes the converted old value back to
+                        // its source (dst) and the new value to its destination (the local). The
+                        // local is untouched if the conversion throws. (`Inc(local, local)` here left
+                        // dst holding the unconverted value.)
                         compiler.bytecode.emit_move(dst.variable(), local_op);
-                        // Increment in-place.
                         if increment {
-                            compiler.bytecode.emit_inc(local_op, local_op);
+                            compiler.bytecode.emit_inc(local_op, dst.variable());
                         } else {
-                            compiler.bytecode.emit_dec(local_op, local_op);
+                            compiler.bytecode.emit_dec(local_op, dst.variable());
                         }
                     } else {
                         if increment {
