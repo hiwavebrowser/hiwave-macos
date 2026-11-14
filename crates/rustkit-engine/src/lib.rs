@@ -549,6 +549,8 @@ mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_zindex_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
+mod lifted_clip_tests;
+#[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
