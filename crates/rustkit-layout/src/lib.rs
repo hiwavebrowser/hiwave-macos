@@ -2544,7 +2544,9 @@ impl LayoutBox {
     /// it, as the painter reads it: `position: relative` is laid out as
     /// static, so the computed style says too.
     fn holds_absolute_boxes(&self) -> bool {
-        self.position != Position::Static || self.style.position != rustkit_css::Position::Static
+        // A transform, filter, perspective and the rest hold the absolute boxes under them as well as the
+        // fixed ones (CSS Transforms 1 §2; Filter Effects 1 §3).
+        self.position != Position::Static || self.style.position != rustkit_css::Position::Static || self.holds_fixed_boxes()
     }
 
     /// Create a new layout box with positioning.
@@ -8757,7 +8759,7 @@ impl LayoutBox {
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
         self.ensure_hit_overflow();
-        self.hit_test_internal(x, y, (0.0, 0.0), 0, false, (false, false))
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false, (false, false, false))
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -8806,7 +8808,7 @@ impl LayoutBox {
             // A fixed box is drawn in the first stacking context on its path (another fixed box, a
             // `relative; z-index: 0` box, ...): that context's `z-index` places it.
             let z_index = self.context_z(path, 0);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true, (false, false)) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true, (false, false, false)) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -8828,7 +8830,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true, (false, false));
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true, (false, false, false));
         match top {
             Some((z_index, hit)) if z_index >= 0 => {
                 // Pages with no sticky box pay for nothing here.
@@ -9176,7 +9178,7 @@ impl LayoutBox {
                     .then(|| if self.z_index_applies(child) { child.style.z_index } else { 0 })
             });
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true, (false, false)) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true, (false, false, false)) {
                     hit.viewport_fixed = true;
                     hits.push((context_z.unwrap_or(child.z_index), hit));
                 }
@@ -9312,7 +9314,7 @@ impl LayoutBox {
         escaped: (f32, f32),
         depth: u32,
         skip_held_fixed: bool,
-        clipped: (bool, bool),
+        clipped: (bool, bool, bool),
     ) -> Option<HitTestResult> {
         self.hit_test_in(x, y, escaped, depth, skip_held_fixed, clipped, (true, false))
     }
@@ -9327,7 +9329,7 @@ impl LayoutBox {
         escaped: (f32, f32),
         depth: u32,
         skip_held_fixed: bool,
-        clipped: (bool, bool),
+        clipped: (bool, bool, bool),
         stacking: (bool, bool),
     ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
@@ -9365,6 +9367,9 @@ impl LayoutBox {
         let flow_clipped =
             clipped.0 || (self.clips_hit_overflow() && !self.dimensions.padding_box().contains(x, y));
         let absolute_clipped = if self.holds_absolute_boxes() { flow_clipped } else { clipped.1 };
+        // Fixed boxes are clipped as their containing block is: the viewport (nothing), or the nearest box
+        // that holds fixed boxes (a transform, a filter, ...), with the clips above it.
+        let fixed_clipped = if self.holds_fixed_boxes() { flow_clipped } else { clipped.2 };
 
         // Check children in reverse paint order (topmost first)
         let skip_held_fixed = skip_held_fixed && !self.carries_fixed_boxes();
@@ -9391,19 +9396,23 @@ impl LayoutBox {
             if skip_held_fixed && child.position == Position::Fixed {
                 continue;
             }
-            // An absolute box lifted past the box that holds it is clipped and scrolled as in flow here.
-            let held_here = entry.held_on_path && child.position == Position::Absolute;
+            // A box lifted past the box that holds the absolute boxes under it (`held_on_path`), a fixed box
+            // apart, is tested as in-flow content here: the context's clips and scroll apply to it and to
+            // the absolute boxes in it, which escape nothing above (R3 HIGH 7 on #1151).
+            let held_here = entry.held_on_path && child.position != Position::Fixed;
             let out_of_flow = !held_here && matches!(child.position, Position::Absolute | Position::Fixed);
             let (child_x, child_y, child_escaped) = if out_of_flow {
                 (inner_x - inner_escaped.0, inner_y - inner_escaped.1, (0.0, 0.0))
+            } else if held_here {
+                (inner_x, inner_y, (0.0, 0.0))
             } else {
                 (inner_x, inner_y, inner_escaped)
             };
             let child_clipped = match child.position {
-                Position::Absolute if held_here => (flow_clipped, flow_clipped),
-                Position::Absolute => (absolute_clipped, absolute_clipped),
-                Position::Fixed => (false, false),
-                _ => (flow_clipped, absolute_clipped),
+                _ if held_here => (flow_clipped, flow_clipped, fixed_clipped),
+                Position::Absolute => (absolute_clipped, absolute_clipped, fixed_clipped),
+                Position::Fixed => (fixed_clipped, fixed_clipped, fixed_clipped),
+                _ => (flow_clipped, absolute_clipped, fixed_clipped),
             };
             let child_depth = depth + 1 + entry.via_len;
             let stacking = entry.child_flags(passes_lift);
@@ -11675,9 +11684,12 @@ impl DisplayList {
         // box's: an absolute descendant popping them would pop this one.
         let shape_clip = self.clip_path_clip(layout_box);
         let rect_clip = self.clip_rect_clip(layout_box);
+        // A box that holds fixed boxes (a transform, a filter, ...) is the containing block of the absolute
+        // and fixed boxes inside it too, so it scopes the clips above out as a positioned box does.
         let positioned = layout_box.position != Position::Static
             || layout_box.style.position != rustkit_css::Position::Static
-            || shape_clip.is_some();
+            || shape_clip.is_some()
+            || layout_box.holds_fixed_boxes();
         // A box lifted to its stacking context's list past the box that holds it (its containing block
         // is inside the context) is painted from the context's loop, so that holder never scoped the
         // context's clips out: the box keeps them, as it would under the holder (R2 HIGH 5 on #1151).
@@ -11686,7 +11698,10 @@ impl DisplayList {
             Position::Fixed => true,
             _ => false,
         };
-        let outer_escapable = if positioned {
+        // A held box (lifted past the box that holds the absolute boxes under it) scopes them out too,
+        // whatever it is: an opacity layer lifted from under a relative box keeps that box's absolute
+        // children inside the context's clips (R3 HIGH 7 on #1151).
+        let outer_escapable = if positioned || keeps_clips {
             let outer = std::mem::take(&mut self.escapable_clips);
             if escapes {
                 for &(_, _, scroll) in outer.iter().rev() {
