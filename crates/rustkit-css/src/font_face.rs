@@ -302,6 +302,107 @@ mod tests {
         assert_eq!(faces[0].src, "/fonts/inter.woff2");
     }
 
+    /// The `src` a face with this descriptor value ends up with.
+    fn picked(src: &str) -> Option<String> {
+        let s = sheet(&format!("@font-face {{ font-family: T; src: {src}; }}"));
+        s.font_face_rules().into_iter().next().map(|f| f.src)
+    }
+
+    #[test]
+    fn a_source_in_a_format_nothing_here_decodes_is_skipped() {
+        // The list every icon-font generator writes. Taking the first url()
+        // fetched the .eot, which no decoder here reads, and never the woff2.
+        assert_eq!(
+            picked(
+                r#"url(/a.eot?#iefix) format("embedded-opentype"), url(/a.woff2) format("woff2"),
+                   url(/a.woff) format("woff"), url(/a.ttf) format("truetype")"#
+            )
+            .as_deref(),
+            Some("/a.woff2")
+        );
+        assert_eq!(picked(r#"url(/a.svg#T) format("svg"), url(/a.ttf) format("truetype")"#).as_deref(), Some("/a.ttf"));
+        assert_eq!(picked(r#"url(/a.xyz) format("xyz"), url(/a.woff) format("woff")"#).as_deref(), Some("/a.woff"));
+        assert_eq!(picked(r#"url(/a.xyz) format(""), url(/a.woff) format("woff")"#).as_deref(), Some("/a.woff"));
+        // The first format that decodes wins, not the smallest file.
+        assert_eq!(picked(r#"url(/a.woff) format("woff"), url(/a.woff2) format("woff2")"#).as_deref(), Some("/a.woff"));
+        // Nothing usable: the face is dropped, as one with no src.
+        assert_eq!(picked(r#"url(/a.eot) format("embedded-opentype"), url(/a.svg) format("svg")"#), None);
+    }
+
+    #[test]
+    fn every_format_the_loader_decodes_is_taken() {
+        for (format, file) in [
+            (r#""truetype""#, "/a.ttf"),
+            (r#""opentype""#, "/a.otf"),
+            (r#""collection""#, "/a.ttc"),
+            (r#""woff""#, "/a.woff"),
+            (r#""woff2""#, "/a.woff2"),
+            (r#""WOFF2""#, "/a.woff2"),
+            ("'woff2'", "/a.woff2"),
+            ("woff2", "/a.woff2"),
+            ("truetype", "/a.ttf"),
+            (r#""woff2-variations""#, "/a.woff2"),
+            (r#""woff-variations""#, "/a.woff"),
+            (r#""truetype-variations""#, "/a.ttf"),
+            (r#""opentype-variations""#, "/a.otf"),
+        ] {
+            let src = format!("url({file}) format({format}), url(/fallback.bin)");
+            assert_eq!(picked(&src).as_deref(), Some(file), "format({format})");
+        }
+        // The legacy `-variations` names are strings only; a keyword that is
+        // no format, an empty format() and two formats are not sources.
+        for format in ["woff2-variations", "warp", "", r#""woff2", "woff""#, "embedded-opentype", "svg"] {
+            let src = format!("url(/a.woff2) format({format}), url(/b.woff)");
+            assert_eq!(picked(&src).as_deref(), Some("/b.woff"), "format({format})");
+        }
+    }
+
+    #[test]
+    fn a_source_with_no_format_is_tried() {
+        assert_eq!(picked(r#"url(/a.woff2), url(/b.woff) format("woff")"#).as_deref(), Some("/a.woff2"));
+        assert_eq!(picked(r#"url(/a.eot) format("embedded-opentype"), url(/b.woff2)"#).as_deref(), Some("/b.woff2"));
+        assert_eq!(picked(r#"URL(/a.woff) FORMAT("woff")"#).as_deref(), Some("/a.woff"));
+    }
+
+    #[test]
+    fn tech_is_a_requirement_the_source_must_meet() {
+        for tech in [
+            "variations",
+            "VARIATIONS",
+            "palettes",
+            "features-opentype",
+            "color-COLRv0",
+            "color-COLRv1",
+            "color-sbix",
+            "color-CBDT",
+            "variations, palettes",
+        ] {
+            let src = format!("url(/a.woff2) format(woff2) tech({tech}), url(/b.woff)");
+            assert_eq!(picked(&src).as_deref(), Some("/a.woff2"), "tech({tech})");
+        }
+        for tech in ["color-SVG", "features-graphite", "incremental", "warp-drive", "variations, incremental", ""] {
+            let src = format!("url(/a.woff2) format(woff2) tech({tech}), url(/b.woff)");
+            assert_eq!(picked(&src).as_deref(), Some("/b.woff"), "tech({tech})");
+        }
+        assert_eq!(picked("url(/a.woff2) tech(variations), url(/b.woff)").as_deref(), Some("/a.woff2"));
+    }
+
+    #[test]
+    fn an_entry_that_is_no_source_is_skipped_alone() {
+        assert_eq!(picked(r#"warp(/a.woff2), url(/b.woff) format("woff")"#).as_deref(), Some("/b.woff"));
+        assert_eq!(picked(r#"url(/a.woff2) format("woff2") warp, url(/b.woff)"#).as_deref(), Some("/b.woff"));
+        // A `)` inside a quoted url does not end it.
+        assert_eq!(
+            picked(r#"url("/a).eot") format("embedded-opentype"), url("/b).woff") format("woff")"#).as_deref(),
+            Some("/b).woff")
+        );
+        assert_eq!(
+            picked(r#"url(data:application/vnd.ms-fontobject;base64,AAAA,BBBB) format("embedded-opentype"), url(/b.woff)"#)
+                .as_deref(),
+            Some("/b.woff")
+        );
+    }
+
     #[test]
     fn a_data_uri_survives_its_own_commas() {
         // base64 payloads contain commas inside url(); a naive split(',')
