@@ -129,58 +129,76 @@
         return text;
     }
 
+    // The decoder builds only what the encoder describes: own markers, ids that are records of this
+    // payload, the allowed view and error constructors, and own data properties for keys. Anything else
+    // is a DataCloneError (the page turns it into a `messageerror`); nothing is built from it.
+    var own = Object.prototype.hasOwnProperty;
+    function refused() {
+        var D = g.DOMException;
+        return typeof D === 'function'
+            ? new D('The message could not be deserialized.', 'DataCloneError')
+            : new Error('DataCloneError: the message could not be deserialized.');
+    }
+    function define(out, key, v) {
+        Object.defineProperty(out, String(key), { value: v, writable: true, enumerable: true, configurable: true });
+    }
     function deserialize(text) {
-        var data = JSON.parse(text), nodes = data.n, made = [];
+        var data = JSON.parse(text);
+        if (data === null || typeof data !== 'object' || !own.call(data, 'r') || !Array.isArray(data.n)) throw refused();
+        var nodes = data.n, made = Object.create(null);
+        function list(v) { if (!Array.isArray(v)) throw refused(); return v; }
         function dec(e) {
             if (e === null || typeof e !== 'object') return e;
-            if ('@' in e) return build(e['@']);
-            if ('u' in e) return undefined;
-            if ('z' in e) return -0;
-            if ('n' in e) return e.n === 'NaN' ? NaN : e.n === 'Inf' ? Infinity : -Infinity;
-            if ('b' in e) return g.BigInt(e.b);
-            return undefined;
-        }
-        // A "__proto__" key is an own data property, as in Chrome, not the prototype setter that a plain
-        // assignment would call. Every other key is a plain assignment.
-        function put(out, key, v) {
-            if (key === '__proto__') {
-                Object.defineProperty(out, key, { value: v, writable: true, enumerable: true, configurable: true });
-            } else {
-                out[key] = v;
-            }
+            if (own.call(e, '@')) return build(e['@']);
+            if (own.call(e, 'u')) return undefined;
+            if (own.call(e, 'z')) return -0;
+            if (own.call(e, 'n')) return e.n === 'NaN' ? NaN : e.n === 'Inf' ? Infinity : -Infinity;
+            if (own.call(e, 'b')) return g.BigInt(e.b);
+            throw refused();
         }
         function build(id) {
-            if (id in made) return made[id];
+            if (typeof id !== 'number' || id !== Math.floor(id) || id < 0 || id >= nodes.length) throw refused();
+            if (own.call(made, id)) return made[id];
             var rec = nodes[id], out, i;
+            if (rec === null || typeof rec !== 'object') throw refused();
             switch (rec.t) {
                 case 'o':
                     out = {}; made[id] = out;
-                    for (i = 0; i < rec.k.length; i++) put(out, rec.k[i][0], dec(rec.k[i][1]));
+                    list(rec.k);
+                    for (i = 0; i < rec.k.length; i++) define(out, list(rec.k[i])[0], dec(rec.k[i][1]));
                     return out;
                 case 'a':
                     out = new g.Array(rec.l); made[id] = out;
-                    for (i = 0; i < rec.k.length; i++) put(out, rec.k[i][0], dec(rec.k[i][1]));
+                    list(rec.k);
+                    for (i = 0; i < rec.k.length; i++) define(out, list(rec.k[i])[0], dec(rec.k[i][1]));
                     return out;
                 case 'D': out = new g.Date(dec(rec.v)); made[id] = out; return out;
                 case 'R': out = new g.RegExp(rec.s, rec.f); made[id] = out; return out;
                 case 'M':
                     out = new g.Map(); made[id] = out;
-                    for (i = 0; i < rec.e.length; i++) out.set(dec(rec.e[i][0]), dec(rec.e[i][1]));
+                    list(rec.e);
+                    for (i = 0; i < rec.e.length; i++) out.set(dec(list(rec.e[i])[0]), dec(rec.e[i][1]));
                     return out;
                 case 'S':
                     out = new g.Set(); made[id] = out;
+                    list(rec.e);
                     for (i = 0; i < rec.e.length; i++) out.add(dec(rec.e[i]));
                     return out;
-                case 'AB': out = unhex(rec.d); made[id] = out; return out;
-                case 'TA': out = new g[rec.c](dec(rec.b), rec.o, rec.l); made[id] = out; return out;
+                case 'AB':
+                    if (typeof rec.d !== 'string') throw refused();
+                    out = unhex(rec.d); made[id] = out; return out;
+                case 'TA':
+                    if (VIEWS.indexOf(rec.c) < 0) throw refused();
+                    out = new g[rec.c](dec(rec.b), rec.o, rec.l); made[id] = out; return out;
                 case 'DV': out = new g.DataView(dec(rec.b), rec.o, rec.l); made[id] = out; return out;
                 case 'E':
+                    if (ERROR_NAMES.indexOf(rec.n) < 0) throw refused();
                     out = new g[rec.n](rec.m); made[id] = out;
                     if (rec.s !== undefined) { try { out.stack = rec.s; } catch (_) {} }
                     return out;
                 case 'W': out = Object(dec(rec.v)); made[id] = out; return out;
             }
-            return undefined;
+            throw refused();
         }
         return dec(data.r);
     }

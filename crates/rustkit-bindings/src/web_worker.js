@@ -58,7 +58,15 @@
     // importScripts: fetch the scripts under the page's fetch policy and
     // answer the worker, which waits for the whole set.
     function serviceFetch(st, rid, urlsJson) {
-        var urls = JSON.parse(urlsJson), out = [], left = urls.length, net = g.__rustkit_net, id = st.id;
+        var urls = null, id = st.id;
+        try { urls = JSON.parse(urlsJson); } catch (_) {}
+        // A malformed request is answered with nothing loaded (importScripts then fails with its
+        // NetworkError); the worker waits for an answer, so it always gets one.
+        if (!Array.isArray(urls) || !urls.length) {
+            if (!st.dead) reply(id, rid, '[]');
+            return;
+        }
+        var out = [], left = urls.length, net = g.__rustkit_net;
         function settle(i, value) {
             out[i] = value;
             if (--left === 0 && !st.dead && st.id === id) reply(id, rid, JSON.stringify(out));
@@ -88,7 +96,11 @@
             if (!st || !st.id) continue;
             var raw = poll(st.id, left);
             if (raw === 'null') { delete live[key]; continue; }
-            var items = JSON.parse(raw);
+            // One malformed item costs only itself: the rest of this worker's items and the other
+            // workers' still run this turn.
+            var items = null;
+            try { items = JSON.parse(raw); } catch (_) {}
+            if (!Array.isArray(items)) continue;
             left -= items.length;
             for (var i = 0; i < items.length; i++) {
                 if (st.dead) break;
@@ -99,7 +111,9 @@
                     try { data = sc.deserialize(it.d); } catch (_) { fire(st.w, new g.MessageEvent('messageerror', { origin: '' })); continue; }
                     fire(st.w, new g.MessageEvent('message', { data: data, origin: '' }));
                 } else if (it.k === 'e') {
-                    var info = JSON.parse(it.m), ev;
+                    var info = null, ev;
+                    try { info = JSON.parse(it.m); } catch (_) {}
+                    if (info === null || typeof info !== 'object') info = {};
                     if (typeof g.ErrorEvent === 'function') {
                         ev = new g.ErrorEvent('error', {
                             message: info.m, filename: info.f || st.href, lineno: info.l, colno: info.c, cancelable: true

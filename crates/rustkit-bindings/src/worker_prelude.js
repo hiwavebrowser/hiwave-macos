@@ -6,6 +6,8 @@
 (function (g) {
     'use strict';
     var out = g.__rk_worker_out, closeHost = g.__rk_worker_close, errorHost = g.__rk_worker_error, fetchHost = g.__rk_worker_fetch;
+    // Held here; the worker's own script does not get them.
+    delete g.__rk_worker_out; delete g.__rk_worker_close; delete g.__rk_worker_error; delete g.__rk_worker_fetch;
     // The structured clone helper (structured_clone.js, evaluated just before this): held here, not left on
     // the worker's global scope.
     var sc = g.__rk_sc;

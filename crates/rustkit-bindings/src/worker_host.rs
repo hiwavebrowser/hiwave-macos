@@ -10,7 +10,7 @@
 //! and loop back-edge, so a `while (true) {}` ends. The same happens to every
 //! worker of a page when its bindings are dropped (a navigation).
 
-use rustkit_js::{JsRuntime, JsValue, ViewControl, Watchdog};
+use rustkit_js::{JsRuntime, JsValue, KeptFunction, ViewControl, Watchdog};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -267,6 +267,35 @@ pub fn install(runtime: &mut JsRuntime) -> Result<Guard, rustkit_js::JsError> {
     Ok(Guard(reg))
 }
 
+/// The least a worker's loop waits for a message between turns, in milliseconds.
+const MIN_WAIT_MS: u64 = 1;
+
+/// The prelude's entry points (worker_prelude.js), kept by the host and removed from the worker's global.
+struct Entry {
+    setup: KeptFunction,
+    run: KeptFunction,
+    next: KeptFunction,
+    run_due: KeptFunction,
+    dispatch: KeptFunction,
+}
+
+impl Entry {
+    fn take(rt: &mut JsRuntime) -> Option<Self> {
+        let entry = Entry {
+            setup: rt.keep_function("__rk_worker_setup").ok()?,
+            run: rt.keep_function("__rk_worker_run").ok()?,
+            next: rt.keep_function("__rk_worker_next").ok()?,
+            run_due: rt.keep_function("__rk_worker_run_due").ok()?,
+            dispatch: rt.keep_function("__rk_worker_dispatch").ok()?,
+        };
+        rt.evaluate_script(
+            "delete globalThis.__rk_worker_setup; delete globalThis.__rk_worker_run; delete globalThis.__rk_worker_next; delete globalThis.__rk_worker_run_due; delete globalThis.__rk_worker_dispatch;",
+        )
+        .ok()?;
+        Some(entry)
+    }
+}
+
 fn worker_main(
     source: String,
     name: String,
@@ -334,7 +363,6 @@ fn worker_main(
             }),
         );
     }
-    let quoted = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
     let report = |e: String, control: &ViewControl| {
         if !control.stops_all() {
             let _ = out.send(FromWorker::Error(json!({"m": e, "f": "", "l": 0, "c": 0}).to_string()));
@@ -342,13 +370,19 @@ fn worker_main(
     };
 
     rt.begin_turn(&stamp, TURN_BUDGET);
-    let started = rt.evaluate_script(STRUCTURED_CLONE).is_ok()
-        && rt.evaluate_script(PRELUDE).is_ok()
-        && rt
-            .evaluate_script(&format!("__rk_worker_setup({}, {})", quoted(&name), quoted(&location)))
-            .is_ok();
-    if started {
-        if let Err(e) = rt.evaluate_script(&format!("__rk_worker_run({})", quoted(&source))) {
+    // The prelude's entry points, held by the host from here on and removed from the worker's global, so
+    // the worker's own script cannot replace what each turn calls.
+    let entry = if rt.evaluate_script(STRUCTURED_CLONE).is_ok() && rt.evaluate_script(PRELUDE).is_ok() {
+        Entry::take(&mut rt)
+    } else {
+        None
+    };
+    let started = entry.as_ref().is_some_and(|entry| {
+        rt.call_kept(entry.setup, &[JsValue::String(name.clone()), JsValue::String(location.clone())])
+            .is_ok()
+    });
+    if let (true, Some(entry)) = (started, entry.as_ref()) {
+        if let Err(e) = rt.call_kept(entry.run, &[JsValue::String(source)]) {
             report(e.to_string(), &control);
         }
         let _ = rt.run_jobs();
@@ -356,11 +390,15 @@ fn worker_main(
         report("the worker scope failed to start".into(), &control);
     }
     rt.end_turn(&stamp);
+    let Some(entry) = entry.filter(|_| started) else {
+        return;
+    };
 
-    while started && !closed.get() && !control.stops_all() {
-        // Sleep until a message arrives or the next timer is due.
-        let wait = match rt.evaluate_script("__rk_worker_next()") {
-            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+    while !closed.get() && !control.stops_all() {
+        // Sleep until a message arrives or the next timer is due, at least MIN_WAIT_MS: a worker whose
+        // timers are always due does not spin its thread.
+        let wait = match rt.call_kept(entry.next, &[]) {
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some((n as u64).max(MIN_WAIT_MS)),
             _ => None,
         };
         let message = match wait {
@@ -368,7 +406,6 @@ fn worker_main(
                 Ok(m) => Some(m),
                 Err(_) => break,
             },
-            Some(0) => None,
             Some(ms) => match rx.recv_timeout(Duration::from_millis(ms)) {
                 Ok(m) => Some(m),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -377,14 +414,13 @@ fn worker_main(
         };
         rt.begin_turn(&stamp, TURN_BUDGET);
         if let Some(json) = message {
-            let call = format!("__rk_worker_dispatch({})", quoted(&json));
-            if let Err(e) = rt.evaluate_script(&call) {
+            if let Err(e) = rt.call_kept(entry.dispatch, &[JsValue::String(json)]) {
                 report(e.to_string(), &control);
             }
             let _ = rt.run_jobs();
         }
         if !closed.get() {
-            if let Err(e) = rt.evaluate_script("__rk_worker_run_due()") {
+            if let Err(e) = rt.call_kept(entry.run_due, &[]) {
                 report(e.to_string(), &control);
             }
             let _ = rt.run_jobs();
