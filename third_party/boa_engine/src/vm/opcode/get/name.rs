@@ -95,6 +95,15 @@ impl GetNameGlobal {
 
             // Cache the property.
             let slot = *context.slot();
+            // HIWAVE PATCH (vm-stats): an inline-cache miss on a global read, by name.
+            if crate::vm::stats::enabled() {
+                crate::vm::stats::miss(
+                    crate::vm::stats::Site::GetGlobal,
+                    &binding_locator.name().to_std_string_escaped(),
+                    "global",
+                    slot.is_cacheable(),
+                );
+            }
             if slot.is_cacheable() {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
                 let object_borrowed = object.borrow();

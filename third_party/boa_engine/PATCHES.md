@@ -528,6 +528,26 @@ showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/t
 (35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
 unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
 
+## Patch: interpreter statistics (`vm-stats`, JS-PERF2 item 4)
+
+**Why.** To say where the interpreter's property lookups go slow on a real page (CodeMirror's first
+parse) without guessing: which opcodes run how often, and which property accesses miss their inline
+cache, on what kind of receiver, for which name.
+
+**What.** `src/vm/stats.rs` (new). Off unless `RUSTKIT_VM_STATS=1` is in the environment (read once
+per process): `Context::run` picks `run_impl::<true>`, a copy of the loop that counts every opcode,
+only then, and the miss hooks in `get_by_name`, `set_by_name` and `GetNameGlobal` (all on the path
+that already missed) are one branch on that flag. `rustkit_js::vm_stats_report()` returns the text:
+the top 40 opcodes with counts and shares, the misses per site split into cacheable (cold, or the
+shape changed) and not cacheable (misses every time, e.g. a store that adds a property), and the top
+40 (site, receiver kind, name) misses. Hits are the opcode's count minus its misses.
+`RUSTKIT_VM_STATS_FILE=<path>` also rewrites the report to `<path>.t<thread number>` every 1M opcodes and when the
+thread ends, for a probe that exits without calling the function. Pin:
+`crates/rustkit-js/tests/vm_stats.rs` (red first, against a stub report). Privacy: the report carries shapes, not data; property names are recorded only when identifier-like
+and at most 48 characters (anything else is one bucket), and computed keys are never recorded.
+Cost with the flag off,
+measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
+reads, a script call and arithmetic loops.
 ## Patch: whole-number double keys without a string (`js-perf1`)
 
 **Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset
