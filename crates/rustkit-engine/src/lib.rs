@@ -301,6 +301,7 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod console_log;
+pub mod console_file;
 mod relayout_cause;
 mod selection;
 mod focus_pseudo;
@@ -414,6 +415,8 @@ mod script_net_body_size_tests;
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod console_file_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8660,14 +8663,14 @@ impl Engine {
             // set, records the same names so a log line can show the URL.
             let external: Option<String> = if label.starts_with("inline#") {
                 if let Some(url) = document_url.as_ref() {
-                    crate::console_log::alias(&label, url.as_str());
+                    crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
-                crate::console_log::alias(&name, &label);
+                crate::console_log::alias(inspector.view_id(), &name, &label);
                 Some(name)
             };
             let began = std::time::Instant::now();
@@ -9641,7 +9644,7 @@ impl Engine {
                     )
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
@@ -10093,7 +10096,7 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
-            inspector_glue::attach(&bindings, &inspector);
+            inspector_glue::attach(&bindings, &inspector, id.raw());
             self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
