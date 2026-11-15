@@ -1,4 +1,4 @@
-//! W0 spike (scratch, not committed): can one Boa ArrayBuffer's storage back a wasmi memory, survive
+//! W0 spike (kept as evidence for the W0 report; not part of the workspace): can one Boa ArrayBuffer's storage back a wasmi memory, survive
 //! memory.grow, and stay valid while an imported host function reads it?
 use aligned_vec::{AVec, ConstAlign};
 use boa_engine::{js_string, object::builtins::JsArrayBuffer, Context, JsValue, Source};
@@ -84,15 +84,24 @@ fn main() {
     let new_len = mem.data_size(&store);
     let after_ptr = mem.data_ptr(&store) as *const u8;
     println!("[6] wasm memory.grow(1): returned {prev}, size {wasm_size} pages, data_size {new_len}, storage pointer unchanged: {}", before_ptr == after_ptr);
+    // wasm writes into the grown page BEFORE the ArrayBuffer is re-wrapped (in the real bridge a
+    // memory.grow happens inside a wasm call and the re-wrap can only follow it).
+    store32.call(&mut store, (PAGE as i32 + 64, 0x0bad_f00d)).unwrap();
     let mut old = ab.detach(&JsValue::undefined()).unwrap();
     println!("[7] old ArrayBuffer detached: byteLength now {} ; storage taken back as an AlignedVec of len {}", ab.byte_length(), old.len());
     assert_eq!(old.as_mut_ptr(), ptr);
-    old.resize(new_len, 0);
+    // NOT old.resize(new_len, 0): that zero-fills the grown region and would wipe what wasm just wrote there
+    // (found in review). The whole reservation was initialised up front, so only the length changes.
+    assert!(new_len <= max_pages * PAGE);
+    unsafe { old.set_len(new_len) };
     assert_eq!(old.as_mut_ptr(), ptr, "resize within the reservation must not move the storage");
     let ab2 = JsArrayBuffer::from_byte_block(old, &mut ctx).unwrap();
     let keep = ab2.data().unwrap()[..4].to_vec();
     let keep2 = u32::from_le_bytes(ab2.data().unwrap()[8..12].try_into().unwrap());
     println!("[8] new ArrayBuffer byteLength = {}, old contents kept: {:?} {:#x}", ab2.byte_length(), keep, keep2);
+    let kept = u32::from_le_bytes(ab2.data().unwrap()[PAGE + 64..PAGE + 68].try_into().unwrap());
+    println!("[8b] a wasm store into the grown page made BEFORE the re-wrap survives it: {:#x}: {}", kept, kept == 0x0bad_f00d);
+    assert_eq!(kept, 0x0bad_f00d);
     // beyond the old size, through wasm and through the new buffer
     store32.call(&mut store, (PAGE as i32 + 16, 0x1234_5678)).unwrap();
     let hi = u32::from_le_bytes(ab2.data().unwrap()[PAGE + 16..PAGE + 20].try_into().unwrap());

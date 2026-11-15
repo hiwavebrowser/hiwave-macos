@@ -1,9 +1,11 @@
-//! W0 spike (scratch): do the five JetStream wasm binaries load in wasmi? Stub imports, no glue.
+//! W0 spike: do the five JetStream wasm binaries load in wasmi? Stub imports, no glue.
+//! Usage: load5 <dir holding quicksort.wasm, richards.wasm, gcc-loops.wasm, HashSet.wasm, tsf.wasm>
+//! (the pinned JetStream checkout's `wasm/` directory).
 use std::time::Instant;
 use wasmi::*;
 
 fn main() {
-    let dir = "/home/petec/zg-measure/stress-suites/JetStream/wasm";
+    let dir = std::env::args().nth(1).expect("usage: load5 <JetStream wasm directory>");
     for f in ["quicksort", "richards", "gcc-loops", "HashSet", "tsf"] {
         let bytes = std::fs::read(format!("{dir}/{f}.wasm")).unwrap();
         let engine = Engine::default();
