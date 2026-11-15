@@ -881,8 +881,16 @@ ordinary one.
 
 **Cost.** One function-pointer comparison per hit on an ordinary object.
 
-Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (7 cases from Chrome for Testing 148.0.7778.216:
-a Proxy sharing `Object.prototype`'s empty shape, a Proxy over an object with a prototype getter,
-a typed array reading `Infinity` through a prototype getter and `NaN` through a prototype data
-property, and three that already matched: a typed array reading a non-numeric name, an
-object with a null prototype, and ordinary hits; 3 differ on develop be8eb272).
+A typed array's and an arguments object's `[[Get]]` carry a comment pointing back to `hit_is_get`,
+which recognises them by function address: if one is wrapped or replaced, hits silently become
+misses (slower, not wrong). `InlineCache::new` runs the numeric-name parse only for a name that
+starts with a digit, `-`, `I` or `N`, the only first characters a canonical numeric string has.
+
+Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (14 cases from Chrome for Testing 148.0.7778.216:
+a Proxy sharing `Object.prototype`'s empty shape, a `super.x` read whose home object's prototype is
+such a Proxy, a typed array reading `Infinity` through a prototype getter and `NaN` through a
+prototype data property; and ten that already matched and pin what must keep working: a Proxy over
+an object with a prototype getter, a null-prototype object, ordinary hits, a typed array and an
+arguments object reading a non-numeric name, a Proxy's `length`, and the fill side, a Proxy with no
+`get` trap or only a `set` trap read twice and then an ordinary object that shares its shape; 4
+differ on develop e2dcd0ff).

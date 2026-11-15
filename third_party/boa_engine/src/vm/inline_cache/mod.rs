@@ -74,8 +74,13 @@ impl fmt::Display for InlineCache {
 
 impl InlineCache {
     pub(crate) fn new(name: JsString) -> Self {
-        let numeric_name =
-            crate::builtins::typed_array::object::canonical_numeric_index_string(&name).is_some();
+        // A canonical numeric string is ToString of a Number: it starts with a digit, `-`, `I`
+        // (`Infinity`) or `N` (`NaN`). Every other name, nearly all of them, skips the parse.
+        let numeric_name = name
+            .code_unit_at(0)
+            .is_some_and(|c| matches!(c, 0x30..=0x39 | 0x2D | 0x49 | 0x4E))
+            && crate::builtins::typed_array::object::canonical_numeric_index_string(&name)
+                .is_some();
         Self {
             name,
             entries: GcRefCell::new(ArrayVec::new()),
