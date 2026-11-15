@@ -17,7 +17,12 @@
 //!   - a handler added in a later task brings one `rejectionhandled` (not cancelable), after that
 //!     task's microtasks; a handler added inside the `unhandledrejection` listener brings none.
 //!
+//!   - every rejection of a task is announced, however many (100 and 300 in one task; 100 made
+//!     inside a listener; a chain of 40, each made by the listener of the one before).
+//!
 //! Where this engine still answers otherwise is listed in [`DIFFERENT`], each with its reason.
+//! One more difference has no Chrome side to pin: a turn the script watchdog stopped announces
+//! nothing, and its rejections are announced (and reported) at the end of the next turn.
 
 use super::*;
 
@@ -32,6 +37,16 @@ const DIFFERENT: &[(&str, &str)] = &[
          comes at the end of the turn, before that timer",
     ),
     ("order.raf", "as order.script: the 0 ms timer set in the frame callback runs after the event here, before it in Chrome"),
+    (
+        "later.handledInAListener",
+        "a handler added inside a listener to a promise announced before: its rejectionhandled comes in the same \
+         round here, ahead of the events still to come; Chrome queues it as a task, after them",
+    ),
+    (
+        "worker",
+        "a worker's runtime announces nothing (Chrome fires unhandledrejection at the WorkerGlobalScope); the \
+         scenario is not run in this test (`window.__noWorkers`)",
+    ),
     (
         "listeners.order",
         "an on<type> handler runs after the listeners here, whenever it was assigned (every event type); \
@@ -91,6 +106,7 @@ fn reported(b: &DomBindings) -> Vec<String> {
 fn ours() -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
     let b = page();
     b.set_error_details(true, true).unwrap();
+    b.evaluate("window.__noWorkers = true;").unwrap();
     b.evaluate(SCRIPT).unwrap();
     turns_until(&b, "window.__out");
     (object(&ev(&b, "window.__out")), reported(&b))
@@ -175,12 +191,12 @@ fn reports_are_as_before_for_a_page_with_no_listener() {
     assert!(reported(&b).is_empty());
 }
 
-/// The dispatch is the engine's own: the event reaches the Window's listeners, trusted, whatever
-/// a page has put in place of the constructors and methods it could have gone through. (What is
-/// replaced here is what announcing a rejection could newly reach; the event builder and the
-/// listener walk it shares with every other engine event have their own tests.)
+/// Announcing a rejection calls none of these when a page has replaced them: the event
+/// constructors, `dispatchEvent` (the Window's and EventTarget's), `Reflect.apply` and
+/// `Reflect.construct`, `WeakMap.prototype.set`, `WeakSet.prototype.add` and `delete`, and the
+/// Promise methods. Nothing else is claimed here.
 #[test]
-fn the_dispatch_does_not_go_through_what_a_page_replaced() {
+fn announcing_calls_no_replaced_event_constructor_dispatch_reflect_weak_write_or_promise_method() {
     let b = page();
     b.evaluate(
         "var calls = 0, seen = []; function spy() { calls++; throw new Error('replaced'); } \
@@ -216,19 +232,57 @@ fn a_rejection_is_announced_in_the_document_whose_script_rejected() {
     assert_eq!(ev(&parent, "log.join()"), "page:in-page");
 }
 
-/// A page that rejects in every listener call is stopped by a count, and the turn ends.
+/// Every rejection of one task is announced at the end of that task, however many.
 #[test]
-fn a_listener_that_rejects_again_each_time_does_not_hold_the_turn() {
+fn every_rejection_of_a_task_is_announced_at_its_end() {
+    for count in [100, 300, 3000] {
+        let b = page();
+        b.evaluate(&format!(
+            "var seen = []; window.addEventListener('unhandledrejection', function (e) {{ seen.push(e.reason); }}); \
+             for (var i = 0; i < {count}; i++) Promise.reject(i);"
+        ))
+        .unwrap();
+        assert_eq!(ev(&b, "seen.length + ':' + seen[0] + ':' + seen[seen.length - 1]"), format!("{count}:0:{}", count - 1));
+    }
+}
+
+/// Rejections made by the listeners are announced too, round after round. A page that rejects
+/// again in every listener call is stopped by a count of rounds, not left running: the turn ends,
+/// the engine asks for another turn at once (a timer of its own that is due now), and the rest
+/// are announced in the turns that follow. None is dropped and none waits for the page to do
+/// something else.
+#[test]
+fn a_listener_that_rejects_again_each_time_does_not_hold_the_turn_and_loses_nothing() {
     let b = page();
     b.evaluate(
-        "var n = 0; window.addEventListener('unhandledrejection', function (e) { e.preventDefault(); n++; Promise.reject(n); }); \
+        "var n = 0; window.addEventListener('unhandledrejection', function (e) { e.preventDefault(); n++; if (n < 200) Promise.reject(n); }); \
          Promise.reject(0);",
     )
     .unwrap();
-    let first: f64 = ev(&b, "String(n)").parse().unwrap();
-    assert!((1.0..=64.0).contains(&first), "{first} events in the first turn");
-    // The rest come with later turns: none is lost.
-    b.evaluate("void 0").unwrap();
-    let second: f64 = ev(&b, "String(n)").parse().unwrap();
-    assert!(second > first, "{second} after another turn, {first} before");
+    let first: u32 = ev(&b, "String(n)").parse().unwrap();
+    assert!((1..200).contains(&first), "{first} events in the first turn");
+    // Nothing of the page's is due, yet a turn is asked for now.
+    assert!(matches!(b.host_turn("return __rk.nextTimer();", &[]).unwrap(), JsValue::Number(n) if n == 0.0));
+    let mut turns = 0;
+    while ev(&b, "String(n)") != "200" {
+        turns += 1;
+        assert!(turns <= 200, "still {} after {turns} more turns", ev(&b, "String(n)"));
+        assert!(b.run_timers(0, 1).unwrap() >= 1, "no turn was asked for with rejections still to announce");
+    }
+    // All announced: no turn is asked for any more.
+    b.run_timers(0, 10).unwrap();
+    assert!(matches!(b.host_turn("return __rk.nextTimer();", &[]).unwrap(), JsValue::Number(n) if n == -1.0));
+}
+
+/// A hundred made inside one listener call are one round: all in the same turn.
+#[test]
+fn rejections_made_inside_a_listener_are_announced_in_the_same_turn() {
+    let b = page();
+    b.evaluate(
+        "var seen = 0; window.addEventListener('unhandledrejection', function (e) { seen++; \
+             if (e.reason === 'seed') for (var i = 0; i < 100; i++) Promise.reject(i); }); \
+         Promise.reject('seed');",
+    )
+    .unwrap();
+    assert_eq!(ev(&b, "String(seen)"), "101");
 }

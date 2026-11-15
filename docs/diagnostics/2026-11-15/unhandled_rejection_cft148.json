@@ -32,7 +32,13 @@
   "listeners.elsewhere": "unhandled(where) capture bodyAttr:0 windowOn:object",
   "listeners.throwing": "unhandled(X) throwing next",
   "listeners.rejecting": "unhandled(first) rejects unhandled(second)",
-  "dispatchedByScript": "unhandled(string:made) returned:true trusted:false"
+  "dispatchedByScript": "unhandled(string:made) returned:true trusted:false",
+  "many.100": "100 first:m0 last:m99",
+  "many.300": "300 first:m0 last:m299",
+  "many.inAListener": "101 first:seed last:c99",
+  "many.chain": "41 first:link0 last:link40",
+  "later.handledInAListener": "unhandled(P) unhandled(q1) caught unhandled(q2) handled(P)",
+  "worker": "worker:unhandled(w) target:true cancelable:true worker:end"
  },
  "pageErrors": [
   "A",
@@ -63,6 +69,9 @@
   "listener-threw",
   "X",
   "first",
-  "second"
+  "second",
+  "P",
+  "q1",
+  "q2"
  ]
 }

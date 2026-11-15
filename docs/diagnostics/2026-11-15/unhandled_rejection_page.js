@@ -213,5 +213,58 @@
     log.push('returned:' + window.dispatchEvent(e) + ' trusted:' + e.isTrusted);
   });
 
+  // ---- many at once: every one is announced, in the task after the one that rejected them
+  function counted(run, settle) {
+    function quiet(e) { e.preventDefault(); }
+    return [function () { window.addEventListener('unhandledrejection', quiet); return run(); }, function () {
+      window.removeEventListener('unhandledrejection', quiet);
+      var last = seen[seen.length - 1];
+      return seen.length + ' first:' + label(seen[0] && seen[0].reason) + ' last:' + label(last && last.reason);
+    }, settle || 150];
+  }
+  function many(name, run, settle) { var c = counted(run, settle); scenario(name, c[0], c[1], c[2]); }
+  many('many.100', function () { for (var i = 0; i < 100; i++) Promise.reject(new Error('m' + i)); });
+  many('many.300', function () { for (var i = 0; i < 300; i++) Promise.reject(new Error('m' + i)); });
+  many('many.inAListener', function () {
+    function l(e) {
+      if (e.reason.message !== 'seed') return;
+      window.removeEventListener('unhandledrejection', l);
+      for (var i = 0; i < 100; i++) Promise.reject(new Error('c' + i));
+    }
+    window.addEventListener('unhandledrejection', l);
+    Promise.reject(new Error('seed'));
+  });
+  many('many.chain', function () {
+    var n = 0;
+    function l() { if (++n > 40) { window.removeEventListener('unhandledrejection', l); return; } Promise.reject(new Error('link' + n)); }
+    window.addEventListener('unhandledrejection', l);
+    Promise.reject(new Error('link0'));
+  }, 400);
+
+  // ---- a handler added, inside a later listener, to a promise announced before
+  scenario('later.handledInAListener', function () {
+    var p = Promise.reject(new Error('P'));
+    setTimeout(function () {
+      function l(e) {
+        if (e.reason.message !== 'q1') return;
+        window.removeEventListener('unhandledrejection', l);
+        p.catch(function () { log.push('caught'); });
+      }
+      window.addEventListener('unhandledrejection', l);
+      Promise.reject(new Error('q1'));
+      Promise.reject(new Error('q2'));
+    }, 10);
+  });
+
+  // ---- a dedicated worker's own rejection (skipped where `window.__noWorkers` is set)
+  scenario('worker', function () {
+    if (window.__noWorkers) { log.push('not run'); return; }
+    var src = "self.addEventListener('unhandledrejection', function (e) {" +
+      " postMessage('unhandled(' + e.reason + ') target:' + (e.target === self) + ' cancelable:' + e.cancelable); e.preventDefault(); });" +
+      " Promise.reject('w'); setTimeout(function () { postMessage('end'); }, 50);";
+    var w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    w.onmessage = function (e) { log.push('worker:' + e.data); if (e.data === 'end') w.terminate(); };
+  }, null, 500);
+
   setTimeout(next, 0);
 })();
