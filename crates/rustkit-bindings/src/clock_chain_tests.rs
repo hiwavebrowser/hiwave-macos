@@ -19,9 +19,10 @@ fn script() -> &'static str {
     &PAGE[start..end]
 }
 
-/// Turns the page's timers live, as the engine's live turn does (`advance_timers_for_frame` with the
-/// real time since the last turn, a 16 ms frame budget) and waits between turns as the app's content
-/// thread does (the next timer, 2 to 50 ms), until the page is done or 5 s pass. Returns `rec`.
+/// Turns the page's timers live, as the engine's live turn on the real clock does
+/// (`advance_real_timers_for_frame` with the real time since the last turn, a 16 ms frame budget),
+/// and waits between turns as the app's content thread does (the next timer, 2 to 50 ms), until the
+/// page is done or 5 s pass. Returns `rec`.
 fn run_live() -> serde_json::Value {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     b.set_document(Rc::new(Document::parse_html("<html><head></head><body></body></html>").unwrap()))
@@ -32,7 +33,7 @@ fn run_live() -> serde_json::Value {
     while began.elapsed() < std::time::Duration::from_secs(5) {
         let elapsed_ms = clock.elapsed().as_millis() as u64;
         clock += std::time::Duration::from_millis(elapsed_ms);
-        b.advance_timers_for_frame(elapsed_ms, 1000, 16).unwrap();
+        b.advance_real_timers_for_frame(elapsed_ms, 1000, 16).unwrap();
         if matches!(b.evaluate("rec.done").unwrap(), JsValue::Boolean(true)) {
             break;
         }
@@ -50,12 +51,15 @@ fn run_live() -> serde_json::Value {
 #[test]
 fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
     let rec = run_live();
+    eprintln!("CLOCK3-RESULT {rec}");
     assert_eq!(rec["done"], true, "the page did not finish: {rec}");
     assert!(rec["longMs"].as_f64().unwrap() >= 500.0, "{rec}");
     // The one link that was overdue runs; the next is set from then.
     assert_eq!(rec["chainBurst"], 1, "chain links run at once after the long task: {rec}");
+    // Chrome 10. Up to 1 ms less here: the live loop's turn delta is whole milliseconds, so the
+    // virtual clock a link is set on trails the real clock by under a millisecond (0 before CLOCK3).
     assert!(
-        rec["chainMinGapMs"].as_f64().unwrap() >= 9.5,
+        rec["chainMinGapMs"].as_f64().unwrap() >= 9.0,
         "two chain links less than their 10 ms apart after the long task: {rec}"
     );
     // No replay: at most a link per 10 ms in the 300 ms after it (Chrome 28).
@@ -63,4 +67,29 @@ fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
     // Intervals were already re-based: one overdue run, then their period (Chrome 1 to 2, 30 to 31).
     assert!(rec["intervalBurst"].as_u64().unwrap() <= 2, "{rec}");
     assert!(rec["intervalAfter"].as_u64().unwrap() <= 32, "{rec}");
+}
+
+/// A stepped turn (a capture's settle, a test) moves virtual time the page has not lived through, so
+/// a chain still runs a link per 10 ms of it: five in a 50 ms step, as before CLOCK3. On the real
+/// clock the same turn is 50 ms the page was held back: the overdue link runs once, and the next is
+/// 10 ms after the turn's time.
+#[test]
+fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
+    let count = |real: bool| {
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.evaluate("var n = 0; (function link() { n++; setTimeout(link, 10); })();").unwrap();
+        if real {
+            b.advance_real_timers_for_frame(50, 1000, 0).unwrap();
+        } else {
+            b.advance_timers_for_frame(50, 1000, 0).unwrap();
+        }
+        let n = match b.evaluate("String(n)").unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{other:?}"),
+        };
+        (n, b.next_timer_delay())
+    };
+    // The first link runs at once, then one per 10 ms: 10, 20, 30, 40, 50.
+    assert_eq!(count(false), ("6".to_string(), Some(10)));
+    assert_eq!(count(true), ("2".to_string(), Some(10)));
 }

@@ -612,7 +612,7 @@ impl EndpointSide {
             }
             PageCmd::PumpLive { elapsed_ms, reply } => {
                 let turn = match live {
-                    Some(runtime) => runtime.block_on(engine.pump_live(self.view, elapsed_ms)),
+                    Some(runtime) => runtime.block_on(engine.pump_live_real(self.view, elapsed_ms)),
                     None => LivePump::default(),
                 };
                 let _ = reply.send(turn);
@@ -1272,7 +1272,7 @@ impl EndpointSide {
             if cmds.is_empty() {
                 let elapsed = clock.elapsed().as_millis() as u64;
                 clock = tokio::time::Instant::now();
-                let turn = engine.pump_live(self.view, elapsed).await;
+                let turn = engine.pump_live_real(self.view, elapsed).await;
                 self.after_page_change(engine);
                 // A resize (or any other command) that arrived during the
                 // turn is applied before the next timer slice. The frame
@@ -1328,7 +1328,7 @@ impl EndpointSide {
                 self.after_page_change(engine);
             }
             PageCmd::PumpLive { elapsed_ms, reply } => {
-                let turn = engine.pump_live(self.view, elapsed_ms).await;
+                let turn = engine.pump_live_real(self.view, elapsed_ms).await;
                 let _ = reply.send(turn);
                 self.after_page_change(engine);
             }

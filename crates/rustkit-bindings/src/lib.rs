@@ -624,12 +624,29 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         target.dispatchEvent(event);
     };
 
+    // The turn's time (`target`) while a live turn on the real clock runs (`advanceTimersFramed`
+    // with `real`), and the real clock when it began; -1 otherwise. Such a turn's delta is real time
+    // that has passed, so a timer due inside it was held back, not stepped over: each still runs at
+    // its own due time, but what it sets counts from when it is set (the turn's time plus the real
+    // time the turn has taken so far), as in a browser. Counted from the
+    // callback's due time, a timeout or an interval run set after a long task came due again in the
+    // same turn, and a 10 ms chain replayed every link it had missed (CLOCK3: 51 links in the 5 ms
+    // after a 500 ms task; Chrome 1). A stepped turn (a capture's settle, a test) moves virtual time
+    // the page has not lived through yet, and keeps every timer on it. An animation frame counts
+    // from the clock as before: one a timer of the turn asks for is in this turn's round.
+    var liveAt = -1, liveReal = 0;
+    function realMs() { return hostClock ? hostClock() : realNow(); }
+    function since() {
+        if (liveAt < 0) return now;
+        var t = liveAt + (realMs() - liveReal);
+        return t > now ? t : now;
+    }
     function schedule(cb, ms, args, repeat, frame) {
         var delay = toNumber(ms) || 0;
         if (delay < 0) delay = 0;
         var id = nextId++;
         var timer = objCreate(null);
-        timer.id = id; timer.seq = id; timer.due = now + delay; timer.cb = cb; timer.args = args;
+        timer.id = id; timer.seq = id; timer.due = (frame ? now : since()) + delay; timer.cb = cb; timer.args = args;
         timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
         timers[count++] = timer;
         return id;
@@ -695,10 +712,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // moved on; the clock does not go back for it.
             if (timer.due > now) now = timer.due;
             // An interval that fell behind (a live turn held it back) is not
-            // caught up: its next run counts from now, as in a browser.
+            // caught up: its next run counts from now (on the real clock, the
+            // turn's time), as in a browser.
             if (timer.every) {
                 timer.due += timer.every;
-                if (timer.due <= now) timer.due = now + timer.every;
+                if (timer.due <= since()) timer.due = since() + timer.every;
                 timer.seq = nextId++;
             }
             else removeAt(best);
@@ -788,20 +806,26 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // A turn that yields still has its frame (#776): its animation-frame
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
-    __rk.advanceTimersFramed = function (delta, max, frameMs) {
+    //
+    // `real`: `delta` is real time that has passed (the app's live loops),
+    // so timers set in the turn count from its time (`liveAt`, CLOCK3).
+    __rk.advanceTimersFramed = function (delta, max, frameMs, real) {
         var target = now + delta;
         var start = Date.now();
         var ran = 0;
         var yielded = false;
-        while (ran < max) {
-            var n = runTimers(target, 1, true);
-            if (n === 0) break;
-            ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
-                yielded = true;
-                break;
+        if (real) { liveAt = target; liveReal = realMs(); }
+        try {
+            while (ran < max) {
+                var n = runTimers(target, 1, true);
+                if (n === 0) break;
+                ran += n;
+                if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+                    yielded = true;
+                    break;
+                }
             }
-        }
+        } finally { liveAt = -1; }
         if (now < target) now = target;
         if (ran >= max) return yielded ? -ran : ran;
         ran = frameRound(ran, max);
@@ -3033,9 +3057,33 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, false)
+    }
+
+    /// [`Self::advance_timers_for_frame`] for a live turn on the real clock:
+    /// `delta_ms` is real time that has passed, so a timer due inside it was
+    /// held back, and one set during the turn (a chain's next link, an
+    /// interval's next run) counts from the turn's time, not from the due
+    /// time of the callback that set it (CLOCK3).
+    pub fn advance_real_timers_for_frame(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true)
+    }
+
+    fn advance_timers_framed(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+        real: bool,
+    ) -> Result<(u32, bool), BindingError> {
         let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
-            "return __rk.advanceTimersFramed({}, {}, {})",
-            delta_ms, max_callbacks, frame_ms
+            "return __rk.advanceTimersFramed({}, {}, {}, {})",
+            delta_ms, max_callbacks, frame_ms, real
         ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),

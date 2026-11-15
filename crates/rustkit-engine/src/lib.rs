@@ -6322,7 +6322,23 @@ impl Engine {
         Ok(())
     }
 
+    /// One live turn that steps the page's clock by `elapsed_ms` of virtual time the page has not
+    /// lived through yet (a capture's settle, a test): every timer due inside it runs on that clock,
+    /// and what it sets counts from its own due time. The app's loops, whose `elapsed_ms` is real time
+    /// that has passed, use [`Self::pump_live_real`].
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, false).await
+    }
+
+    /// One live turn after `elapsed_ms` of real time: a timer due inside it was held back (a long
+    /// task, a late turn), so it runs once, and what it sets (a chain's next link, an interval's next
+    /// run) counts from the turn's time, as in Chrome, not from the due time it was held back from
+    /// (CLOCK3: a 10 ms chain replayed every link it had missed in one turn).
+    pub async fn pump_live_real(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, true).await
+    }
+
+    async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
@@ -6405,11 +6421,11 @@ impl Engine {
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (ran, yielded) = bindings.advance_timers_for_frame(
-                        elapsed_ms,
-                        MAX_LIVE_TIMER_CALLBACKS,
-                        LIVE_FRAME_MS,
-                    )?;
+                    let (ran, yielded) = if real_clock {
+                        bindings.advance_real_timers_for_frame(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS, LIVE_FRAME_MS)?
+                    } else {
+                        bindings.advance_timers_for_frame(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS, LIVE_FRAME_MS)?
+                    };
                     frame_yield.set(yielded);
                     Ok::<_, rustkit_bindings::BindingError>(ran)
                 }))

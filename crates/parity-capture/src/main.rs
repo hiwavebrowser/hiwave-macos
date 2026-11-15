@@ -715,7 +715,8 @@ fn run_live(
         let started = Instant::now();
         let elapsed_ms = started.duration_since(clock).as_millis() as u64;
         clock += Duration::from_millis(elapsed_ms);
-        let turn = rt.block_on(engine.pump_live(view_id, elapsed_ms));
+        // Real time has passed (`elapsed_ms`), as in the app's loops (CLOCK3).
+        let turn = rt.block_on(engine.pump_live_real(view_id, elapsed_ms));
         stats.turns += 1;
         stats.timer_callbacks += turn.timers_ran as u64;
         stats.requests += turn.requests as u64;
