@@ -58,16 +58,75 @@ fn the_same_relations_hold_when_the_live_turns_are_slow() {
     live(45);
 }
 
+/// Every animation frame callback's timestamp, with the live turn that ran it (`window.__turn`, set
+/// by the test before each turn; -1 before the first).
+const RECORD_FRAMES: &str = "window.__turn = -1; window.__frames = []; (function () { \
+    var raf = window.requestAnimationFrame; \
+    window.requestAnimationFrame = function (cb) { \
+        return raf(function (t) { window.__frames.push([t, window.__turn]); return cb(t); }); \
+    }; })();";
+
 /// 60 live turns of 16 ms of virtual time, `sleep_ms` of real time apart.
+///
+/// Live, a frame's timestamp is `performance.now()` at its turn, held at least one virtual frame
+/// (16 ms) past the frame before it, so how far apart the page's frames are is how far apart this
+/// test's turns are in real time: the page's `.rafLoop.medianNearAFrame` (Chrome: the middle gap is
+/// 5 to 40 ms) is a wall-clock bound here, and a loaded runner failed it (FLK6). That one relation is
+/// checked on the values instead, against the turns this test made, which holds at any load:
+/// - each frame runs one turn after the one before (a frame asked for in a turn is due a virtual
+///   frame later, the next turn), and every callback of a turn gets the same timestamp;
+/// - consecutive frames in turns `a < b` are at least `16 * (b - a)` ms apart (the virtual floor)
+///   and at most `max(16 * (b - a), end[b] - end[a - 1])`, where `end[k]` is `performance.now()`
+///   just after turn `k`: the clock is monotonic, so frame `a`'s stamp is past `end[a - 1]` and
+///   frame `b`'s is not past `end[b]` unless the floor put it there.
+/// Every other relation is compared with Chrome as it stands.
 fn live(sleep_ms: u64) {
     let b = page();
+    b.evaluate(RECORD_FRAMES).unwrap();
     b.evaluate(&format!("(0, eval)({})", serde_json::to_string(PAGE_JS).unwrap())).unwrap();
-    for _ in 0..60 {
+    let now = |b: &DomBindings| ev(b, "String(performance.now())").parse::<f64>().unwrap();
+    let begin = now(&b);
+    let mut end = Vec::new();
+    for turn in 0..60 {
+        b.evaluate(&format!("window.__turn = {turn}")).unwrap();
         b.advance_timers(16, 100).unwrap();
+        end.push(now(&b));
         std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
     }
+    let frames: Vec<(f64, i64)> = serde_json::from_str(&ev(&b, "JSON.stringify(window.__frames)")).unwrap();
+    // One timestamp per turn, in turn order.
+    let mut stamps: Vec<(i64, f64)> = Vec::new();
+    for &(t, turn) in &frames {
+        assert!(turn >= 0, "a frame ran outside a live turn: {frames:?}");
+        match stamps.last() {
+            Some(&(last, at)) if last == turn => assert_eq!(at, t, "two timestamps in turn {turn}: {frames:?}"),
+            Some(&(last, _)) => assert!(turn > last, "frames out of turn order: {frames:?}"),
+            None => {}
+        }
+        if stamps.last().map_or(true, |&(last, _)| last != turn) {
+            stamps.push((turn, t));
+        }
+    }
+    // The page asks for 2 frames, then a loop of 11: turns 0 to 10.
+    assert_eq!(stamps.len(), 11, "{frames:?}");
+    let start_of = |k: i64| if k == 0 { begin } else { end[k as usize - 1] };
+    for pair in stamps.windows(2) {
+        let ((a, ta), (b2, tb)) = (pair[0], pair[1]);
+        assert_eq!(b2, a + 1, "a frame skipped a turn: {stamps:?}");
+        let floor = 16.0 * (b2 - a) as f64;
+        let span = end[b2 as usize] - start_of(a);
+        assert!(tb - ta >= floor - 1e-6, "frames {a} and {b2} less than a frame apart: {stamps:?}");
+        assert!(
+            tb - ta <= floor.max(span) + 1e-6,
+            "frames {a} and {b2} are {} ms apart, more than the {span} ms their turns took: {stamps:?} {end:?}",
+            tb - ta
+        );
+    }
     let want: serde_json::Value = serde_json::from_str(CHROME).unwrap();
-    same(&observed(&b), &want);
+    let mut got = observed(&b);
+    // Checked above, against the turns.
+    got["rafLoop"]["medianNearAFrame"] = want["rafLoop"]["medianNearAFrame"].clone();
+    same(&got, &want);
 }
 
 /// Equal, naming the first path that differs (the relations are booleans, so say which one).
