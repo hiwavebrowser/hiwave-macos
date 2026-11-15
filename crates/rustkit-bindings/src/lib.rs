@@ -780,13 +780,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // the last frame's stamp than the clock moved between them. A late frame's callbacks
             // get the time it was due, and the frames after it are again a grid step apart
             // (Chrome: 16.6-16.8 ms after a 24 ms frame); stamped with the turn's time the gaps
-            // went 41, 0 and 9 ms. A frame owed for two frames or more (a long task, an idle
-            // page) is the frame it runs in, stamped now: its grid time is long past.
-            var due = Q.frameDue, at = Q.now - due < 34 ? due : Q.now;
-            if (Q.frameTsAt !== due) {
-                Q.frameTsAt = due;
+            // went 41, 0 and 9 ms. However late: a frame a long task held up 30-190 ms is
+            // stamped with its grid time in Chrome (`frame_stamp_probe_cft148.json`,
+            // "longTimer"), so a frame a timer in its callback asks for, on a later grid point,
+            // is stamped after it. Stamped with the turn's time once two frames late, the page
+            // saw 69 then 67. Never below the last frame's stamp.
+            var at = Q.frameDue;
+            if (Q.frameTsAt !== at) {
+                Q.frameTsAt = at;
                 var ts = treeNow() - (Q.now - at);
                 if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
+                if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
                 Q.frameTs = ts;
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
@@ -4391,10 +4395,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
-        // The callback is told the time of the frame it runs in, on performance.now()'s clock: the
-        // virtual time (600 here) plus the real time since the virtual clock moved.
+        // The callback is told its frame's grid time however late the long task ran it, on
+        // performance.now()'s clock: the grid point 17 plus the real time since the virtual clock
+        // moved. Chrome (CfT 148.0.7778.216, `frame_stamp_probe_cft148.json`, "longFirst", five
+        // runs): a frame asked for just before a 600 ms task runs 600 ms on, stamped -15.6 to
+        // +0.7 ms from the request. It was stamped 600 here, the turn's time.
         assert_eq!(read("String(stamps.length)"), "1");
-        assert_eq!(read("String(stamps[0] >= 600 && stamps[0] < 700)"), "true");
+        assert_eq!(read("String(stamps[0] >= 17 && stamps[0] < 100)"), "true");
         // The loop asked for the frame after this one: the 60 Hz grid's next point after 600 (617;
         // 600 is a grid point, and the frame that ran there is not run again).
         assert_eq!(bindings.next_timer_delay(), Some(17));
