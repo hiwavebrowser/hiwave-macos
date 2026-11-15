@@ -31,6 +31,10 @@ window.sawParent = (window.parent !== window) + ':' + (window.top === window.par
 
 impl Page {
     fn load(on: bool, page: &str) -> Self {
+        Self::load_with(config(on), page)
+    }
+
+    fn load_with(config: EngineConfig, page: &str) -> Self {
         let routes = vec![
             ("/", "text/html", page.to_string()),
             ("/child.html", "text/html", CHILD.to_string()),
@@ -39,7 +43,7 @@ impl Page {
             ("/noscript.html", "text/html", "<!doctype html><body><noscript><strong>x</strong></noscript><p>c</p></body>".to_string()),
         ];
         let server = serve_routes(routes);
-        let mut engine = Engine::new(config(on)).expect("engine");
+        let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
             .expect("view");
@@ -643,4 +647,37 @@ f.addEventListener('load', function () { loaded = true; });
     page.js("window.ticked = false; setTimeout(function () { ticked = true; }, 0);");
     page.turns_until("window.ticked", Duration::from_secs(2));
     assert_eq!(page.js("String(window.ticked)"), r#"String("true")"#);
+}
+
+/// How far a frame's `performance.now()` moves across 40 ms of real time, and the page's.
+fn clocks_across_40ms(config: EngineConfig) -> (f64, f64) {
+    let page = "<!doctype html><body><iframe id=f src=/child.html></iframe><script>
+window.loaded = false;
+var f = document.getElementById('f');
+f.addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let mut page = Page::load_with(config, page);
+    page.turns_until("window.loaded", Duration::from_secs(5));
+    assert_eq!(page.js("String(typeof f.contentWindow.childFn)"), r#"String("function")"#, "the frame loaded");
+    let read = |page: &mut Page| -> (f64, f64) {
+        let v = page.js("f.contentWindow.performance.now() + ' ' + performance.now()");
+        let v = v.trim_start_matches("String(\"").trim_end_matches("\")").to_string();
+        let (frame, top) = v.split_once(' ').unwrap_or_else(|| panic!("{v}"));
+        (frame.parse().unwrap(), top.parse().unwrap())
+    };
+    let a = read(&mut page);
+    std::thread::sleep(Duration::from_millis(40));
+    let b = read(&mut page);
+    (b.0 - a.0, b.1 - a.1)
+}
+
+/// The page clock's capture switch is the frame tree's: a frame's document, which the engine
+/// makes after the page's, reads a stepped clock under it and a flowing one without it, as the
+/// page does (`clock_flag_tests`).
+#[test]
+fn the_capture_clock_is_the_frames_too() {
+    let (frame, top) = clocks_across_40ms(EngineConfig { deterministic_page_clock: true, ..config(true) });
+    assert!(frame < 5.0 && top < 5.0, "under the capture switch the frame moved {frame} ms and the page {top} ms across 40 ms");
+    let (frame, top) = clocks_across_40ms(config(true));
+    assert!(frame >= 35.0 && top >= 35.0, "without it the frame moved {frame} ms and the page {top} ms across 40 ms");
 }

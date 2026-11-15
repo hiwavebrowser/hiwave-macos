@@ -66,7 +66,8 @@ fn shared_names() -> std::collections::BTreeSet<String> {
 /// Member names of what the engine keeps for a frame tree: the timer
 /// queue's, a frame record's, the registries' frame members. (Not
 /// `loaded`: it is also a ProgressEvent's, set on the page's own event.)
-const FRAME_NAMES: &str = "now nextId timers count pumps pumpCount up top el win tree changed scan attach size nodeId byTag";
+const FRAME_NAMES: &str = "now nextId timers count pumps pumpCount up top el win tree changed scan attach size nodeId byTag \
+    det reads seenNow skew lastPerf startedAt frameTs frameTsAt prevFrameTs prevFrameAt";
 
 /// The names the engine describes the events of the user's input, of
 /// transitions and of animations with (the fields it writes on what it
@@ -517,6 +518,10 @@ fn a_frames_host_object_and_the_trees_shared_state_inherit_nothing() {
          [{shared}].forEach(function (n) {{ if (!__rk.shared || !has.call(__rk.shared, n)) out.push('shared.' + n); }});
          var queue = __rk.shared && __rk.shared.timerQueue;
          if (!queue || proto(queue) !== null) out.push('shared.timerQueue');
+         // The tree's clock is kept on the queue's record, every slot there from the start.
+         'now det reads seenNow skew lastPerf startedAt frameTs frameTsAt prevFrameTs prevFrameAt'.split(' ').forEach(function (n) {{
+             if (!queue || !has.call(queue, n)) out.push('timerQueue.' + n);
+         }});
          return out.join(' ');"
     );
     let page = text(t.parent.host_turn(&body, &[]).unwrap());
