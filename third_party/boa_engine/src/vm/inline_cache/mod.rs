@@ -11,6 +11,7 @@ use crate::{
         Shape, WeakShape,
         slot::{Slot, SlotAttributes},
     },
+    property::PropertyKey,
 };
 
 #[cfg(test)]
@@ -94,6 +95,20 @@ impl InlineCache {
         } else {
             None
         };
+
+        // HIWAVE PATCH (ic-holder): the slot was taken when the lookup found the property, but
+        // the shapes are taken now, after any getter or setter it ran; one that redefined or
+        // deleted its own property leaves a slot that the current shape no longer has there. Cache
+        // only if the name still resolves to that slot, with the same attributes, in the shape of
+        // the object that holds it.
+        let key = PropertyKey::from(self.name.clone());
+        let found = holder.as_ref().unwrap_or(shape).lookup(&key);
+        let same = |a: SlotAttributes| a.difference(SlotAttributes::INLINE_CACHE_BITS);
+        if !found.is_some_and(|found| {
+            found.index == slot.index && same(found.attributes) == same(slot.attributes)
+        }) {
+            return;
+        }
 
         let mut entries = self.entries.borrow_mut();
 

@@ -795,7 +795,7 @@ kept answering from the prototype after an own property shadowed it. Four change
   accessor write whose setter is no longer callable (a setter replaced by `undefined` keeps the
   slot's bits, so the shape does not change; the full path is what throws in strict code).
 
-**Cost.** Inline-cache misses are unchanged to within 0.05% on richards, delta-blue, raytrace,
+**Cost.** Inline-cache misses are the same as develop's, count for count, on richards, delta-blue, raytrace,
 splay, hash-map, navier-stokes and Babylon (vm-stats). Wall time, median of three runs of 8
 iterations each, alternated with develop (Linux x86-64, release): richards +3.3%, delta-blue +4.1%,
 raytrace +3.3%, Babylon +1.1%, hash-map -1.1% (noise; run-to-run spread is 1-3%). A weakly held
@@ -804,8 +804,9 @@ The cost is one prototype borrow and one address comparison on each prototype hi
 check into the three hit paths, which already borrow the prototype, would remove the second
 borrow, at the price of every hit path having to remember it.
 
-Pin: `crates/rustkit-js/tests/ic_holder.rs` (25 cases from Chrome for Testing 148.0.7778.216, each
+Pin: `crates/rustkit-js/tests/ic_holder.rs` (cases from Chrome for Testing 148.0.7778.216, each
 warming a site twice before the change: prototype property deleted, accessor to data, data to
 accessor, read-only, getter or setter swapped, on reads and writes; dictionary-mode objects frozen,
 made read-only, shadowed; a built-in prototype; strict code with no setter; `arguments` objects;
-global names. 16 differed on develop 55547c08).
+global names; a getter or setter that redefines or deletes its own property, own, on the prototype
+and global. 31 cases; on develop 55547c08, 20 differ).
