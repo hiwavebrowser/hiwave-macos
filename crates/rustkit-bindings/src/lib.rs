@@ -3315,20 +3315,36 @@ mod tests {
     /// (measured 2026-11-12: over 50 ms of a busy loop every step between distinct readings is 0.1,
     /// 500 distinct values). It stepped by a whole millisecond, so the stress suites' short timings
     /// read 0.
+    ///
+    /// The tick is read off the values, not off how many ticks fit in a stretch of wall time
+    /// (FLK4: "20 distinct readings in 5 ms" failed whenever a loaded machine took the thread away
+    /// for most of the 5 ms). Every reading is a whole number of tenths of a millisecond, and the
+    /// largest step that divides all of them is one tenth: a coarser clock leaves a larger common
+    /// step, a finer one a reading off the grid. A descheduled slice only spaces the readings out.
     #[test]
     fn performance_now_ticks_every_tenth_of_a_millisecond() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        // 50 distinct readings, however long they take, each in tenths of a millisecond.
         let out = eval_string(
             &bindings,
-            "var d = [], last = performance.now(), end = last + 5;              while (last < end) { var n = performance.now(); if (n !== last) { d.push(n - last); last = n; } }              d.sort(function (a, b) { return a - b; }); String(d.length + ',' + d[0].toFixed(3))",
+            "var r = [], last = performance.now(); r.push(last * 10); \
+             while (r.length < 50) { var n = performance.now(); if (n !== last) { r.push(n * 10); last = n; } } \
+             r.join()",
         );
-        let (count, min) = out.split_once(',').unwrap();
-        let (count, min): (u32, f64) = (count.parse().unwrap(), min.parse().unwrap());
-        // 5 ms at 0.1 ms is about 50 distinct readings; whole-millisecond steps give at most 5.
-        assert!(count >= 20, "distinct readings in 5 ms: {count}");
-        assert!(min < 0.5, "the smallest step is {min} ms");
+        let tenths: Vec<f64> = out.split(',').map(|v| v.parse().unwrap()).collect();
+        assert_eq!(tenths.len(), 50);
+        assert!(tenths.windows(2).all(|w| w[0] < w[1]), "the clock went backwards: {tenths:?}");
         // Not finer than a tenth of a millisecond: a high-resolution timer is a fingerprinting aid.
-        assert!(min >= 0.0999, "the smallest step is {min} ms");
+        for t in &tenths {
+            assert!((t - t.round()).abs() < 1e-6, "{} ms is not a whole number of 0.1 ms ticks", t / 10.0);
+        }
+        // Not coarser: whole-millisecond steps leave a common step of 10 tenths.
+        fn gcd(a: u64, b: u64) -> u64 {
+            if b == 0 { a } else { gcd(b, a % b) }
+        }
+        let first = tenths[0].round() as u64;
+        let step = tenths.iter().fold(0, |g, t| gcd(g, t.round() as u64 - first));
+        assert_eq!(step, 1, "the readings share a step of {} ms: {tenths:?}", step as f64 / 10.0);
     }
 
     /// Pages read these without feature-testing; each used to throw a
