@@ -2221,7 +2221,7 @@ mod tests {
     /// due at once, as in Chrome for Testing 148 (0-1 ms, 60-61 frames; `long_turn_resume_cft148.json`).
     /// `--window-thread-pacing` keeps the wait of the app's window thread with the content thread off:
     /// at least as long as the last turn took, so about 2000 ms. The bounds are wall-clock bounds with
-    /// wide margins on either side of the two behaviours (measured 5-14 ms and 2010-2017 ms;
+    /// wide margins on either side of the two behaviours (measured 5-15 ms and 2010-2017 ms;
     /// `long_turn_resume_engine.json`): a 2 to 50 ms wait would have to run 450 ms late to fail the
     /// first, and no load makes a 2000 ms wait shorter.
     const LONG_TURN_PAGE: &str =
