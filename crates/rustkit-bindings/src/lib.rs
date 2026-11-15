@@ -141,6 +141,8 @@ mod frame_clock_tests;
 #[cfg(test)]
 mod named_collections_tests;
 #[cfg(test)]
+mod unhandled_rejection_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
