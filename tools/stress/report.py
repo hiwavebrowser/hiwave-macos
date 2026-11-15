@@ -7,8 +7,11 @@
 Reads the run records run.py writes (default ~/zg-measure/stress-runs). Runs
 are grouped by suite, engine and label (run.py --label; by default the first
 8 of the binary's sha1). Partial runs (--only, --iterations) are left out
-unless --partial is given, and are never mixed with full ones. A run that
-started at a 1-minute load of 3 or more is discarded (the `disc` column).
+unless --partial is given, and are never mixed with full ones. Runs with the
+live-turn watchdog raised (`live_turn_budget_ms` set, HIWAVE_STRESS_TURN_BUDGET_MS)
+are likewise left out unless --raised-budget is given, and are never mixed
+with default runs. A run that started at a 1-minute load of 3 or more is
+discarded (the `disc` column).
 
 --compare BASE CAND applies the landing rule to every suite and engine both
 labels have scores for: the candidate regresses when its median is below the
@@ -33,7 +36,7 @@ SCORE_LOAD = 3.0
 DEFAULT_DIR = pathlib.Path.home() / "zg-measure" / "stress-runs"
 
 
-def load(dirs, partial):
+def load(dirs, partial, raised=False):
     runs = []
     for d in dirs:
         for f in sorted(pathlib.Path(d).glob("*.json")):
@@ -42,6 +45,10 @@ def load(dirs, partial):
             except ValueError:
                 continue
             if r.get("schema") != 1 or bool(r.get("partial")) != partial:
+                continue
+            # A raised live-turn watchdog is a different engine setting: such a run is reported only on its
+            # own, never beside or against default runs.
+            if (r.get("live_turn_budget_ms") is not None) != raised:
                 continue
             r["_file"] = f.name
             # The Mac's load rule: a run that started at a 1-minute load of
@@ -96,13 +103,16 @@ def main():
     ap.add_argument("--compare", nargs=2, metavar=("BASE", "CAND"), help="two run.py labels")
     ap.add_argument("--floor", type=float, default=3.0, help="regression floor, percent (default 3)")
     ap.add_argument("--partial", action="store_true", help="report the partial runs instead of the full ones")
+    ap.add_argument("--raised-budget", action="store_true",
+                    help="report the runs with the live-turn watchdog raised instead of the default ones")
     ap.add_argument("--subs", action="store_true", help="also print per-subtest medians")
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     args = ap.parse_args()
 
-    g = groups(load(args.dirs, args.partial))
+    g = groups(load(args.dirs, args.partial, args.raised_budget))
     if not g:
-        print("no %sruns under %s" % ("partial " if args.partial else "", ", ".join(args.dirs)))
+        print("no %s%sruns under %s" % ("partial " if args.partial else "", "raised-budget " if args.raised_budget else "",
+                                         ", ".join(args.dirs)))
         return 2
     table = {k: summary(v) for k, v in g.items()}
 

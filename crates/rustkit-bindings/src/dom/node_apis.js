@@ -49,6 +49,11 @@
          ['text', 'SVGTextElement']].forEach(function (pair) {
             SVG_PROTOS[pair[0]] = iface(pair[1], Graphics).prototype;
         });
+        // Paint servers: their `gradientTransform` / `patternTransform` lists are web_svg_geometry.js's.
+        var Gradient = iface('SVGGradientElement', g.SVGElement);
+        SVG_PROTOS.linearGradient = iface('SVGLinearGradientElement', Gradient).prototype;
+        SVG_PROTOS.radialGradient = iface('SVGRadialGradientElement', Gradient).prototype;
+        SVG_PROTOS.pattern = iface('SVGPatternElement', g.SVGElement).prototype;
     })();
     // SVG elements get the SVG interfaces (the tag table already maps
     // `svg`); elements in any other non-HTML namespace are plain Element.
