@@ -174,6 +174,29 @@ fn the_next_timer_is_read_without_the_pages_math() {
     assert_eq!((delay, clock, ran.as_str()), (Some(1000), 0.0, "0"), "the delay, the clock, and calls of the page's functions");
 }
 
+/// An interval held back on the real clock keeps its grid, and a turn's
+/// frame budget is timed, with the arithmetic and clock of install time: a
+/// page whose `Math.floor` returns `NaN` still has its interval run, once,
+/// and on its grid, and its `Date.now` is not what ends a turn.
+#[test]
+fn an_interval_keeps_its_grid_without_the_pages_math_or_clock() {
+    let got = bounded(|| {
+        let (b, _) = bindings(false);
+        b.evaluate(KIT).unwrap();
+        b.evaluate(
+            "var n = 0, realFloor = Math.floor, realNow = Date.now;
+             setInterval(function () { n++; }, 10);
+             Math.floor = function () { ran++; return NaN; }; Date.now = counted;",
+        )
+        .unwrap();
+        b.advance_real_timers_for_frame(55, 1000, 16).unwrap();
+        let next = b.next_timer_delay();
+        b.evaluate("Math.floor = realFloor; Date.now = realNow;").unwrap();
+        (next.map(|d| d % 10), text(b.evaluate("'n=' + n + ' ran=' + ran").unwrap()))
+    });
+    assert_eq!(got, (Some(5), "n=1 ran=0".to_string()), "the next run's place on the grid, and the page's counts");
+}
+
 /// Timers are set and cleared while the page has its own array methods in
 /// place: the timer table never passes through them, and reading the next
 /// timer runs nothing of the page's.
