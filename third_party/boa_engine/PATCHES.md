@@ -855,3 +855,36 @@ made read-only, shadowed; a built-in prototype; strict code with no setter; `arg
 global names; a getter or setter that redefines or deletes its own property, own, on the prototype
 and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
 develop be8eb272, 22 differ).
+
+## Patch: the prototype-holder check is made where a hit reads the slot (`ic-hit-read`)
+
+**What.** `ic-holder` made `InlineCache::get` borrow the receiver's prototype to compare its shape
+with the one the entry was made under, and every hit path then borrowed the same prototype again to
+read the slot. Now `get` returns a `Hit` (the shape, the slot and, for a prototype slot, the
+holder's address) without looking at the prototype, and `Hit::read(ic, own, extra)` reads
+`storage[slot.index + extra]` from the receiver or, for a prototype slot, from its prototype,
+comparing the prototype's shape with the holder there. A stale entry is dropped and the read
+returns `None`, so the hit path takes the full [[Get]]/[[Set]]. All three readers of a cached slot
+(`get/property.rs`, `get/name.rs` and the accessor arm of `set/property.rs`) go through `read`, and
+`Hit::slot` is the only part of a hit they use otherwise, so there is no path that reads a
+prototype slot without the check. Marked `HIWAVE PATCH (ic-hit-read)`.
+
+**Cost.** Against develop be8eb272 and `ic-holder` at 45d914f3, both on one pinned core, median of
+five alternated rounds of 8 iterations (Linux x86-64, release); vm-stats misses are identical to
+develop's on six of seven workloads, splay within develop's own variation:
+
+| | `ic-holder` vs develop | `ic-hit-read` vs develop | `ic-hit-read` vs `ic-holder` |
+|---|---|---|---|
+| richards | +3.3% | +2.0% | -1.3% |
+| delta-blue | +3.9% | +1.9% | -1.9% |
+| raytrace | +1.8% | +1.1% | -0.7% |
+| splay | +2.0% | -1.3% | -3.3% |
+| hash-map | +3.1% | -0.0% | -3.0% |
+| navier-stokes | -0.6% | +0.3% | +1.0% |
+| Babylon | +2.0% | +2.2% | +0.2% |
+
+This recovers 1 to 3 points on four workloads and about 1 on raytrace; richards, delta-blue and
+Babylon stay about 2% above develop. Single rounds swing by several points, so read each figure as
+about ±1.
+
+Pin: `crates/rustkit-js/tests/ic_holder.rs` (the 33 cases are the contract; behaviour is unchanged).

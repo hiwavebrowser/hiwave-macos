@@ -66,7 +66,8 @@ fn set_by_name(
     };
 
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape())
+    if let Some(hit) = ic.get(object_borrowed.shape())
+        && let slot = hit.slot
         // HIWAVE PATCH (super-set-receiver): an accessor hit calls the setter with the receiver, so
         // it is right for any receiver, on an object whose [[Set]] is the ordinary one (a proxy or
         // a typed array sharing the shape would skip its own [[Set]]). A data hit writes a slot in
@@ -93,17 +94,8 @@ fn set_by_name(
         // `undefined` without a shape change (accessor -> accessor keeps the slot's bits), and
         // the full path is what throws for that in strict code.
         if slot.attributes.is_accessor_descriptor() {
-            let setter = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                let prototype = shape.prototype().expect("prototype should have value");
-                let prototype = prototype.borrow();
-                prototype.properties().storage.get(slot_index + 1).cloned()
-            } else {
-                object_borrowed
-                    .properties()
-                    .storage
-                    .get(slot_index + 1)
-                    .cloned()
-            };
+            // (ic-hit-read: `Hit::read` checks that a prototype slot is still where it was.)
+            let setter = hit.read(ic, object_borrowed.properties(), 1);
 
             if slot.attributes.has_set()
                 && let Some(setter) = setter.as_ref().and_then(JsValue::as_object)

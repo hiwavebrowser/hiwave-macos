@@ -1,7 +1,7 @@
 use crate::{
     Context, JsResult, JsValue,
     error::JsNativeError,
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    object::internal_methods::InternalMethodPropertyContext,
     property::PropertyKey,
     vm::opcode::{IndexOperand, Operation, RegisterOperand},
 };
@@ -60,25 +60,12 @@ impl GetNameGlobal {
             let ic = &context.vm.frame().code_block().ic[usize::from(ic_index)];
 
             let object_borrowed = object.borrow();
-            if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
-                // HIWAVE PATCH (ic-holder): the cached index is read with `get`; a slot that is not
-                // there falls through to the full [[Get]] instead of indexing out of bounds.
-                let cached = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                    let prototype = shape.prototype().expect("prototype should have value");
-                    let prototype = prototype.borrow();
-                    prototype
-                        .properties()
-                        .storage
-                        .get(slot.index as usize)
-                        .cloned()
-                } else {
-                    object_borrowed
-                        .properties()
-                        .storage
-                        .get(slot.index as usize)
-                        .cloned()
-                };
-                if let Some(mut result) = cached {
+            if let Some(hit) = ic.get(object_borrowed.shape()) {
+                let slot = hit.slot;
+                // HIWAVE PATCH (ic-holder, ic-hit-read): the slot is read with `Hit::read`, which
+                // checks that a prototype slot is still where it was; a slot that is not there
+                // falls through to the full [[Get]] instead of indexing out of bounds.
+                if let Some(mut result) = hit.read(ic, object_borrowed.properties(), 0) {
                     drop(object_borrowed);
                     if slot.attributes.has_get() && result.is_object() {
                         result = result.as_object().expect("should contain getter").call(
