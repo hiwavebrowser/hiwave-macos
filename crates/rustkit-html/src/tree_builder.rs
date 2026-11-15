@@ -2817,5 +2817,136 @@ mod tests {
         // Should recover gracefully
         assert!(!result.events.is_empty());
     }
+
+    /// A raw-text element the "in head" rules opened from another mode
+    /// keeps its characters and its own end tag in every mode (the spec's
+    /// "text" insertion mode). Without the stack-depth guard, "in frameset"
+    /// dropped the text and ignored `</noframes>`, so the next `</frameset>`
+    /// closed the noframes and the frames landed inside it (#1120 / batch 76).
+    #[test]
+    fn noframes_in_a_frameset_keeps_its_text_and_end_tag() {
+        let events = events_of(
+            "<html><head></head><frameset cols='50%,50%'>\
+             <noframes>Your browser does not support frames.</noframes>\
+             <frame src='a.html'><frame src='b.html'></frameset></html>",
+        );
+        let start = events
+            .iter()
+            .position(|e| e == "start:noframes")
+            .expect("noframes opens");
+        assert_eq!(
+            events.get(start + 1).map(String::as_str),
+            Some("text:Your browser does not support frames."),
+            "frameset mode must not drop noframes text: {:?}",
+            events
+        );
+        assert_eq!(
+            events.get(start + 2).map(String::as_str),
+            Some("end:noframes"),
+            "frameset mode must honour </noframes>: {:?}",
+            events
+        );
+        let end = start + 2;
+        assert_eq!(
+            events.get(end + 1).map(String::as_str),
+            Some("start:frame[src=a.html]"),
+            "frames come after the closed noframes, not inside it: {:?}",
+            events
+        );
+        let frames = events
+            .iter()
+            .filter(|e| e.starts_with("start:frame["))
+            .count();
+        assert_eq!(frames, 2, "{:?}", events);
+        assert_eq!(count(&events, "end:noframes"), 1, "{:?}", events);
+    }
+
+    /// Same guard from "after frameset" and "after after frameset".
+    #[test]
+    fn noframes_after_a_frameset_keeps_its_text_and_end_tag() {
+        for html in [
+            "<html><frameset><frame src='a'></frameset><noframes>after <b>x</b></noframes></html>",
+            "<html><frameset><frame src='a'></frameset></html><noframes>late</noframes>",
+        ] {
+            let events = events_of(html);
+            let start = events
+                .iter()
+                .position(|e| e == "start:noframes")
+                .unwrap_or_else(|| panic!("noframes opens in {html}: {events:?}"));
+            let text = events.get(start + 1).map(String::as_str);
+            assert!(
+                text == Some("text:after <b>x</b>") || text == Some("text:late"),
+                "noframes text kept ({html}): {:?}",
+                events
+            );
+            assert_eq!(
+                events.get(start + 2).map(String::as_str),
+                Some("end:noframes"),
+                "</noframes> kept ({html}): {:?}",
+                events
+            );
+            // RAWTEXT: the `<b>` inside noframes is text, not an element.
+            assert_eq!(count(&events, "start:b"), 0, "{html}: {:?}", events);
+        }
+    }
+
+    /// A late `<style>` after `</head>` is put back into the head; its text
+    /// and end tag must stay with it. Without the guard the first character
+    /// implied a body inside the style (#1120 / earlier R1).
+    #[test]
+    fn a_style_after_head_keeps_its_text_and_end_tag_in_the_head() {
+        let events = events_of(
+            "<html><head><title>t</title></head><style>p{color:red}</style>\
+             <body><p>x</p><div>d</div></body></html>",
+        );
+        assert!(
+            events.iter().any(|e| e == "end:head"),
+            "head still closes: {:?}",
+            events
+        );
+        let style = events
+            .iter()
+            .position(|e| e == "start:style")
+            .expect("style opens");
+        assert_eq!(
+            events.get(style + 1).map(String::as_str),
+            Some("text:p{color:red}"),
+            "style text must not imply a body: {:?}",
+            events
+        );
+        assert_eq!(
+            events.get(style + 2).map(String::as_str),
+            Some("end:style"),
+            "{:?}",
+            events
+        );
+        // Body content is still body content.
+        assert!(events.iter().any(|e| e == "start:p"), "{:?}", events);
+        assert!(events.iter().any(|e| e == "start:div"), "{:?}", events);
+    }
+
+    /// `<noframes>` after `</head>` is the same raw-text path as `<style>`.
+    #[test]
+    fn a_noframes_after_head_keeps_its_text_in_the_head() {
+        let events = events_of(
+            "<html><head></head><noframes>n</noframes><body><p>x</p></body></html>",
+        );
+        let start = events
+            .iter()
+            .position(|e| e == "start:noframes")
+            .expect("noframes");
+        assert_eq!(
+            events.get(start + 1).map(String::as_str),
+            Some("text:n"),
+            "{:?}",
+            events
+        );
+        assert_eq!(
+            events.get(start + 2).map(String::as_str),
+            Some("end:noframes"),
+            "{:?}",
+            events
+        );
+    }
 }
 

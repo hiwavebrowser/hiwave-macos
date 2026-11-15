@@ -18,3 +18,39 @@ it is the value it is. Change the constant and this table together.
 Rules of thumb: an absolute pixel gate is only honest where we control both sides of the
 page (the chrome board). Engine correctness is gated by regression (campaign, A/B) and by
 assertions (WPT). Live sites get a loose bound because their content moves.
+
+## Release gate: third-party notices
+
+`THIRD_PARTY_NOTICES.md` at the repository root carries the copyright and licence
+notices of every third-party work in the shipped binary. It is a release gate, not a
+parity threshold, and it is generated: `scripts/third_party_notices.py` writes it.
+
+Before `develop` is promoted to `master`, and in any PR that changes `Cargo.lock`,
+`third_party/`, or a file embedded with `include_str!` / `include_bytes!` that came from
+somewhere else, run from the repository root:
+
+```bash
+python3 scripts/third_party_notices.py --check   # exit 1, with "missing:" / "stale:" lines, if out of date
+python3 scripts/third_party_notices.py           # rewrite the file
+```
+
+Both need the crates' sources on disk (`cargo fetch`); add `--offline` to keep cargo off
+the network. The crate list is `cargo tree -p hiwave-app -e normal --prefix none
+--format '{p}|{l}|{r}' --target <target> --locked` for `aarch64-apple-darwin` and
+`x86_64-apple-darwin`: the default-feature build of the app, without build- or
+dev-dependencies. It does not describe a build with other features or of another package.
+
+The script stops, and the release with it, on:
+
+- a crate whose licence it has no section for. A GPL, LGPL, AGPL or SSPL licence, or no
+  licence, is not added: it goes to Pete.
+- a licence file below a crate's root that its `NESTED` table does not name. Read the
+  file, then add a `carry` or `skip` entry.
+
+The script cannot see works that are not crates. Chart.js, the CLDR tables, SQLite, the
+Rust standard library and the code ported into the vendored Boa (sections 2 and 3 of the
+file) are written by hand in the script. When code is copied or ported from another
+project, anywhere in `crates/` or `third_party/`, add its notice there in the same PR;
+to look for ones that were missed, search `crates/`, `third_party/`, `scripts/` and
+`tools/` for "Copyright", "SPDX", "ported from", "derived from", "based on", "adapted
+from", "copied from" and "taken from". Section 7 of the file says what was not verified.

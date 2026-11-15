@@ -190,10 +190,10 @@ fn existing_singletons_get_their_interfaces_and_the_rest_are_interface_only() {
     assert_eq!(ev(&b, "var t; try { new ShadowRoot(); t = 'no throw'; } catch (e) { t = e.name; } t"), "TypeError");
     assert_eq!(ev(&b, "var w; try { new Window(); w = 'no throw'; } catch (e) { w = e.name; } w"), "TypeError");
     // Constructors for features the engine does not have stay UNDEFINED, so
-    // `typeof Worker` style feature detection keeps working.
+    // `typeof WebAssembly` style feature detection keeps working.
     assert_eq!(
-        ev(&b, "[typeof Worker, typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel].join()"),
-        "undefined,undefined,undefined,undefined,undefined,undefined"
+        ev(&b, "[typeof WebAssembly, typeof Notification, typeof AudioContext, typeof OffscreenCanvas, typeof BroadcastChannel].join()"),
+        "undefined,undefined,undefined,undefined,undefined"
     );
 }
 

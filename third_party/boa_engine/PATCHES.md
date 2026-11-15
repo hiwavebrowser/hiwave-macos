@@ -1,4 +1,4 @@
-# Vendored boa_engine 0.22.0, with one patch
+# Vendored boa_engine 0.22.0 (and boa_parser, boa_ast), with HiWave's patches
 
 Source: crates.io `boa_engine` 0.22.0 (upstream `boa-dev/boa` at `337a3668`,
 `core/engine`), the version `Cargo.lock` pins. The first commit that added this
@@ -718,6 +718,59 @@ to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/
 `decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
 `crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
 a parameter, a global and a member; 12 differed before).
+## Patch: a write to an array's `length` is never inline-cached (`array-length-ic`)
+
+**Why.** Unmodified Boa 0.22 bug, reported by Atlas from engine-side JS on develop e8ed58da (a
+request queue emptied with `queue.length = 0` lost elements after the second reset). An array's
+`length` is an ordinary shape slot, so the first `a.length = n` at a site found it and
+`SetPropertyByName` cached the slot; every later write from that site stored `n` straight into the
+slot and skipped ArraySetLength. So nothing was truncated (old elements stayed readable: `q[0]` after
+`q.length = 0`), later `q[i] = v` writes did not grow `length`, and `q.length = '2'` stored a string.
+
+**What.** `builtins/array/mod.rs` `array_exotic_define_own_property` (marked
+`HIWAVE PATCH (array-length-ic)`): after ArraySetLength, the slot is marked `NOT_CACHEABLE`, so a
+`length` write always takes the exotic path. Reads of `length` are still cached. Pin:
+`crates/rustkit-js/tests/array_length_reset.rs` (30 cases from Chrome 148.0.7778.216: push, shift,
+pop, unshift, index writes, holes, closures, a queue pump, string and growing lengths, a frozen
+array; 6 differed before).
+
+## Patch: a dead zone for `let`/`const`/`class` declared in a `switch` case (`switch-tdz`)
+
+**Why.** A binding declared in one `switch` case is reached by jumps that skip its declaration
+(`case 0: let z = 1; break; case 1: z`). Boa kept it in a register, and registers have no run-time
+dead zone: compilation follows source order, so the later case's access compiled as initialised and
+read whatever the reused register last held (another local's value, the switch value), where Chrome
+throws ReferenceError. A non-local `const` there had the same hole through `const_binding_cache`.
+
+**What.** In vendored `boa_ast` (`src/scope_analyzer.rs`, `visit_switch_mut` of the escape analysis,
+marked `HIWAVE PATCH (switch-tdz)`): a switch scope's bindings always escape, so they live in a
+declarative environment (as they already did under direct `eval`), whose uninitialised binding throws.
+In `src/bytecompiler/mod.rs` and `statement/switch.rs`: a `const` of a switch scope is not cached in a
+register (`switch_scope_ids`). The cost is limited to `switch` statements that declare a lexical
+binding in a case. Pin: `crates/rustkit-js/tests/switch_tdz.rs` (14 cases from Chrome 148.0.7778.216,
+including fallthrough, same-case access, hoisted functions, closures and a fresh binding per loop
+iteration; 9 differed before).
+
+## Patch: ArrayBuffer transfer without `experimental` (arraybuffer transfer)
+
+`ArrayBuffer.prototype.transfer`, `transferToFixedLength` and the `detached` getter were behind Boa's
+`experimental` feature, so no page saw them. The four `#[cfg(feature = "experimental")]` gates in
+`src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
+transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
+(18 cases, Chrome for Testing 148.0.7778.216).
+
+**Follow-up (R1 on #1157).** The write cache could still be filled by an ordinary object that has an
+array's shape (an Array subclass instance is shaped like `Object.create(Q.prototype)` given a writable
+own `length`), and a later hit wrote a real array's `length` directly. `vm/opcode/set/property.rs`
+`set_by_name`: a cache hit writes the slot only when the object's [[DefineOwnProperty]] is the ordinary
+one, or the object is an array and the name is not `length` (so other named writes on arrays stay
+cached). `object/operations.rs` `length_of_array_like`: an array's length is read and the borrow
+released before it is converted. With the cache guard in place every array's `length` slot holds a
+number, so this second change has no failing case of its own; it is defensive. Pin:
+`crates/rustkit-js/tests/array_length_shapes.rs` (15 cases from Chrome 148.0.7778.216: subclass,
+`Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
+non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
+2 differed at #1157's head).
 ## Patch: a name-write cache hit writes a data slot only for the receiver's own property (`super-set-receiver`)
 
 **Why.** Unmodified Boa 0.22 bug, flagged by Atlas in the R1 on #1157 and confirmed against Chrome 148.
@@ -736,6 +789,10 @@ with no own `x`). The cache also wrote a data slot found on the prototype (`PROT
   writes give up the cache, and its prototype-setter writes still hit;
 - the cache is filled from a data write only when the receiver is the object. Upstream already marks
   that case not cacheable inside OrdinarySet, so this has no failing case of its own; it is defensive.
+- composed with `array-length-ic`: both conditions hold on every hit, the define-own one on accessor
+  hits too (an exotic object whose [[Set]] never reaches the prototype for a name, such as a typed
+  array's canonical numeric key, can share a shape with an ordinary object that cached a prototype
+  setter).
 
 Checked with the vm-stats counters: 4,000 writes to an object, an array, a function and a class
 instance, 1,000 `super.x = v` onto a prototype setter with a new `this` each time, and 1,000 writes

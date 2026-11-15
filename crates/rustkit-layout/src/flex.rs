@@ -6350,6 +6350,46 @@ mod tests {
     }
 
 
+    /// FX1: step 11d's automatic minimum for a column item measures content,
+    /// not the item's own `height`. With `content_border_height`, two
+    /// `height: 300px` items in a 500px column kept `min(content, specified)`
+    /// at 300 and overflowed; Chrome 148 shrinks them to 250/250 when each
+    /// item's content is only 100px.
+    #[test]
+    fn a_column_flex_items_automatic_minimum_measures_content_not_height() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.height = Length::Px(500.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for _ in 0..2 {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(300.0);
+            item_style.flex_shrink = 1.0;
+            let mut item = LayoutBox::new(BoxType::Block, item_style);
+            let mut child_style = ComputedStyle::new();
+            child_style.height = Length::Px(100.0);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+            container.children.push(item);
+        }
+        // Pre-pass cursor: the two specified bases stacked (not the used 500).
+        container.dimensions.content = Rect::new(0.0, 0.0, 200.0, 600.0);
+        let containing = container.dimensions.clone();
+        layout_flex_container(&mut container, &containing);
+
+        let a = container.children[0].dimensions.border_box().height;
+        let b = container.children[1].dimensions.border_box().height;
+        assert!(
+            (a - 250.0).abs() < 0.5,
+            "first item shrinks to 250 once content (not height) is the automatic minimum, got {a}"
+        );
+        assert!(
+            (b - 250.0).abs() < 0.5,
+            "second item shrinks to 250 once content (not height) is the automatic minimum, got {b}"
+        );
+    }
+
     #[test]
     fn a_column_flex_item_grows_into_the_containers_definite_height() {
         // css-flexbox-1 §9.7: free space is the container's inner MAIN size

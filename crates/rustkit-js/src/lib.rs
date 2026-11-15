@@ -438,6 +438,20 @@ struct PendingTimer {
 /// Default maximum number of loop iterations/pumps per `run_jobs` call.
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
 
+/// A function the embedder keeps in a runtime ([`JsRuntime::keep_function`]) and calls by handle. The
+/// handle names the runtime that issued it; another runtime refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptFunction {
+    runtime: u64,
+    index: usize,
+}
+
+/// A process-wide id for each runtime, which its kept-function handles carry.
+fn next_runtime_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// JavaScript runtime configuration.
 #[derive(Clone, Debug)]
 pub struct JsRuntimeConfig {
@@ -536,6 +550,11 @@ pub struct JsRuntime {
     sources: source_context::ScriptSources,
     /// A test's view of every source handed to the engine (`tap_sources`).
     source_tap: Option<std::rc::Rc<dyn Fn(&str)>>,
+    /// Functions the embedder kept ([`JsRuntime::keep_function`]), called by handle.
+    #[cfg(feature = "boa")]
+    kept: Vec<boa_engine::JsObject>,
+    /// This runtime's id, carried by the handles it issues.
+    kept_owner: u64,
 }
 
 /// M2: dropping a runtime lets its realm go. The realm's natives (console,
@@ -632,6 +651,9 @@ impl JsRuntime {
             blobs,
             sources: source_context::ScriptSources::default(),
             source_tap: None,
+            #[cfg(feature = "boa")]
+            kept: Vec::new(),
+            kept_owner: next_runtime_id(),
         };
 
         // Set up built-in APIs
@@ -1081,47 +1103,115 @@ impl JsRuntime {
                     .context
                     .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
-            self.consume_interrupt();
-            // Promise reactions (`.then`, `await`) are jobs Boa queues but
-            // does not run on its own; a page's async code never resumes
-            // without this.
-            let job_result = self.context.run_jobs();
-            self.consume_interrupt();
-
-            match result {
-                Ok(value) => {
-                    self.flush_console_logs();
-                    if let Err(job_err) = job_result {
-                        let msg = job_err.to_string();
-                        // Only promote job queue limit or timeout breaches (runaway RangeError policy)
-                        // to script failure; ordinary microtask rejections are handled by Promise rejection events
-                        // and do not fail the synchronous script value that already completed successfully.
-                        if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
-                            if self.diag.on.get() {
-                                let report = self.diag.describe_error(&job_err, &mut self.context);
-                                self.diag.push(report);
-                            }
-                            return Err(JsError::ExecutionError(msg));
-                        }
-                    }
-                    let js_value = self.convert_boa_value(&value);
-                    Ok(js_value)
-                }
-                Err(err) => {
-                    self.flush_console_logs();
-                    if self.diag.on.get() {
-                        let report = self.diag.describe_error(&err, &mut self.context);
-                        self.diag.push(report);
-                    }
-                    let msg = describe::error_text(&err, &mut self.context);
-                    Err(JsError::ExecutionError(msg))
-                }
-            }
+            self.settle_evaluation(result)
         }
 
         #[cfg(not(feature = "boa"))]
         {
             let _ = path;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// What follows a script or a kept call: the interrupt state, the microtask drain, console output and
+    /// the error report, then the value.
+    #[cfg(feature = "boa")]
+    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>) -> Result<JsValue, JsError> {
+        self.consume_interrupt();
+        // Promise reactions (`.then`, `await`) are jobs Boa queues but
+        // does not run on its own; a page's async code never resumes
+        // without this.
+        let job_result = self.context.run_jobs();
+        self.consume_interrupt();
+
+        match result {
+            Ok(value) => {
+                self.flush_console_logs();
+                if let Err(job_err) = job_result {
+                    let msg = job_err.to_string();
+                    // Only promote job queue limit or timeout breaches (runaway RangeError policy)
+                    // to script failure; ordinary microtask rejections are handled by Promise rejection events
+                    // and do not fail the synchronous script value that already completed successfully.
+                    if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                        if self.diag.on.get() {
+                            let report = self.diag.describe_error(&job_err, &mut self.context);
+                            self.diag.push(report);
+                        }
+                        return Err(JsError::ExecutionError(msg));
+                    }
+                }
+                let js_value = self.convert_boa_value(&value);
+                Ok(js_value)
+            }
+            Err(err) => {
+                self.flush_console_logs();
+                if self.diag.on.get() {
+                    let report = self.diag.describe_error(&err, &mut self.context);
+                    self.diag.push(report);
+                }
+                let msg = describe::error_text(&err, &mut self.context);
+                Err(JsError::ExecutionError(msg))
+            }
+        }
+    }
+
+    /// Evaluate `source`, which must give a function, and keep that function: the embedder calls it later
+    /// by handle ([`Self::call_kept`]) instead of looking it up by name, so script that replaces or deletes
+    /// the global it came from does not change what the embedder calls.
+    pub fn keep_function(&mut self, source: &str) -> Result<KeptFunction, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::Source;
+            let value = match self
+                .context
+                .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
+            {
+                Ok(value) => value,
+                Err(e) => return Err(JsError::ExecutionError(describe::error_text(&e, &mut self.context))),
+            };
+            let Some(function) = value.as_callable() else {
+                return Err(JsError::ExecutionError(format!("{source} is not a function")));
+            };
+            self.kept.push(function.clone());
+            Ok(KeptFunction { runtime: self.kept_owner, index: self.kept.len() - 1 })
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Call a function kept with [`Self::keep_function`], with string, number, boolean or null arguments
+    /// (anything else is passed as undefined). It runs as a script does: the microtask drain and the
+    /// interrupt state after it, and an exception is an `Err`.
+    pub fn call_kept(&mut self, function: KeptFunction, args: &[JsValue]) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsString, JsValue as BoaValue};
+            if function.runtime != self.kept_owner {
+                return Err(JsError::ExecutionError("a kept function from another runtime".into()));
+            }
+            let Some(callee) = self.kept.get(function.index).cloned() else {
+                return Err(JsError::ExecutionError("no such kept function".into()));
+            };
+            let args: Vec<BoaValue> = args
+                .iter()
+                .map(|a| match a {
+                    JsValue::String(s) => BoaValue::from(JsString::from(s.as_str())),
+                    JsValue::Number(n) => BoaValue::from(*n),
+                    JsValue::Boolean(b) => BoaValue::from(*b),
+                    JsValue::Null => BoaValue::null(),
+                    _ => BoaValue::undefined(),
+                })
+                .collect();
+            self.context.reset_recursion_max();
+            let result = callee.call(&BoaValue::undefined(), &args, &mut self.context);
+            self.settle_evaluation(result)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (function, args);
             Err(JsError::NotInitialized)
         }
     }
