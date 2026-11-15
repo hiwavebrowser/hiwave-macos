@@ -4,7 +4,8 @@
 //! time origin.
 //!
 //! The expected relations are the pinned Chrome's (CfT 148.0.7778.216, headless, a page with a
-//! same-origin `<iframe>` that starts 150 ms after it, recorded 2026-11-15):
+//! same-origin `<iframe>` that starts 150 ms after it, recorded 2026-11-15;
+//! `docs/diagnostics/2026-11-15/frame_clock_{parent.html,child.html,page.js,chrome.mjs,cft148.json}`):
 //!   - each document has its own `performance.timeOrigin`; the frame's is later;
 //!   - at one instant `parent.performance.now() - frame.performance.now()` is the difference of
 //!     the two origins (the frame's reading is the smaller);
