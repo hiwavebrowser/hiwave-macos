@@ -57,6 +57,14 @@
   step('own(item)', function () { return desc(F(), 'item'); });
   step('own(toString)', function () { return desc(F(), 'toString'); });
 
+  // ---- ids that are names of Object.prototype, and `then`
+  step('forms.__proto__', function () { return String(F().__proto__ === HTMLCollection.prototype) + ' ' + id(F().namedItem('__proto__')); });
+  step('forms.constructor', function () { return String(F().constructor === HTMLCollection) + ' ' + id(F().namedItem('constructor')); });
+  step('forms.hasOwnProperty', function () { return typeof F().hasOwnProperty + ' ' + id(F().namedItem('hasOwnProperty')); });
+  step('forms.then', function () { return id(F().then) + ' ' + id(F().namedItem('then')); });
+  step('own(then)', function () { return desc(F(), 'then').replace(/ c[01]$/, ''); });
+  step('own(__proto__)', function () { return desc(F(), '__proto__') + ' ' + desc(F(), 'constructor') + ' ' + desc(F(), 'hasOwnProperty'); });
+
   // ---- names that look like numbers
   step('forms["0"]', function () { return id(F()['0']); });
   step('forms["2"]', function () { return id(F()['2']); });

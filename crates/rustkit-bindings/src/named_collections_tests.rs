@@ -9,7 +9,7 @@
 //!   - a named property is an element's id, or its `name` attribute when the element is an HTML
 //!     element; a match by id anywhere in the collection comes before a match by name;
 //!     the first in tree order wins among ids, and among names;
-//!   - a name that is an array index is never a named property (`forms["40"]` with 17 forms is
+//!   - a name that is an array index is never a named property (`forms["40"]` with 21 forms is
 //!     undefined), a name the interface or `Object.prototype` has is the interface's
 //!     (`length`, `item`, `toString`), and an empty name is no name;
 //!   - a named property is an own, read-only, non-enumerable property: `in` and
@@ -52,6 +52,12 @@ const SAME: &[&str] = &[
     "forms.namedItem(toString)",
     "own(item)",
     "own(toString)",
+    "forms.__proto__",
+    "forms.constructor",
+    "forms.hasOwnProperty",
+    "forms.then",
+    "own(then)",
+    "own(__proto__)",
     "forms[\"0\"]",
     "forms[\"2\"]",
     "forms[\"40\"]",
@@ -203,5 +209,5 @@ fn named_access_does_not_go_through_built_ins_a_page_replaced() {
          var ids = [f.fid, f.fname, f.dup, f[1], i.pic, l.arname, a.nohref].map(function (e) { return typeof e; }); \
          [ids.join(''), f.length, String(f.nope), f.fid === f[0], f.dup === f[1], i.pic === i[0], calls].join()",
     );
-    assert_eq!(got, "objectobjectobjectobjectobjectobjectobject,17,undefined,true,true,true,0");
+    assert_eq!(got, "objectobjectobjectobjectobjectobjectobject,21,undefined,true,true,true,0");
 }
