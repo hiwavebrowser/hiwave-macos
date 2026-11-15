@@ -97,6 +97,16 @@ struct Args {
     #[arg(long)]
     script_budget_ms: Option<u64>,
 
+    /// The live turn's watchdog, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): how long
+    /// one callback's JavaScript may run before it is stopped, and also the turn's whole allowance of
+    /// script time, so a raised value paces frames differently even when no single callback is long.
+    /// Needs `--interrupt-scripts`; 1 to 3600000 (an hour). For stress-suite runs only (tools/stress,
+    /// `HIWAVE_STRESS_TURN_BUDGET_MS`): MotionMark's end-of-test analysis runs longer than the default and
+    /// the stop ends the suite. A capture taken with it is not comparable with the board or the app: it says
+    /// so on stderr, and tools/stress records the budget in the run.
+    #[arg(long, requires = "interrupt_scripts", value_parser = clap::value_parser!(u64).range(1..=MAX_LIVE_TURN_BUDGET_MS))]
+    live_turn_budget_ms: Option<u64>,
+
     /// Stop a script that is still running when the script budget is spent, as the
     /// live app does (off by default: the board lets a running script finish). A
     /// capture taken with it is not comparable with the board and must be labelled.
@@ -742,8 +752,19 @@ struct LayoutStats {
     positioning_rate: f32,
 }
 
+/// The most `--live-turn-budget-ms` takes: an hour, far below what the engine's deadline arithmetic
+/// (`Instant + Duration`) can hold.
+const MAX_LIVE_TURN_BUDGET_MS: u64 = 3_600_000;
+
 fn main() {
     let args = Args::parse();
+    if let Some(budget) = args.live_turn_budget_ms {
+        eprintln!(
+            "WARNING: the live turn's script watchdog is {budget} ms, not the engine's {} ms \
+             (--live-turn-budget-ms, a stress-suite run): this capture is not comparable with the board or the app",
+            EngineConfig::for_parity_testing().live_turn_budget_ms
+        );
+    }
     if let Some(path) = &args.console_log {
         rustkit_engine::console_file::set_path(path);
     }
@@ -2211,6 +2232,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     if let Some(budget) = args.script_budget_ms {
         config.script_budget_ms = budget;
     }
+    if let Some(budget) = args.live_turn_budget_ms {
+        config.live_turn_budget_ms = budget;
+    }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
     config.post_load_requests_live = args.post_load_live;
     if args.animations {
@@ -2466,6 +2490,30 @@ mod tests {
         assert_eq!(parsed(&["--prelude-url", "http://p/"]).prelude_url.as_deref(), Some("http://p/"));
         assert_eq!(parsed(&[]).prelude_live_ms, None);
         assert_eq!(parsed(&["--prelude-live-ms", "250"]).prelude_live_ms, Some(250));
+    }
+
+    /// A stress-suite run may raise the live turn's watchdog (`--live-turn-budget-ms`) so a long computation
+    /// finishes and the next blocker shows; without the flag the engine's default stands.
+    #[test]
+    fn the_live_turn_budget_is_raised_only_with_the_flag() {
+        let default = EngineConfig::for_parity_testing().live_turn_budget_ms;
+        assert_eq!(capture_config(&parsed(&["--interrupt-scripts"]), None).live_turn_budget_ms, default);
+        let raised = capture_config(&parsed(&["--interrupt-scripts", "--live-turn-budget-ms", "600000"]), None);
+        assert_eq!(raised.live_turn_budget_ms, 600_000);
+        assert!(raised.interrupt_scripts_at_budget);
+        // Without the stop the flag would change nothing; past an hour, or zero, it is refused.
+        for bad in [
+            &["--live-turn-budget-ms", "60000"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "0"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "3600001"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "18446744073709551615"][..],
+        ] {
+            let mut argv = vec!["parity-capture", "--url", "http://a/"];
+            argv.extend_from_slice(bad);
+            assert!(Args::try_parse_from(&argv).is_err(), "accepted {bad:?}");
+        }
+        let most = capture_config(&parsed(&["--interrupt-scripts", "--live-turn-budget-ms", "3600000"]), None);
+        assert_eq!(most.live_turn_budget_ms, 3_600_000);
     }
 
     #[test]

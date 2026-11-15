@@ -627,17 +627,49 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     return Handle
 
 
-def start_headless(binary, url, work, limit_s, extra_env):
+# A stress run may raise the engine's live-turn watchdog so a long computation, such as MotionMark's
+# end-of-test analysis, finishes and the next blocker shows. The same number is also the turn's whole
+# allowance of script time, so a raised run paces frames differently even when no callback is long. Only
+# when this is set; the run says so loudly and records it, report.py keeps such runs apart, and its score
+# is not a default-engine score.
+TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
+# The engine's own budget (`EngineConfig::live_turn_budget_ms`), for messages.
+ENGINE_TURN_BUDGET_MS = 5000
+# What parity-capture's --live-turn-budget-ms takes at most (an hour).
+TURN_BUDGET_MAX_MS = 3600000
+
+
+def turn_budget_ms():
+    """The raised live-turn budget from the environment, or None when it is not set: plain digits, 1 to
+    TURN_BUDGET_MAX_MS."""
+    raw = os.environ.get(TURN_BUDGET_ENV)
+    if raw is None:
+        return None
+    value = int(raw) if re.fullmatch(r"[0-9]{1,8}", raw) else 0
+    if not 1 <= value <= TURN_BUDGET_MAX_MS:
+        raise SystemExit("%s must be a whole number of milliseconds from 1 to %d, not %r"
+                         % (TURN_BUDGET_ENV, TURN_BUDGET_MAX_MS, raw))
+    return value
+
+
+def headless_argv(launcher, url, work, limit_s, turn_budget):
+    argv = [str(launcher), "--url", url, "--width", "1280", "--height", "800",
+            "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
+            "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
+            "--event-log", str(work / "events.jsonl"), "--event-summary",
+            "--event-log-error-text", "--event-log-console-text"]
+    if turn_budget is not None:
+        argv += ["--live-turn-budget-ms", str(turn_budget)]
+    return argv
+
+
+def start_headless(binary, url, work, limit_s, extra_env, turn_budget=None):
     forced, dropped = engine_env(extra_env)
     env = dict(os.environ)
     for name in dropped:
         env.pop(name, None)
     env.update(forced)
-    argv = [str(sandboxed(binary, work)), "--url", url, "--width", "1280", "--height", "800",
-            "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
-            "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
-            "--event-log", str(work / "events.jsonl"), "--event-summary",
-            "--event-log-error-text", "--event-log-console-text"]
+    argv = headless_argv(sandboxed(binary, work), url, work, limit_s, turn_budget)
     return Proc(argv, work / "app.log", env=env, cwd=str(work))
 
 
@@ -779,6 +811,14 @@ def main():
     args = ap.parse_args()
 
     extra_env = dict(kv.split("=", 1) for kv in args.env)
+    turn_budget = turn_budget_ms()
+    if turn_budget is not None:
+        if args.engine != "hiwave-headless":
+            sys.exit("%s is for the hiwave-headless engine only (the app does not read it; Chrome has no such "
+                     "watchdog)" % TURN_BUDGET_ENV)
+        print("TURN BUDGET RAISED: the live turn's script watchdog is %d ms, not the engine's %d (%s): "
+              "this run finds blockers; its score is not a default-engine score and report.py keeps it apart"
+              % (turn_budget, ENGINE_TURN_BUDGET_MS, TURN_BUDGET_ENV), file=sys.stderr)
     binary = pathlib.Path(args.binary).resolve()
     if not binary.is_file():
         sys.exit("no binary at %s" % binary)
@@ -789,6 +829,10 @@ def main():
         return 2
     root, pin = check_pin(args.suite)
     limit = args.timeout or SUITE[args.suite]["timeout"]
+    if turn_budget is not None and turn_budget > limit * 1000:
+        # No turn can outlast the run itself.
+        turn_budget = limit * 1000
+        print("TURN BUDGET RAISED: clamped to the run's wall limit, %d ms" % turn_budget, file=sys.stderr)
     stall = args.stall or SUITE[args.suite]["stall"]
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -855,7 +899,7 @@ def main():
                         sys.exit(2)
                     record.t0 = record.last = started = time.time()
                 elif args.engine == "hiwave-headless":
-                    handle = start_headless(binary, url, work, limit, extra_env)
+                    handle = start_headless(binary, url, work, limit, extra_env, turn_budget)
                     watch.add(handle.proc.pid)
                 else:
                     handle = start_chrome(binary, url, work, args.headed, sink)
@@ -952,6 +996,8 @@ def main():
         "log_findings": findings,
         "off_machine": left,
         "discarded_score": discarded_score,
+        # Set only when the run raised the live-turn watchdog (HIWAVE_STRESS_TURN_BUDGET_MS).
+        "live_turn_budget_ms": turn_budget,
         "offline_checks": (["sink_proxy"] if sink is not None else
                            ["loopback-only sandbox",
                             "sockets (%d samples, %d failed)" % ((watch.samples, watch.failed) if watch else (0, 0)),
@@ -979,9 +1025,10 @@ def main():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
     shutil.rmtree(work, ignore_errors=True)
-    print("%s %s %s: %s%s score=%s wall=%ss errors=%d -> %s"
-          % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0], "%.2f" % score if isinstance(score, (int, float)) else score,
-             wall, len(record.errors), path))
+    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d -> %s"
+          % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0],
+             "" if turn_budget is None else " (TURN BUDGET RAISED to %d ms: not a default-engine score)" % turn_budget,
+             "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors), path))
     return 0 if status == "ok" else 1
 
 
