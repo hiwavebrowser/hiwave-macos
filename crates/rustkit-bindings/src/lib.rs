@@ -568,7 +568,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // numbers made with the `Number` of install time. The built-ins used
     // around it are taken now, in the realm that uses them.
     var objCreate = Object.create, setProto = Object.setPrototypeOf, toNumber = Number, toText = String,
-        evalNow = eval, applyTo = Reflect.apply, win = window;
+        evalNow = eval, applyTo = Reflect.apply, win = window, floorOf = Math.floor;
     // Real time, for the live turn's slice and the page clock. Taken now,
     // before page script can replace `Date.now`.
     var realNow = Date.now;
@@ -719,11 +719,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // waits for the next frame. Until this, a frame was due 16 ms after the turn that ran the last
     // one, so a late turn moved every later frame (173 of Chrome's 180-181 on the app's loop,
     // PACE2).
-    function frameAt(k) { return Math.floor((k * 50 + 2) / 3); }
+    function frameAt(k) { return floorOf((k * 50 + 2) / 3); }
     function nextFrame() {
         var k = Q.frameK + 1;
         if (frameAt(k) + 17 <= Q.now) {
-            k = Math.floor(Q.now * 3 / 50);
+            k = floorOf(Q.now * 3 / 50);
             while (frameAt(k) <= Q.now) k++;
         }
         return k;
@@ -844,13 +844,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
     __rk.runTimersFramed = function (horizon, max, frameMs) {
-        var start = Date.now();
+        var start = realNow();
         var ran = 0;
         while (ran < max) {
             var n = runTimers(horizon, 1, false);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+            if (frameMs > 0 && (realNow() - start) >= frameMs) return -ran;
         }
         return ran;
     };
@@ -901,14 +901,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // chain that outlasted every frame starved `requestAnimationFrame`.
     __rk.advanceTimersFramed = function (delta, max, frameMs) {
         var target = Q.now + delta;
-        var start = Date.now();
+        var start = realNow();
         var ran = 0;
         var yielded = false;
         while (ran < max) {
             var n = runTimers(target, 1, true);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+            if (frameMs > 0 && (realNow() - start) >= frameMs) {
                 yielded = true;
                 break;
             }
