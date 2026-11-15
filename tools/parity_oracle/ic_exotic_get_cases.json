@@ -1,0 +1,40 @@
+{
+ "cases": [
+  {
+   "name": "g_proxy_shares_object_shape",
+   "js": "(function(){function f(o){return o.zz}Object.prototype.zz='proto';var a=f(Object.create(Object.prototype));var b=f(Object.create(Object.prototype));var c=f(new Proxy({},{get(){return 'trap'}}));delete Object.prototype.zz;return a+','+b+','+c})()",
+   "chrome": "proto,proto,trap"
+  },
+  {
+   "name": "g_proxy_after_own_hit",
+   "js": "(function(){function f(o){return o.zz}var p=Object.create(null);var a=f(p),b=f(p);var c=f(new Proxy({},{get(t,k){return 'trap:'+String(k)}}));return String(a)+','+String(b)+','+c})()",
+   "chrome": "undefined,undefined,trap:zz"
+  },
+  {
+   "name": "g_proxy_proto_getter",
+   "js": "(function(){var P={get zz(){return 'getter'}};function f(o){return o.zz}var a=f(Object.create(P)),b=f(Object.create(P));var t=Object.create(P);var c=f(new Proxy(t,{get(){return 'trap'}}));return a+','+b+','+c})()",
+   "chrome": "getter,getter,trap"
+  },
+  {
+   "name": "g_typed_array_infinity_getter",
+   "js": "(function(){Object.defineProperty(Uint8Array.prototype,'Infinity',{get(){return 'g'},configurable:true});function f(o){return o.Infinity}var a=f(Object.create(Uint8Array.prototype)),b=f(Object.create(Uint8Array.prototype));var c=f(new Uint8Array(1));delete Uint8Array.prototype.Infinity;return a+','+b+','+String(c)})()",
+   "chrome": "g,g,undefined"
+  },
+  {
+   "name": "g_typed_array_nan_data",
+   "js": "(function(){Float64Array.prototype.NaN='p';function f(o){return o.NaN}var a=f(Object.create(Float64Array.prototype)),b=f(Object.create(Float64Array.prototype));var c=f(new Float64Array(2));delete Float64Array.prototype.NaN;return a+','+b+','+String(c)})()",
+   "chrome": "p,p,undefined"
+  },
+  {
+   "name": "g_typed_array_named_ok",
+   "js": "(function(){Uint8Array.prototype.zz='p';function f(o){return o.zz}var a=f(Object.create(Uint8Array.prototype)),b=f(Object.create(Uint8Array.prototype));var c=f(new Uint8Array(1));delete Uint8Array.prototype.zz;return a+','+b+','+c})()",
+   "chrome": "p,p,p"
+  },
+  {
+   "name": "g_ordinary_still_hits",
+   "js": "(function(){var P={zz:1};function f(o){return o.zz}var s=0;for(var i=0;i<5;i++)s+=f(Object.create(P));return String(s)})()",
+   "chrome": "5"
+  }
+ ],
+ "chrome_version": "148.0.7778.216"
+}
