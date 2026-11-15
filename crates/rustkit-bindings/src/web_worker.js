@@ -232,7 +232,8 @@
             if (u.protocol === 'blob:') {
                 // Resolved now, as Chrome does: revoking right after `new Worker` does not matter.
                 // The bytes are the host's blob store's (createObjectURL put them there).
-                var found = __rk.blobGet(u.href.split('#')[0]);
+                // Asked as this document's realm, as its XMLHttpRequest asks (web_xhr.js).
+                var found = __rk.blobGet(__realm, u.href.split('#')[0]);
                 if (!found) { failLoad(this, st); return; }
                 var blobText;
                 try { blobText = new g.TextDecoder().decode(new Uint8Array(found[0])); } catch (_) { failLoad(this, st); return; }
