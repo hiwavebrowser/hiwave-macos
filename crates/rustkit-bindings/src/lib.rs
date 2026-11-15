@@ -565,12 +565,23 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // around it are taken now, in the realm that uses them.
     var objCreate = Object.create, setProto = Object.setPrototypeOf, toNumber = Number, toText = String,
         evalNow = eval, applyTo = Reflect.apply, win = window;
+    // Real time, for the live turn's slice and the page clock. Taken now,
+    // before page script can replace `Date.now`.
+    var realNow = Date.now;
     var SHARED = __rk.shared;
     var Q = SHARED.timerQueue;
-    if (!Q) {
+    // The tree's first document makes the record; its time origin is the
+    // page clock's zero.
+    var first = !Q;
+    if (first) {
         Q = SHARED.timerQueue = objCreate(null);
         Q.now = 0; Q.nextId = 1; Q.timers = objCreate(null); Q.count = 0;
         Q.pumps = objCreate(null); Q.pumpCount = 0;
+        // The page clock's state (below), one for the tree as the timers'
+        // clock is: every slot is made here, on a record that inherits
+        // from nothing.
+        Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
+        Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -596,12 +607,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         for (var i = skip; i < args.length; i++) out[i - skip] = args[i];
         return out;
     }
-    // `Q.now` is the frame tree's one clock: lifecycle `timeStamp` and the
-    // rAF argument read it. When #1104's page clock lands, `Q.now` moves
-    // onto it (one page clock for the tree), not a second clock beside it.
-    // Real time, for the live turn's slice. Taken now, before page script
-    // can replace `Date.now`.
-    var realNow = Date.now;
+    // `Q.now` is the frame tree's one timer clock, and the page clock below
+    // is kept on the same record: one page clock for the tree, read by
+    // each document from its own time origin.
     // THE page clock: performance.now(), the frame callback's timestamp and Event.timeStamp
     // (ms from the time origin). Real time flows, but a load that ran the timers ahead (a 300 ms
     // timeout run at once) skipped time forward: after the virtual clock moves, this clock reads
@@ -619,39 +627,63 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Real-flowing mode: real time plus a SKEW that only ever grows, when the timers' virtual clock
     // gets ahead of real time (a load that ran a 300 ms timeout at once). So the clock flows with real
     // time always (no wait is lost), is never behind virtual time, and never goes backwards.
-    var skew = 0, lastPerf = 0, det = false, reads = 0, seenNow = 0, startedAt = realNow();
+    //
+    // A frame tree has ONE such clock, as it has one timer queue: its state (the skew, the last
+    // reading, the capture switch and its read count, the frame stamp) is on the tree's record, in
+    // ms from the first document's time origin. Each document reads it from its own time origin
+    // (`base`, the clock's reading when the document's realm was made; zero for the first), as a
+    // browser's documents each count from their own `performance.timeOrigin`: at one instant a page
+    // and its frame read numbers that differ by the difference of their origins, the callbacks of
+    // one animation frame get each document's reading of one time, and an event keeps the reading
+    // of the document that made it. Every realm's host clock is the tree's one monotonic clock
+    // (the bindings give a frame's realm the page's), captured here in each realm; nothing of one
+    // realm's is kept on the record.
     var hostClock = window.performance && typeof window.performance.now === 'function' ? window.performance.now : null;
     var DET_STEP = 0.1;
-    function perfNow() {
+    function treeNow() {
         var t;
-        if (det) {
-            if (now !== seenNow) { seenNow = now; reads = 0; }
-            t = now + reads * DET_STEP;
-            reads++;
-            if (t <= lastPerf) t = lastPerf + DET_STEP;
+        if (Q.det) {
+            if (Q.now !== Q.seenNow) { Q.seenNow = Q.now; Q.reads = 0; }
+            t = Q.now + Q.reads * DET_STEP;
+            Q.reads++;
+            if (t <= Q.lastPerf) t = Q.lastPerf + DET_STEP;
         } else {
-            // Without the host clock: elapsed since this script began, never an epoch value (the
-            // never-backwards rule would pin it there).
-            var real = hostClock ? hostClock() : realNow() - startedAt;
-            t = real + skew;
-            if (t < now) { skew += now - t; t = now; }
-            if (t < lastPerf) { skew += lastPerf - t; t = lastPerf; }
+            // Without the host clock: elapsed since the tree's first script began, never an epoch
+            // value (the never-backwards rule would pin it there).
+            var real = hostClock ? hostClock() : realNow() - Q.startedAt;
+            t = real + Q.skew;
+            if (t < Q.now) { Q.skew += Q.now - t; t = Q.now; }
+            if (t < Q.lastPerf) { Q.skew += Q.lastPerf - t; t = Q.lastPerf; }
         }
-        lastPerf = t;
+        Q.lastPerf = t;
         return t;
     }
+    // This document's time origin on the tree's clock. The first document takes no reading for
+    // it (with one document the clock reads exactly as it did before frames). A frame's is the
+    // reading now, less the real time since its `performance.timeOrigin` was taken a little
+    // earlier in this realm's install, so origin plus reading is one instant in every document;
+    // capture mode has no real time in it.
+    var base = 0;
+    if (!first) {
+        base = treeNow();
+        var born = window.performance ? window.performance.timeOrigin : 0;
+        var since = typeof born === 'number' ? realNow() - born : 0;
+        if (!Q.det && since > 0 && since < 5000 && since < base) base -= since;
+    }
+    function perfNow() { return treeNow() - base; }
     // The previous frame's stamp and virtual time: each frame is at least the virtual step after it,
     // whatever the real clock did (a load runs frames back to back in microseconds), and the page
-    // clock is never behind a frame stamp it handed out.
-    var prevFrameTs = -1, prevFrameAt = 0;
+    // clock is never behind a frame stamp it handed out (`Q.prevFrameTs`, `Q.prevFrameAt`).
     __rk.perfNow = perfNow;
-    __rk.setDetClock = function (on) { det = !!on; reads = 0; };
+    // The capture switch is the tree's: thrown from any document, it is every document's, and a
+    // frame made later finds it set.
+    __rk.setDetClock = function (on) { Q.det = !!on; Q.reads = 0; };
     if (window.performance) window.performance.now = function now() { return perfNow(); };
     // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
     // taken when the first callback at a virtual time runs (the clock has moved to it by then), so
     // the frames of a load, which one runTimers call runs one after the other, are each their own
-    // time, a frame apart.
-    var frameTs = 0, frameTsAt = -1;
+    // time, a frame apart. One stamp for the tree (`Q.frameTs`, taken at `Q.frameTsAt`): each
+    // document's callbacks get it from that document's origin.
     __rk.fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         var event = {
@@ -697,14 +729,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
         return schedule(function () {
-            if (frameTsAt !== now) {
-                frameTsAt = now;
-                frameTs = perfNow();
-                if (prevFrameTs >= 0 && frameTs < prevFrameTs + (now - prevFrameAt)) frameTs = prevFrameTs + (now - prevFrameAt);
-                if (frameTs > lastPerf) lastPerf = frameTs;
-                prevFrameTs = frameTs; prevFrameAt = now;
+            if (Q.frameTsAt !== Q.now) {
+                Q.frameTsAt = Q.now;
+                Q.frameTs = treeNow();
+                if (Q.prevFrameTs >= 0 && Q.frameTs < Q.prevFrameTs + (Q.now - Q.prevFrameAt)) Q.frameTs = Q.prevFrameTs + (Q.now - Q.prevFrameAt);
+                if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
+                Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = Q.now;
             }
-            cb(frameTs);
+            cb(Q.frameTs - base);
         }, 16, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
@@ -1310,6 +1342,10 @@ pub struct FrameRequest {
 
 pub struct DomBindings {
     runtime: PageRuntime,
+    /// Where the monotonic clock behind the page clock counts from: the
+    /// frame tree's first document's start. A frame's realm is given its
+    /// page's, so every document of a tree reads one clock.
+    clock_origin: std::time::Instant,
     /// Frame requests not yet taken (`take_frame_requests`); filled only
     /// once `enable_frames` ran.
     frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
@@ -1358,7 +1394,7 @@ impl DomBindings {
     }
 
     fn build(runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
-        Self::build_in(PageRuntime::main(runtime), app_bridge, false)
+        Self::build_in(PageRuntime::main(runtime), app_bridge, false, None)
     }
 
     /// Bindings for a document nested in this one's frame tree and of its
@@ -1369,7 +1405,7 @@ impl DomBindings {
     /// [`Self::drop_child`].
     pub fn new_child(&self) -> Result<Self, BindingError> {
         let realm = self.runtime.shared.borrow_mut().create_realm()?;
-        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, true)
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, true, Some(self.clock_origin))
     }
 
     /// Give this page's global a property `name` that is `other`'s global
@@ -1520,7 +1556,12 @@ impl DomBindings {
 
     /// `lazy` (a child realm): Intl, Streams, Web Animations and the canvas
     /// 2D context are installed on first use (web_lazy.js), not now.
-    fn build_in(page: PageRuntime, app_bridge: bool, lazy: bool) -> Result<Self, BindingError> {
+    fn build_in(
+        page: PageRuntime,
+        app_bridge: bool,
+        lazy: bool,
+        tree_clock: Option<std::time::Instant>,
+    ) -> Result<Self, BindingError> {
         let mut entered = page.borrow_mut();
         let runtime: &mut JsRuntime = &mut entered;
         debug!(app_bridge, "Initializing DOM bindings");
@@ -1549,7 +1590,7 @@ impl DomBindings {
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut *runtime, app_bridge, lazy)?;
+        let clock_origin = Self::inject_globals(&mut *runtime, app_bridge, lazy, tree_clock)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
@@ -1655,6 +1696,7 @@ impl DomBindings {
         drop(entered);
         Ok(Self {
             runtime: page,
+            clock_origin,
             frame_requests: Rc::new(RefCell::new(Vec::new())),
             window: RefCell::new(WindowState::default()),
             dom_host,
@@ -1953,7 +1995,12 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool, lazy: bool) -> Result<(), BindingError> {
+    fn inject_globals(
+        runtime: &mut JsRuntime,
+        app_bridge: bool,
+        lazy: bool,
+        tree_clock: Option<std::time::Instant>,
+    ) -> Result<std::time::Instant, BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -2032,7 +2079,10 @@ impl DomBindings {
         runtime.evaluate_script(&window_js.replace("__NAVIGATOR_PLATFORM__", NAVIGATOR_PLATFORM))?;
 
         // The monotonic clock behind `performance.now()` (STR-9), before web_platform.js reads it.
-        let time_origin = std::time::Instant::now(); // this page's time origin
+        // It counts from here for a page, and for a frame's realm from where its page's does: one
+        // clock for the tree, which the page clock (PAGE_LIFECYCLE_JS) reads from each document's
+        // own origin.
+        let time_origin = tree_clock.unwrap_or_else(std::time::Instant::now);
         runtime.register_host_function(
             "__rustkit_now_ms",
             0,
@@ -2422,7 +2472,7 @@ impl DomBindings {
         runtime.evaluate_with_host(PAGE_LIFECYCLE_JS)?;
 
         debug!("Global objects injected");
-        Ok(())
+        Ok(time_origin)
     }
 
     /// Install the selector matcher `querySelector`, `querySelectorAll`,

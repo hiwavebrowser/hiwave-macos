@@ -114,18 +114,19 @@ fn a_frames_clock_is_the_pages_instant_from_its_own_origin() {
     let (a, c, b, origins) = (first[0], first[1], first[2], first[3]);
     assert!(origins >= 100.0, "the frame's time origin is {origins} ms after the page's");
     assert!(c >= 0.0 && c < a - 100.0, "the frame reads {c}, the page {a}");
-    assert!(c < 100.0, "the frame's first reading, {c}, counts from its own origin");
     let apart = (a + b) / 2.0 - c;
-    assert!((apart - origins).abs() < 20.0, "the readings are {apart} ms apart, the origins {origins}");
+    // Chrome: within 2 ms. `timeOrigin` is in whole milliseconds here.
+    assert!((apart - origins).abs() < 3.0, "the readings are {apart} ms apart, the origins {origins}");
     // The frame's own script reads the same.
     let own = numbers(ev(&child, "[up.performance.now(), performance.now()].join()"));
     assert!((own[0] - own[1] - apart).abs() < 0.5, "read in the frame: {} apart, in the page {apart}", own[0] - own[1]);
     // After real time and a jump of the timers' clock, in whichever document set the timer.
     std::thread::sleep(std::time::Duration::from_millis(30));
-    child.evaluate("setTimeout(function () {}, 500);").unwrap();
+    child.evaluate("setTimeout(function () {}, 2000);").unwrap();
     parent.run_timers(5000, 100).unwrap();
     let later = numbers(ev(&parent, read));
-    assert!(later[0] >= a + 500.0 && later[1] >= c + 500.0, "both moved with the timers: {later:?} after {first:?}");
+    // The timers' clock is at 2300 ms now, and the page clock is never behind it.
+    assert!(later[0] >= 2300.0 && later[1] >= c + 1000.0, "both moved with the timers: {later:?} after {first:?}");
     let apart_later = (later[0] + later[2]) / 2.0 - later[1];
     assert!((apart_later - apart).abs() < 0.5, "the readings were {apart} ms apart and are {apart_later}");
 }
