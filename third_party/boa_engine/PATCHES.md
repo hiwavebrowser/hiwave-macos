@@ -787,7 +787,11 @@ kept answering from the prototype after an own property shadowed it. Four change
 - `vm/inline_cache/mod.rs`: an entry for a prototype slot also holds the prototype's shape when
   it was made (strongly, so its address is not reused while the entry exists); `get` hits only
   while the prototype still has that shape and drops the entry otherwise. Prototype slots are not
-  cached for a receiver whose shape is unique.
+  cached for a receiver whose shape is unique. `set` caches only if the name still resolves to the
+  slot, with the same attributes, in the holder's current shape: the slot is taken when the lookup
+  finds the property but the shapes after any getter or setter it ran, and one that redefines or
+  deletes its own property (a self-replacing lazy getter) would otherwise cache a stale slot under
+  the new shape.
 - `object/shape/unique_shape.rs` `change_attributes_transition`: the same-width case makes a new
   unique shape, as the width-changing case already did (upstream's "TODO: invalidate the pointer").
 - `vm/opcode/get/property.rs`, `get/name.rs`, `set/property.rs`: cached indexes are read with
@@ -795,8 +799,8 @@ kept answering from the prototype after an own property shadowed it. Four change
   accessor write whose setter is no longer callable (a setter replaced by `undefined` keeps the
   slot's bits, so the shape does not change; the full path is what throws in strict code).
 
-**Cost.** Inline-cache misses are the same as develop's, count for count, on richards, delta-blue, raytrace,
-splay, hash-map, navier-stokes and Babylon (vm-stats). Wall time, median of three runs of 8
+**Cost.** Inline-cache misses are the same as develop's, count for count, on richards,
+delta-blue, raytrace, splay, hash-map, navier-stokes and Babylon (vm-stats). Wall time, median of three runs of 8
 iterations each, alternated with develop (Linux x86-64, release): richards +3.3%, delta-blue +4.1%,
 raytrace +3.3%, Babylon +1.1%, hash-map -1.1% (noise; run-to-run spread is 1-3%). A weakly held
 holder (an upgrade on every prototype hit) cost about 1 point more on richards and delta-blue.
