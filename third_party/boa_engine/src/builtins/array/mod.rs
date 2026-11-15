@@ -3492,8 +3492,14 @@ fn array_exotic_define_own_property(
         // 2. If P is "length", then
         PropertyKey::String(s) if s == &StaticJsStrings::LENGTH => {
             // a. Return ? ArraySetLength(A, Desc).
-
-            array_set_length(obj, desc, context)
+            let result = array_set_length(obj, desc, context);
+            // HIWAVE PATCH (array-length-ic): `length` lives in an ordinary shape slot, so the
+            // write found it and `SetPropertyByName` would cache it, and the next `a.length = n`
+            // from the same site would store `n` straight into the slot: no truncation (old
+            // elements stay readable and later index writes miss `length`), no ToUint32 and no
+            // RangeError. A write to an array's `length` always goes through ArraySetLength.
+            context.slot().attributes |= crate::object::shape::slot::SlotAttributes::NOT_CACHEABLE;
+            result
         }
         // 3. Else if P is an array index, then
         PropertyKey::Index(index) => {

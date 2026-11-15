@@ -692,12 +692,12 @@ impl JsObject {
         // NOTE: This is an optimization, most of the cases that `LengthOfArrayLike` will be called
         //       is for arrays. The "length" property of an array is stored in the first index.
         if self.is_array() {
-            let borrowed_object = self.borrow();
+            // HIWAVE PATCH (array-length-ic): the length is read and the borrow released before it
+            // is converted; a conversion runs script, which may write to this array.
+            let length = self.borrow().properties().storage[0].clone();
             // NOTE: using `to_u32` instead of `to_length` is an optimization,
             //       since arrays are limited to [0, 2^32 - 1] range.
-            return borrowed_object.properties().storage[0]
-                .to_u32(context)
-                .map(u64::from);
+            return length.to_u32(context).map(u64::from);
         }
 
         // 2. Return ℝ(? ToLength(? Get(obj, "length"))).
