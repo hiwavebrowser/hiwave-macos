@@ -1266,12 +1266,11 @@ impl EndpointSide {
     /// The content thread's loop. One current-thread runtime, already
     /// entered by the caller: timers and fetches progress on every idle wait.
     pub(crate) async fn run(&mut self, engine: &mut Engine) {
-        let mut clock = tokio::time::Instant::now();
+        let mut clock = LiveClock::new(tokio::time::Instant::now());
         loop {
             let mut cmds = self.drain_coalesced();
             if cmds.is_empty() {
-                let elapsed = clock.elapsed().as_millis() as u64;
-                clock = tokio::time::Instant::now();
+                let elapsed = clock.turn(tokio::time::Instant::now());
                 let turn = engine.pump_live(self.view, elapsed).await;
                 self.after_page_change(engine);
                 // A resize (or any other command) that arrived during the
@@ -1284,13 +1283,21 @@ impl EndpointSide {
                 cmds = self.drain_coalesced();
                 if cmds.is_empty() {
                     let wait = content_turn_wait(turn.next_timer_ms);
+                    let now = tokio::time::Instant::now();
+                    let deadline = clock.deadline(now, wait);
+                    if deadline <= now {
+                        // Due already: the runtime's timers and sockets get
+                        // their turn first, as a sleep would give them.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
                     // A command ends the wait (CH3.A9): the chrome's Cmd+T
                     // used to sit here until the chrome's next timer.
                     match &self.cmd_wake {
                         Some(wake) => {
-                            let _ = tokio::time::timeout(wait, wake.notified()).await;
+                            let _ = tokio::time::timeout_at(deadline, wake.notified()).await;
                         }
-                        None => tokio::time::sleep(wait).await,
+                        None => tokio::time::sleep_until(deadline).await,
                     }
                     continue;
                 }
@@ -1352,6 +1359,47 @@ impl EndpointSide {
 /// headless capture paces as the app does.
 pub fn content_turn_wait(next_timer_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(next_timer_ms.unwrap_or(50).clamp(2, 50))
+}
+
+/// The content thread loop's clock: how much time each live turn is given,
+/// and when the loop wakes for the next (PACE2).
+///
+/// The page's clock moves in whole milliseconds, a turn at a time. Each turn
+/// is given the whole milliseconds since the last turn's time and the
+/// fraction stays for the next, so the page's clock keeps up with real time.
+/// Until PACE2 the clock restarted at every turn and dropped the fraction
+/// (about 0.46 ms a turn), and the loop slept its wait after the turn and its
+/// frame had ended, so a timer or frame due 10 ms after a turn came 10 ms
+/// after its end: with sleeps that end late as well, a requestAnimationFrame
+/// loop beside a 10 ms timer chain got 51-54 frames a second where Chrome
+/// gets 60. parity-capture's live loop keeps its fraction the same way.
+pub(crate) struct LiveClock {
+    /// The last turn's time: where the page's clock stands, in real time.
+    /// Behind the instant that turn began by the fraction it was not given.
+    turn_at: tokio::time::Instant,
+}
+
+impl LiveClock {
+    pub(crate) fn new(now: tokio::time::Instant) -> Self {
+        Self { turn_at: now }
+    }
+
+    /// The whole milliseconds since the last turn's time, for the turn that
+    /// begins `now`; the fraction is kept for the next turn.
+    pub(crate) fn turn(&mut self, now: tokio::time::Instant) -> u64 {
+        let ms = now.saturating_duration_since(self.turn_at).as_millis() as u64;
+        self.turn_at += std::time::Duration::from_millis(ms);
+        ms
+    }
+
+    /// When the loop wakes for the next turn: `wait` (the page's next timer
+    /// or frame, from [`content_turn_wait`]) after this turn's time, where
+    /// the page's clock stood when the wait was measured. Not before `now`
+    /// (the loop asks after the turn and its frame): a turn that took longer
+    /// than the wait is followed by the next at once.
+    pub(crate) fn deadline(&self, now: tokio::time::Instant, wait: std::time::Duration) -> tokio::time::Instant {
+        (self.turn_at + wait).max(now)
+    }
 }
 
 impl PageEndpoint {
