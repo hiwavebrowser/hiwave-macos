@@ -2244,6 +2244,19 @@ mod tests {
         let raised = capture_config(&parsed(&["--interrupt-scripts", "--live-turn-budget-ms", "600000"]), None);
         assert_eq!(raised.live_turn_budget_ms, 600_000);
         assert!(raised.interrupt_scripts_at_budget);
+        // Without the stop the flag would change nothing; past an hour, or zero, it is refused.
+        for bad in [
+            &["--live-turn-budget-ms", "60000"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "0"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "3600001"][..],
+            &["--interrupt-scripts", "--live-turn-budget-ms", "18446744073709551615"][..],
+        ] {
+            let mut argv = vec!["parity-capture", "--url", "http://a/"];
+            argv.extend_from_slice(bad);
+            assert!(Args::try_parse_from(&argv).is_err(), "accepted {bad:?}");
+        }
+        let most = capture_config(&parsed(&["--interrupt-scripts", "--live-turn-budget-ms", "3600000"]), None);
+        assert_eq!(most.live_turn_budget_ms, 3_600_000);
     }
 
     #[test]
