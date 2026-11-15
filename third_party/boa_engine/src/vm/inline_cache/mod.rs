@@ -99,7 +99,7 @@ impl InlineCache {
     pub(crate) fn hit_is_get(&self, object: &crate::JsObject) -> bool {
         type Get = fn(
             &crate::JsObject,
-            &crate::property::PropertyKey,
+            &PropertyKey,
             crate::JsValue,
             &mut crate::object::internal_methods::InternalMethodPropertyContext<'_>,
         ) -> crate::JsResult<crate::JsValue>;
