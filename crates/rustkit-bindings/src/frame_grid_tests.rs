@@ -178,6 +178,26 @@ fn a_frame_asked_for_when_idle_is_the_frame_of_its_time() {
     assert_eq!(t.floor(), grid(60) as f64);
 }
 
+/// KNOWN DIVERGENCE, flipped by TIMELINE1: in Chrome `document.timeline.currentTime` is the frame's
+/// timestamp inside every frame callback (`frame_stamp_probe_cft148.json`, "timeline": all true).
+/// Here the timeline is the engine's animation clock (`__rk.now()`, the turn's time), which the
+/// Web Animations code computes from, while the callback gets the frame's grid time on
+/// `performance.now()`'s clock. Until TIMELINE1 moves Web Animations onto the page clock they are
+/// not mixed: a frame due at 17 and run at 20 is stamped 17, and the timeline reads 20.
+#[test]
+fn known_divergence_timeline_current_time_is_not_the_frame_stamp_yet() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html("<html><body></body></html>").unwrap()))
+        .unwrap();
+    b.set_deterministic_clock(true);
+    b.evaluate(
+        "var got = ''; requestAnimationFrame(function (t) { got = t + ',' + document.timeline.currentTime; });",
+    )
+    .unwrap();
+    b.advance_timers_for_frame(20, 1000, 0).unwrap();
+    assert_eq!(read(&b, "got"), "17,20", "Chrome: the two are equal (TIMELINE1 makes them so)");
+}
+
 /// A turn begins outside any frame's callbacks, whatever the last turn left: a request a task makes
 /// is a task's (the frame of its time), not a frame's own (the next).
 #[test]

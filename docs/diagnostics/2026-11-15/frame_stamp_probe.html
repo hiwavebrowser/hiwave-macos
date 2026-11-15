@@ -7,6 +7,8 @@
 //   sweep     for k = 0..40: a frame at time T asks setTimeout(task, k); the task asks for a
 //             frame; [k, task's perf - T, that frame's timestamp - T] (which frame the task's
 //             request lands in, as the task's time crosses the next frame's)
+// Pinned on Chrome for Testing 148.0.7778.216, HEADLESS (frame_stamp_probe_chrome.mjs). Headless
+// frame scheduling has not been checked against a headed run: row FRAMEPIN-HEADED (low priority).
 // When done it sets rec.done and logs REC <json>.
 // Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
 // harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
