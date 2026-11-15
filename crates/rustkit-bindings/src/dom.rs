@@ -4654,8 +4654,10 @@ const WRAPPERS_JS: &str = r#"
     // declarations inherit from nothing, are filled by assignment with an explicit count, and hold only
     // strings and booleans; the built-ins on these paths are taken now. A parse (the older code below, which
     // reads built-ins as it goes) is kept only while those built-ins are still the ones this script
-    // started with, and only when it produced plain strings. A parse that page script disturbed in a way
-    // that check does not see still yields plain strings, kept until the text changes.
+    // started with, and only when it produced plain strings: each field of its output is read once, and
+    // the value checked is the value kept. A parse that page script disturbed in a way that check does not
+    // see (an index accessor on Array.prototype, say) still yields plain strings, kept until the text
+    // changes.
     var parsedStyles = new WeakMap(), mapDelete = uncurry(WeakMap.prototype.delete);
     var ownKey = uncurry(Object.prototype.hasOwnProperty), strCode = uncurry(String.prototype.charCodeAt);
     var strLower = uncurry(String.prototype.toLowerCase), fromCode = String.fromCharCode;
@@ -4698,10 +4700,11 @@ const WRAPPERS_JS: &str = r#"
     function fromParse(out) {
         var l = newList(), n = out.length, clean = typeof n === 'number';
         for (var i = 0; clean && i < n; i++) {
-            var x = out[i];
-            if (x !== null && typeof x === 'object' && typeof x.name === 'string' && typeof x.value === 'string' &&
-                typeof x.important === 'boolean') {
-                listAdd(l, newDecl(x.name, x.value, x.important));
+            // Each field is read once: what is checked is what is kept.
+            var x = out[i], name, value, important;
+            if (x !== null && typeof x === 'object') { name = x.name; value = x.value; important = x.important; }
+            if (typeof name === 'string' && typeof value === 'string' && typeof important === 'boolean') {
+                listAdd(l, newDecl(name, value, important));
             } else {
                 clean = false;
             }
@@ -4790,7 +4793,8 @@ const WRAPPERS_JS: &str = r#"
         return true;
     }
     function roundTrips(value) {
-        var open = [], depth = 0, prev = -1;
+        // The open brackets, entries 0..depth-1.
+        var open = objCreate(null), depth = 0, prev = -1;
         for (var i = 0; i < value.length; i++) {
             var c = strCode(value, i);
             // " ' \ ; ! { } and control characters
