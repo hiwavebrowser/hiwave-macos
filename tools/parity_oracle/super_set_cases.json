@@ -79,6 +79,26 @@
    "name": "plain_proto_data_write",
    "js": "(function(){var p={x:1},r='';for(var i=0;i<3;i++){var o=Object.create(p);o.x=i;r+=o.x+'/'+p.x+'/'+Object.hasOwn(o,'x')+','}return r})()",
    "chrome": "0/1/true,1/1/true,2/1/true,"
+  },
+  {
+   "name": "proxy_set_trap_after_ordinary_fill",
+   "js": "(function(){var log=[];Object.defineProperty(Object.prototype,'zz',{set(v){log.push('s'+v)},configurable:true});function f(o,v){o.zz=v}f(Object.create(Object.prototype),1);f(Object.create(Object.prototype),2);f(new Proxy({},{set(t,k,v){log.push('trap'+v);return true}}),3);delete Object.prototype.zz;return log.join(',')})()",
+   "chrome": "s1,s2,trap3"
+  },
+  {
+   "name": "typed_array_infinity_setter",
+   "js": "(function(){var log=[];class T extends Uint8Array{};Object.defineProperty(T.prototype,'Infinity',{set(v){log.push(v)},configurable:true});function f(o,v){o.Infinity=v}f(Object.create(T.prototype),1);f(Object.create(T.prototype),2);f(new T(2),3);return log.join(',')})()",
+   "chrome": "1,2"
+  },
+  {
+   "name": "typed_array_nan_setter",
+   "js": "(function(){var log=[];class T extends Float64Array{};Object.defineProperty(T.prototype,'NaN',{set(v){log.push(v)},configurable:true});function f(o,v){o.NaN=v}f(Object.create(T.prototype),1);f(Object.create(T.prototype),2);f(new T(2),3);return log.join(',')})()",
+   "chrome": "1,2"
+  },
+  {
+   "name": "proxy_no_trap_after_fill",
+   "js": "(function(){var log=[];var P={set zz(v){log.push('s'+v)}};function f(o,v){o.zz=v}f(Object.create(P),1);f(Object.create(P),2);var p=new Proxy(Object.create(P),{});f(p,3);return log.join(',')})()",
+   "chrome": "s1,s2,s3"
   }
  ],
  "chrome_version": "148.0.7778.216"

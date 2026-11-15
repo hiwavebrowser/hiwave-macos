@@ -26,6 +26,22 @@ fn has_ordinary_define_own_property(object: &JsObject) -> bool {
     std::ptr::fn_addr_eq(object.vtable().__define_own_property__, ordinary)
 }
 
+/// HIWAVE PATCH (super-set-receiver): whether `object`'s [[Set]] is the ordinary one, the only case
+/// in which a cached prototype setter is what [[Set]] would call. A proxy (its `set` trap) and a
+/// typed array (a canonical numeric key such as `Infinity` never reaches the prototype) can share
+/// an ordinary object's shape; a String wrapper keeps the ordinary [[Set]].
+#[inline(always)]
+fn has_ordinary_set(object: &JsObject) -> bool {
+    let ordinary: fn(
+        &JsObject,
+        PropertyKey,
+        JsValue,
+        JsValue,
+        &mut InternalMethodPropertyContext<'_>,
+    ) -> JsResult<bool> = crate::object::internal_methods::ordinary_set;
+    std::ptr::fn_addr_eq(object.vtable().__set__, ordinary)
+}
+
 fn set_by_name(
     value: RegisterOperand,
     value_object: &JsValue,
@@ -52,11 +68,13 @@ fn set_by_name(
     let object_borrowed = object.borrow();
     if let Some((shape, slot)) = ic.get(object_borrowed.shape())
         // HIWAVE PATCH (super-set-receiver): an accessor hit calls the setter with the receiver, so
-        // it is right for any receiver. A data hit writes a slot in place, which is what [[Set]]
-        // does only for an own data property of the receiver: the slot must be the object's own
-        // (not `PROTOTYPE`: a data property found on the prototype is defined on the receiver,
-        // never written where it was found) and the receiver must be the object.
-        && (slot.attributes.is_accessor_descriptor()
+        // it is right for any receiver, on an object whose [[Set]] is the ordinary one (a proxy or
+        // a typed array sharing the shape would skip its own [[Set]]). A data hit writes a slot in
+        // place, which is what [[Set]] does only for an own data property of the receiver: the
+        // slot must be the object's own (not `PROTOTYPE`: a data property found on the prototype
+        // is defined on the receiver, never written where it was found) and the receiver must be
+        // the object.
+        && ((slot.attributes.is_accessor_descriptor() && has_ordinary_set(&object))
             || (!slot.attributes.contains(SlotAttributes::PROTOTYPE)
                 && receiver_is_object
                 // HIWAVE PATCH (array-length-ic): and only on an object whose [[DefineOwnProperty]]
@@ -87,12 +105,10 @@ fn set_by_name(
                     context,
                 )?;
             }
-        } else if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = shape.prototype().expect("prototype should have value");
-            let mut prototype = prototype.borrow_mut();
-
-            prototype.properties_mut().storage[slot_index] = value.clone();
         } else {
+            // HIWAVE PATCH (super-set-receiver): a data hit is always the object's own slot (the
+            // guard above); upstream's branch writing a prototype's data slot in place is gone.
+            debug_assert!(!slot.attributes.contains(SlotAttributes::PROTOTYPE));
             drop(object_borrowed);
             let mut object_borrowed = object.borrow_mut();
             object_borrowed.properties_mut().storage[slot_index] = value.clone();
