@@ -118,6 +118,21 @@ impl InlineCache {
 
         let mut entries = self.entries.borrow_mut();
 
+        // HIWAVE PATCH (ic-set-dedupe): one entry per shape. A site that is filled again for a
+        // shape it already has (a getter or setter that runs the same site, once per level of
+        // recursion; or any fill that follows a hit that fell through) updates that entry. Pushed
+        // as new, five fills of one shape would use all four slots and make the site megamorphic
+        // for every receiver.
+        let shape_addr = shape.to_addr_usize();
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|e| e.shape.upgrade().is_some_and(|s| s.to_addr_usize() == shape_addr))
+        {
+            entry.slot = slot;
+            entry.holder = holder;
+            return;
+        }
+
         // Add a new entry if there's space.
         if entries
             .try_push(CacheEntry {

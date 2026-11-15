@@ -855,3 +855,20 @@ made read-only, shadowed; a built-in prototype; strict code with no setter; `arg
 global names; a getter or setter that redefines or deletes its own property, own, on the prototype
 and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
 develop be8eb272, 22 differ).
+
+## Patch: one inline cache entry per shape (`ic-set-dedupe`)
+
+**What.** `InlineCache::set` pushed an entry for every fill, so a site could hold several entries for
+one shape. A getter or setter that runs the same site again (a recursive accessor chain: each level
+misses, runs the accessor, and fills the same shape on the way out) filled the four slots with
+copies of one shape within five levels, and the site then went megamorphic and missed on every later
+access, for every receiver. `set` now updates the entry that already has the shape (its slot and
+holder) and pushes only a shape it does not have. Marked `HIWAVE PATCH (ic-set-dedupe)` in
+`vm/inline_cache/mod.rs`.
+
+**Cost.** A scan of at most four entries on a fill, which is a miss already.
+
+Pin: `crates/rustkit-js/tests/ic_set_dedupe.rs` counts vm-stats misses for a read site and a write
+site reached through eight levels of accessor recursion and then used for 4000 accesses of two
+shapes: 4012 read and 4009 write misses before, under 200 after (two levels of recursion miss 31
+times in the same script).
