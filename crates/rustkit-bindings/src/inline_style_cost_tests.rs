@@ -62,3 +62,23 @@ fn a_style_attribute_changed_by_script_is_read_afresh() {
         "1px|9px|red||2"
     );
 }
+
+/// What a read gives after a write is what the attribute now says, whatever the name or value written: a
+/// write the parser would read differently (a `;` or `:` in the name, a comment, mismatched brackets) is not
+/// taken from the kept list. (The attribute is set again with a space added: different text, the same
+/// declarations, so the second read parses it.)
+#[test]
+fn a_read_after_an_odd_write_matches_the_attribute() {
+    let b = bound();
+    for (name, value) in [("a;b", "1px"), ("x:y", "2px"), ("transform", "rotate(3deg]"), ("color", "red /* c */"), ("left", "4px\u{1}")] {
+        let script = format!(
+            "var e = document.getElementById('t'); e.setAttribute('style', 'left: 1px; top: 2px'); var s = e.style; \
+             s.setProperty({name:?}, {value:?}); \
+             var kept = s.cssText + '|' + s.length + '|' + s.getPropertyValue({name:?}); \
+             e.setAttribute('style', e.getAttribute('style') + ' '); \
+             var fresh = s.cssText + '|' + s.length + '|' + s.getPropertyValue({name:?}); \
+             kept === fresh ? 'same' : kept + ' != ' + fresh"
+        );
+        assert_eq!(ev(&b, &script), "same", "{name}: {value}");
+    }
+}
