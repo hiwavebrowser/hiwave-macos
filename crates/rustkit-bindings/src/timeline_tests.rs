@@ -224,3 +224,25 @@ fn a_first_request_at_20_is_the_frame_at_17_run_at_once() {
     turn(&b, 20);
     assert_eq!(read(&b, "got"), "17");
 }
+
+/// Captures stay reproducible on the real-flowing page clock (parity-capture's default): when the
+/// timers run ahead of real time (a load's run-ahead, a stepped capture), a frame is stamped with
+/// its exact grid time, so the timeline and every script animation's time carry no real time. Here
+/// a timer at 5000 reads `performance.now()` and works 3 ms of real time, then asks for a frame:
+/// the frame of 5000, stamped 5000 exactly. It was 5000 plus the real time since the clock's
+/// reading at 5000 (about 3 ms, a different number every run).
+#[test]
+fn a_frame_run_ahead_of_real_time_is_stamped_with_its_exact_grid_time() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><body></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.evaluate(
+        "var got = ''; setTimeout(function () { var s = performance.now(); while (performance.now() - s < 3) {} \
+           requestAnimationFrame(function (t) { got = [t, document.timeline.currentTime].join(); }); }, 5000);",
+    )
+    .unwrap();
+    turn(&b, 5000);
+    assert_eq!(read(&b, "got"), "5000,5000");
+}
