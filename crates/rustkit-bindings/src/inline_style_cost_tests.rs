@@ -82,3 +82,63 @@ fn a_read_after_an_odd_write_matches_the_attribute() {
         assert_eq!(ev(&b, &script), "same", "{name}: {value}");
     }
 }
+
+/// What the kept declarations and the property-name table remember is made without the page's built-ins:
+/// a page that replaces them for a while (and puts them back) leaves nothing behind. Reads and writes made
+/// while they are replaced may fail; every one after must be right.
+#[test]
+fn replaced_built_ins_leave_no_trace_in_inline_style() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style; \
+             var rp = String.prototype.replace, tl = String.prototype.toLowerCase; \
+             String.prototype.replace = function () { return 'width'; }; String.prototype.toLowerCase = function () { return 'width'; }; \
+             try { s.outlineColor = 'green'; } catch (x) {} \
+             String.prototype.replace = rp; String.prototype.toLowerCase = tl; \
+             var saved = [[Object.prototype, 'hasOwnProperty'], [Array.prototype, 'every'], [Array.prototype, 'map'], \
+               [Array.prototype, 'filter'], [Array.prototype, 'push'], [String.prototype, 'replace'], \
+               [String.prototype, 'toLowerCase'], [String.prototype, 'indexOf'], [String.prototype, 'charCodeAt'], \
+               [RegExp.prototype, 'exec'], [RegExp.prototype, 'test'], [WeakMap.prototype, 'get'], [WeakMap.prototype, 'set']] \
+               .map(function (p) { return [p[0], p[1], p[0][p[1]]]; }); \
+             Object.prototype.hasOwnProperty = function () { return true; }; \
+             Array.prototype.every = function () { return true; }; Array.prototype.map = function () { return []; }; \
+             Array.prototype.filter = function () { return []; }; Array.prototype.push = function () { return 0; }; \
+             String.prototype.replace = function () { return 'width'; }; String.prototype.toLowerCase = function () { return 'width'; }; \
+             String.prototype.indexOf = function () { return -1; }; String.prototype.charCodeAt = function () { return 97; }; \
+             RegExp.prototype.exec = function () { return null; }; RegExp.prototype.test = function () { return true; }; \
+             WeakMap.prototype.get = function () { return undefined; }; WeakMap.prototype.set = function () { return this; }; \
+             try { s.paddingLeft = '7px'; } catch (x) {} try { s.marginTop = '8px'; } catch (x) {} \
+             try { s.setProperty('a;b', '1px'); } catch (x) {} try { var r1 = s.left + s.top + s.borderTopWidth; } catch (x) {} \
+             saved.forEach(function (p) { p[0][p[1]] = p[2]; }); \
+             e.setAttribute('style', 'left: 1px; top: 2px'); \
+             s.paddingLeft = '4px'; s.marginTop = '5px'; s.borderTopWidth = '6px'; s.outlineColor = 'green'; \
+             var kept = s.cssText + '|' + s.length + '|' + s.paddingLeft + '|' + s.marginTop + '|' + s.left + '|' + s.outlineColor; \
+             e.setAttribute('style', ' ' + e.getAttribute('style')); \
+             var fresh = s.cssText + '|' + s.length + '|' + s.paddingLeft + '|' + s.marginTop + '|' + s.left + '|' + s.outlineColor; \
+             kept === fresh ? kept : kept + ' != ' + fresh",
+        ),
+        "left: 1px; top: 2px; padding-left: 4px; margin-top: 5px; border-top-width: 6px; outline-color: green;|6|4px|5px|1px|green"
+    );
+}
+
+/// A write the element answers by changing its own style again (a custom element's
+/// attributeChangedCallback) is read back as the attribute now stands, not as the write left it.
+#[test]
+fn a_style_changed_again_inside_the_write_is_read_as_it_stands() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var seen = 0; \
+             customElements.define('x-restyle', class extends HTMLElement { \
+               static get observedAttributes() { return ['style']; } \
+               attributeChangedCallback() { if (seen++ === 0) this.setAttribute('style', 'color: blue; width: 9px'); } }); \
+             var e = document.createElement('x-restyle'); document.body.appendChild(e); \
+             e.style.color = 'red'; \
+             [e.getAttribute('style'), e.style.color, e.style.width, e.style.length].join('|')",
+        ),
+        "color: blue; width: 9px|blue|9px|2"
+    );
+}
