@@ -98,6 +98,27 @@ fn a_late_frame_is_caught_up_not_carried_forward() {
     assert_eq!(read(&b, "frames"), "180");
 }
 
+/// The callbacks' timestamp is the frame's time on the grid, not when the late turn ran it: with
+/// one turn 24 ms late, every gap between consecutive frames' timestamps stays 16-17 ms, as
+/// Chrome's stay 16.6-16.8 ms after its 24 ms frames (the deterministic clock, so the numbers are
+/// exact: the frame's grid point plus the clock's 0.1 ms read steps). Stamped with the turn's
+/// time, the gaps went 24 ms then 0.
+#[test]
+fn a_late_frames_timestamp_is_its_grid_time() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_deterministic_clock(true);
+    b.evaluate("var stamps = []; (function f() { requestAnimationFrame(function (t) { stamps.push(t); f(); }); })();")
+        .unwrap();
+    drive(&b, 1000, |turn| if turn == 30 { 24 } else { 0 });
+    let stamps: Vec<f64> = read(&b, "stamps.join()").split(',').map(|s| s.parse().unwrap()).collect();
+    let gaps: Vec<f64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        gaps.iter().all(|&g| (15.5..=17.5).contains(&g)),
+        "gaps {:?}",
+        &gaps[25..36]
+    );
+}
+
 /// A frame asked for by a task after a short idle is due at the next grid point after now, as
 /// Chrome's waits for the next vsync: the last frame at 1000 (grid point 60) and a timer at 1025
 /// asking for one, it is due at 1034 (grid point 62), not at once (61, 1017, is past). The same for
