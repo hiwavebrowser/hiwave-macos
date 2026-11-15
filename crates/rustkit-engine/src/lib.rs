@@ -682,6 +682,8 @@ mod chrome_bridge_tests;
 mod waapi_layer_tests;
 #[cfg(test)]
 mod clock_live_timer_tests;
+#[cfg(all(test, feature = "headless"))]
+mod style1b_frame_cost_tests;
 #[cfg(test)]
 mod clock_flag_tests;
 mod animations;

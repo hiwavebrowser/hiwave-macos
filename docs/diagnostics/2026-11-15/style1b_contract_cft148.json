@@ -1,0 +1,143 @@
+{
+ "version": "Chrome/148.0.7778.216",
+ "runsAgree": true,
+ "cases": {
+  "attr-verbatim": [
+   "  COLOR : red ;; margin:1px 2px;/*c*/ ",
+   "color: red; margin: 1px 2px;",
+   5
+  ],
+  "attr-duplicates": [
+   "color: red; color: blue; width: 1px",
+   "color: blue; width: 1px;",
+   2,
+   "blue"
+  ],
+  "attr-invalid-dropped": [
+   "color: notacolor; width: 2px; foo: bar",
+   "width: 2px;",
+   1
+  ],
+  "set-one": [
+   "left: 3px;",
+   "left: 3px;",
+   1,
+   "left"
+  ],
+  "set-order-kept": [
+   "color: blue; width: 1px;",
+   "color: blue; width: 1px;"
+  ],
+  "set-same-no-rewrite": [
+   "left:3px"
+  ],
+  "set-invalid-ignored": [
+   "color: red;",
+   "red"
+  ],
+  "set-unitless-ignored": [
+   "width: 0px;",
+   "width: 0px;"
+  ],
+  "set-number": [
+   "opacity: 0.5; z-index: 3;",
+   "0.5",
+   "3"
+  ],
+  "set-empty-removes": [
+   "width: 1px;",
+   1
+  ],
+  "set-important": [
+   "color: red !important;",
+   "important",
+   "color: red !important;"
+  ],
+  "remove-property": [
+   "red",
+   "width: 1px;",
+   1
+  ],
+  "shorthand-margin": [
+   "margin: 1px;",
+   "margin: 1px;",
+   4,
+   [
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left"
+   ],
+   "1px"
+  ],
+  "shorthand-margin-then-longhand": [
+   "margin: 1px 1px 1px 2px;",
+   "1px 1px 1px 2px"
+  ],
+  "shorthand-background": [
+   "background: red;",
+   9,
+   "red"
+  ],
+  "shorthand-in-attr": [
+   "margin: 1px 2px",
+   "margin: 1px 2px;",
+   4,
+   "2px"
+  ],
+  "csstext-messy": [
+   "color: red; width: 1px;",
+   "color: red; width: 1px;",
+   "red",
+   "1px"
+  ],
+  "custom-property": [
+   "--x: a  b; --Y: c;",
+   "a  b",
+   2
+  ],
+  "url-and-quotes": [
+   "background-image: url(\"a b.png\"); font-family: \"Open Sans\", serif;",
+   "url(\"a b.png\")",
+   "\"Open Sans\", serif"
+  ],
+  "color-normalised": [
+   "rgb(255, 0, 0)",
+   "rgb(1, 2, 3)",
+   "color: rgb(1, 2, 3);"
+  ],
+  "transform": [
+   "transform: translate(10px, 20px) rotate(45deg);",
+   "translate(10px, 20px) rotate(45deg)"
+  ],
+  "camel-and-float": [
+   "background-color: red; float: left;",
+   "red",
+   "left"
+  ],
+  "unknown-property-ignored": [
+   null,
+   0,
+   "string"
+  ],
+  "mutation-records": [
+   [
+    "style",
+    null
+   ],
+   [
+    "style",
+    "color: red;"
+   ],
+   [
+    "style",
+    "color: red; width: 1px;"
+   ]
+  ],
+  "remove-attribute-then-style": [
+   "",
+   0,
+   ""
+  ]
+ }
+}

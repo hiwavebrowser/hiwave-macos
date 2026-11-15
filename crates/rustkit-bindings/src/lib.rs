@@ -80,6 +80,10 @@ mod web_cssom_tests;
 #[cfg(test)]
 mod inline_style_cost_tests;
 #[cfg(test)]
+mod style1b_contract_tests;
+#[cfg(test)]
+mod style1b_cost_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
