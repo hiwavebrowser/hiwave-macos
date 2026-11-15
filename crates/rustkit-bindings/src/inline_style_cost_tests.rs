@@ -324,3 +324,23 @@ fn a_declaration_field_is_read_once_and_kept_as_checked() {
         "string,left: 1px;"
     );
 }
+
+/// #1170 R3: the open-brackets tracker is `Object.create(null)`, so a poisoned
+/// `Array.prototype[0]` cannot rewrite bracket depth while a nested function
+/// value is parsed.
+#[test]
+fn open_brackets_ignore_a_poisoned_array_prototype_index() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style; \
+             Object.defineProperty(Array.prototype, '0', { configurable: true, \
+               get: function () { return '('; }, set: function () {} }); \
+             s.transform = 'rotate(calc(9deg + 1deg))'; \
+             delete Array.prototype[0]; \
+             s.transform",
+        ),
+        "rotate(calc(9deg + 1deg))"
+    );
+}

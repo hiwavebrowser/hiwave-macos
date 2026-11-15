@@ -316,7 +316,7 @@ fn edge_chain(b: &LayoutBox, top: bool) -> Option<Vec<i64>> {
 }
 
 /// Drop every path that has another (or an equal one) as a prefix, sorted.
-fn nest_free(mut paths: Vec<Vec<usize>>) -> Vec<Vec<usize>> {
+pub(crate) fn nest_free(mut paths: Vec<Vec<usize>>) -> Vec<Vec<usize>> {
     paths.sort();
     let mut kept: Vec<Vec<usize>> = Vec::new();
     for p in paths {

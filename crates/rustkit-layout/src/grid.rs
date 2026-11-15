@@ -9231,6 +9231,61 @@ mod tests {
         );
     }
 
+    /// GR7 end-to-end: `auto 1fr` rows in a 600px grid must not take a 300px
+    /// floor from a `height: 50%` / `calc(50%)` item. The contribution pin
+    /// above is necessary but not sufficient; `layout_grid_container` once
+    /// resolved the percent against the grid height when sizing `1fr`. The
+    /// auto row's size is the second row's start (the item's final used
+    /// height may later resolve the percent against that row).
+    #[test]
+    fn an_auto_1fr_row_sizes_to_content_not_a_percent_height_floor() {
+        fn auto_row_start_of_second(item_height: Length) -> f32 {
+            let mut container_style = ComputedStyle::new();
+            container_style.display = Display::Grid;
+            container_style.grid_template_columns =
+                GridTemplate::from_sizes(vec![TrackSize::Px(200.0)]);
+            container_style.grid_template_rows =
+                GridTemplate::from_sizes(vec![TrackSize::Auto, TrackSize::Fr(1.0)]);
+            let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+            let mut item_style = ComputedStyle::new();
+            item_style.height = item_height;
+            let mut item = LayoutBox::new(BoxType::Block, item_style);
+            let mut child = ComputedStyle::new();
+            child.height = Length::Px(18.0);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child));
+            container.children.push(item);
+            container
+                .children
+                .push(LayoutBox::new(BoxType::Block, ComputedStyle::new()));
+
+            layout_grid_container(&mut container, 200.0, 600.0);
+            container.children[1].dimensions.border_box().y
+        }
+
+        for (label, height) in [
+            ("Percent(50)", Length::Percent(50.0)),
+            (
+                "calc(50%)",
+                Length::Calc(Box::new(rustkit_css::CalcSum {
+                    percent: 50.0,
+                    ..Default::default()
+                })),
+            ),
+        ] {
+            let y = auto_row_start_of_second(height);
+            assert!(
+                (y - 300.0).abs() > 1.0,
+                "{label}: auto row must not floor at 300 (second row at {y})"
+            );
+            assert!(
+                (y - 18.0).abs() < 1.0,
+                "{label}: auto row sizes to the 18px content (second row at {y})"
+            );
+        }
+    }
+
     /// Columns size from the outer width for the same reason.
     #[test]
     fn a_column_contribution_includes_the_inline_margins() {

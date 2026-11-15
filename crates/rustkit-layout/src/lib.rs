@@ -110,6 +110,12 @@ mod own_context_collapse_tests;
 
 #[cfg(test)]
 mod clip_rect_unit_tests;
+#[cfg(test)]
+mod holds_absolute_boxes_tests;
+#[cfg(test)]
+mod margin_walk_cost_tests;
+#[cfg(test)]
+mod incremental_unit_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -2593,7 +2599,7 @@ impl LayoutBox {
     /// Whether this box is the containing block of the absolute boxes inside
     /// it, as the painter reads it: `position: relative` is laid out as
     /// static, so the computed style says too.
-    fn holds_absolute_boxes(&self) -> bool {
+    pub(crate) fn holds_absolute_boxes(&self) -> bool {
         // A transform, filter, perspective and the rest hold the absolute boxes under them as well as the
         // fixed ones (CSS Transforms 1 §2; Filter Effects 1 §3).
         self.position != Position::Static || self.style.position != rustkit_css::Position::Static || self.holds_fixed_boxes()

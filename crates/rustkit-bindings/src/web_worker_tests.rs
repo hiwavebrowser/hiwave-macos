@@ -63,6 +63,11 @@ fn ev(b: &DomBindings, script: &str) -> String {
 
 /// Answer every queued worker-script request with `source`.
 fn serve(b: &DomBindings, source: &str) {
+    serve_as(b, source, "text/javascript");
+}
+
+/// Answer every queued worker-script request with `source` and a Content-Type.
+fn serve_as(b: &DomBindings, source: &str, content_type: &str) {
     for r in b.take_net_requests() {
         assert_eq!(r.destination, "worker");
         b.deliver_net_response(
@@ -71,7 +76,7 @@ fn serve(b: &DomBindings, source: &str) {
                 url: r.url,
                 status: 200,
                 status_text: "OK".into(),
-                headers: vec![("content-type".into(), "text/javascript".into())],
+                headers: vec![("content-type".into(), content_type.into())],
                 body_b64: b64(source.as_bytes()),
                 kind: "basic".into(),
                 redirected: false,
@@ -721,6 +726,48 @@ fn a_worker_location_carries_no_user_agent_field() {
     serve(&b, "postMessage({ ua: 'ua' in location, nav: typeof navigator.userAgent, href: location.href });");
     assert!(pump_until(&b, "seen !== null"), "no answer");
     assert_eq!(ev(&b, "JSON.stringify(seen)"), "{\"ua\":false,\"nav\":\"string\",\"href\":\"http://a.test/l.js\"}");
+}
+
+/// #1105 / `eee9d5c4`: a worker script of an image, audio, video or text/csv
+/// type is refused (Fetch MIME block). The headless `worker_url_e2e_tests`
+/// pin needs the engine; this answers the net bridge directly on `--lib`.
+#[test]
+fn a_worker_script_of_a_blocked_mime_type_fails_to_load() {
+    const BODY: &str = "postMessage('ran');";
+    for mime in ["image/png", "audio/mpeg", "video/mp4", "text/csv", "image/png; charset=utf-8"] {
+        let b = bound();
+        b.evaluate(
+            "var got = [], err = 0, w = new Worker('http://a.test/w.js'); \
+             w.onmessage = function (e) { got.push(e.data); }; \
+             w.onerror = function (e) { err++; e.preventDefault(); };",
+        )
+        .unwrap();
+        serve_as(&b, BODY, mime);
+        assert!(
+            pump_until(&b, "err >= 1"),
+            "{mime}: no error event (got={}, err={})",
+            ev(&b, "JSON.stringify(got)"),
+            ev(&b, "String(err)")
+        );
+        assert_eq!(ev(&b, "JSON.stringify(got)"), "[]", "{mime} must not run");
+    }
+}
+
+/// A non-JS MIME that is not in the Fetch block list still runs, as in Chrome
+/// (`text/plain` companion of the image refuse pin).
+#[test]
+fn a_worker_script_served_as_text_plain_still_runs() {
+    let b = bound();
+    b.evaluate(
+        "var got = [], err = 0, w = new Worker('http://a.test/plain.js'); \
+         w.onmessage = function (e) { got.push(e.data); }; \
+         w.onerror = function () { err++; };",
+    )
+    .unwrap();
+    serve_as(&b, "postMessage('ran');", "text/plain");
+    assert!(pump_until(&b, "got.length >= 1"), "err={}", ev(&b, "String(err)"));
+    assert_eq!(ev(&b, "got.join()"), "ran");
+    assert_eq!(ev(&b, "String(err)"), "0");
 }
 
 /// The malformed script-request branch, pinned as the malformed error branch is: a request item the page
