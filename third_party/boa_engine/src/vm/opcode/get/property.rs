@@ -39,7 +39,11 @@ fn get_by_name<const LENGTH: bool>(
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    // HIWAVE PATCH (ic-exotic-get): a hit only where it is what the object's [[Get]] would do (a
+    // Proxy or a typed array can share an ordinary object's shape; see `InlineCache::hit_is_get`).
+    if ic.hit_is_get(&object)
+        && let Some((shape, slot)) = ic.get(object_borrowed.shape())
+    {
         let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
             let prototype = shape.prototype().expect("prototype should have value");
             let prototype = prototype.borrow();

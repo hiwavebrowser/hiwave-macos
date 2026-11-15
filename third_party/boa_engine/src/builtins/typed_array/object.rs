@@ -334,7 +334,7 @@ pub(crate) fn typed_array_exotic_prevent_extensions(
 ///  - [ECMAScript reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-canonicalnumericindexstring
-fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
+pub(crate) fn canonical_numeric_index_string(argument: &JsString) -> Option<f64> {
     // 1. If argument is "-0", return -0𝔽.
     if argument == &js_str!("-0") {
         return Some(-0.0);

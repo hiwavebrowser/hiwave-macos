@@ -36,6 +36,13 @@ pub(crate) struct InlineCache {
     /// Whether this access site has seen too many shapes and should no longer be cached.
     #[unsafe_ignore_trace]
     pub(crate) megamorphic: Cell<bool>,
+
+    /// HIWAVE PATCH (ic-exotic-get): whether `name` is a canonical numeric string (an array index,
+    /// `Infinity`, `NaN`, `-0`, `1.5`, ...), the names for which a typed array's [[Get]] reads its
+    /// elements and never the prototype, and the only names a mapped arguments object's [[Get]]
+    /// can answer from its parameter map. Worked out once here so a hit does not parse the name.
+    #[unsafe_ignore_trace]
+    pub(crate) numeric_name: bool,
 }
 
 impl fmt::Display for InlineCache {
@@ -55,11 +62,39 @@ impl fmt::Display for InlineCache {
 
 impl InlineCache {
     pub(crate) fn new(name: JsString) -> Self {
+        let numeric_name =
+            crate::builtins::typed_array::object::canonical_numeric_index_string(&name).is_some();
         Self {
             name,
             entries: GcRefCell::new(ArrayVec::new()),
             megamorphic: Cell::new(false),
+            numeric_name,
         }
+    }
+
+    /// HIWAVE PATCH (ic-exotic-get): whether a read that hits this cache on `object` is what
+    /// `object`'s [[Get]] would do. The cache is keyed on shape, and an exotic object can share an
+    /// ordinary object's shape (a Proxy made from `{}`, a typed array and an object created from its
+    /// prototype). An ordinary [[Get]] always is; a typed array's and an arguments object's are for
+    /// a name that is not numeric (they differ from the ordinary one only for numeric names); a
+    /// Proxy's (its `get` trap) and a module namespace's never are.
+    #[inline(always)]
+    pub(crate) fn hit_is_get(&self, object: &crate::JsObject) -> bool {
+        type Get = fn(
+            &crate::JsObject,
+            &crate::property::PropertyKey,
+            crate::JsValue,
+            &mut crate::object::internal_methods::InternalMethodPropertyContext<'_>,
+        ) -> crate::JsResult<crate::JsValue>;
+        let get = object.vtable().__get__;
+        let ordinary: Get = crate::object::internal_methods::ordinary_get;
+        if std::ptr::fn_addr_eq(get, ordinary) {
+            return true;
+        }
+        let typed_array: Get = crate::builtins::typed_array::object::typed_array_exotic_get;
+        let arguments: Get = crate::builtins::function::arguments::arguments_exotic_get;
+        !self.numeric_name
+            && (std::ptr::fn_addr_eq(get, typed_array) || std::ptr::fn_addr_eq(get, arguments))
     }
 
     pub(crate) fn set(&self, shape: &Shape, slot: Slot) {
