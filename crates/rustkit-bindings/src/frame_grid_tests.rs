@@ -119,38 +119,76 @@ fn a_late_frames_timestamp_is_its_grid_time() {
     );
 }
 
-/// A frame asked for by a task after a short idle is due at the next grid point after now, as
-/// Chrome's waits for the next vsync: the last frame at 1000 (grid point 60) and a timer at 1025
-/// asking for one, it is due at 1034 (grid point 62), not at once (61, 1017, is past). The same for
-/// the page's first frame asked for between 17 and 34 ms. Only a frame the last frame's own
-/// callbacks ask for is caught up when late.
+/// Which frame a task's request lands in, and its stamp: `frame_stamp_probe.html`'s sweep on the
+/// pinned Chrome (CfT 148.0.7778.216, `frame_stamp_probe_cft148.json`, two runs): a frame at T
+/// sets `setTimeout(task, k)` and the task asks for a frame. A task that runs before T + 16.7 gets
+/// the frame at T + 16.7; one that runs between T + 16.7 and T + 33.3 (k = 14 to 31) gets the
+/// frame at T + 16.7 too, run at once although its time has passed (16.6-16.7 in every run).
+/// Here: the frame at 17 (T), a task at 17 + k; the frame it gets, as its stamp less T on the
+/// deterministic clock. RustKit takes the latest grid point at or before the task, never before the
+/// frame after the last; Chrome's one exception, a task between T + 33.3 and T + 50 that waits for
+/// T + 50 (its scheduler had ticked T + 33.3 idle), is not modelled: such a task here gets T + 33.
 #[test]
-fn a_frame_asked_for_by_a_task_between_grid_points_waits_for_the_next() {
-    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.evaluate(
-        "setTimeout(function () { requestAnimationFrame(function () {}); }, 990); \
-         setTimeout(function () { requestAnimationFrame(function () {}); }, 1025);",
-    )
-    .unwrap();
-    b.advance_timers_for_frame(1000, 1000, 0).unwrap();
-    b.advance_timers_for_frame(25, 1000, 0).unwrap();
-    assert_eq!(b.next_timer_delay(), Some(grid(62) - 1025));
-
-    let first = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    first
-        .evaluate("setTimeout(function () { requestAnimationFrame(function () {}); }, 20);")
+fn a_frame_a_task_asks_for_is_the_frame_of_its_time() {
+    let gap = |k: u64| {
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_deterministic_clock(true);
+        b.evaluate(&format!(
+            "var T = -1, got = -1; requestAnimationFrame(function (t) {{ T = t; \
+               setTimeout(function () {{ requestAnimationFrame(function (t2) {{ got = t2 - T; }}); }}, {k}); }});"
+        ))
         .unwrap();
-    first.advance_timers_for_frame(20, 1000, 0).unwrap();
-    assert_eq!(first.next_timer_delay(), Some(grid(2) - 20));
+        b.advance_timers_for_frame(17, 1000, 0).unwrap();
+        b.advance_timers_for_frame(k, 1000, 0).unwrap();
+        // The frame ran in the task's own turn when its time had passed; otherwise when it is due.
+        let ran_at_once = read(&b, "got") != "-1";
+        if !ran_at_once {
+            let delay = b.next_timer_delay().expect("the frame is asked for");
+            b.advance_timers_for_frame(delay, 1000, 0).unwrap();
+        }
+        let got: f64 = read(&b, "got").parse().unwrap();
+        (got.round() as i64, ran_at_once)
+    };
+    // Chrome: 16.6-16.7, then (from k = 14) 16.6-16.7 run at once.
+    assert_eq!(gap(5), (17, false));
+    assert_eq!(gap(17), (17, true), "a task at the grid instant itself");
+    assert_eq!(gap(20), (17, true));
+    assert_eq!(gap(30), (17, true));
+    // Two grid steps on: the latest grid point at or before the task (Chrome: 50, see above).
+    assert_eq!(gap(60), (50, true));
 }
 
-/// A frame asked for after the page was idle (here by a timer at 1005 ms) is due at the next grid
-/// point (1017), as Chrome's comes at the next vsync, not 16 ms after it was asked for (1021).
+/// A frame asked for after the page was idle runs at once and is the frame of the grid point at or
+/// before the request, as Chrome's (`frame_stamp_probe`'s idle part: after 300 ms with no frame, a
+/// timer task's frame is stamped 0.6 to 15.3 ms before the task's `performance.now()`, and its
+/// callback runs at once). Here a timer at 1005: the frame of 1000.
 #[test]
-fn a_frame_asked_for_when_idle_is_due_at_the_next_grid_point() {
+fn a_frame_asked_for_when_idle_is_the_frame_of_its_time() {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.evaluate("setTimeout(function () { requestAnimationFrame(function () {}); }, 1005);")
-        .unwrap();
+    b.set_deterministic_clock(true);
+    b.evaluate(
+        "var asked = -1, t = -1; \
+         setTimeout(function () { asked = performance.now(); requestAnimationFrame(function (s) { t = s; }); }, 1005);",
+    )
+    .unwrap();
     b.advance_timers_for_frame(1005, 1000, 0).unwrap();
-    assert_eq!(b.next_timer_delay(), Some(grid(61) - 1005));
+    let (asked, t): (f64, f64) = (read(&b, "asked").parse().unwrap(), read(&b, "t").parse().unwrap());
+    assert!(t >= 0.0, "the frame did not run in the timer's turn");
+    assert!(asked - 17.0 < t && t <= asked, "asked at {asked}, stamped {t}");
+    assert_eq!(t.floor(), grid(60) as f64);
+}
+
+/// A turn begins outside any frame's callbacks, whatever the last turn left: a request a task makes
+/// is a task's (the frame of its time), not a frame's own (the next).
+#[test]
+fn a_turn_begins_outside_a_frame() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.evaluate("var ran = 0; setTimeout(function () { requestAnimationFrame(function () { ran++; }); }, 40);")
+        .unwrap();
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping("__rk.shared.timerQueue.inFrame = true; return 0")
+        .unwrap();
+    b.advance_timers_for_frame(40, 1000, 0).unwrap();
+    assert_eq!(read(&b, "String(ran)"), "1", "the task's frame (34) did not run in its turn");
 }

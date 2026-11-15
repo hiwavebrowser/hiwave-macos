@@ -1,0 +1,53 @@
+<!doctype html><title>frame stamp probe</title><div id=box style="width:10px;height:10px;background:#08f"></div><script>
+// PACE2 grid row, R1 follow-ups: what a frame's callbacks are stamped with, against the task that
+// asked for the frame. Records:
+//   idle      after 300 ms with no frame, a timer task asks for one: [perf at the request,
+//             the frame's timestamp, the timeline's currentTime inside the callback, perf inside]
+//   timeline  for 30 frames of a loop: timestamp === document.timeline.currentTime inside
+//   sweep     for k = 0..40: a frame at time T asks setTimeout(task, k); the task asks for a
+//             frame; [k, task's perf - T, that frame's timestamp - T] (which frame the task's
+//             request lands in, as the task's time crosses the next frame's)
+// When done it sets rec.done and logs REC <json>.
+// Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
+// harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
+window.rec = { idle: [], timeline: [], sweep: [], done: false };
+function r2(x) { return Math.round(x * 100) / 100; }
+function idlePart(next) {
+  setTimeout(function () {
+    var asked = performance.now();
+    requestAnimationFrame(function (t) {
+      rec.idle.push([r2(asked), r2(t), document.timeline ? r2(document.timeline.currentTime) : null, r2(performance.now())]);
+      if (rec.idle.length < 5) idlePart(next); else next();
+    });
+  }, 300);
+}
+function timelinePart(next) {
+  var n = 0;
+  (function f() {
+    requestAnimationFrame(function (t) {
+      rec.timeline.push(document.timeline ? t === document.timeline.currentTime : null);
+      if (++n < 30) f(); else next();
+    });
+  })();
+}
+function sweepPart(k, next) {
+  if (k > 40) { next(); return; }
+  requestAnimationFrame(function (T) {
+    setTimeout(function () {
+      var at = performance.now();
+      requestAnimationFrame(function (t) {
+        rec.sweep.push([k, r2(at - T), r2(t - T)]);
+        sweepPart(k + 1, next);
+      });
+    }, k);
+  });
+}
+function go() {
+  idlePart(function () {
+    timelinePart(function () {
+      sweepPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+    });
+  });
+}
+if (location.hash !== '#manual') addEventListener('load', go);
+</script>
