@@ -154,6 +154,16 @@
    "name": "r_global_getter_redefines",
    "js": "(function(){Object.defineProperty(globalThis,'gz',{get:function(){Object.defineProperty(globalThis,'gz',{value:'d',configurable:true,writable:true});return 'g'},configurable:true});var g=new Function('return gz');return [g(),g(),g()].join(',')})()",
    "chrome": "g,d,d"
+  },
+  {
+   "name": "r_proto_getter_defines_own",
+   "js": "(function(){var n=0;var P={get zz(){n++;Object.defineProperty(this,'zz',{value:'own'});return 'lazy'}};var o=Object.create(P);function f(x){return x.zz}var a=f(o),b=f(o),c=f(o);return a+','+b+','+c+','+n})()",
+   "chrome": "lazy,own,own,1"
+  },
+  {
+   "name": "r_proto_setter_defines_own",
+   "js": "(function(){var n=0;var P={set zz(v){n++;Object.defineProperty(this,'zz',{value:v,writable:true,configurable:true})}};var o=Object.create(P);function f(x,v){x.zz=v}f(o,1);f(o,2);f(o,3);return o.zz+','+n+','+Object.hasOwn(o,'zz')})()",
+   "chrome": "3,1,true"
   }
  ],
  "chrome_version": "148.0.7778.216"

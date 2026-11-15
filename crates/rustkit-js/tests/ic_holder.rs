@@ -8,7 +8,9 @@
 //! (`tools/parity_oracle/ic_holder_cases.json`, `js_cases_log.mjs --write`). Each case warms one
 //! site at least twice before the change (the second call is the cache hit). `s_args*`,
 //! `s_strict_nosetter`, the swap cases and the `u_global*` cases already matched; they pin paths a
-//! fix touches. Each case runs on its own runtime and its own thread, so one that panics is
+//! fix touches. The `r_*` cases have a getter or setter change the property while the site is
+//! being filled, including the memoising idiom where a prototype accessor defines the name on the
+//! receiver itself. Each case runs on its own runtime and its own thread, so one that panics is
 //! reported by name instead of ending the run.
 
 use rustkit_js::{JsRuntime, JsValue};
