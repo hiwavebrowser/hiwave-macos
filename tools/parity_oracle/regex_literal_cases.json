@@ -29,6 +29,11 @@
    "name": "x_same_literal_text_two_sites",
    "js": "(function(){function a(){return /x/g}function b(){return /x/g}var p=a(),q=b();p.lastIndex=2;return [p===q,q.lastIndex,p.source===q.source].join()})()",
    "chrome": "false,0,true"
+  },
+  {
+   "name": "x_literal_after_exec_has_fresh_state",
+   "js": "(function(){function f(){return /(?<y>\\d{4})/g}var r=f();var m=r.exec('in 2026');var s=f();return [m.groups.y,r.lastIndex,s.lastIndex,s.exec('1999').groups.y].join()})()",
+   "chrome": "2026,7,0,1999"
   }
  ],
  "chrome_version": "148.0.7778.216"

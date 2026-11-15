@@ -26,6 +26,7 @@ use boa_gc::{Finalize, Trace};
 use boa_macros::{js_str, utf16};
 use boa_parser::lexer::regex::RegExpFlags;
 use regress::{Flags, Range, Regex};
+use std::{cell::RefCell, rc::Rc};
 use std::str::FromStr;
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
@@ -35,13 +36,18 @@ pub(crate) use regexp_string_iterator::RegExpStringIterator;
 #[cfg(test)]
 mod tests;
 
+/// HIWAVE PATCH (regex-literal-cache): per code block, the compiled record of each regex literal
+/// it has evaluated, keyed by the literal's pattern and flags constant indexes.
+pub(crate) type LiteralCache = RefCell<Vec<(u32, u32, RegExp)>>;
+
 /// The internal representation of a `RegExp` object.
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
 // Safety: `RegExp` does not contain any objects which needs to be traced, so this is safe.
 #[boa_gc(unsafe_empty_trace)]
 pub struct RegExp {
-    /// Regex matcher.
-    matcher: Regex,
+    /// Regex matcher. HIWAVE PATCH (regex-literal-cache): shared, so every evaluation of one regex
+    /// literal uses the matcher its code block compiled once.
+    matcher: Rc<Regex>,
     flags: RegExpFlags,
     original_source: JsString,
     original_flags: JsString,
@@ -396,11 +402,45 @@ impl RegExp {
         // 20. Set obj.[[RegExpRecord]] to rer.
         // 21. Set obj.[[RegExpMatcher]] to CompilePattern of parseResult with argument rer.
         Ok(RegExp {
-            matcher,
+            matcher: Rc::new(matcher),
             flags,
             original_source: p,
             original_flags: f,
         })
+    }
+
+    /// HIWAVE PATCH (regex-literal-cache): the object for one evaluation of a regex literal. The
+    /// pattern is compiled the first time the literal is evaluated in its code block and the record
+    /// (matcher, flags, source text) is kept in `cache`; every evaluation makes its own object, with
+    /// its own identity and its own `lastIndex`, from that record. `key` is the literal's pattern
+    /// and flags constant indexes, which identify it within the code block.
+    pub(crate) fn from_literal(
+        cache: &LiteralCache,
+        key: (u32, u32),
+        pattern: &JsString,
+        flags: &JsString,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let cached = cache
+            .borrow()
+            .iter()
+            .find(|(p, f, _)| (*p, *f) == key)
+            .map(|(_, _, regexp)| regexp.clone());
+        let regexp = if let Some(regexp) = cached {
+            regexp
+        } else {
+            // Converting strings runs no script, so nothing here can re-enter the cache.
+            let regexp =
+                Self::compile_native_regexp(&pattern.clone().into(), &flags.clone().into(), context)?;
+            cache.borrow_mut().push((key.0, key.1, regexp.clone()));
+            regexp
+        };
+        let obj = context
+            .intrinsics()
+            .templates()
+            .regexp()
+            .create(regexp, vec![0.into()]);
+        Ok(obj.into())
     }
 
     /// `RegExpInitialize ( obj, pattern, flags )`
