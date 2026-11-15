@@ -48,11 +48,23 @@ fn the_frame_timestamp_and_event_time_stamps_share_performance_nows_clock_in_a_l
 /// The live loop: real time advances in turns; the same relations hold.
 #[test]
 fn the_same_relations_hold_when_the_page_runs_live() {
+    live(8);
+}
+
+/// FLK6: the same, with the turns as far apart as a loaded runner made them (batch 83's CI failed
+/// `.rafLoop.medianNearAFrame` with 8 ms sleeps). Each turn is still one virtual frame of 16 ms.
+#[test]
+fn the_same_relations_hold_when_the_live_turns_are_slow() {
+    live(45);
+}
+
+/// 60 live turns of 16 ms of virtual time, `sleep_ms` of real time apart.
+fn live(sleep_ms: u64) {
     let b = page();
     b.evaluate(&format!("(0, eval)({})", serde_json::to_string(PAGE_JS).unwrap())).unwrap();
     for _ in 0..60 {
         b.advance_timers(16, 100).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(8));
+        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
     }
     let want: serde_json::Value = serde_json::from_str(CHROME).unwrap();
     same(&observed(&b), &want);
