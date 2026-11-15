@@ -273,6 +273,245 @@
         method(SVGSVG.prototype, 'createSVGMatrix', function createSVGMatrix() { return matrix(IDENTITY); });
         method(SVGSVG.prototype, 'createSVGRect', function createSVGRect() { return rect([0, 0, 0, 0]); });
     }
+
+    // ---- The transform DOM (SVG 1.1 §7.14-7.17, as Chrome for Testing 148 ships it): SVGTransform,
+    // SVGTransformList and SVGAnimatedTransformList behind `transform`, `gradientTransform` and
+    // `patternTransform`. A transform is a record (type, angle, matrix, rotation centre) that wrappers
+    // share: a list item made from a free transform shares its record, so changing either writes the
+    // attribute back, as Chrome does; one already in a list is copied. A list reads its attribute again
+    // whenever the text changed under it, and writes it back after each change.
+    var T = { UNKNOWN: 0, MATRIX: 1, TRANSLATE: 2, SCALE: 3, ROTATE: 4, SKEWX: 5, SKEWY: 6 };
+    function SVGTransform() { illegal(); }
+    Object.defineProperty(SVGTransform.prototype, Symbol.toStringTag, { value: 'SVGTransform' });
+    if (g.SVGTransform === undefined) Object.defineProperty(g, 'SVGTransform', { value: SVGTransform, writable: true, configurable: true });
+    Object.keys(T).forEach(function (k) {
+        var desc = { value: T[k], enumerable: true };
+        Object.defineProperty(SVGTransform, 'SVG_TRANSFORM_' + k, desc);
+        Object.defineProperty(SVGTransform.prototype, 'SVG_TRANSFORM_' + k, desc);
+    });
+    var RECORD = new WeakMap();
+    function record(type, angle, m, cx, cy) {
+        return { type: type, angle: angle, m: m, cx: cx || 0, cy: cy || 0, list: null, wrapper: null };
+    }
+    function wrapperOf(rec) {
+        if (!rec.wrapper) {
+            rec.wrapper = Object.create(SVGTransform.prototype);
+            RECORD.set(rec.wrapper, rec);
+        }
+        return rec.wrapper;
+    }
+    function freshWrapper(rec) {
+        var w = Object.create(SVGTransform.prototype);
+        RECORD.set(w, rec);
+        return w;
+    }
+    function recordOf(t, where) {
+        var rec = t !== null && typeof t === 'object' ? RECORD.get(t) : undefined;
+        if (!rec) throw new TypeError("Failed to execute '" + where + "' on 'SVGTransformList': parameter 1 is not of type 'SVGTransform'.");
+        return rec;
+    }
+    function transformRecord(t) {
+        var rec = t !== null && typeof t === 'object' ? RECORD.get(t) : undefined;
+        if (!rec) throw new TypeError('Illegal invocation');
+        return rec;
+    }
+    function rad(deg) { return deg * Math.PI / 180; }
+    function rotation(a, cx, cy) {
+        var r = rad(a), m = [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0];
+        return cx || cy ? multiply(multiply([1, 0, 0, 1, cx, cy], m), [1, 0, 0, 1, -cx, -cy]) : m;
+    }
+    function changed(rec) { if (rec.list) rec.list.write(); }
+    Object.defineProperty(SVGTransform.prototype, 'type', { get: function () { return transformRecord(this).type; }, enumerable: true, configurable: true });
+    Object.defineProperty(SVGTransform.prototype, 'angle', { get: function () { return transformRecord(this).angle; }, enumerable: true, configurable: true });
+    Object.defineProperty(SVGTransform.prototype, 'matrix', { get: function () { return matrix(transformRecord(this).m); }, enumerable: true, configurable: true });
+    var SETTERS = {
+        setMatrix: function (mx) { var r = transformRecord(this); r.type = T.MATRIX; r.angle = 0; r.m = values(mx); r.cx = r.cy = 0; changed(r); },
+        setTranslate: function (tx, ty) { var r = transformRecord(this); r.type = T.TRANSLATE; r.angle = 0; r.m = [1, 0, 0, 1, Number(tx), Number(ty)]; changed(r); },
+        setScale: function (sx, sy) { var r = transformRecord(this); r.type = T.SCALE; r.angle = 0; r.m = [Number(sx), 0, 0, Number(sy), 0, 0]; changed(r); },
+        setRotate: function (a, cx, cy) {
+            var r = transformRecord(this); a = Number(a); cx = Number(cx) || 0; cy = Number(cy) || 0;
+            r.type = T.ROTATE; r.angle = a; r.m = rotation(a, cx, cy); r.cx = cx; r.cy = cy; changed(r);
+        },
+        setSkewX: function (a) { var r = transformRecord(this); a = Number(a); r.type = T.SKEWX; r.angle = a; r.m = [1, 0, Math.tan(rad(a)), 1, 0, 0]; changed(r); },
+        setSkewY: function (a) { var r = transformRecord(this); a = Number(a); r.type = T.SKEWY; r.angle = a; r.m = [1, Math.tan(rad(a)), 0, 1, 0, 0]; changed(r); }
+    };
+    Object.keys(SETTERS).forEach(function (name) { method(SVGTransform.prototype, name, SETTERS[name]); });
+
+    // One transform as the attribute writes it, the way Chrome serialises it (space-separated numbers).
+    function serialize(rec) {
+        var m = rec.m;
+        switch (rec.type) {
+            case T.TRANSLATE: return 'translate(' + m[4] + ' ' + m[5] + ')';
+            case T.SCALE: return 'scale(' + m[0] + ' ' + m[3] + ')';
+            case T.ROTATE: return rec.cx || rec.cy ? 'rotate(' + rec.angle + ' ' + rec.cx + ' ' + rec.cy + ')' : 'rotate(' + rec.angle + ')';
+            case T.SKEWX: return 'skewX(' + rec.angle + ')';
+            case T.SKEWY: return 'skewY(' + rec.angle + ')';
+            default: return 'matrix(' + m.join(' ') + ')';
+        }
+    }
+    // An attribute's text as records; an unreadable list is empty.
+    function parseList(text) {
+        var out = [], re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g, hit;
+        if (!text) return out;
+        while ((hit = re.exec(text))) {
+            var a = hit[2].split(/[\s,]+/).filter(function (s) { return s !== ''; }).map(Number);
+            if (a.some(function (n) { return !isFinite(n); })) return [];
+            var rec = null;
+            switch (hit[1]) {
+                case 'matrix': if (a.length === 6) rec = record(T.MATRIX, 0, a); break;
+                case 'translate': if (a.length === 1 || a.length === 2) rec = record(T.TRANSLATE, 0, [1, 0, 0, 1, a[0], a.length > 1 ? a[1] : 0]); break;
+                case 'scale': if (a.length === 1 || a.length === 2) rec = record(T.SCALE, 0, [a[0], 0, 0, a.length > 1 ? a[1] : a[0], 0, 0]); break;
+                case 'rotate':
+                    if (a.length === 1 || a.length === 3) rec = record(T.ROTATE, a[0], rotation(a[0], a[1] || 0, a[2] || 0), a[1], a[2]);
+                    break;
+                case 'skewX': if (a.length === 1) rec = record(T.SKEWX, a[0], [1, 0, Math.tan(rad(a[0])), 1, 0, 0]); break;
+                case 'skewY': if (a.length === 1) rec = record(T.SKEWY, a[0], [1, Math.tan(rad(a[0])), 0, 1, 0, 0]); break;
+            }
+            if (!rec) return [];
+            out.push(rec);
+        }
+        return out;
+    }
+
+    function SVGTransformList() { illegal(); }
+    Object.defineProperty(SVGTransformList.prototype, Symbol.toStringTag, { value: 'SVGTransformList' });
+    if (g.SVGTransformList === undefined) Object.defineProperty(g, 'SVGTransformList', { value: SVGTransformList, writable: true, configurable: true });
+    function SVGAnimatedTransformList() { illegal(); }
+    Object.defineProperty(SVGAnimatedTransformList.prototype, Symbol.toStringTag, { value: 'SVGAnimatedTransformList' });
+    if (g.SVGAnimatedTransformList === undefined) {
+        Object.defineProperty(g, 'SVGAnimatedTransformList', { value: SVGAnimatedTransformList, writable: true, configurable: true });
+    }
+    // An element's list for one attribute: its records, and the attribute text they were read from.
+    function ListState(el, attr) { this.el = el; this.attr = attr; this.items = []; this.text = null; }
+    ListState.prototype.sync = function () {
+        var text = this.el.getAttribute(this.attr);
+        if (text === this.text) return;
+        this.items.forEach(function (r) { r.list = null; });
+        this.items = parseList(text);
+        var self = this;
+        this.items.forEach(function (r) { r.list = self; });
+        this.text = text;
+    };
+    ListState.prototype.write = function () {
+        this.el.setAttribute(this.attr, this.items.map(serialize).join(' '));
+        this.text = this.el.getAttribute(this.attr);
+    };
+    // The record a list takes for `t`: its own when free, a copy when it is in another list (or this one,
+    // which it then leaves first).
+    ListState.prototype.adopt = function (t, where) {
+        var rec = recordOf(t, where);
+        if (rec.list === this) {
+            this.items.splice(this.items.indexOf(rec), 1);
+        } else if (rec.list) {
+            rec = record(rec.type, rec.angle, rec.m.slice(), rec.cx, rec.cy);
+        }
+        rec.list = this;
+        return rec;
+    };
+    var LIST_STATE = new WeakMap(), READ_ONLY = new WeakMap();
+    function stateOf(list, where) {
+        var st = LIST_STATE.get(list);
+        if (!st) throw new TypeError('Illegal invocation');
+        if (where && READ_ONLY.get(list)) {
+            throw new g.DOMException("Failed to execute '" + where + "' on 'SVGTransformList': The object is read-only.", 'NoModificationAllowedError');
+        }
+        st.sync();
+        return st;
+    }
+    function indexError(where, i, n) {
+        return new g.DOMException("Failed to execute '" + where + "' on 'SVGTransformList': The index provided (" + i +
+            ") is greater than the maximum bound (" + n + ").", 'IndexSizeError');
+    }
+    ['numberOfItems', 'length'].forEach(function (name) {
+        Object.defineProperty(SVGTransformList.prototype, name, {
+            get: function () { return stateOf(this).items.length; }, enumerable: true, configurable: true
+        });
+    });
+    var LIST_METHODS = {
+        clear: function () { var st = stateOf(this, 'clear'); st.items.forEach(function (r) { r.list = null; }); st.items = []; st.write(); },
+        initialize: function (t) {
+            var st = stateOf(this, 'initialize'), rec = st.adopt(t, 'initialize');
+            st.items.forEach(function (r) { if (r !== rec) r.list = null; });
+            st.items = [rec]; st.write();
+            return freshWrapper(rec);
+        },
+        getItem: function (i) {
+            var st = stateOf(this); i = Number(i) >>> 0;
+            if (i >= st.items.length) throw indexError('getItem', i, st.items.length);
+            return wrapperOf(st.items[i]);
+        },
+        insertItemBefore: function (t, i) {
+            var st = stateOf(this, 'insertItemBefore'), rec = st.adopt(t, 'insertItemBefore');
+            i = Math.min(Number(i) >>> 0, st.items.length);
+            st.items.splice(i, 0, rec); st.write();
+            return wrapperOf(rec);
+        },
+        replaceItem: function (t, i) {
+            var st = stateOf(this, 'replaceItem'); i = Number(i) >>> 0;
+            if (i >= st.items.length) throw indexError('replaceItem', i, st.items.length);
+            var rec = st.adopt(t, 'replaceItem');
+            st.items[i].list = null; st.items[i] = rec; st.write();
+            return wrapperOf(rec);
+        },
+        removeItem: function (i) {
+            var st = stateOf(this, 'removeItem'); i = Number(i) >>> 0;
+            if (i >= st.items.length) throw indexError('removeItem', i, st.items.length);
+            var rec = st.items.splice(i, 1)[0];
+            rec.list = null; st.write();
+            return wrapperOf(rec);
+        },
+        appendItem: function (t) {
+            var st = stateOf(this, 'appendItem'), rec = st.adopt(t, 'appendItem');
+            st.items.push(rec); st.write();
+            return wrapperOf(rec);
+        },
+        createSVGTransformFromMatrix: function (mx) { return freshWrapper(record(T.MATRIX, 0, values(mx))); },
+        // One matrix for the whole list. As Chrome does, the attribute text is left as it was.
+        consolidate: function () {
+            var st = stateOf(this, 'consolidate');
+            if (!st.items.length) return null;
+            var m = st.items.reduce(function (acc, r) { return multiply(acc, r.m); }, IDENTITY);
+            st.items.forEach(function (r) { r.list = null; });
+            var rec = record(T.MATRIX, 0, m);
+            rec.list = st; st.items = [rec];
+            return wrapperOf(rec);
+        }
+    };
+    Object.keys(LIST_METHODS).forEach(function (name) { method(SVGTransformList.prototype, name, LIST_METHODS[name]); });
+
+    // `el.transform` / `gradientTransform` / `patternTransform`: one SVGAnimatedTransformList per element
+    // and attribute, its baseVal the live list and its animVal a read-only view of the same items.
+    var ANIMATED = new WeakMap();
+    function animatedFor(el, attr) {
+        var byAttr = ANIMATED.get(el);
+        if (!byAttr) { byAttr = Object.create(null); ANIMATED.set(el, byAttr); }
+        if (byAttr[attr]) return byAttr[attr];
+        var st = new ListState(el, attr);
+        var base = Object.create(SVGTransformList.prototype), anim = Object.create(SVGTransformList.prototype);
+        LIST_STATE.set(base, st); LIST_STATE.set(anim, st); READ_ONLY.set(anim, true);
+        var a = Object.create(SVGAnimatedTransformList.prototype);
+        Object.defineProperty(a, 'baseVal', { value: base, enumerable: true });
+        Object.defineProperty(a, 'animVal', { value: anim, enumerable: true });
+        byAttr[attr] = a;
+        return a;
+    }
+    function animatedAttribute(proto, name) {
+        if (!proto) return;
+        Object.defineProperty(proto, name, {
+            get: function () { return animatedFor(this, name); }, enumerable: true, configurable: true
+        });
+    }
+    animatedAttribute(Graphics.prototype, 'transform');
+    animatedAttribute(g.SVGGradientElement && g.SVGGradientElement.prototype, 'gradientTransform');
+    animatedAttribute(g.SVGPatternElement && g.SVGPatternElement.prototype, 'patternTransform');
+    if (SVGSVG) {
+        method(SVGSVG.prototype, 'createSVGTransform', function createSVGTransform() {
+            return freshWrapper(record(T.MATRIX, 0, IDENTITY.slice()));
+        });
+        method(SVGSVG.prototype, 'createSVGTransformFromMatrix', function createSVGTransformFromMatrix(mx) {
+            return freshWrapper(record(T.MATRIX, 0, values(mx)));
+        });
+    }
     ['ownerSVGElement', 'viewportElement'].forEach(function (name) {
         Object.defineProperty(g.SVGElement.prototype, name, {
             get: function () { return ownerSvg(this); }, enumerable: true, configurable: true
