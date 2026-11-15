@@ -2938,9 +2938,14 @@ const WRAPPERS_JS: &str = r#"
     // from nothing before the engine reads or writes a field of it.
     function bare(o) { return setProto(o, null); }
     // An event's dispatch state under the engine's own keys: own
-    // properties of an engine event from the start (`make`).
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    // properties of an engine event from the start (`make`). The keys are
+    // the frame tree's, like the event state above: an event stopped
+    // through one window's prototype is stopped in another's dispatch,
+    // and its path reads the same through either.
+    var STOP = SHARED.stop || (SHARED.stop = Symbol('rustkit.stop')),
+        STOP_NOW = SHARED.stopNow || (SHARED.stopNow = Symbol('rustkit.stopNow'));
+    var ORIGIN = SHARED.origin || (SHARED.origin = Symbol('rustkit.origin')),
+        PATH = SHARED.path || (SHARED.path = Symbol('rustkit.path'));
     function getterDesc(get) {
         var d = objCreate(null);
         d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;

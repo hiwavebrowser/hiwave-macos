@@ -66,7 +66,7 @@ fn shared_names() -> std::collections::BTreeSet<String> {
 /// Member names of what the engine keeps for a frame tree: the timer
 /// queue's, a frame record's, the registries' frame members. (Not
 /// `loaded`: it is also a ProgressEvent's, set on the page's own event.)
-const FRAME_NAMES: &str = "now nextId timers count up top el win tree changed scan attach size nodeId byTag";
+const FRAME_NAMES: &str = "now nextId timers count pumps pumpCount up top el win tree changed scan attach size nodeId byTag";
 
 /// The page: an accessor on `Object.prototype` for every name, counting
 /// its calls. `mine` holds what the page made or was given; a receiver

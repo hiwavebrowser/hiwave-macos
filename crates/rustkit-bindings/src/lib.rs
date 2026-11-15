@@ -564,8 +564,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     if (!Q) {
         Q = SHARED.timerQueue = objCreate(null);
         Q.now = 0; Q.nextId = 1; Q.timers = objCreate(null); Q.count = 0;
+        Q.pumps = objCreate(null); Q.pumpCount = 0;
     }
     var timers = Q.timers;
+    // What each document's workers have sent is delivered at the top of
+    // the tree's timer turn, whichever document's turn it is: a frame's
+    // own turn takes no timers. One entry a document, in a table kept as
+    // the timers are; an entry calls its own document's pump, which the
+    // workers script fills in later.
+    var pumps = Q.pumps;
+    function pump() { return typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0; }
+    pumps[Q.pumpCount++] = pump;
     function removeAt(i) {
         for (Q.count--; i < Q.count; i++) timers[i] = timers[i + 1];
         delete timers[Q.count];
@@ -654,7 +663,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
         // What a worker has sent since the last turn is delivered first.
-        var ran = typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0;
+        var ran = 0;
+        for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < Q.count; i++) {
@@ -788,22 +798,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // its time with timers still due (`Engine::pump_live`): the frame
     // callbacks due now run once, as a turn's round does.
     __rk.animationRound = function (max) {
-        var round = [], ran = 0;
-        for (var i = 0; i < timers.length; i++) {
-            if (timers[i].frame && timers[i].due <= Q.now) round.push(timers[i]);
-        }
-        for (var j = 0; j < round.length && ran < max; j++) {
-            var at = timers.indexOf(round[j]);
-            if (at < 0) continue;
-            timers.splice(at, 1);
-            ran++;
-            round[j].run(round[j]);
-        }
-        return ran;
+        return frameRound(0, max);
     };
-    // A frame's document is going away: its timers go with it.
+    // A frame's document is going away: its timers go with it, and its
+    // workers are no longer asked. Loops over the tables, nothing called.
     __rk.dropTimers = function () {
-        for (var i = timers.length - 1; i >= 0; i--) if (timers[i].win === window) timers.splice(i, 1);
+        for (var i = Q.count - 1; i >= 0; i--) if (timers[i].win === win) removeAt(i);
+        for (var p = 0; p < Q.pumpCount; p++) {
+            if (pumps[p] !== pump) continue;
+            for (Q.pumpCount--; p < Q.pumpCount; p++) pumps[p] = pumps[p + 1];
+            delete pumps[Q.pumpCount];
+        }
     };
     __rk.nextTimer = function () {
         // Only a number is a time; compared and subtracted here, with no
