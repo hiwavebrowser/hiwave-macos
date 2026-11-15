@@ -565,3 +565,132 @@ fn an_attach_leaves_no_window_behind() {
     assert!(matches!(t.parent.attach_frame(para, &t.child), Ok(false)));
     assert_eq!(text(t.child.host_turn(left, &[]).unwrap()), "true", "nothing left after an attach to no frame");
 }
+
+// ---------------------------------------------------------------------
+// One event loop for the frame tree: the timers, the animation frame
+// round, the workers' messages and an event's dispatch state are the
+// tree's, whichever document set, asked for or made them.
+// ---------------------------------------------------------------------
+
+/// A frame's document goes away: its timers go with it, the page's stay.
+#[test]
+fn a_dropped_frames_timers_are_gone() {
+    let t = tree(false, "");
+    t.parent.evaluate("var hits = 0; setTimeout(function () { hits++; }, 50);").unwrap();
+    t.child
+        .evaluate(
+            "setTimeout(function () {}, 5); setInterval(function () {}, 7); requestAnimationFrame(function () {}); \
+             setTimeout(function () {}, 900);",
+        )
+        .unwrap();
+    assert_eq!(t.parent.next_timer_delay(), Some(5), "the frame's timer is the tree's next");
+    let Tree { parent, child, .. } = t;
+    parent.drop_child(child);
+    let next = parent.next_timer_delay();
+    let ran = parent.run_timers(5000, 100).unwrap();
+    let after = parent.next_timer_delay();
+    assert_eq!(
+        (next, ran, after, text(parent.evaluate("String(hits)").unwrap())),
+        (Some(50), 1, None, "1".to_string()),
+        "the next timer once the frame is gone, callbacks then run, what is left, the page's own timer"
+    );
+}
+
+/// A turn that stopped for its time still has its frame: the animation
+/// frame callbacks that are due run once, the page's and its frame's, and
+/// one asked for during the round waits for the next.
+#[test]
+fn a_stopped_turns_animation_round_runs_the_frame_callbacks() {
+    let t = tree(false, "");
+    t.parent
+        .evaluate("var frames = 0; requestAnimationFrame(function () { frames++; }); setTimeout(function () { frames += 100; }, 500);")
+        .unwrap();
+    t.child
+        .evaluate(
+            "var frames = 0; requestAnimationFrame(function () { frames++; requestAnimationFrame(function () { frames++; }); });",
+        )
+        .unwrap();
+    // The clock moves on and no callback runs, as when a turn stops.
+    assert_eq!(t.parent.advance_timers(20, 0).unwrap(), 0);
+    let ran = t.parent.run_animation_round(100).unwrap();
+    let got = (
+        ran,
+        text(t.parent.evaluate("String(frames)").unwrap()),
+        text(t.child.evaluate("String(frames)").unwrap()),
+        t.parent.next_timer_delay(),
+    );
+    assert_eq!(
+        got,
+        (2, "1".to_string(), "1".to_string(), Some(16)),
+        "callbacks run, frames seen by the page, by its frame, and when the next is due"
+    );
+}
+
+/// A worker started by a frame's document is heard: the frame's turn
+/// takes no timers (the tree's are run from the page's), and the worker's
+/// messages arrive all the same.
+#[test]
+fn a_frames_worker_is_heard_in_the_trees_turn() {
+    let t = tree(true, "");
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(matches!(attached, Ok(true)), "{attached:?}");
+    t.child
+        .evaluate(
+            "var got = []; var w = new Worker('data:text/javascript,postMessage(7)'); \
+             w.onmessage = function (e) { got.push(e.data); };",
+        )
+        .unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut heard = String::new();
+    while std::time::Instant::now() < end {
+        // A turn of the tree: the frame's with no timers, then the page's.
+        let _ = t.child.advance_timers_for_frame(0, 0, 16);
+        let _ = t.parent.advance_timers_for_frame(5, 1, 16);
+        heard = text(t.child.evaluate("got.join()").unwrap());
+        if !heard.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(heard, "7", "what the frame's worker sent");
+}
+
+/// An event made in one window and dispatched in another has one
+/// dispatch state: stopping it through either window's prototype stops
+/// the dispatch, and its path reads the same.
+#[test]
+fn an_event_of_one_window_keeps_its_dispatch_state_in_another() {
+    let t = tree(false, "");
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(matches!(attached, Ok(true)), "{attached:?}");
+    // `doc` is the document dispatched in, `W` the window whose `Event` makes the event.
+    let run = "function run(doc, W) {
+        var seen = [], p = doc.getElementById('p'), b = doc.getElementById('b');
+        p.addEventListener('x', function (e) {
+            seen.push(e.composedPath()[0] === p ? 'path' : 'no-path');
+            e.stopPropagation();
+            seen.push('stopped:' + e.cancelBubble);
+        });
+        doc.body.addEventListener('x', function () { seen.push('body'); });
+        p.dispatchEvent(new W.Event('x', { bubbles: true }));
+        b.addEventListener('y', function (e) { seen.push('first'); e.stopImmediatePropagation(); });
+        b.addEventListener('y', function () { seen.push('second'); });
+        doc.body.addEventListener('y', function () { seen.push('body'); });
+        b.dispatchEvent(new W.Event('y', { bubbles: true }));
+        return seen.join(' ');
+    }";
+    let got = text(
+        t.parent
+            .evaluate(&format!(
+                "{run} var w = document.getElementById('fr').contentWindow; \
+                 [run(document, w), run(w.document, window), run(document, window), run(w.document, w)].join(' | ')"
+            ))
+            .unwrap(),
+    );
+    let one = "path stopped:true first";
+    assert_eq!(
+        got,
+        format!("{one} | {one} | {one} | {one}"),
+        "the frame's event in the page, the page's in the frame, each window's own"
+    );
+}
