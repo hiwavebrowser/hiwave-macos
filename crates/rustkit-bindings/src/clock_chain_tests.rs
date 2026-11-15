@@ -97,19 +97,21 @@ fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
 }
 
 /// A stepped turn (a capture's settle, a test) moves virtual time the page has not lived through, so
-/// a chain still runs a link per 10 ms of it: five in a 50 ms step, as before CLOCK3. On the real
-/// clock the same turn is 50 ms the page was held back: the overdue link runs once, and the next is
-/// at least 10 ms after the turn's time (plus the real time the turn had taken when it was set).
+/// a chain still runs a link per period of it: five 1000 ms links in a 5000 ms step, as before
+/// CLOCK3. On the real clock the same turn is 5000 ms the page was held back: the overdue link runs
+/// once, and the next is at least a period after the turn's time (plus the real time the turn had
+/// taken when it was set). The period is long so the count cannot depend on the machine: only a
+/// stall of a whole second inside the turn would let the next link into it.
 #[test]
 fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
     let count = |real: bool| {
         let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-        b.evaluate("var n = 0; (function link() { n++; setTimeout(link, 10); })();")
+        b.evaluate("var n = 0; (function link() { n++; setTimeout(link, 1000); })();")
             .unwrap();
         if real {
-            b.advance_real_timers_for_frame(50, 1000, 0).unwrap();
+            b.advance_real_timers_for_frame(5000, 1000, 0).unwrap();
         } else {
-            b.advance_timers_for_frame(50, 1000, 0).unwrap();
+            b.advance_timers_for_frame(5000, 1000, 0).unwrap();
         }
         let n = match b.evaluate("String(n)").unwrap() {
             JsValue::String(s) => s,
@@ -117,12 +119,12 @@ fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
         };
         (n, b.next_timer_delay())
     };
-    // The first link runs at once, then one per 10 ms: 10, 20, 30, 40, 50.
-    assert_eq!(count(false), ("6".to_string(), Some(10)));
+    // The first link runs at once, then one per 1000 ms: 1000, 2000, 3000, 4000, 5000.
+    assert_eq!(count(false), ("6".to_string(), Some(1000)));
     let (n, next) = count(true);
     assert_eq!(n, "2");
     assert!(
-        next.is_some_and(|d| d >= 10),
+        next.is_some_and(|d| d >= 1000),
         "the next link is due in {next:?} ms"
     );
 }
@@ -172,15 +174,17 @@ fn a_frames_chain_on_the_real_clock_counts_from_the_trees_turn() {
 /// machine it can be 70; either way 5 ms off the turn's time modulo 10.
 #[test]
 fn an_interval_held_back_on_the_real_clock_runs_once_and_keeps_its_grid() {
+    // A 1000 ms period held back 5500 ms (the 10 ms and 55 ms of Chrome's case, scaled so that only
+    // a whole-second stall inside a turn could change a count).
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.evaluate("var n = 0; setInterval(function () { n++; }, 10);")
+    b.evaluate("var n = 0; setInterval(function () { n++; }, 1000);")
         .unwrap();
-    b.advance_real_timers_for_frame(55, 1000, 0).unwrap();
+    b.advance_real_timers_for_frame(5500, 1000, 0).unwrap();
     assert!(matches!(b.evaluate("String(n)").unwrap(), JsValue::String(s) if s == "1"));
     let next = b.next_timer_delay().expect("the interval is set");
     assert_eq!(
-        next % 10,
-        5,
+        next % 1000,
+        500,
         "the interval left its grid: next in {next} ms"
     );
     // On time, once a period.

@@ -1743,10 +1743,11 @@ mod tests {
 
     /// CLOCK3: the window thread's live turn (`PumpLive`, the loop with the
     /// content thread off) is on the real clock: its `elapsed_ms` is real time
-    /// that has passed, so a 10 ms chain held back for 50 ms runs its overdue
-    /// link once and sets the next from then. A stepped turn would run five
-    /// (10, 20, 30, 40, 50 ms). Holds at any load: the next link is set after
-    /// the turn began, so it is due after the turn's time.
+    /// that has passed, so a 1000 ms chain held back for 5000 ms runs its
+    /// overdue link once and sets the next from then. A stepped turn would
+    /// run five (1000 to 5000 ms). The period is long because the turn's
+    /// reach grows with the real time it takes: only a whole-second stall
+    /// inside the turn would let the next link into it.
     #[test]
     fn the_window_threads_live_turn_does_not_replay_a_timeout_chain() {
         let (handle, mut endpoint) = pair();
@@ -1762,12 +1763,12 @@ mod tests {
         };
         // The turn after the load (its timers already ran in the load's pass).
         pump(&handle, &mut endpoint, 0);
-        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 10); })(); 0");
-        pump(&handle, &mut endpoint, 50);
+        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 1000); })(); 0");
+        pump(&handle, &mut endpoint, 5000);
         assert_eq!(
             eval(&handle, &mut endpoint, "String(window.n)"),
             r#"String("2")"#,
-            "the chain replayed the links the 50 ms held back"
+            "the chain replayed the links the 5000 ms held back"
         );
     }
 
