@@ -284,7 +284,8 @@ document.getElementById('mk_added_src').src = '/mk_added_src.html';</script>"
 fn what_the_page_patches_does_not_change_the_answer() {
     let body = format!(
         "<script>{PRELUDE}
-var f = document.createElement('iframe'); f.id = 'patched'; f.setAttribute('sandbox', ''); f.src = '/patched.html'; count(f);
+var f = document.createElement('iframe'); f.id = 'patched'; f.setAttribute('sandbox', ''); f.src = '/patched.html';
+loads.patched = 0; f.addEventListener('load', function () {{ loads.patched++; }});
 var remove = Element.prototype.removeAttribute;
 Element.prototype.getAttribute = function (n) {{ return n === 'src' ? '/patched.html' : null; }};
 Element.prototype.hasAttribute = function () {{ return false; }};

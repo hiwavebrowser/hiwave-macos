@@ -150,10 +150,18 @@ fn the_attribute_as_parsed_counts_once() {
     assert_eq!(asked(&b), vec![some("")]);
     run(&b, "var r = document.getElementById('r'); r.removeAttribute('sandbox'); r.src = '/x.html';");
     assert_eq!(asked(&b), vec![None]);
-    // A new document starts again from its own markup.
-    b.set_document(Rc::new(Document::parse_html("<html><head></head><body><iframe></iframe></body></html>").unwrap())).unwrap();
+}
+
+/// The same when the document was bound before frames were turned on.
+#[test]
+fn a_document_bound_before_frames_were_on_counts_its_markup_too() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html("<html><head></head><body><iframe id=r sandbox></iframe></body></html>").unwrap()))
+        .unwrap();
+    b.enable_frames().unwrap();
+    run(&b, "document.getElementById('r').removeAttribute('sandbox');");
     b.scan_frames().unwrap();
-    assert_eq!(asked(&b), vec![None]);
+    assert_eq!(asked(&b), vec![some("")]);
 }
 
 /// Known difference, recorded: a markup frame the page's first script gives the attribute to,

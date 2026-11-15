@@ -15,7 +15,10 @@
 // has drained the request (after the script that inserted the frame
 // returns; HTML makes it `about:blank` at once). A cross-origin frame is
 // left blank: `contentWindow` and `contentDocument` stay `null`, and `load`
-// fires. `srcdoc`, `name` targeting and `window.frames[i]` are not here.
+// fires. A frame with a `sandbox` attribute is left blank the same way: the
+// engine reads the attribute itself when the request below is made
+// (`FrameRequest::sandbox`), nothing here does.
+// `srcdoc`, `name` targeting and `window.frames[i]` are not here.
 (function (g) {
     var HOOKS = __rk.domHooks;
     var request = g.__rustkit_frame_request;

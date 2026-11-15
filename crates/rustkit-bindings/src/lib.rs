@@ -1355,6 +1355,12 @@ pub struct DomBindings {
     /// Frame requests not yet taken (`take_frame_requests`); filled only
     /// once `enable_frames` ran.
     frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
+    /// The `sandbox` attribute of each iframe of the document as it was
+    /// bound (the parser's), until that frame is first asked for: a markup
+    /// frame is asked for at the engine's scan, after the page's first
+    /// scripts, and its attribute as parsed counts for that navigation.
+    /// `None` (nothing kept) unless `enable_frames` ran.
+    frame_sandbox_parsed: Rc<RefCell<Option<std::collections::HashMap<usize, String>>>>,
     window: RefCell<WindowState>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
@@ -1434,20 +1440,34 @@ impl DomBindings {
     /// Off, nothing of it exists (`EngineConfig::nested_contexts`).
     pub fn enable_frames(&self) -> Result<(), BindingError> {
         let queue = self.frame_requests.clone();
+        let host = self.dom_host.clone();
+        let parsed = self.frame_sandbox_parsed.clone();
+        *parsed.borrow_mut() = Some(host.borrow().frames_with_sandbox());
         let mut runtime = self.runtime.borrow_mut();
         runtime.register_host_function(
             "__rustkit_frame_request",
             2,
             Box::new(move |args| {
                 if let Some(JsValue::Number(node)) = args.first() {
+                    let node = *node as usize;
                     let url = match args.get(1) {
                         Some(JsValue::String(url)) => Some(url.clone()),
                         _ => None,
                     };
+                    // The frame's `sandbox` attribute for this navigation,
+                    // read here from the document (no script is asked): the
+                    // element's now, or, the first time a markup frame is
+                    // asked for, the parser's. Whatever the request is, the
+                    // parser's is spent by it.
+                    let as_parsed = parsed.borrow_mut().as_mut().and_then(|kept| kept.remove(&node));
+                    let sandbox = match url {
+                        Some(_) => host.borrow().frame_sandbox(node).or(as_parsed),
+                        None => None,
+                    };
                     let mut queue = queue.borrow_mut();
                     // Bounds what a page can park between two drains.
                     if queue.len() < 256 {
-                        queue.push(FrameRequest { node: *node as usize, url, sandbox: None });
+                        queue.push(FrameRequest { node, url, sandbox });
                     }
                 }
                 JsValue::Null
@@ -1704,6 +1724,7 @@ impl DomBindings {
             runtime: page,
             clock_origin,
             frame_requests: Rc::new(RefCell::new(Vec::new())),
+            frame_sandbox_parsed: Rc::new(RefCell::new(None)),
             window: RefCell::new(WindowState::default()),
             dom_host,
             ipc_queue,
@@ -2649,6 +2670,10 @@ impl DomBindings {
         // Rebind the DOM wrappers. Wrappers handed out for a previous
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
+        // With frames on: the new document's iframes' `sandbox` as parsed.
+        if let Some(kept) = self.frame_sandbox_parsed.borrow_mut().as_mut() {
+            *kept = self.dom_host.borrow().frames_with_sandbox();
+        }
         self.canvases.borrow_mut().clear();
         runtime.evaluate_host_turn(&format!("return __rk.domReset({generation});"), &[])?;
 
