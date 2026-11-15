@@ -98,6 +98,31 @@ fn a_late_frame_is_caught_up_not_carried_forward() {
     assert_eq!(read(&b, "frames"), "180");
 }
 
+/// A frame asked for by a task after a short idle is due at the next grid point after now, as
+/// Chrome's waits for the next vsync: the last frame at 1000 (grid point 60) and a timer at 1025
+/// asking for one, it is due at 1034 (grid point 62), not at once (61, 1017, is past). The same for
+/// the page's first frame asked for between 17 and 34 ms. Only a frame the last frame's own
+/// callbacks ask for is caught up when late.
+#[test]
+fn a_frame_asked_for_by_a_task_between_grid_points_waits_for_the_next() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.evaluate(
+        "setTimeout(function () { requestAnimationFrame(function () {}); }, 990); \
+         setTimeout(function () { requestAnimationFrame(function () {}); }, 1025);",
+    )
+    .unwrap();
+    b.advance_timers_for_frame(1000, 1000, 0).unwrap();
+    b.advance_timers_for_frame(25, 1000, 0).unwrap();
+    assert_eq!(b.next_timer_delay(), Some(grid(62) - 1025));
+
+    let first = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    first
+        .evaluate("setTimeout(function () { requestAnimationFrame(function () {}); }, 20);")
+        .unwrap();
+    first.advance_timers_for_frame(20, 1000, 0).unwrap();
+    assert_eq!(first.next_timer_delay(), Some(grid(2) - 20));
+}
+
 /// A frame asked for after the page was idle (here by a timer at 1005 ms) is due at the next grid
 /// point (1017), as Chrome's comes at the next vsync, not 16 ms after it was asked for (1021).
 #[test]
