@@ -6,13 +6,18 @@
 //   timeline  for 30 frames of a loop: timestamp === document.timeline.currentTime inside
 //   sweep     for k = 0..40: a frame at time T asks setTimeout(task, k); the task asks for a
 //             frame; [k, task's perf - T, that frame's timestamp - T] (which frame the task's
-//             request lands in, as the task's time crosses the next frame's)
+//             request lands in, as the task's time crosses the next frame's), and the callback's
+//             own performance.now() - T (when it ran: at once, or at that frame's time)
+//   longTimer for 9 rounds: a frame at T0 asks for the next frame and posts a task that works
+//             W = 45, 100 or 200 ms, so that frame runs late; its callback sets setTimeout(task, 5)
+//             and the task asks for a frame: [W, late frame's t - T0, perf in it - T0, perf at the request - T0,
+//             the requested frame's t - T0, perf in it - T0]: is the stamp ever below the last?
 // Pinned on Chrome for Testing 148.0.7778.216, HEADLESS (frame_stamp_probe_chrome.mjs). Headless
 // frame scheduling has not been checked against a headed run: row FRAMEPIN-HEADED (low priority).
 // When done it sets rec.done and logs REC <json>.
 // Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
 // harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
-window.rec = { idle: [], timeline: [], sweep: [], done: false };
+window.rec = { idle: [], timeline: [], sweep: [], longTimer: [], done: false };
 function r2(x) { return Math.round(x * 100) / 100; }
 function idlePart(next) {
   setTimeout(function () {
@@ -38,16 +43,36 @@ function sweepPart(k, next) {
     setTimeout(function () {
       var at = performance.now();
       requestAnimationFrame(function (t) {
-        rec.sweep.push([k, r2(at - T), r2(t - T)]);
+        rec.sweep.push([k, r2(at - T), r2(t - T), r2(performance.now() - T)]);
         sweepPart(k + 1, next);
       });
     }, k);
   });
 }
+function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
+function longTimerPart(n, next) {
+  if (n >= 9) { next(); return; }
+  var W = [45, 100, 200][n % 3];
+  requestAnimationFrame(function (T0) {
+    requestAnimationFrame(function (t1) {
+      var p1 = performance.now();
+      setTimeout(function () {
+        var asked = performance.now();
+        requestAnimationFrame(function (t2) {
+          rec.longTimer.push([W, r2(t1 - T0), r2(p1 - T0), r2(asked - T0), r2(t2 - T0), r2(performance.now() - T0)]);
+          setTimeout(function () { longTimerPart(n + 1, next); }, 50);
+        });
+      }, 5);
+    });
+    setTimeout(function () { spin(W); }, 0);
+  });
+}
 function go() {
   idlePart(function () {
     timelinePart(function () {
-      sweepPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+      sweepPart(0, function () {
+        longTimerPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+      });
     });
   });
 }

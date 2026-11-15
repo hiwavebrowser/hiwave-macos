@@ -128,9 +128,8 @@ fn a_late_frames_timestamp_is_its_grid_time() {
 /// deterministic clock. RustKit takes the latest grid point at or before the task, never before the
 /// frame after the last; Chrome's one exception, a task between T + 33.3 and T + 50 that waits for
 /// T + 50 (its scheduler had ticked T + 33.3 idle), is not modelled: such a task here gets T + 33.
-#[test]
-fn a_frame_a_task_asks_for_is_the_frame_of_its_time() {
-    let gap = |k: u64| {
+fn task_frame_gap(k: u64) -> (i64, bool) {
+    {
         let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         b.set_deterministic_clock(true);
         b.evaluate(&format!(
@@ -148,7 +147,12 @@ fn a_frame_a_task_asks_for_is_the_frame_of_its_time() {
         }
         let got: f64 = read(&b, "got").parse().unwrap();
         (got.round() as i64, ran_at_once)
-    };
+    }
+}
+
+#[test]
+fn a_frame_a_task_asks_for_is_the_frame_of_its_time() {
+    let gap = task_frame_gap;
     // Chrome: 16.6-16.7, then (from k = 14) 16.6-16.7 run at once.
     assert_eq!(gap(5), (17, false));
     assert_eq!(gap(17), (17, true), "a task at the grid instant itself");
@@ -176,6 +180,42 @@ fn a_frame_asked_for_when_idle_is_the_frame_of_its_time() {
     assert!(t >= 0.0, "the frame did not run in the timer's turn");
     assert!(asked - 17.0 < t && t <= asked, "asked at {asked}, stamped {t}");
     assert_eq!(t.floor(), grid(60) as f64);
+}
+
+/// KNOWN DIVERGENCE, not modelled: in Chrome a task between T + 33.3 and T + 50 after a frame at T
+/// waits for the frame at T + 50 and runs then (`frame_stamp_probe_cft148.json`, sweep k = 34 to
+/// 40: stamped 49.9-50.1, run at 50.1-54.5), as its scheduler had ticked T + 33.3 while idle. Here
+/// such a task gets the latest grid point at or before it, T + 33, run at once.
+#[test]
+fn known_divergence_a_task_after_two_frames_gets_the_passed_frame() {
+    assert_eq!(task_frame_gap(40), (33, true), "Chrome: (50, false)");
+}
+
+/// A frame a long task held up is stamped with its grid time however late it runs, and a frame a
+/// timer in its callback asks for comes after it on the grid: the page never sees a stamp go
+/// backwards. The pinned Chrome (CfT 148.0.7778.216, `frame_stamp_probe_cft148.json`,
+/// "longTimer", five runs): a frame at T0 asks for the next and posts a task that works 45, 100 or
+/// 200 ms; the next frame runs 30-190 ms late and is stamped T0 + 16.6-16.8 every time; its
+/// callback's 5 ms timer asks for a frame, stamped at the grid point at or before the request
+/// (T0 + 50 after the 45 ms task). Here the frame at 17, the next (due 34) run at 69 by a late
+/// turn, its timer at 74: stamped T0 + 17 and T0 + 50. Stamped with the turn's time once two
+/// frames late, the late frame got 69 and the timer's frame 67.
+#[test]
+fn a_frame_held_up_by_a_long_task_keeps_its_grid_time_and_stamps_never_go_back() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_deterministic_clock(true);
+    b.evaluate(
+        "var T0 = -1, s = []; requestAnimationFrame(function (t) { T0 = t;            requestAnimationFrame(function (t1) { s.push(t1 - T0);              setTimeout(function () { requestAnimationFrame(function (t2) { s.push(t2 - T0); }); }, 5); }); });",
+    )
+    .unwrap();
+    b.advance_timers_for_frame(17, 1000, 0).unwrap();
+    b.advance_timers_for_frame(52, 1000, 0).unwrap();
+    b.advance_timers_for_frame(5, 1000, 0).unwrap();
+    if read(&b, "s.length") != "2" {
+        let delay = b.next_timer_delay().expect("the timer's frame is asked for");
+        b.advance_timers_for_frame(delay, 1000, 0).unwrap();
+    }
+    assert_eq!(read(&b, "s.map(Math.round).join()"), "17,50", "Chrome: 16.7, 50");
 }
 
 /// KNOWN DIVERGENCE, flipped by TIMELINE1: in Chrome `document.timeline.currentTime` is the frame's
