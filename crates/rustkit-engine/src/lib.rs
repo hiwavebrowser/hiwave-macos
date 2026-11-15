@@ -416,6 +416,8 @@ mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
 #[cfg(test)]
+mod frame_sandbox_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;

@@ -1,0 +1,19 @@
+<!doctype html>
+<title>frames with a sandbox attribute</title>
+<body>
+<!-- In the markup, with the attribute changed by the script that follows at once. -->
+<iframe id=mk_removed sandbox src="frame_sandbox_child.html?c=mk_removed"></iframe>
+<iframe id=mk_added src="frame_sandbox_child.html?c=mk_added"></iframe>
+<iframe id=mk_added_src src="frame_sandbox_child.html?c=mk_added_src_first"></iframe>
+<script>
+window.marks = {}; window.said = {}; window.loads = {};
+addEventListener("message", function (e) { try { var m = JSON.parse(e.data); said[m.name] = m.r; } catch (x) {} });
+function count(f) { loads[f.id] = 0; f.addEventListener("load", function () { loads[f.id]++; }); }
+["mk_removed", "mk_added", "mk_added_src"].forEach(function (id) { count(document.getElementById(id)); });
+document.getElementById("mk_removed").removeAttribute("sandbox");
+document.getElementById("mk_added").setAttribute("sandbox", "");
+document.getElementById("mk_added_src").setAttribute("sandbox", "");
+document.getElementById("mk_added_src").src = "frame_sandbox_child.html?c=mk_added_src";
+</script>
+<script src="frame_sandbox_page.js"></script>
+</body>

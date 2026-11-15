@@ -1,0 +1,244 @@
+{
+ "src": {
+  "none": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "empty": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "scripts": {
+   "loads": 1,
+   "marked": 0,
+   "said": {
+    "ran": true,
+    "frameElement": "null",
+    "parentWrite": "throws DOMException",
+    "origin": "null"
+   },
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "origin": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "both": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  }
+ },
+ "srcdoc": {
+  "none": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "empty": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "scripts": {
+   "loads": 1,
+   "marked": 0,
+   "said": {
+    "ran": true,
+    "frameElement": "null",
+    "parentWrite": "throws DOMException",
+    "origin": "null"
+   },
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "origin": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "both": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  }
+ },
+ "blank": {
+  "none": {
+   "loads": 2,
+   "marked": 1,
+   "said": null,
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object",
+   "write": "ok"
+  },
+  "empty": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException",
+   "write": "throws TypeError"
+  },
+  "both": {
+   "loads": 2,
+   "marked": 1,
+   "said": null,
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object",
+   "write": "ok"
+  }
+ },
+ "markup": {
+  "mk_removed": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "mk_added": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "mk_added_src": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException",
+   "saidFirst": null
+  }
+ },
+ "afterLoad": {
+  "added_loaded": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  },
+  "removed_loaded": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "added_changed": {
+   "loads": 1,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object",
+   "sameOriginCallStillWorks": "child"
+  },
+  "removed_changed": {
+   "loads": 1,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "added_navigated": {
+   "loads": 2,
+   "marked": 0,
+   "said": null,
+   "contentDocument": "null",
+   "contentWindow": "object",
+   "contentWindowDocument": "throws DOMException"
+  },
+  "removed_navigated": {
+   "loads": 2,
+   "marked": 1,
+   "said": {
+    "ran": true,
+    "frameElement": "object",
+    "parentWrite": "ok",
+    "origin": "page"
+   },
+   "contentDocument": "object",
+   "contentWindow": "object",
+   "contentWindowDocument": "object"
+  }
+ },
+ "browser": "148.0.7778.216"
+}

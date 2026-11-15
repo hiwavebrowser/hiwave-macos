@@ -139,6 +139,8 @@ mod clock_parity_tests;
 #[cfg(test)]
 mod frame_clock_tests;
 #[cfg(test)]
+mod frame_sandbox_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
@@ -1335,11 +1337,13 @@ impl Drop for InRealm<'_> {
 
 /// What a page asked of its frames (web_frames.js): show `url` in the
 /// iframe element `node` (`Some`), or that element left the document
-/// (`None`).
+/// (`None`). `sandbox` is the element's `sandbox` attribute for this
+/// navigation: its value when the request was made (`None`: no attribute).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameRequest {
     pub node: usize,
     pub url: Option<String>,
+    pub sandbox: Option<String>,
 }
 
 pub struct DomBindings {
@@ -1443,7 +1447,7 @@ impl DomBindings {
                     let mut queue = queue.borrow_mut();
                     // Bounds what a page can park between two drains.
                     if queue.len() < 256 {
-                        queue.push(FrameRequest { node: *node as usize, url });
+                        queue.push(FrameRequest { node: *node as usize, url, sandbox: None });
                     }
                 }
                 JsValue::Null
