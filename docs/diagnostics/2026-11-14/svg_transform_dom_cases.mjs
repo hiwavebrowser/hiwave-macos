@@ -1,0 +1,52 @@
+// The SVG transform DOM (SVG 1.1 §7.14-7.17, as Chrome still ships it) in the pinned Chrome (CfT 148):
+// SVGSVGElement.createSVGTransform / createSVGTransformFromMatrix, SVGTransform and its setters, and the
+// SVGAnimatedTransformList / SVGTransformList behind `transform`, `gradientTransform` and `patternTransform`.
+// MotionMark 1.3.2's Suits test calls createSVGTransform, setRotate and gradientTransform.baseVal.initialize
+// on every particle reset (STYLE1 blocker hunt, blocker 3). Each case is a script whose last expression is
+// the string recorded.
+// Usage: node svg_transform_dom_cases.mjs <chrome.exe> <cases.json> <results.json>
+import puppeteer from "puppeteer-core";
+import fs from "fs";
+const [exe, casesOut, resultsOut] = process.argv.slice(2);
+const M = "function m(t) { var x = t.matrix; return [x.a, x.b, x.c, x.d, x.e, x.f].map(function (v) { return Math.round(v * 1000) / 1000; }).join(','); }";
+const cases = {
+  new_transform: "var t = svg.createSVGTransform(); [Object.prototype.toString.call(t), t.type, t.angle, m(t)].join('|')",
+  set_rotate_about_a_point: "var t = svg.createSVGTransform(); t.setRotate(30, 10, 20); [t.type, t.angle, m(t)].join('|')",
+  set_translate: "var t = svg.createSVGTransform(); t.setTranslate(5, 6); [t.type, t.angle, m(t)].join('|')",
+  set_scale: "var t = svg.createSVGTransform(); t.setScale(2, 3); [t.type, t.angle, m(t)].join('|')",
+  set_skew_x: "var t = svg.createSVGTransform(); t.setSkewX(10); [t.type, t.angle, m(t)].join('|')",
+  set_skew_y: "var t = svg.createSVGTransform(); t.setSkewY(10); [t.type, t.angle, m(t)].join('|')",
+  set_matrix: "var t = svg.createSVGTransform(); var x = svg.createSVGMatrix(); x.a = 2; x.e = 7; t.setMatrix(x); [t.type, t.angle, m(t)].join('|')",
+  from_matrix: "var x = svg.createSVGMatrix(); x.d = 3; x.f = 4; var t = svg.createSVGTransformFromMatrix(x); x.d = 9; [t.type, m(t)].join('|')",
+  constants: "[SVGTransform.SVG_TRANSFORM_UNKNOWN, SVGTransform.SVG_TRANSFORM_MATRIX, SVGTransform.SVG_TRANSFORM_TRANSLATE, SVGTransform.SVG_TRANSFORM_SCALE, SVGTransform.SVG_TRANSFORM_ROTATE, SVGTransform.SVG_TRANSFORM_SKEWX, SVGTransform.SVG_TRANSFORM_SKEWY].join(',')",
+  gradient_initialize: "var t = svg.createSVGTransform(); t.setRotate(45, 0, 0); var l = grad.gradientTransform.baseVal; var r = l.initialize(t); [grad.getAttribute('gradientTransform'), l.numberOfItems, l.length, r === t, l.getItem(0) === t, l.getItem(0).type].join('|')",
+  gradient_initialize_twice: "var a = svg.createSVGTransform(); a.setTranslate(1, 2); var b = svg.createSVGTransform(); b.setScale(3, 3); var l = grad.gradientTransform.baseVal; l.initialize(a); l.initialize(b); [grad.getAttribute('gradientTransform'), l.numberOfItems].join('|')",
+  item_change_writes_back: "var t = svg.createSVGTransform(); var l = grad.gradientTransform.baseVal; l.initialize(t); t.setRotate(10, 0, 0); grad.getAttribute('gradientTransform')",
+  rect_append: "rect.setAttribute('transform', 'translate(1,2)'); var t = svg.createSVGTransform(); t.setScale(2, 2); var l = rect.transform.baseVal; l.appendItem(t); [rect.getAttribute('transform'), l.numberOfItems, l.getItem(0).type, m(l.getItem(0))].join('|')",
+  parse_attribute: "rect.setAttribute('transform', 'rotate(45) scale(2) translate(3 4) skewX(5) matrix(1,0,0,1,6,7)'); var l = rect.transform.baseVal; var out = [l.numberOfItems]; for (var i = 0; i < l.numberOfItems; i++) out.push(l.getItem(i).type + ':' + l.getItem(i).angle + ':' + m(l.getItem(i))); out.join('|')",
+  parse_rotate_about_point: "rect.setAttribute('transform', 'rotate(90 10 10)'); var t = rect.transform.baseVal.getItem(0); [t.type, t.angle, m(t)].join('|')",
+  consolidate: "rect.setAttribute('transform', 'translate(10,0) scale(2)'); var l = rect.transform.baseVal; var c = l.consolidate(); [l.numberOfItems, c.type, m(c), rect.getAttribute('transform')].join('|')",
+  consolidate_empty: "rect.removeAttribute('transform'); var c = rect.transform.baseVal.consolidate(); String(c)",
+  clear: "rect.setAttribute('transform', 'translate(1,2)'); var l = rect.transform.baseVal; l.clear(); [l.numberOfItems, rect.getAttribute('transform')].join('|')",
+  remove_and_replace: "rect.setAttribute('transform', 'translate(1,2) scale(3)'); var l = rect.transform.baseVal; var r = l.removeItem(0); var n = svg.createSVGTransform(); n.setRotate(5, 0, 0); l.replaceItem(n, 0); [r.type, l.numberOfItems, rect.getAttribute('transform')].join('|')",
+  insert_before: "rect.setAttribute('transform', 'scale(3)'); var l = rect.transform.baseVal; var n = svg.createSVGTransform(); n.setTranslate(4, 0); l.insertItemBefore(n, 0); rect.getAttribute('transform')",
+  get_item_out_of_range: "rect.setAttribute('transform', 'scale(3)'); try { rect.transform.baseVal.getItem(5); 'no' } catch (e) { e.name }",
+  identity: "[rect.transform === rect.transform, rect.transform.baseVal === rect.transform.baseVal, rect.transform.animVal === rect.transform.baseVal, Object.prototype.toString.call(rect.transform), Object.prototype.toString.call(rect.transform.baseVal)].join('|')",
+  append_moves_item: "rect.setAttribute('transform', 'scale(3)'); var t = rect.transform.baseVal.getItem(0); var l2 = grad.gradientTransform.baseVal; l2.clear(); l2.appendItem(t); [rect.transform.baseVal.numberOfItems, l2.numberOfItems, grad.getAttribute('gradientTransform'), rect.getAttribute('transform')].join('|')",
+};
+fs.writeFileSync(casesOut, JSON.stringify(cases, null, 1));
+const b = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu"] });
+const p = await b.newPage();
+const res = {};
+for (const [k, body] of Object.entries(cases)) {
+  await p.setContent(`<!doctype html><svg id=s width=100 height=100><defs><linearGradient id=g></linearGradient></defs><rect id=r width=10 height=10></rect></svg>`);
+  // The case scripts are this file's own fixed strings, run in a throwaway page: evaluating them is the point.
+  res[k] = await p.evaluate((M, body) => {
+    const svg = document.getElementById("s"), grad = document.getElementById("g"), rect = document.getElementById("r");
+    try { return String(new Function("svg", "grad", "rect", M + "; return (" + "function () { return eval(arguments[0]); }" + ")(arguments[3]);")(svg, grad, rect, body)); }
+    catch (e) { return "threw:" + e.name + ":" + e.message; }
+  }, M, body);
+}
+fs.writeFileSync(resultsOut, JSON.stringify(res, null, 1));
+console.log(await b.version());
+await b.close();
