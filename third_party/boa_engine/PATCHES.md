@@ -855,3 +855,44 @@ made read-only, shadowed; a built-in prototype; strict code with no setter; `arg
 global names; a getter or setter that redefines or deletes its own property, own, on the prototype
 and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
 develop be8eb272, 22 differ).
+
+## Patch: a name-read cache hit only where it is what [[Get]] would do (`ic-exotic-get`)
+
+**What.** The property inline cache is keyed on shape, and an exotic object can share an ordinary
+object's shape: a Proxy made from `{}` has the empty shape with `Object.prototype`, and a typed array
+has the empty shape with its prototype, as does an object created from that prototype. A
+`GetPropertyByName` site warmed on ordinary objects then answered a Proxy from the prototype's slot
+(its `get` trap never ran) and a typed array reading a canonical numeric name such as `Infinity` or
+`NaN` from the prototype (a typed array's [[Get]] reads its elements for those names and never the
+prototype). The write side has had the same guard since `super-set-receiver`. Marked
+`HIWAVE PATCH (ic-exotic-get)`:
+
+- `vm/inline_cache/mod.rs`: `InlineCache::numeric_name`, whether the site's name is a canonical
+  numeric string, worked out once when the cache is made; `InlineCache::hit_is_get(object)`: an
+  ordinary [[Get]] always hits; a typed array's or an arguments object's hits for a name that is not
+  numeric (they differ from the ordinary one only for numeric names, so `ta.byteLength` and
+  `arguments.length` keep their hits); a Proxy's and a module namespace's never do.
+- `vm/opcode/get/property.rs`: the hit is taken only when `hit_is_get` holds; otherwise the full
+  [[Get]] runs.
+- `builtins/typed_array/object.rs`: `canonical_numeric_index_string` is `pub(crate)`.
+
+`GetNameGlobal` is unchanged: its receiver is the realm's global object, whose [[Get]] is the
+ordinary one.
+
+**Cost.** One function-pointer comparison per hit on an ordinary object.
+
+A typed array's and an arguments object's `[[Get]]` carry a comment pointing back to `hit_is_get`,
+which recognises them by function address: if one is wrapped or replaced, hits silently become
+misses (slower, not wrong). `InlineCache::new` runs the numeric-name parse only for a name that
+starts with a digit, `-`, `I` or `N`, the only first characters a canonical numeric string has.
+
+Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (17 cases from Chrome for Testing 148.0.7778.216:
+a Proxy sharing `Object.prototype`'s empty shape, a `super.x` read whose home object's prototype is
+such a Proxy, a Proxy's `length` read after ordinary objects that share its shape and get `length`
+from the prototype, a typed array reading `Infinity` through a prototype getter and `NaN` through a
+prototype data property; and twelve that already matched and pin what must keep working: a Proxy
+over an object with a prototype getter, a null-prototype object, ordinary hits, a typed array and a
+mapped arguments object reading a non-numeric name (and a check that the arguments object is
+mapped), a Proxy's `length` through an object with its own `length`, and the fill side, a Proxy with
+no `get` trap or only a `set` trap read twice and then an ordinary object that shares its shape; 5
+differ on develop).
