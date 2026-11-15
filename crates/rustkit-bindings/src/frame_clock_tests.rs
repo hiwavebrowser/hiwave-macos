@@ -103,63 +103,108 @@ fn one_documents_capture_clock_reads_what_it_did() {
 /// Recorded with this test's script on the merged-in tree (batch 83, 470f0ae4), one document.
 const ONE_DOCUMENT_CAPTURE: &str = "[0.1,0.2,5.4,16,16.1,16,16.2,32,32.1,40,40.1,48,48.1,64,64.1,80,96]";
 
-/// Chrome's `now` rows: the frame's origin is later, it reads less than the page at one instant,
-/// and the difference is the difference of the origins, before and after the clock moves.
+/// The page's clock read before and after one reading of the frame's, all in one script: the
+/// frame's reading plus the distance between the two documents' origins lies between the two page
+/// readings, so that distance lies in `[before - frame, after - frame]`. No allowance for time:
+/// however long the script was held between two reads, the bracket holds.
+const BRACKET_IN_PAGE: &str = "(function () { var a = performance.now(), c = child.performance.now(), b = performance.now(); \
+    return [a - c, b - c, a, c, b].join(); })()";
+const BRACKET_IN_FRAME: &str = "(function () { var a = up.performance.now(), c = performance.now(), b = up.performance.now(); \
+    return [a - c, b - c, a, c, b].join(); })()";
+
+fn numbers(s: String) -> Vec<f64> {
+    s.split(',').map(|x| x.parse::<f64>().unwrap()).collect()
+}
+
+/// Whether two closed ranges share a point (the clock's 0.1 ms steps are sums of doubles).
+fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0 <= b.1 + 1e-6 && b.0 <= a.1 + 1e-6
+}
+
+/// Chrome's `now` rows: the frame's origin is later, the frame reads less than the page at one
+/// instant, and the two readings stay the same distance apart, which is where the page's clock
+/// stood when the frame was made.
+///
+/// Chrome's distance is the difference of the two `timeOrigin`s to within 2 ms. Here it is that
+/// only while the page clock has not been moved ahead of real time: a load that runs its timers
+/// ahead moves the page clock with them (it is never behind the timers' clock), and a frame made
+/// after that counts from the moved clock, while its `timeOrigin` is the wall clock's. This page
+/// runs 300 ms of timers at once, so the distance is not compared with the `timeOrigin`s as a
+/// number of milliseconds (it was, within 3 ms, and failed whenever the frame was made before
+/// 300 ms of real time had passed). Every comparison below is a bracket or a floor that
+/// scheduling cannot break.
 #[test]
 fn a_frames_clock_is_the_pages_instant_from_its_own_origin() {
-    let (parent, child) = tree();
-    let read = "(function () { var a = performance.now(), c = child.performance.now(), b = performance.now(); \
-        return [a, c, b, child.performance.timeOrigin - performance.timeOrigin].join(); })()";
-    let numbers = |s: String| s.split(',').map(|x| x.parse::<f64>().unwrap()).collect::<Vec<_>>();
-    let first = numbers(ev(&parent, read));
-    let (a, c, b, origins) = (first[0], first[1], first[2], first[3]);
-    assert!(origins >= 100.0, "the frame's time origin is {origins} ms after the page's");
-    assert!(c >= 0.0 && c < a - 100.0, "the frame reads {c}, the page {a}");
-    let apart = (a + b) / 2.0 - c;
-    // Chrome: within 2 ms. `timeOrigin` is in whole milliseconds here.
-    assert!((apart - origins).abs() < 3.0, "the readings are {apart} ms apart, the origins {origins}");
-    // The frame's own script reads the same.
-    let own = numbers(ev(&child, "[up.performance.now(), performance.now()].join()"));
-    assert!((own[0] - own[1] - apart).abs() < 0.5, "read in the frame: {} apart, in the page {apart}", own[0] - own[1]);
+    let parent = page();
+    parent.evaluate("setTimeout(function () {}, 300);").unwrap();
+    parent.run_timers(1000, 100).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    // The page's clock before and after the frame is made, and how long making it took.
+    let before: f64 = ev(&parent, "String(performance.now())").parse().unwrap();
+    let making = std::time::Instant::now();
+    let child = frame_of(&parent);
+    let took = making.elapsed().as_secs_f64() * 1000.0;
+    let after: f64 = ev(&parent, "String(performance.now())").parse().unwrap();
+
+    // Wall time: the sleep is a floor, whatever else took time (whole milliseconds, twice).
+    let origins: f64 = ev(&parent, "String(child.performance.timeOrigin - performance.timeOrigin)").parse().unwrap();
+    assert!(origins >= 148.0, "the frame's time origin is {origins} ms after the page's");
+
+    let first = numbers(ev(&parent, BRACKET_IN_PAGE));
+    let apart = (first[0], first[1]);
+    assert!(first[3] >= 0.0 && apart.1 > 0.0, "the frame reads less than the page: {first:?}");
+    // The frame's origin is a reading of the page's clock taken while the frame was made, less at
+    // most the wall time making it took (in whole milliseconds).
+    assert!(
+        overlap(apart, (before - took - 1.0, after)),
+        "the readings are {apart:?} ms apart; the page's clock read {before} before the frame was made and {after} after, {took:.1} ms of wall time"
+    );
+    // The frame's own script reads the same distance.
+    let own = numbers(ev(&child, BRACKET_IN_FRAME));
+    assert!(overlap(apart, (own[0], own[1])), "read in the frame {own:?}, in the page {first:?}");
     // After real time and a jump of the timers' clock, in whichever document set the timer.
     std::thread::sleep(std::time::Duration::from_millis(30));
     child.evaluate("setTimeout(function () {}, 2000);").unwrap();
     parent.run_timers(5000, 100).unwrap();
-    let later = numbers(ev(&parent, read));
+    let later = numbers(ev(&parent, BRACKET_IN_PAGE));
     // The timers' clock is at 2300 ms now, and the page clock is never behind it.
-    assert!(later[0] >= 2300.0 && later[1] >= c + 1000.0, "both moved with the timers: {later:?} after {first:?}");
-    let apart_later = (later[0] + later[2]) / 2.0 - later[1];
-    assert!((apart_later - apart).abs() < 0.5, "the readings were {apart} ms apart and are {apart_later}");
+    assert!(later[2] >= 2300.0 && later[3] >= 2300.0 - after, "both moved with the timers: {later:?} after {first:?}");
+    assert!(overlap(apart, (later[0], later[1])), "the readings were {apart:?} ms apart and are {:?}", (later[0], later[1]));
+    assert!(overlap((own[0], own[1]), (later[0], later[1])), "read in the frame {own:?}, later in the page {later:?}");
 }
 
 /// Reading the two documents' clocks in turn does not run the clock fast, and neither goes back.
+/// The wall clock is read before the first reading and after the last, in the same script, so
+/// what the page clock moved is at most what the wall clock moved between them (its whole
+/// milliseconds, and the page clock's 0.1 ms step), however the script was scheduled.
 #[test]
-fn reading_two_documents_in_turn_keeps_wall_rate() {
+fn reading_two_documents_in_turn_does_not_run_the_clock_fast() {
     let (parent, _child) = tree();
-    let wall = std::time::Instant::now();
     let got = ev(
         &parent,
-        "(function () { var s = performance.now(), p = s, c = child.performance.now(), back = 0, n = 0; \
+        "(function () { var d0 = Date.now(), s = performance.now(), p = s, c = child.performance.now(), back = 0, n = 0; \
          while (p - s < 100) { var c2 = child.performance.now(), p2 = performance.now(); \
            if (c2 < c || p2 < p) back++; c = c2; p = p2; n++; } \
-         return [p - s, back, n].join(); })()",
+         var d1 = Date.now(); \
+         return [p - s, d1 - d0, back, n].join(); })()",
     );
-    let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
-    let parts: Vec<f64> = got.split(',').map(|x| x.parse().unwrap()).collect();
-    assert_eq!(parts[1], 0.0, "a clock went back ({got})");
-    let ratio = parts[0] / wall_ms;
-    assert!((0.85..=1.2).contains(&ratio), "{} ms on the clock in {wall_ms:.1} ms of wall time ({got})", parts[0]);
+    let parts = numbers(got.clone());
+    assert_eq!(parts[2], 0.0, "a clock went back ({got})");
+    assert!(parts[3] >= 2.0, "the loop read both clocks more than once ({got})");
+    assert!(parts[0] <= parts[1] + 1.2, "{} ms on the page clock in {} ms of wall time ({got})", parts[0], parts[1]);
 }
 
 /// Chrome's `raf` rows, in a load and in a live turn: one frame, the page's callback first, each
 /// document's own reading of the frame's time.
+/// The two timestamps are as far apart as the two documents' clocks are: within the bracket of
+/// a page reading before and after a frame reading (no allowance for time).
 #[test]
 fn one_frames_callbacks_get_each_documents_reading_of_one_time() {
     for live in [false, true] {
         let (parent, _child) = tree();
         parent
             .evaluate(
-                "var got = { order: [] }; var apart = (function () { var a = performance.now(), c = child.performance.now(), b = performance.now(); return (a + b) / 2 - c; })(); \
+                "var got = { order: [] }; var apart = (function () { var a = performance.now(), c = child.performance.now(), b = performance.now(); return [a - c, b - c]; })(); \
                  requestAnimationFrame(function (t) { got.p = t; got.pNow = performance.now(); got.order.push('parent'); }); \
                  child.requestAnimationFrame(function (t) { got.c = t; got.cNow = child.performance.now(); got.order.push('frame'); }); \
                  child.requestAnimationFrame(function (t) { got.c2 = t; }); requestAnimationFrame(function (t) { got.p2 = t; });",
@@ -173,7 +218,7 @@ fn one_frames_callbacks_get_each_documents_reading_of_one_time() {
         }
         let got = ev(
             &parent,
-            "[got.p === got.c, Math.abs(got.p - got.c - apart) < 0.5, got.pNow >= got.p && got.cNow >= got.c, \
+            "[got.p === got.c, got.p - got.c >= apart[0] - 1e-6 && got.p - got.c <= apart[1] + 1e-6, got.pNow >= got.p && got.cNow >= got.c, \
               got.p2 === got.p && got.c2 === got.c, got.c >= 0, got.order.join('+')].join()",
         );
         assert_eq!(
@@ -183,46 +228,53 @@ fn one_frames_callbacks_get_each_documents_reading_of_one_time() {
     }
 }
 
-/// Chrome's `ev` rows.
+/// Chrome's `ev` rows. An event's `timeStamp` is a reading of its maker's clock: it lies between
+/// a reading of that document's clock taken before the event was made and one taken after (no
+/// allowance for time), and stays what it was wherever the event is dispatched.
 #[test]
 fn an_events_time_stamp_is_on_its_makers_clock_and_stays() {
     let (parent, _child) = tree();
     let got = ev(
         &parent,
-        "(function () { var near = function (a, b) { return Math.abs(a - b) < 20; }, out = []; \
-         var e1 = new Event('x'), pn = performance.now(), cn = child.performance.now(), e2 = new child.Event('x'); \
-         out.push('made by the page: ' + near(e1.timeStamp, pn) + ' ' + near(e1.timeStamp, cn)); \
-         out.push('made with the frame\\'s constructor: ' + near(e2.timeStamp, pn) + ' ' + near(e2.timeStamp, cn)); \
+        "(function () { var out = [], within = function (lo, x, hi) { return lo <= x && x <= hi; }; \
+         var p0 = performance.now(), e1 = new Event('x'), p1 = performance.now(); \
+         out.push('made by the page: ' + within(p0, e1.timeStamp, p1)); \
+         var c0 = child.performance.now(), e2 = new child.Event('x'), c1 = child.performance.now(); \
+         out.push('made with the frame\\'s constructor: ' + within(c0, e2.timeStamp, c1)); \
          var cb = child.document.getElementById('cb'), seen; \
          cb.addEventListener('x', function (e) { seen = e.timeStamp; }); cb.dispatchEvent(e1); \
-         out.push('the page\\'s, dispatched in the frame: ' + (seen === e1.timeStamp) + ' ' + near(seen, pn) + ' ' + near(seen, cn)); \
+         out.push('the page\\'s, dispatched in the frame: ' + (seen === e1.timeStamp)); \
          var pb = document.getElementById('b'), pseen; \
          pb.addEventListener('x', function (e) { pseen = e.timeStamp; }); pb.dispatchEvent(e2); \
-         out.push('the frame\\'s, dispatched in the page: ' + (pseen === e2.timeStamp) + ' ' + near(pseen, pn) + ' ' + near(pseen, cn)); \
-         var click; cb.addEventListener('click', function (e) { click = [e.timeStamp, performance.now(), child.performance.now()]; }); cb.click(); \
-         out.push('click() in the frame: ' + near(click[0], click[1]) + ' ' + near(click[0], click[2])); \
+         out.push('the frame\\'s, dispatched in the page: ' + (pseen === e2.timeStamp)); \
+         var click; cb.addEventListener('click', function (e) { click = e.timeStamp; }); \
+         var k0 = child.performance.now(); cb.click(); var k1 = child.performance.now(); \
+         out.push('click() in the frame: ' + within(k0, click, k1)); \
          return out.join('; '); })()",
     );
-    // near the page's now, near the frame's now
     assert_eq!(
         got,
-        "made by the page: true false; made with the frame's constructor: false true; \
-         the page's, dispatched in the frame: true true false; the frame's, dispatched in the page: true false true; \
-         click() in the frame: false true"
+        "made by the page: true; made with the frame's constructor: true; \
+         the page's, dispatched in the frame: true; the frame's, dispatched in the page: true; \
+         click() in the frame: true"
     );
 }
 
 /// An event the engine fires in a document is stamped on that document's clock (Chrome: `load`
-/// at the frame's window reads the frame's clock, at the `<iframe>` element the page's).
+/// at the frame's window reads the frame's clock, at the `<iframe>` element the page's): between
+/// a reading of that clock before the engine fired it and the listener's reading of it.
 #[test]
 fn an_event_the_engine_fires_is_on_its_documents_clock() {
     let (parent, child) = tree();
-    child.evaluate("var seen; addEventListener('load', function (e) { seen = [e.timeStamp, performance.now(), up.performance.now()]; });").unwrap();
-    parent.evaluate("var seen; addEventListener('load', function (e) { seen = [e.timeStamp, performance.now(), child.performance.now()]; });").unwrap();
+    let listen = "var seen, before; addEventListener('load', function (e) { seen = [e.timeStamp, performance.now()]; });";
+    child.evaluate(listen).unwrap();
+    parent.evaluate(listen).unwrap();
+    child.evaluate("before = performance.now();").unwrap();
     child.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+    parent.evaluate("before = performance.now();").unwrap();
     parent.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
-    let near = "[Math.abs(seen[0] - seen[1]) < 20, Math.abs(seen[0] - seen[2]) < 20].join()";
-    assert_eq!((ev(&child, near), ev(&parent, near)), ("true,false".to_string(), "true,false".to_string()), "near its own document's now, near the other's: in the frame, in the page");
+    let within = "String(before <= seen[0] && seen[0] <= seen[1])";
+    assert_eq!((ev(&child, within), ev(&parent, within)), ("true".to_string(), "true".to_string()), "between its own document's readings: in the frame, in the page");
 }
 
 /// What a page and its frame log in capture mode: both documents' readings, events, frames and
