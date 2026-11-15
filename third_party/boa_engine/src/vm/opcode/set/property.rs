@@ -51,22 +51,21 @@ fn set_by_name(
 
     let object_borrowed = object.borrow();
     if let Some((shape, slot)) = ic.get(object_borrowed.shape())
-        // HIWAVE PATCH (array-length-ic): a cached slot is used only on an object whose
-        // [[DefineOwnProperty]] is the ordinary one, or on an array for any name but `length`. An
-        // Array subclass instance has the same shape as `Object.create(Q.prototype)` given a
-        // writable own `length`, so a site that cached that object's `length` would otherwise
-        // write a real array's `length` past ArraySetLength. It covers accessor hits too: an exotic
-        // object whose [[Set]] never reaches the prototype for a name (a typed array's canonical
-        // numeric key) can share a shape with an ordinary object that cached a prototype setter.
-        && (has_ordinary_define_own_property(&object)
-            || (object.is_array() && ic.name != StaticJsStrings::LENGTH))
         // HIWAVE PATCH (super-set-receiver): an accessor hit calls the setter with the receiver, so
         // it is right for any receiver. A data hit writes a slot in place, which is what [[Set]]
         // does only for an own data property of the receiver: the slot must be the object's own
         // (not `PROTOTYPE`: a data property found on the prototype is defined on the receiver,
         // never written where it was found) and the receiver must be the object.
         && (slot.attributes.is_accessor_descriptor()
-            || (!slot.attributes.contains(SlotAttributes::PROTOTYPE) && receiver_is_object))
+            || (!slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                && receiver_is_object
+                // HIWAVE PATCH (array-length-ic): and only on an object whose [[DefineOwnProperty]]
+                // is the ordinary one, or on an array for any name but `length`. An Array subclass
+                // instance has the same shape as `Object.create(Q.prototype)` given a writable own
+                // `length`, so a site that cached that object's `length` would otherwise write a
+                // real array's `length` past ArraySetLength.
+                && (has_ordinary_define_own_property(&object)
+                    || (object.is_array() && ic.name != StaticJsStrings::LENGTH))))
     {
         let slot_index = slot.index as usize;
 

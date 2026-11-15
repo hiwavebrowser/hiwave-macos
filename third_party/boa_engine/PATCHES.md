@@ -789,10 +789,9 @@ with no own `x`). The cache also wrote a data slot found on the prototype (`PROT
   writes give up the cache, and its prototype-setter writes still hit;
 - the cache is filled from a data write only when the receiver is the object. Upstream already marks
   that case not cacheable inside OrdinarySet, so this has no failing case of its own; it is defensive.
-- composed with `array-length-ic`: both conditions hold on every hit, the define-own one on accessor
-  hits too (an exotic object whose [[Set]] never reaches the prototype for a name, such as a typed
-  array's canonical numeric key, can share a shape with an ordinary object that cached a prototype
-  setter).
+- composed with `array-length-ic`: #1160's define-own condition applies to data hits. It is not applied
+  to accessor hits: a primitive string base goes through its exotic wrapper, so that would make every
+  write to a `String.prototype` setter miss.
 
 Checked with the vm-stats counters: 4,000 writes to an object, an array, a function and a class
 instance, 1,000 `super.x = v` onto a prototype setter with a new `this` each time, and 1,000 writes
