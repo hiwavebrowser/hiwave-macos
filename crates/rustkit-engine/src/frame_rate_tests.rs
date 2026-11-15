@@ -1,0 +1,60 @@
+//! PACE2: animation frames and 10 ms timer links per wall second on the content thread's loop.
+//!
+//! The page (`docs/diagnostics/2026-11-15/frame_rate_probe.html`) runs a requestAnimationFrame
+//! loop and a `setTimeout(link, 10)` chain for 3000 ms of `performance.now`. Chrome for Testing
+//! 148.0.7778.216, five runs (`frame_rate_probe_cft148.json`): 180-181 frames and 281-283 links.
+
+use std::time::{Duration, Instant};
+
+use crate::load_turns_tests::{html, serve, Load};
+
+pub(crate) const PROBE_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-15/frame_rate_probe.html");
+
+/// Loads the probe with `#manual`, starts it in a live turn after the load, and returns its record.
+pub(crate) fn run_probe() -> serde_json::Value {
+    let fixture = serve(vec![("/", html(PROBE_PAGE))]);
+    let mut load = Load::start(&fixture, "/#manual");
+    load.wait_complete();
+    let _ = load.eval("go(); 'started'", Duration::from_secs(10));
+    // No commands while the probe runs: an eval is a turn the loop did not pace.
+    std::thread::sleep(Duration::from_millis(3300));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (answer, _) = load.eval(
+            "window.rec && rec.done ? JSON.stringify(rec) : ''",
+            Duration::from_secs(10),
+        );
+        let answer = answer.unwrap_or_default();
+        let text = answer
+            .strip_prefix("String(\"")
+            .and_then(|s| s.strip_suffix("\")"))
+            .unwrap_or_default()
+            .replace("\\\"", "\"");
+        if !text.is_empty() {
+            return serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+        }
+        assert!(Instant::now() < deadline, "the probe did not finish");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+}
+
+#[test]
+#[ignore]
+fn measure_the_content_threads_frame_rate() {
+    // Windows sleeps in 15.6 ms ticks unless a process asks for 1 ms; `HIWAVE_PACE2_1MS` asks, so
+    // a sleep lasts about what it does on macOS.
+    #[cfg(windows)]
+    if std::env::var_os("HIWAVE_PACE2_1MS").is_some() {
+        unsafe { timeBeginPeriod(1) };
+    }
+    for _ in 0..3 {
+        eprintln!("PACE2-RESULT {}", run_probe());
+    }
+}
