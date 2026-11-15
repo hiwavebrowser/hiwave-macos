@@ -174,6 +174,31 @@ wake on it), so headless load-to-script latencies (`scripts/diagnose.py`,
 `tools/parity_oracle/img_load_log.mjs`) can move by up to one 50 ms tick
 against earlier runs.
 
+## Raising the live-turn watchdog (blocker hunts only)
+
+The engine stops one turn's JavaScript after 5000 ms (`EngineConfig::live_turn_budget_ms`). Chrome has
+no such stop, and a suite with a long computation in one turn dies at it: MotionMark 1.3.2's end-of-test
+analysis (2500 bootstrap iterations) takes 3-8 s on a Windows release build, and the stop ends the
+animation loop and every later test. To list everything that stops a suite in one run:
+
+    HIWAVE_STRESS_TURN_BUDGET_MS=60000 python3 tools/stress/run.py --suite motionmark --engine hiwave-headless --binary <parity-capture>
+
+- For `hiwave-headless` only (it passes `--live-turn-budget-ms` to parity-capture, with
+  `--interrupt-scripts`, which the flag requires); refused for the other engines.
+- Off unless set; the engine's default does not change. Whole milliseconds, 1 to 3600000; above the run's
+  wall limit it is clamped to that limit.
+- It raises more than the stop: the same number is the turn's whole allowance of script time
+  (`lib.rs`, the live turn's `install_script_js`), so a raised run paces frames differently even when no
+  single callback runs long. Fine for finding blockers; not a measurement of the default engine.
+- Said loudly at the start and in the closing line (run.py and parity-capture both print it), and recorded
+  as `live_turn_budget_ms` in the run record (`null` for a normal run). `report.py` leaves such runs out,
+  and never mixes them with default runs; `report.py --raised-budget` reports them on their own.
+
+What one long turn does, on the same page (`docs/diagnostics/2026-11-14/long_turn_engine.html`: a
+requestAnimationFrame callback that runs 6 s after 4 s, a timer that runs 6 s at 12 s), in Chrome for
+Testing 148 (`long_turn_cft148.json`, by `long_turn_chrome.mjs`) and in the engine at the default and at a
+raised budget (`long_turn_engine.json`, by `long_turn_engine.py`).
+
 ## Landing rule (proposed)
 
 `report.py --compare BASE CAND`: the candidate regresses when its median is

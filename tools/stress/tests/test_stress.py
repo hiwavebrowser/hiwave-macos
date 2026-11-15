@@ -18,10 +18,10 @@ sys.path.insert(0, str(HERE))
 import run  # noqa: E402
 
 
-def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0):
+def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0, budget=None):
     r = {"schema": 1, "suite": suite, "engine": "hiwave", "label": label, "status": status, "score": score,
          "partial": partial, "binary_sha1": label * 5, "suite_sha": "0" * 40, "wall_s": 60.0,
-         "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}}
+         "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}, "live_turn_budget_ms": budget}
     (tmp / ("%s_%s_%d.json" % (suite, label, n))).write_text(json.dumps(r))
 
 
@@ -416,3 +416,77 @@ def test_a_run_is_unobserved_without_its_request_log_or_on_the_webkit_chrome(mon
     # End to end: an engine whose request log says nothing is not an offline run.
     code, rec = run_with_fake_engine(monkeypatch, tmp_path / "quiet", "", request_log=False)
     assert code == 1 and rec["status"] == "invalid" and rec["score"] is None and "unobserved" in rec["off_machine"], rec
+
+
+def test_the_turn_budget_is_raised_only_when_its_variable_is_set(monkeypatch, tmp_path):
+    # A stress run may raise the engine's live-turn watchdog so a long computation (MotionMark's end-of-test
+    # analysis) finishes and the next blocker shows. Without the variable the engine keeps its own default.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    assert run.turn_budget_ms() is None
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, None)
+    assert "--live-turn-budget-ms" not in argv and "--interrupt-scripts" in argv
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "600000")
+    assert run.turn_budget_ms() == 600000
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, 600000)
+    assert argv[argv.index("--live-turn-budget-ms") + 1] == "600000"
+    for bad in ("", "abc", "0", "-5"):
+        monkeypatch.setenv(run.TURN_BUDGET_ENV, bad)
+        try:
+            run.turn_budget_ms()
+            raise AssertionError("accepted %r" % bad)
+        except SystemExit:
+            pass
+
+
+def test_a_raised_budget_run_never_enters_a_default_comparison(tmp_path):
+    # Same suite, engine and label: a raised-budget run is still not folded into the default median.
+    record(tmp_path, "motionmark", "base", 100.0, 0)
+    record(tmp_path, "motionmark", "cand", 100.0, 0)
+    record(tmp_path, "motionmark", "cand", 5000.0, 1, budget=60000)
+    record(tmp_path, "motionmark", "cand", 5000.0, 2, budget=60000)
+    code, rows = compare(tmp_path)
+    assert code == 0 and rows["motionmark"]["cand"]["n"] == 1, rows
+    # On its own, with --raised-budget, it is reported, and only it.
+    p = subprocess.run([sys.executable, str(HERE / "report.py"), "--raised-budget", "--json", str(tmp_path)],
+                       capture_output=True, text=True)
+    rows = json.loads(p.stdout)
+    assert [(r["label"], r["n"], r["median"]) for r in rows] == [("cand", 2, 5000.0)], rows
+
+
+def test_the_turn_budget_takes_plain_digits_up_to_an_hour(monkeypatch):
+    for bad in (" 60000 ", "+5", "1_000", "６０", "3600001", "99999999999"):
+        monkeypatch.setenv(run.TURN_BUDGET_ENV, bad)
+        try:
+            run.turn_budget_ms()
+            raise AssertionError("accepted %r" % bad)
+        except SystemExit:
+            pass
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "3600000")
+    assert run.turn_budget_ms() == run.TURN_BUDGET_MAX_MS == 3600000
+
+
+def test_a_raised_budget_is_refused_for_the_app_and_chrome(monkeypatch, tmp_path):
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
+    for engine in ("hiwave", "chrome"):
+        monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "motionmark", "--engine", engine,
+                                          "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")])
+        try:
+            run.main()
+            raise AssertionError("ran %s with a raised budget" % engine)
+        except SystemExit as e:
+            assert "hiwave-headless engine only" in str(e.code), e.code
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_raised_budget_run_says_so_and_records_it(monkeypatch, tmp_path, capsys):
+    # The fake engine is started the way the real one is (sandbox-exec on the Mac).
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path, "")
+    cap = capsys.readouterr()
+    # The run's wall limit is 20 s here, so the budget is clamped to it.
+    assert code == 0 and rec["live_turn_budget_ms"] == 20000, rec
+    assert "TURN BUDGET RAISED" in cap.err and "clamped to the run's wall limit, 20000 ms" in cap.err, cap.err
+    assert "TURN BUDGET RAISED to 20000 ms" in cap.out, cap.out
+    monkeypatch.delenv(run.TURN_BUDGET_ENV)
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "default", "")
+    assert code == 0 and rec["live_turn_budget_ms"] is None, rec
