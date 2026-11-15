@@ -1,0 +1,19 @@
+{
+ "page": "long_turn_engine.html",
+ "default_budget": {
+  "exit": 0,
+  "frames": 548,
+  "framesAfterLong": 0,
+  "longFrameMs": 0,
+  "timerLongMs": 0,
+  "timersAfter": 0
+ },
+ "raised_budget_60000": {
+  "exit": 0,
+  "frames": 548,
+  "framesAfterLong": 1,
+  "longFrameMs": 6000,
+  "timerLongMs": 6000,
+  "timersAfter": 1
+ }
+}

@@ -1,0 +1,19 @@
+<!doctype html><script>
+window.rec = { frames: 0, framesAfterLong: 0, longFrameMs: 0, timerLongMs: 0, timersAfter: 0 };
+var start = performance.now(), longDone = false, timerDone = false;
+function frame(ts) {
+  rec.frames++;
+  if (longDone) rec.framesAfterLong++;
+  else if (performance.now() - start > 4000) { var t0 = performance.now(); while (performance.now() - t0 < 6000) {} rec.longFrameMs = Math.round(performance.now() - t0); longDone = true; }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+(function poll() {
+  if (!timerDone && performance.now() - start > 12000) {
+    timerDone = true; var t0 = performance.now(); while (performance.now() - t0 < 6000) {} rec.timerLongMs = Math.round(performance.now() - t0);
+    setTimeout(function tick() { rec.timersAfter++; if (rec.timersAfter < 5) setTimeout(tick, 50); }, 50);
+  }
+  if (!timerDone) setTimeout(poll, 100);
+})();
+setTimeout(function report() { if (performance.now() - start > 21000) console.log('REC ' + JSON.stringify(rec)); else setTimeout(report, 200); }, 200);
+</script>
