@@ -1,0 +1,111 @@
+{
+ "raw": {
+  "originDelta": 162,
+  "parentNow": 178.60000002384186,
+  "childNow": 16.600000023841858,
+  "childFirstRead": 16.100000023841858,
+  "timeline": [
+   170.8,
+   0
+  ],
+  "ev": {
+   "parentMade": 178.60000002384186,
+   "childCtor": 16.600000023841858,
+   "pn": 178.60000002384186,
+   "cn": 16.600000023841858,
+   "parentMadeViaChildGetter": 178.60000002384186
+  },
+  "raf0": {
+   "order": [
+    "parent",
+    "frame"
+   ],
+   "p": 178.2,
+   "pNow": 178.80000007152557,
+   "c": 15.9,
+   "cNow": 16.90000009536743
+  },
+  "raf1": {
+   "order": [
+    "parent",
+    "frame"
+   ],
+   "p": 187.8,
+   "pNow": 187.90000009536743,
+   "c": 25.5,
+   "cNow": 25.90000009536743
+  },
+  "trustedClick": [
+   62.800000071525574,
+   225.40000009536743,
+   63.40000009536743,
+   true
+  ]
+ },
+ "now": {
+  "childOriginIsLater": true,
+  "childReadsLessThanParent": true,
+  "parentMinusChildIsTheOriginDelta": true,
+  "originPlusNowIsOneInstant": true,
+  "childFirstReadIsFromItsOwnOrigin": true
+ },
+ "timeline": {
+  "parentMinusChildIsTheOriginDelta": true,
+  "equal": false
+ },
+ "ev": {
+  "madeByParent": {
+   "nearParentNow": true,
+   "nearChildNow": false
+  },
+  "madeWithTheFramesConstructor": {
+   "nearParentNow": false,
+   "nearChildNow": true
+  },
+  "parentsEventDispatchedInTheFrame": {
+   "sameAsBefore": true,
+   "nearParentNow": true,
+   "nearChildNow": false
+  },
+  "framesEventDispatchedInTheParent": {
+   "sameAsBefore": true,
+   "nearParentNow": false,
+   "nearChildNow": true
+  },
+  "parentsEventReadWithTheFramesGetter": {
+   "sameAsOwnGetter": true,
+   "nearParentNow": true,
+   "nearChildNow": false
+  },
+  "clickMethodInTheFrame": {
+   "nearParentNow": false,
+   "nearChildNow": true
+  },
+  "frameWindowLoad": {
+   "nearChildNowThen": true
+  },
+  "iframeElementLoad": {
+   "nearParentNowThen": true
+  },
+  "trustedClickInTheFrame": {
+   "trusted": true,
+   "nearParentNow": false,
+   "nearChildNow": true
+  }
+ },
+ "raf": [
+  {
+   "equalNumbers": false,
+   "parentMinusChildIsTheOriginDelta": true,
+   "notAfterEachDocumentsNow": true,
+   "order": "parent,frame"
+  },
+  {
+   "equalNumbers": false,
+   "parentMinusChildIsTheOriginDelta": true,
+   "notAfterEachDocumentsNow": true,
+   "order": "parent,frame"
+  }
+ ],
+ "browser": "148.0.7778.216"
+}
