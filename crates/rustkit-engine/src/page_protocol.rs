@@ -1283,8 +1283,7 @@ impl EndpointSide {
                 // wait until that callback does.
                 cmds = self.drain_coalesced();
                 if cmds.is_empty() {
-                    let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
-                    let wait = std::time::Duration::from_millis(wait_ms);
+                    let wait = content_turn_wait(turn.next_timer_ms);
                     // A command ends the wait (CH3.A9): the chrome's Cmd+T
                     // used to sit here until the chrome's next timer.
                     match &self.cmd_wake {
@@ -1340,6 +1339,19 @@ impl EndpointSide {
             other => self.apply(engine, other, None),
         }
     }
+}
+
+/// How long the content thread's loop waits after a turn that left no
+/// command: until the page's next timer, at least 2 ms and at most 50 ms.
+/// Nothing in it depends on how long the turn took: a turn that ran one long
+/// callback is followed by the next frame as soon as its timer is due, as
+/// in Chrome. (The window thread's loop with the content thread off,
+/// `hiwave-app` `process_events`, keeps a wait at least as long as the last
+/// turn, so the page cannot hold the window's thread more than half the
+/// time.) parity-capture's live loop paces with this function, so a
+/// headless capture paces as the app does.
+pub fn content_turn_wait(next_timer_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(next_timer_ms.unwrap_or(50).clamp(2, 50))
 }
 
 impl PageEndpoint {

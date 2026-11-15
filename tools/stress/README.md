@@ -150,14 +150,29 @@ The suites themselves reference no off-machine subresource at these pins
 
 ## Headless or window
 
-`hiwave-headless` runs the same engine, the same live loop pacing as the app
+`hiwave-headless` runs the same engine and the app's 15 s script budget
 (`parity-capture --live-ms`: timers on the real clock, `requestAnimationFrame`
-as a 16 ms frame timer) and the app's 15 s script budget, but presents
-nothing: frames are drawn offscreen and never reach a window. It is a fair
-arm for script-bound scores (Speedometer, JetStream) and for finding what
-blocks a suite. MotionMark measures frames reaching the screen, so its score
-of record is the real window's. Do not mix engines in one comparison:
-`report.py` keeps them apart.
+as a 16 ms frame timer), but presents nothing: frames are drawn offscreen and
+never reach a window. Between turns it waits as the app's content thread
+does (PACE1, `rustkit_engine::content_turn_wait`); its turns are its own, not
+the content thread's, so its pacing is close to the app's, not the same. It
+is a fair arm for script-bound scores (Speedometer, JetStream) and for
+finding what blocks a suite. MotionMark measures frames reaching the screen,
+so its score of record is the real window's. Do not mix engines in one
+comparison: `report.py` keeps them apart.
+
+**A headless frame rate is an upper bound, not the app's.** On the same page
+(`docs/diagnostics/2026-11-15/long_turn_resume.html`, Windows) the capture ran
+59 frames/s where the app's content-thread loop ran 35-37; until the capture
+drives the app's loop itself (row CAP1), read a headless MotionMark score as
+what the engine allows, not what the app shows. Runs record which wait the
+binary used (`live_pacing`): runs from before PACE1 (`window-thread`) waited
+at least as long as the last turn took and are not comparable with later
+ones. Since PACE1 a fetch that arrives while the loop waits with no timer set
+is handled up to 50 ms later than before (the content thread's wait does not
+wake on it), so headless load-to-script latencies (`scripts/diagnose.py`,
+`tools/parity_oracle/img_load_log.mjs`) can move by up to one 50 ms tick
+against earlier runs.
 
 ## Raising the live-turn watchdog (blocker hunts only)
 
