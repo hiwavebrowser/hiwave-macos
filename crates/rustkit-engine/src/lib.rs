@@ -340,7 +340,7 @@ mod transparent_frame_tests;
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
-    connect, content_turn_wait, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
+    connect, content_turn_wait, LiveClock, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
     PageEvent, PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
