@@ -124,6 +124,36 @@
    "name": "u_shadow_set",
    "js": "(function(){function big(p){var o=Object.create(p);for(var i=0;i<1100;i++)o['k'+i]=i;return o};var log=[];var P={set zz(v){log.push(v)}};var o=big(P);function f(o,v){o.zz=v}f(o,1);f(o,2);Object.defineProperty(o,'zz',{value:0,writable:true,configurable:true});f(o,3);return log.join(',')+'/'+o.zz})()",
    "chrome": "1,2/3"
+  },
+  {
+   "name": "r_lazy_getter_own",
+   "js": "(function(){var n=0;var o={get zz(){Object.defineProperty(o,'zz',{value:function(){n++;return 'called'},configurable:true});return 'first'}};function f(x){return x.zz}var a=f(o);var b=f(o);return a+','+typeof b+','+n})()",
+   "chrome": "first,function,0"
+  },
+  {
+   "name": "r_proto_getter_deletes",
+   "js": "(function(){var P={get zz(){delete P.zz;return 'g'},yy:'Y'};var o=Object.create(P);function f(x){return x.zz}var a=f(o);var b=f(o);return a+','+String(b)})()",
+   "chrome": "g,undefined"
+  },
+  {
+   "name": "r_proto_getter_redefines_data",
+   "js": "(function(){var P={get zz(){Object.defineProperty(P,'zz',{value:'d',configurable:true});return 'g'},yy:'Y'};var o=Object.create(P);function f(x){return x.zz}return [f(o),f(o),f(o)].join(',')})()",
+   "chrome": "g,d,d"
+  },
+  {
+   "name": "r_setter_redefines_own",
+   "js": "(function(){var log=[];var o={set zz(v){log.push('s'+v);Object.defineProperty(o,'zz',{value:0,writable:true,configurable:true})}};function f(x,v){x.zz=v}f(o,1);f(o,2);f(o,3);return log.join(',')+'/'+o.zz})()",
+   "chrome": "s1/3"
+  },
+  {
+   "name": "r_proto_setter_deletes",
+   "js": "(function(){var log=[];var P={set zz(v){log.push('s'+v);delete P.zz},yy:'Y'};var o=Object.create(P);function f(x,v){x.zz=v}f(o,1);f(o,2);f(o,3);return log.join(',')+'/'+Object.hasOwn(o,'zz')+'/'+o.zz+'/'+P.yy})()",
+   "chrome": "s1/true/3/Y"
+  },
+  {
+   "name": "r_global_getter_redefines",
+   "js": "(function(){Object.defineProperty(globalThis,'gz',{get:function(){Object.defineProperty(globalThis,'gz',{value:'d',configurable:true,writable:true});return 'g'},configurable:true});var g=new Function('return gz');return [g(),g(),g()].join(',')})()",
+   "chrome": "g,d,d"
   }
  ],
  "chrome_version": "148.0.7778.216"
