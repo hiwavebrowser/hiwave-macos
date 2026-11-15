@@ -26,6 +26,10 @@ fn a_recursive_getter_does_not_fill_a_site_with_copies_of_one_shape() {
     // Read once, when the first counter is bumped; nothing has run in this process yet.
     unsafe_set_env();
     let mut rt = JsRuntime::new().unwrap();
+    // The counters are cumulative for the process and runtime start-up fills some; count the
+    // misses these scripts add, not the total.
+    let before = rustkit_js::vm_stats_report();
+    let (get0, set0) = (misses(&before, "GetPropertyByName"), misses(&before, "SetPropertyByName"));
     // One read site (`f`); depth levels of recursion through an accessor, then 2000 reads of
     // each of two shapes that the site should now answer from its cache.
     let script = "(function(){ function f(o){ return o.v }\
@@ -47,7 +51,8 @@ fn a_recursive_getter_does_not_fill_a_site_with_copies_of_one_shape() {
     };
     assert_eq!(got, "2001,1999");
     let report = rustkit_js::vm_stats_report();
-    let (get, set) = (misses(&report, "GetPropertyByName"), misses(&report, "SetPropertyByName"));
+    let get = misses(&report, "GetPropertyByName").saturating_sub(get0);
+    let set = misses(&report, "SetPropertyByName").saturating_sub(set0);
     assert!(
         get < 200 && set < 200,
         "{get} read misses for 4000 reads and {set} write misses for 4000 writes, each of two shapes\n{report}"
