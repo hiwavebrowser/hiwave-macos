@@ -807,3 +807,51 @@ prototype for many receivers and for a primitive base, a primitive base over a p
 property, `Reflect.set` with another receiver, a plain write over a prototype data property, a proxy
 and a typed array (`Infinity`, `NaN`) after an ordinary object filled a prototype-setter entry; 5
 differed on develop, and the 3 exotic-base cases differed at 179eb717).
+
+## Patch: an inline cache entry is valid only while its slot is (`ic-holder`)
+
+**What.** Upstream keys a property inline-cache entry on the receiver's shape alone. For a property
+found on the receiver's prototype, that shape does not change when the prototype's property is
+deleted or redefined, so a site kept reading or writing a slot of the prototype that had moved or
+gone (another property's value or accessor, or past the end of storage). And a unique (dictionary
+mode) shape is changed in place, without a new shape, by an attribute change that keeps the slot's
+width (`Object.freeze`, `writable: false`, an accessor's getter or setter replaced) and by an own
+property added to it, so a site keyed on it kept writing a property that had become read-only, or
+kept answering from the prototype after an own property shadowed it. Three changes, each marked
+`HIWAVE PATCH (ic-holder)`:
+
+- `vm/inline_cache/mod.rs`: an entry for a prototype slot also holds the prototype's shape when
+  it was made (strongly, so its address is not reused while the entry exists); `get` hits only
+  while the prototype still has that shape and drops the entry otherwise. Prototype slots are not
+  cached for a receiver whose shape is unique. `set` caches only if the name still resolves to the
+  slot, with the same attributes, in the holder's current shape: the slot is taken when the lookup
+  finds the property but the shapes after any getter or setter it ran, and one that redefines or
+  deletes its own property (a self-replacing lazy getter) would otherwise cache a stale slot under
+  the new shape. For a prototype slot it also caches only if the receiver's shape still lacks the
+  name: a prototype accessor that defines it on the receiver (a memoising getter) gives the
+  receiver a new shape that has it, and an entry under that shape would skip the own property.
+- `object/shape/unique_shape.rs` `change_attributes_transition`: the same-width case makes a new
+  unique shape, as the width-changing case already did (upstream's "TODO: invalidate the pointer").
+- `vm/opcode/get/property.rs`, `get/name.rs`, `set/property.rs`: cached indexes are read with
+  `get`; a slot that is not there falls through to the full [[Get]]/[[Set]], and so does a cached
+  accessor write whose setter is no longer callable (a setter replaced by `undefined` keeps the
+  slot's bits, so the shape does not change; the full path is what throws in strict code).
+
+**Cost.** Inline-cache misses are the same as develop's, count for count, on richards,
+delta-blue, raytrace, hash-map, navier-stokes and Babylon (vm-stats); on splay they differ by at
+most 12 of 288k, within develop's own run-to-run variation. Wall time against develop be8eb272,
+both pinned to one core, median of five alternated rounds of 8 iterations (Linux x86-64,
+release): richards +3.3%, delta-blue +2.8%, raytrace +2.2%, hash-map +3.4%, Babylon +2.3%,
+splay +0.4%, navier-stokes +0.3% (single rounds swing up to about 10%). A weakly held
+holder (an upgrade on every prototype hit) cost about 1 point more on richards and delta-blue.
+The cost is one prototype borrow and one address comparison on each prototype hit; folding the
+check into the three hit paths, which already borrow the prototype, would remove the second
+borrow, at the price of every hit path having to remember it.
+
+Pin: `crates/rustkit-js/tests/ic_holder.rs` (cases from Chrome for Testing 148.0.7778.216, each
+warming a site twice before the change: prototype property deleted, accessor to data, data to
+accessor, read-only, getter or setter swapped, on reads and writes; dictionary-mode objects frozen,
+made read-only, shadowed; a built-in prototype; strict code with no setter; `arguments` objects;
+global names; a getter or setter that redefines or deletes its own property, own, on the prototype
+and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
+develop be8eb272, 22 differ).
