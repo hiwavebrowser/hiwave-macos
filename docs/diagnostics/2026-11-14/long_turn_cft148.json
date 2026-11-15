@@ -1,0 +1,9 @@
+{
+ "chrome": "Chrome/148.0.7778.216",
+ "frames": 244,
+ "framesAfterLong": 234,
+ "longFrameMs": 6000,
+ "timerLongMs": 6000,
+ "timersAfter": 5,
+ "error": null
+}
