@@ -12,6 +12,21 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// HIWAVE PATCH (regex-literal-cache): how many times a regular expression pattern was compiled to
+/// a matcher in this process. Always counted (one relaxed increment next to a pattern compile).
+static REGEXP_COMPILES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn count_regexp_compile() {
+    REGEXP_COMPILES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The number of regular expression pattern compiles so far in this process. Diagnostic and tests.
+#[must_use]
+pub fn regexp_compiles() -> u64 {
+    REGEXP_COMPILES.load(Ordering::Relaxed)
+}
 
 /// Whether the counters are on in this process.
 pub(crate) fn enabled() -> bool {

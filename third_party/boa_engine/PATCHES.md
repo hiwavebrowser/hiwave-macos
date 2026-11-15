@@ -896,3 +896,32 @@ mapped arguments object reading a non-numeric name (and a check that the argumen
 mapped), a Proxy's `length` through an object with its own `length`, and the fill side, a Proxy with
 no `get` trap or only a `set` trap read twice and then an ordinary object that shares its shape; 5
 differ on develop).
+
+## Patch: a regex literal compiles once per code block (`regex-literal-cache`)
+
+**What.** `StoreRegexp` (a regular expression literal) called `JsRegExp::new` on every evaluation,
+which parsed and compiled the pattern each time. A literal in a function that runs often (a string
+helper that tests a pattern, a loop body) paid a full pattern compile on every call. Now the
+literal's compiled record (matcher, flags, source text) is built the first time it is evaluated in
+its code block and kept in `CodeBlock::regexp_literals`, keyed by the pattern and flags constant
+indexes; each evaluation makes a new RegExp object from it, with its own identity and its own
+`lastIndex`, as the language requires. Marked `HIWAVE PATCH (regex-literal-cache)`:
+
+- `builtins/regexp/mod.rs`: `RegExp::matcher` is an `Rc<Regex>` (a clone of the record shares the
+  matcher); `RegExp::from_literal` looks the literal up in the cache, compiles and stores it if it
+  is not there, and creates the object from the record. `LiteralCache` is the cache's type.
+- `vm/code_block.rs`, `bytecompiler/mod.rs`: the `regexp_literals` field (not traced; the record
+  holds no object), empty when a code block is made.
+- `vm/opcode/push/literal.rs`: `StoreRegexp` goes through `RegExp::from_literal`.
+- `vm/stats.rs`, `rustkit-js` `regexp_compile_count()`: a process-wide count of pattern compiles
+  (one relaxed increment in `compile_native_regexp`), the pin's counter.
+
+`new RegExp(...)`, `RegExp(...)` and `String.prototype.match` with a string still compile on each
+call: their pattern is a runtime value.
+
+**Cost.** One lookup in a short vector (literals per code block) per evaluation instead of a compile.
+
+Pin: `crates/rustkit-js/tests/regex_literal_compile.rs`: 1000 evaluations of one literal compile at
+most once (was 1000), in a loop and in a called function; and 7 cases from Chrome for Testing
+148.0.7778.216 (a new object each evaluation, `lastIndex` per object, flags, sticky and unicode, two
+sites with the same text, named groups after `exec`).

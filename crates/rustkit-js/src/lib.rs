@@ -191,6 +191,19 @@ pub fn vm_stats_report() -> String {
     String::new()
 }
 
+/// How many times a regular expression pattern has been compiled to a matcher in this process (a
+/// regex literal evaluated again, `new RegExp(...)`, `RegExp.prototype.compile`). Diagnostic and tests.
+#[cfg(feature = "boa")]
+pub fn regexp_compile_count() -> u64 {
+    boa_engine::vm_stats::regexp_compiles()
+}
+
+/// Without the Boa engine nothing is compiled here.
+#[cfg(not(feature = "boa"))]
+pub fn regexp_compile_count() -> u64 {
+    0
+}
+
 /// Install the function Boa calls when an interrupt path fires. A null hook
 /// leaves those paths silent. The hook itself decides whether to write.
 #[cfg(feature = "boa")]
