@@ -5,9 +5,9 @@
 //! Proxy (skipping its `get` trap) and for a typed array reading a canonical numeric name such as
 //! `Infinity` or `NaN` (which [[Get]] on a typed array never looks up on the prototype). Expected
 //! values: Chrome for Testing 148.0.7778.216 (`tools/parity_oracle/ic_exotic_get_cases.json`,
-//! `js_cases_log.mjs --write`). Ten of the 14 cases already matched; they pin what must keep
-//! working: ordinary hits, a typed array and an `arguments` object reading a non-numeric name,
-//! a Proxy's `length`, and the fill side (a Proxy with no `get` trap, or only a `set` trap, reads
+//! `js_cases_log.mjs --write`). Twelve of the 17 cases already matched on develop; they pin what must
+//! keep working: ordinary hits, a typed array and a mapped `arguments` object reading a
+//! non-numeric name, a Proxy's `length` through an object with its own `length`, and the fill side (a Proxy with no `get` trap, or only a `set` trap, reads
 //! through to its target, and the entry made for it must not be taken by an ordinary object that
 //! shares its shape: a Proxy's [[Get]] marks its slot not cacheable). Each case runs on its
 //! own runtime and its own thread, so one that panics is reported by name.

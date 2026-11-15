@@ -69,6 +69,21 @@
    "name": "g_arguments_named_read",
    "js": "(function(){Object.prototype.zz='p';function g(){return arguments.zz}var r=[g(1),g(1),g(2,3)];delete Object.prototype.zz;return r.join()})()",
    "chrome": "p,p,p"
+  },
+  {
+   "name": "g_length_proxy_shares_shape_with_proto_length",
+   "js": "(function(){Object.prototype.length='L';function f(o){return o.length}var a=f(Object.create(Object.prototype)),b=f(Object.create(Object.prototype));var c=f(new Proxy({},{get(){return 'trap'}}));delete Object.prototype.length;return a+','+b+','+c})()",
+   "chrome": "L,L,trap"
+  },
+  {
+   "name": "g_arguments_mapped_named_read",
+   "js": "(function(){Object.prototype.zz='p';function g(a){a=a;return arguments.zz}var r=[g(1),g(1),g(2,3)];delete Object.prototype.zz;return r.join()})()",
+   "chrome": "p,p,p"
+  },
+  {
+   "name": "g_arguments_mapped_is_mapped",
+   "js": "(function(){function g(a){arguments[0]=9;return a}function h(a){'use strict';arguments[0]=9;return a}return g(1)+','+h(1)})()",
+   "chrome": "9,1"
   }
  ],
  "chrome_version": "148.0.7778.216"
