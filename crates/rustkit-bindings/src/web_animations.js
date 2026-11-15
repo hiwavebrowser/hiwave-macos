@@ -407,7 +407,12 @@
     var all = [];             // script animations, oldest first (composite order)
     var frameQueued = false;
     var timeline = {};
-    Object.defineProperty(timeline, 'currentTime', { get: function () { return timeNow; }, enumerable: true });
+    // The engine's virtual clock as it stands (Chrome's timeline is live, not only at a frame): the
+    // time the animations compute from.
+    Object.defineProperty(timeline, 'currentTime', { get: function () {
+        var v = typeof __rk.now === 'function' ? __rk.now() : timeNow;
+        return v > timeNow ? v : timeNow;
+    }, enumerable: true });
     function AnimationTimeline() { throw new TypeError('Illegal constructor'); }
     function DocumentTimeline() { return timeline; }
     DocumentTimeline.prototype = Object.create(AnimationTimeline.prototype);
@@ -420,7 +425,11 @@
     }
     function frame(ts) {
         frameQueued = false;
-        if (typeof ts === 'number' && ts > timeNow) timeNow = ts;
+        // The timeline runs on the engine's virtual frame clock, not on the callback's timestamp
+        // (the page clock, which also moves in real time between virtual steps): a capture that
+        // steps the clock reproduces.
+        var vt = typeof __rk.now === 'function' ? __rk.now() : ts;
+        if (typeof vt === 'number' && vt > timeNow) timeNow = vt;
         var list = all.slice();
         var more = false;
         for (var i = 0; i < list.length; i++) {
