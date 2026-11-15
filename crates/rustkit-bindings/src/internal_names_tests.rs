@@ -11,7 +11,7 @@ use super::*;
 /// The names page script can reach, sorted. Each is to move host-side.
 const REACHABLE: &[&str] = &[];
 
-const PAGE: &str = "<!DOCTYPE html><html><head><title>t</title><style>p{color:red}</style></head><body>\
+pub(super) const PAGE: &str = "<!DOCTYPE html><html><head><title>t</title><style>p{color:red}</style></head><body>\
     <p id=\"p\">text</p><form id=\"f\"><input id=\"i\"><select id=\"s\"><option>a</option></select>\
     <textarea id=\"t\"></textarea><button id=\"b\">b</button></form><img id=\"img\"><canvas id=\"c\"></canvas>\
     <div id=\"host\"></div></body></html>";
@@ -19,7 +19,7 @@ const PAGE: &str = "<!DOCTYPE html><html><head><title>t</title><style>p{color:re
 /// Walk own properties and prototype chains from the roots a page has
 /// (data properties only: no getter is called), three levels of values
 /// deep, and collect the internal-looking names with where each was seen.
-const WALK: &str = r#"(function () {
+pub(super) const WALK: &str = r#"(function () {
     var seen = new Set(), found = {};
     function visit(o, depth) {
         if (o === null || (typeof o !== 'object' && typeof o !== 'function') || seen.has(o) || depth > 3) return;
