@@ -2900,6 +2900,14 @@ const WRAPPERS_JS: &str = r#"
     // The engine builds its events with nothing a page can reach: these
     // built-ins are taken now, and every descriptor has no prototype.
     var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
+    var setProto = Object.setPrototypeOf, mathMax = Math.max, mathRound = Math.round, mathAbs = Math.abs;
+    // What describes an engine event (the embedder's literal) inherits
+    // from nothing before the engine reads or writes a field of it.
+    function bare(o) { return setProto(o, null); }
+    // An event's dispatch state under the engine's own keys: own
+    // properties of an engine event from the start (`make`).
+    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function getterDesc(get) {
         var d = objCreate(null);
         d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;
@@ -2972,6 +2980,8 @@ const WRAPPERS_JS: &str = r#"
         fixed(ev, 'composed', !!arg('composed'));
         stamp(ev);
         fixed(ev, 'timeStamp', dateNow());
+        fixed(ev, ORIGIN, null); fixed(ev, PATH, null);
+        fixed(ev, STOP, false); fixed(ev, STOP_NOW, false);
         // The fields, the root interface's first.
         var chain = objCreate(null), depth = 0, n;
         for (n = name; n !== 'Event' && FIELDS[n]; n = PARENT[n]) chain[depth++] = n;
@@ -5847,6 +5857,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireTransition = function (id, type, init) {
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!target) return;
+        init = bare(init);
         init.bubbles = true;
         init.cancelable = type === 'transitionend';
         var ev = make('TransitionEvent', type, init);
@@ -5858,6 +5869,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireAnimation = function (id, type, init) {
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!target) return;
+        init = bare(init);
         init.bubbles = true;
         init.cancelable = false;
         var ev = make('AnimationEvent', type, init);
@@ -5873,6 +5885,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireMouse = function (id, type, init) {
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!target) return true;
+        init = bare(init);
         // The pointer is on a shape of an `<svg>`, which the layout
         // sees as one box: the event's target is the shape.
         if (target.localName === 'svg' && typeof init.clientX === 'number') {
@@ -5897,11 +5910,11 @@ const WRAPPERS_JS: &str = r#"
         }
         var ev = make(pointer && __rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', type, init);
         // Where the point is in the document and in the target's box.
-        var at = {
+        var at = bare({
             pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
             offsetX: init.offsetX, offsetY: init.offsetY,
             movementX: init.movementX, movementY: init.movementY
-        };
+        });
         // A move or a boundary event has no button of its own: `which`
         // is the primary button while it is held.
         if (!press && !pointer) at.which = init.buttons & 1;
@@ -5947,6 +5960,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireWheel = function (id, init, cancelable) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target || !__rk.hasCtor('WheelEvent')) return true;
+            init = bare(init);
             if (target.localName === 'svg') target = svgShapeAt(target, init.clientX, init.clientY);
             init.bubbles = true;
             init.cancelable = cancelable !== false;
@@ -5954,7 +5968,7 @@ const WRAPPERS_JS: &str = r#"
             init.view = g;
             init.deltaZ = 0;
             init.deltaMode = 0;
-            var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * Math.max(1, Math.round(Math.abs(d) / 100)); };
+            var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * mathMax(1, mathRound(mathAbs(d) / 100)); };
             init.wheelDeltaX = notches(init.deltaX);
             init.wheelDeltaY = notches(init.deltaY);
             var ev = make('WheelEvent', 'wheel', init);
@@ -5962,10 +5976,10 @@ const WRAPPERS_JS: &str = r#"
             // `mousewheel` instead (Chrome for Testing 148; the user's
             // wheel only). Kept in a private map, read by `invoke`.
             if (mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute()) mapSet(LEGACY_TYPE, ev, 'mousewheel');
-            var at = {
+            var at = bare({
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
                 offsetX: init.offsetX, offsetY: init.offsetY
-            };
+            });
             extra(ev, at);
             trust(ev);
             return dispatchTo(target, ev);
@@ -5981,6 +5995,7 @@ const WRAPPERS_JS: &str = r#"
         var store = __rk.dragStore;
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!store || !target) return '1:none';
+        init = bare(init);
         if (type === 'dragstart') store.begin(target);
         var dt = store.prepare(type, op);
         var cancelable = type !== 'dragleave' && type !== 'dragend';
@@ -5993,10 +6008,10 @@ const WRAPPERS_JS: &str = r#"
         init.dataTransfer = dt;
         var ev = make(__rk.hasCtor('DragEvent') ? 'DragEvent' : 'MouseEvent', type, init);
 
-        var at = {
+        var at = bare({
             pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
             offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0, dataTransfer: dt
-        };
+        });
         extra(ev, at);
         trust(ev);
         var notCancelled = dispatchTo(target, ev);
@@ -6016,6 +6031,7 @@ const WRAPPERS_JS: &str = r#"
     __rk.fireKey = function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : g.document.activeElement;
             if (!target) return true;
+            init = bare(init);
             init.bubbles = true;
             init.cancelable = true;
             init.composed = true;
@@ -6101,7 +6117,6 @@ const WRAPPERS_JS: &str = r#"
     // Engine input events still dispatch Rust-side (events.rs, pin §4);
     // this is what page script registers and fires itself.
     var LISTENERS = new WeakMap();
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
     function thisTarget(o) { return o == null ? g : o; }
     function flag(opts, key) {
         return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
@@ -6380,7 +6395,6 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
         Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
     });
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
         mapSet(EV_CURRENT, event, t);
         mapSet(EV_PHASE, event, phase);
