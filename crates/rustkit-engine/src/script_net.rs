@@ -812,6 +812,9 @@ fn script_request(request: &NetRequest) -> Result<ScriptRequest, String> {
     let destination = match request.destination.as_str() {
         "xhr" => RequestDestination::Xhr,
         "fetch" => RequestDestination::Fetch,
+        // A dedicated worker's script and the scripts it imports: script requests to the policy, which
+        // checks them as it checks a module script (the page side checks the importScripts MIME type).
+        "worker" | "script" => RequestDestination::Script,
         _ => return Err("bad destination".into()),
     };
 

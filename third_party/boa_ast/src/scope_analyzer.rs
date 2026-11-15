@@ -127,9 +127,13 @@ impl<'ast> VisitorMut<'ast> for BindingEscapeAnalyzer<'_> {
         let direct_eval_old = self.direct_eval;
         self.direct_eval = node.contains_direct_eval || self.direct_eval;
         if let Some(scope) = &mut node.scope {
-            if self.direct_eval {
-                scope.escape_all_bindings();
-            }
+            // HIWAVE PATCH (switch-tdz): a binding declared in a switch case is reached by jumps
+            // that skip its declaration (`case 0: let z = 1; break; case 1: z`), so it needs a
+            // run-time dead zone. Registers have none: compilation follows source order, a later
+            // case's access compiled as initialised, and it read whatever the reused register held.
+            // A declarative environment does (an uninitialised binding throws ReferenceError), so
+            // these bindings always live in one, as they already did under direct eval.
+            scope.escape_all_bindings();
             std::mem::swap(&mut self.scope, scope);
         }
         for case in &mut node.cases {
