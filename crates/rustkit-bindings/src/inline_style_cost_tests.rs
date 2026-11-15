@@ -301,3 +301,26 @@ fn writes_of_every_shape_read_back_as_the_attribute_says() {
         assert!(!got.contains(" != "), "{base} / {op}: {got}");
     }
 }
+
+/// Each field of a parsed declaration is read once, and what is checked is what is kept: an index
+/// accessor on `Array.prototype` that hands the parse an object whose `name` answers a string once and
+/// an object after leaves a string kept.
+#[test]
+fn a_declaration_field_is_read_once_and_kept_as_checked() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style, r = s.left, calls = 0, names = 0; \
+             var x = { value: '1px', important: false }; \
+             Object.defineProperty(x, 'name', { get: function () { return names++ ? { toString: function () { return 'zzz'; } } : 'left'; } }); \
+             Object.defineProperty(Array.prototype, '0', { configurable: true, \
+               get: function () { return calls++ ? x : 'left: 1px'; }, set: function () {} }); \
+             e.setAttribute('style', 'left: 1px'); \
+             try { var during = s.length; } catch (err) {} \
+             delete Array.prototype[0]; \
+             [typeof s.item(0), s.cssText].join(',')",
+        ),
+        "string,left: 1px;"
+    );
+}
