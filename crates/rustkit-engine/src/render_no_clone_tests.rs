@@ -144,16 +144,21 @@ fn fixed_sticky_images_and_iframes_draw_the_same_under_scroll() {
         let drawn = capture(&mut engine, view, offset, false, &tag);
         assert!(drawn == copied, "at {offset:?} the offset draws what the copied list drew");
         if offset.0 == 0.0 {
-            assert_eq!(pixel(&drawn, 200, 10), [0, 0, 0], "at {offset:?} the fixed bar is at the top");
+            // Below 20: once stuck, the sticky bar is drawn over the fixed
+            // one, its elder in the tree, as in Chromium.
+            assert_eq!(pixel(&drawn, 200, 22), [0, 0, 0], "at {offset:?} the fixed bar is at the top");
         }
     }
-    // Sticky is laid out as static today (`Position::Sticky => Static`,
-    // ledgered): it scrolls with the page, as it did before P3. The bytes
-    // above pin that; here, that it really moved.
+    // The sticky bar scrolls with the page until it reaches the window's top,
+    // then stays there.
     let top = capture(&mut engine, view, (0.0, 0.0), false, "stick-top");
     let down = capture(&mut engine, view, (0.0, 10.0), false, "stick-down");
+    let stuck = capture(&mut engine, view, (0.0, 400.0), false, "stick-stuck");
     assert_eq!(pixel(&top, 200, 40), [0, 136, 255], "the sticky bar at 24..44");
-    assert_eq!(pixel(&down, 200, 40), pixel(&top, 200, 50), "10 up after a 10 px scroll");
+    assert_eq!(pixel(&down, 200, 30), [0, 136, 255], "10 up after a 10 px scroll");
+    assert_ne!(pixel(&down, 200, 40), [0, 136, 255], "and gone from where it ended");
+    assert_eq!(pixel(&stuck, 200, 10), [0, 136, 255], "held at the top, over the fixed bar");
+    assert_ne!(pixel(&stuck, 200, 40), [0, 136, 255], "and no further down");
 }
 
 /// An image is uploaded the first time a frame names it, and never again

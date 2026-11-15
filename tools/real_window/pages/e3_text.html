@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E3 text input</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* Two tall inputs, so the driver can aim by window fractions (as e12's
+     page): #a under 35% of the window height, #b under 75%. */
+  input { position: fixed; left: 0; right: 0; width: 100%; margin: 0; padding: 0 0 0 8px; border: 0;
+          box-sizing: border-box; font: 24px Menlo; }
+  #a { top: 0; height: 300px; background: #ffffe0; }
+  #b { top: 340px; height: 300px; background: #e0ffff; }
+</style>
+<input id="a" value="">
+<input id="b" value="">
+<script>
+  // CH2.E3. The page reports what it hears as beacons the driver reads:
+  // composition events, every input's value, and Cmd chords' keydowns.
+  // With ?prevent it cancels the keydown of every Cmd chord except the
+  // editing ones (Cmd+A/C/V/X/Z), as a page with its own Cmd+F does.
+  var prevent = location.search.indexOf('prevent') >= 0;
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  ['a', 'b'].forEach(function (id) {
+    var el = document.getElementById(id);
+    ['compositionstart', 'compositionupdate', 'compositionend'].forEach(function (t) {
+      el.addEventListener(t, function (e) { beacon('e3-' + id + '-' + t + '=' + encodeURIComponent(e.data)); });
+    });
+    el.addEventListener('input', function (e) {
+      beacon('e3-' + id + '-v=' + encodeURIComponent(el.value) + '-c=' + e.isComposing);
+    });
+    el.addEventListener('focus', function () { beacon('e3-' + id + '-focus'); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (!e.metaKey) return;
+    beacon('e3-cmd=' + encodeURIComponent(e.key));
+    if (prevent && 'acvxz'.indexOf(e.key.toLowerCase()) < 0) e.preventDefault();
+  });
+  beacon('e3-ready');
+</script>

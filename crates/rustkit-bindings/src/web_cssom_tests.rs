@@ -130,8 +130,8 @@ fn text_written_by_script_reparses_and_rule_style_writes_reach_the_text() {
     assert_eq!(
         ev(
             &b,
-            "var s = document.getElementById('s2'), sh = s.sheet, r = [sh.cssRules.length]; \
-             s.textContent = 'a{color:red} b{color:blue}'; r.push(sh.cssRules.length, s.sheet === sh); \
+            "var s = document.getElementById('s2'), old = s.sheet, r = [old.cssRules.length]; \
+             s.textContent = 'a{color:red} b{color:blue}'; var sh = s.sheet; r.push(old.cssRules.length, sh === old); \
              var st = sh.cssRules[1].style; st.setProperty('margin-top', '2px', 'important'); \
              st.color = 'green'; r.push(st.color, st.marginTop, st.getPropertyPriority('margin-top')); \
              r.push(s.textContent.indexOf('margin-top: 2px !important') > 0, st.removeProperty('color'), \
@@ -139,7 +139,10 @@ fn text_written_by_script_reparses_and_rule_style_writes_reach_the_text() {
              sh.cssRules[0].selectorText = 'i'; r.push(s.textContent.indexOf('i {') === 0); \
              r.join('|')"
         ),
-        "0|2|true|green|2px|important|true|green|b { margin-top: 2px !important; }|true"
+        // New text is a new sheet object; the old one keeps its (zero)
+        // rules (Chromium 148: `0|0|false|...`). The text write-backs after
+        // it are the engine's own CSSOM mechanism, not Chromium's.
+        "0|0|false|green|2px|important|true|green|b { margin-top: 2px !important; }|true"
     );
 }
 
@@ -172,6 +175,84 @@ fn constructed_sheets_replace_and_adopt() {
          s.replace('a { color: red }').then(function (x) { got = (x === s) + ',' + x.cssRules.length; }); '';",
     );
     assert_eq!(ev(&b, "got"), "true,1");
+}
+
+/// Records what `__rk.setAdoptedStyles` is given: `pub(node)` is the
+/// last text list published for `node`, joined with `||`, or `none`. The
+/// recorder is put on the host object (a host turn), where the engine's
+/// own is, since no page script can reach it.
+const RECORD_PUBLISH: &str = "globalThis.pubs = new Map(); \
+     __rk.setAdoptedStyles = function (node, texts) { pubs.set(node, JSON.parse(texts)); }; \
+     globalThis.pub = function (node) { return pubs.has(node) ? pubs.get(node).join('||') : 'none'; }; return '';";
+
+#[test]
+fn adopted_style_sheets_is_observable_push_splice_and_length_publish() {
+    let b = bound();
+    b.host_turn(RECORD_PUBLISH, &[]).unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "var a = new CSSStyleSheet(), c = new CSSStyleSheet(); a.replaceSync('p { color: red }'); \
+             c.replaceSync('i { top: 0 }'); var r = []; \
+             var list = document.adoptedStyleSheets; list.push(a); \
+             r.push(document.adoptedStyleSheets.length, pub(document).indexOf('red') >= 0); \
+             r.push(document.adoptedStyleSheets === list); \
+             document.adoptedStyleSheets.push(c); r.push(pub(document).split('||').length); \
+             document.adoptedStyleSheets.splice(0, 1); r.push(pub(document).indexOf('red') < 0, pub(document).indexOf('top') >= 0); \
+             document.adoptedStyleSheets.length = 0; r.push(pub(document) === ''); \
+             try { document.adoptedStyleSheets.push({}); } catch (e) { r.push(e.name); } \
+             try { document.adoptedStyleSheets.push(document.getElementById('s1').sheet); } catch (e) { r.push(e.name); } \
+             r.push(document.adoptedStyleSheets.length, Array.isArray(document.adoptedStyleSheets)); \
+             a.insertRule('b { left: 0 }', 1); \
+             document.adoptedStyleSheets = [a]; r.push(document.adoptedStyleSheets === list, pub(document).indexOf('left') >= 0); \
+             r.join('|')"
+        ),
+        "1|true|true|2|true|true|true|TypeError|NotAllowedError|0|true|true|true"
+    );
+}
+
+#[test]
+fn disabled_and_media_republish_and_media_applies_only_where_it_matches() {
+    let b = bound();
+    b.host_turn(RECORD_PUBLISH, &[]).unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new CSSStyleSheet(); s.replaceSync('p { color: red }'); var r = []; \
+             document.adoptedStyleSheets = [s]; r.push(pub(document).indexOf('red') >= 0); \
+             s.disabled = true; r.push(pub(document) === '', s.disabled); \
+             s.disabled = false; r.push(pub(document).indexOf('red') >= 0); \
+             var m = new CSSStyleSheet({ media: 'print' }); m.replaceSync('p { color: blue }'); \
+             document.adoptedStyleSheets = [m]; r.push(m.media.mediaText, /^@media print \\{/.test(pub(document))); \
+             m.media.mediaText = 'screen'; r.push(/^@media screen \\{/.test(pub(document)), String(m.media)); \
+             m.media.mediaText = ''; r.push(pub(document).indexOf('@media') < 0, m.media.length); \
+             r.join('|')"
+        ),
+        "true|true|true|true|print|true|true|screen|true|0"
+    );
+}
+
+#[test]
+fn one_sheet_adopted_by_many_shadow_roots_republishes_to_each() {
+    let b = bound();
+    b.host_turn(RECORD_PUBLISH, &[]).unwrap();
+    assert_eq!(
+        ev(
+            &b,
+            "var s = new CSSStyleSheet(); s.replaceSync('p { color: red }'); var roots = []; \
+             for (var i = 0; i < 50; i++) { var h = document.createElement('div'); document.body.appendChild(h); \
+               var root = h.attachShadow({ mode: 'open' }); root.adoptedStyleSheets = [s]; roots.push(root); } \
+             var r = [roots.every(function (x) { return pub(x).indexOf('red') >= 0; })]; \
+             s.insertRule('i { top: 0 }', 1); r.push(roots.every(function (x) { return pub(x).indexOf('top') >= 0; })); \
+             s.replaceSync('em { left: 0 }'); r.push(roots.every(function (x) { return pub(x) === pub(roots[0]) && pub(x).indexOf('left') >= 0 && pub(x).indexOf('red') < 0; })); \
+             roots[3].adoptedStyleSheets = []; s.replaceSync('u { right: 0 }'); \
+             r.push(pub(roots[3]) === '', pub(roots[4]).indexOf('right') >= 0); \
+             roots[5].adoptedStyleSheets.push(s); s.replaceSync('q { bottom: 0 }'); \
+             r.push(pub(roots[5]).split('||').length, pub(roots[5]).split('||')[1].indexOf('bottom') >= 0); \
+             r.join('|')"
+        ),
+        "true|true|true|true|true|2|true"
+    );
 }
 
 #[test]

@@ -60,6 +60,10 @@ name = "macos_key_events"
 harness = false
 
 [[test]]
+name = "macos_text_input"
+harness = false
+
+[[test]]
 name = "macos_pointer_moves"
 harness = false
 
@@ -70,4 +74,16 @@ harness = false
 
 [[test]]
 name = "macos_input_order"
+harness = false
+
+[[test]]
+name = "macos_transparent_region"
+harness = false
+
+[[test]]
+name = "macos_destroy_view"
+harness = false
+
+[[test]]
+name = "macos_chord_wait"
 harness = false

@@ -43,6 +43,9 @@ pub enum RelayoutCause {
     /// A click, mouse, key or form-submit event's listeners changed the DOM,
     /// or an edit changed a control's value.
     Input,
+    /// A frame of a running CSS transition, or what a transition event's
+    /// listeners wrote.
+    Animation,
     /// Anything else, named. The name is also the key it is counted under,
     /// so it must come from a fixed set of literals, never be built at run
     /// time.
@@ -64,6 +67,7 @@ impl RelayoutCause {
             RelayoutCause::ObserverCallback => "observer_callback",
             RelayoutCause::HoverOrFocus => "hover_or_focus",
             RelayoutCause::Input => "input",
+            RelayoutCause::Animation => "animation",
             RelayoutCause::Other(name) => name,
         }
     }
@@ -233,10 +237,34 @@ pub struct RelayoutStats {
     /// Relayouts that kept the laid-out tree: the build changed only what
     /// is painted, so the layout pass was skipped.
     pub layouts_skipped: u32,
+    /// Animation frames painted without a relayout (LAT2): every value
+    /// the frame moved was paint, copied onto the laid-out boxes.
+    pub animation_frames_painted: u32,
+    /// Time spent in them: the restyle, the patch and the display list
+    /// (the commit to the presenter is not counted).
+    pub animation_paint_ms: f64,
+    /// Forced layouts: script read geometry after a DOM write in the same
+    /// task, so the page was laid out (not painted) for the read.
+    pub forced_layouts: u64,
+    /// LAT19: reads after a paint-only Web Animations write answered from
+    /// an animation frame over the published boxes instead of a build.
+    pub forced_frames: u64,
+    /// Their time in milliseconds (LAT7; LAT1's sizing input).
+    pub forced_ms: f64,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.
     pub last: Option<RelayoutCause>,
+    /// The most recent relayout's build stage, in milliseconds: the whole
+    /// tree, or on a pointer restyle's short path the two builds of the
+    /// restyled subtrees (`build_ms` of the relayout log line).
+    pub last_build_ms: f64,
+    /// The most recent relayout's inline svg pre-pass, in milliseconds
+    /// (`svg_ms` of the relayout log line).
+    pub last_svg_ms: f64,
+    /// The most recent relayout's layout stage, in milliseconds (INC5's
+    /// timing; under `RUSTKIT_INCREMENTAL_LAYOUT=verify` both passes).
+    pub last_layout_ms: f64,
 }
 
 impl RelayoutStats {
@@ -306,6 +334,9 @@ pub(crate) enum Stage {
     Snapshot,
     /// Drawing the display list (`render`).
     Render,
+    /// The inline svg pre-pass before the build: the author paint styles
+    /// of svg elements and each inline `<svg>`'s markup and parse (LAT4b).
+    Svg,
 }
 
 /// Milliseconds one relayout spent in each stage. A stage that ran more
@@ -318,6 +349,7 @@ pub struct StageMs {
     pub display_list: f64,
     pub snapshot: f64,
     pub render: f64,
+    pub svg: f64,
 }
 
 impl StageMs {
@@ -328,18 +360,19 @@ impl StageMs {
             Stage::DisplayList => &mut self.display_list,
             Stage::Snapshot => &mut self.snapshot,
             Stage::Render => &mut self.render,
+            Stage::Svg => &mut self.svg,
         };
         *slot += ms;
     }
 }
 
 impl fmt::Display for StageMs {
-    /// `build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.1 render_ms=3.0`
+    /// `build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.1 render_ms=3.0 svg_ms=0.2`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1}",
-            self.build, self.layout, self.display_list, self.snapshot, self.render
+            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1} svg_ms={:.1}",
+            self.build, self.layout, self.display_list, self.snapshot, self.render, self.svg
         )
     }
 }
@@ -356,6 +389,7 @@ thread_local! {
             display_list: 0.0,
             snapshot: 0.0,
             render: 0.0,
+            svg: 0.0,
         })
     };
 }
@@ -377,23 +411,37 @@ pub(crate) fn time_stage(stage: Stage) -> StageTimer {
 impl Drop for StageTimer {
     fn drop(&mut self) {
         let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        if matches!(self.stage, Stage::Snapshot) {
+            SNAPSHOT_TOTAL_MS.with(|t| t.set(t.get() + ms));
+        }
         STAGE_MS.with(|c| {
             let mut stages = c.get();
             stages.add(self.stage, ms);
             c.set(stages);
         });
-        // The same figure goes to the window-hold breakdown (W-gate).
-        crate::wgate::add(
-            match self.stage {
-                Stage::Build => crate::wgate::HoldStage::Build,
-                Stage::Layout => crate::wgate::HoldStage::Layout,
-                Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
-                Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
-                Stage::Render => crate::wgate::HoldStage::Render,
-            },
-            ms,
-        );
+        // The same figure goes to the window-hold breakdown (W-gate),
+        // which has no svg stage: that time stays in its `other_ms`.
+        let hold = match self.stage {
+            Stage::Build => crate::wgate::HoldStage::Build,
+            Stage::Layout => crate::wgate::HoldStage::Layout,
+            Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
+            Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
+            Stage::Render => crate::wgate::HoldStage::Render,
+            Stage::Svg => return,
+        };
+        crate::wgate::add(hold, ms);
     }
+}
+
+thread_local! {
+    /// Every snapshot stage on this thread, never reset (LAT8's tests and
+    /// measurement read the difference across turns).
+    static SNAPSHOT_TOTAL_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The snapshot stage's time on this thread so far, in ms.
+pub(crate) fn snapshot_total_ms() -> f64 {
+    SNAPSHOT_TOTAL_MS.with(|t| t.get())
 }
 
 /// The stage times since the last take, and a fresh start.
@@ -423,11 +471,12 @@ mod tests {
             display_list: 0.5,
             snapshot: 0.0,
             render: 3.0,
+            svg: 0.25,
         }
         .to_string();
         assert_eq!(
             shown,
-            "build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.0 render_ms=3.0"
+            "build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.0 render_ms=3.0 svg_ms=0.2"
         );
     }
 

@@ -1,0 +1,18 @@
+[package]
+name = "css-census"
+version = "0.1.0"
+edition = "2021"
+description = "CSS property census: parse, computed and effect against the campaign oracle (dev-tools T13)"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "css-census"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.17"

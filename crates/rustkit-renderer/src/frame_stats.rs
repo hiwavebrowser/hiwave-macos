@@ -28,8 +28,19 @@ pub struct FrameStats {
     pub batch_flushes: u64,
     /// `queue.submit` calls.
     pub submits: u64,
+    /// Times the list was walked again this frame because the glyph atlas
+    /// started over while it was recorded: 0, 1 or 2. The frame shown is
+    /// the last walk's; when `per_pass`, that walk was a pass at a time.
+    pub rebuilds: u64,
+    /// The frame's glyphs did not fit the atlas, so its last walk was drawn
+    /// a pass per layer with each pass submitted as it was recorded (the
+    /// path before LAT13), from an empty atlas.
+    pub per_pass: bool,
     /// Quads handed to the GPU (colors, glyphs, images).
     pub quads: u64,
+    /// Outline clip masks (`PushClipPath`) rasterised on the CPU and
+    /// uploaded this frame, i.e. not found in the mask cache.
+    pub clip_masks_rasterized: u64,
     /// Of those, quads with no pixel inside the viewport (measure mode only).
     pub quads_offscreen: u64,
 }

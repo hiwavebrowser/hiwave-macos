@@ -353,7 +353,7 @@ pub(crate) struct DiagnosticsSource<'a> {
     pub layout: Option<&'a LayoutBox>,
     pub scroll: (f32, f32),
     pub viewport: (u32, u32),
-    pub checked: &'a HashMap<usize, bool>,
+    pub checked: std::cell::Ref<'a, HashMap<usize, bool>>,
 }
 
 struct Builder<'a> {
@@ -365,7 +365,7 @@ struct Builder<'a> {
     sibs: Siblings,
 }
 
-fn element_parts(node: &Node) -> Option<(String, &HashMap<String, String>)> {
+fn element_parts(node: &Node) -> Option<(String, &rustkit_dom::AttrMap)> {
     match &node.node_type {
         NodeType::Element { tag_name, attributes, .. } => Some((tag_name.to_lowercase(), attributes)),
         _ => None,
@@ -380,7 +380,7 @@ fn parent_element(node: &Node) -> Option<Rc<Node>> {
     node.parent().filter(|p| matches!(p.node_type, NodeType::Element { .. }))
 }
 
-fn classes_of(attrs: &HashMap<String, String>) -> Vec<String> {
+fn classes_of(attrs: &rustkit_dom::AttrMap) -> Vec<String> {
     attrs.get("class").map(|c| c.split_whitespace().map(str::to_string).collect()).unwrap_or_default()
 }
 
@@ -972,12 +972,8 @@ impl<'a> Builder<'a> {
             notes.push("containing block and clip ancestry are computed on untransformed boxes".into());
         }
         // body's and html's overflow scroll the viewport, which is applied.
-        let scrolls_element = ctx.scroller.and_then(|sc| sc.node_id).is_some_and(|raw| {
-            let tag = self.src.document.get_node(rustkit_dom::NodeId::new(raw)).and_then(|n| element_parts(&n).map(|(t, _)| t));
-            tag.is_some_and(|t| t != "body" && t != "html")
-        });
-        if scrolls_element {
-            notes.push("inside a scroll container: the engine does not apply element scroll offsets, so this is the unscrolled position".into());
+        if ctx.scroller.is_some_and(|sc| sc.element_scroll.get() != (0.0, 0.0)) {
+            notes.push("inside a scrolled container: this is the position before its element scroll".into());
         }
         let viewport_border = to_viewport(border, scroll);
         let (vw, vh) = (self.src.viewport.0 as f32, self.src.viewport.1 as f32);
@@ -1257,7 +1253,9 @@ fn style_record(
             "grid-column-end" => Some(grid_line(&s.grid_column_end)),
             "grid-row-start" => Some(grid_line(&s.grid_row_start)),
             "grid-row-end" => Some(grid_line(&s.grid_row_end)),
-            "aspect-ratio" => Some(s.aspect_ratio.map_or("auto".into(), |r| format!("{} / 1", num(r)))),
+            "aspect-ratio" => Some(s.aspect_ratio.map_or("auto".into(), |r| {
+                format!("{}{} / 1", if s.aspect_ratio_auto { "auto " } else { "" }, num(r))
+            })),
             "vertical-align" => Some(match s.vertical_align {
                 rustkit_css::VerticalAlign::Length(px) => css_px(px),
                 v => kw(&v),
@@ -1474,7 +1472,7 @@ impl Engine {
             layout: view.layout.as_deref(),
             scroll: view.scroll_offset,
             viewport: page.viewport,
-            checked: &view.checked_states,
+            checked: view.lay.checked_states.borrow(),
         })
     }
 
@@ -1520,7 +1518,7 @@ impl Engine {
                 let mut stack = vec![src.document.root().clone()];
                 let mut found = None;
                 while let Some(n) = stack.pop() {
-                    match SelectorMatcher.node_matches(&n, sel, src.checked) {
+                    match SelectorMatcher.node_matches(&n, sel, &src.checked) {
                         None => return Err(EngineError::RenderError(format!("invalid selector: {sel}"))),
                         Some(true) => {
                             found = Some(n);

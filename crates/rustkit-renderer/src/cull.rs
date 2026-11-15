@@ -19,7 +19,7 @@
 //! it whatever clip is open.
 //!
 //! Nothing samples the paint of a culled command either: the only filter
-//! command is `BackdropFilter`, which reads the target, and the target
+//! command is `BackdropFilter`, which reads the frame, and the frame
 //! holds only the viewport. A group filter (`filter: blur()` or
 //! `drop-shadow()` over a subtree) would have to inflate the cull by its
 //! reach, or turn it off inside the group.
@@ -170,6 +170,7 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
     Some(match cmd {
         C::PushClip(_)
         | C::PushClipRounded { .. }
+        | C::PushClipPath { .. }
         | C::PopClip
         | C::PushStackingContext { .. }
         | C::PopStackingContext
@@ -177,8 +178,12 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
         | C::PopTransform
         | C::PushOpacity(_)
         | C::PopOpacity
+        | C::PushFilter(_)
+        | C::PopFilter
         | C::PushViewportFixed
-        | C::PopViewportFixed => return None,
+        | C::PopViewportFixed
+        | C::PushWindowSticky(_)
+        | C::PopWindowSticky => return None,
         // Fills keep the exact rect the check has always used.
         C::SolidColor(color, rect) | C::RoundedRect { color, rect, .. } => {
             if color.a <= 0.0 {
@@ -304,6 +309,8 @@ mod tests {
             advances: None,
             ascent: None,
             run: None,
+            faces: None,
+            undilated: false,
         };
         assert!(paint_bounds(&text).is_none());
         assert!(paint_bounds(&DisplayCommand::PushClip(Rect::new(0.0, 1e6, 1.0, 1.0))).is_none());
@@ -336,6 +343,8 @@ mod tests {
             advances: Some(advances),
             ascent: Some(13.0),
             run: None,
+            faces: None,
+            undilated: false,
         }
     }
 

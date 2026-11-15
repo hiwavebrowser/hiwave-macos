@@ -16,15 +16,17 @@
 //
 // A <style> in a shadow root styles that tree only, and document rules
 // stop at the boundary (engine `shadow_tree.rs`: `:host`, `::slotted`).
-// What this is not, yet: `::part` is not understood, and adoptedStyleSheets
-// apply to nothing. `slotchange` does not fire. Manual slot assignment (`slot.assign()`) assigns nothing.
+// What this is not, yet: `::part` is not understood. `slotchange` does not
+// fire. Manual slot assignment (`slot.assign()`) assigns nothing.
+// `adoptedStyleSheets` is installed by web_cssom.js, which loads next, and
+// the engine applies that CSS with this tree's `<style>` elements.
 // composedPath() does not hide the inside of a closed shadow root from
 // listeners outside it.
 //
 // The event hooks are installed only once a document has a shadow root
 // (attachShadow, or a declarative one when the document is bound).
 (function (g) {
-    var HOOKS = g.__rkDomHooks;
+    var HOOKS = __rk.domHooks;
     var document = g.document;
     var S = g.__rkShadowInternals;
     delete g.__rkShadowInternals;
@@ -81,9 +83,9 @@
         HOOKS.retarget = retarget;
     }
     // A newly bound document may come with declarative shadow roots.
-    var reset = g.__rustkit_dom_reset;
+    var reset = __rk.domReset;
     if (typeof reset === 'function') {
-        g.__rustkit_dom_reset = function (newGen) {
+        __rk.domReset = function (newGen) {
             var r = reset.apply(this, arguments);
             if (S.call('any', document) === true) installHooks();
             return r;
@@ -154,9 +156,13 @@
         return Array.prototype.map.call(this.childNodes, serialize).join('');
     }, function (html) {
         rec(this, 'innerHTML');
-        var tpl = document.createElement('template');
-        tpl.innerHTML = String(html);
-        this.replaceChildren.apply(this, Array.prototype.slice.call(tpl.content.childNodes));
+        // Parsed in the host's document, with its scripting flag (a
+        // template's contents would parse with scripting off): a holder of
+        // that document, the host's context being an ordinary element.
+        var home = this.host && this.host.ownerDocument || document;
+        var holder = home.createElement('div');
+        holder.innerHTML = String(html);
+        this.replaceChildren.apply(this, Array.prototype.slice.call(holder.childNodes));
     });
     method(P, 'getHTML', function getHTML() { return this.innerHTML; });
     method(P, 'setHTMLUnsafe', function setHTMLUnsafe(html) { this.innerHTML = html; });

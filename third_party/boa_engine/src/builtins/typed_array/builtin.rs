@@ -2293,7 +2293,7 @@ impl BuiltinTypedArray {
 
         let ta = ta.upcast();
         // 7. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, read-through-holes).
-        let sorted = Array::sort_indexed_properties(&ta, len, sort_compare, false, context)?;
+        let sorted = Array::sort_indexed_properties(&ta, len, sort_compare, false, super::super::array::SortAlgorithm::TypedArray, context)?;
 
         // 8. Let j be 0.
         // 9. Repeat, while j < len,
@@ -2349,7 +2349,7 @@ impl BuiltinTypedArray {
         let ta = ta.upcast();
 
         // 8. Let sortedList be ? SortIndexedProperties(O, len, SortCompare, read-through-holes).
-        let sorted = Array::sort_indexed_properties(&ta, len, sort_compare, false, context)?;
+        let sorted = Array::sort_indexed_properties(&ta, len, sort_compare, false, super::super::array::SortAlgorithm::TypedArray, context)?;
 
         //  9. Let j be 0.
         //  10. Repeat, while j < len;
@@ -3202,10 +3202,10 @@ fn compare_typed_array_elements(
         }
 
         // c. Return v.
-        if v.is_sign_positive() {
-            return Ok(cmp::Ordering::Greater);
-        }
-        return Ok(cmp::Ordering::Less);
+        // HIWAVE PATCH (sort-v8): a result of 0 (or -0, or `false`) is "equal", not "greater":
+        // `is_sign_positive` took +0 for positive, so a comparator answering 0 for a tie, or a
+        // boolean `a > b`, sorted wrongly.
+        return Ok(v.partial_cmp(&0.0).unwrap_or(cmp::Ordering::Equal));
     }
 
     match (x.variant(), y.variant()) {

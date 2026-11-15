@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>A3 page</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #00ff00; }
+  #b { position: fixed; left: 0; top: 0; right: 0; bottom: 0; width: 100%; height: 100%;
+       margin: 0; border: 0; padding: 0; background: #00ff00; font-size: 24px; }
+</style>
+<!-- CH3.A3: the page under the RustKit chrome. Green over the whole
+     viewport, a button, and beacons for what the page
+     hears: the click, keys, a resize. -->
+<button id="b">a3</button>
+<script>
+  function beacon(what) { fetch('/beacon?' + what).catch(function () {}); }
+  // On the document: the button's own box is what the engine lays out,
+  // and a click anywhere on the page is what the check needs.
+  document.addEventListener('click', function (e) {
+    console.log('a3 page click ' + e.clientX + ',' + e.clientY);
+    beacon('a3-click-' + Math.round(e.clientX) + 'x' + Math.round(e.clientY));
+  });
+  document.addEventListener('keydown', function (e) { beacon('a3-key-' + e.key); });
+  window.addEventListener('resize', function () { beacon('a3-resize-' + innerWidth + 'x' + innerHeight); });
+  beacon('a3-ready-' + innerWidth + 'x' + innerHeight);
+</script>

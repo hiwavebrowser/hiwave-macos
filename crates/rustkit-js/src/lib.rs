@@ -14,6 +14,7 @@ mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
+pub use import_map::ImportMap;
 pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
@@ -24,6 +25,8 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+#[cfg(feature = "boa")]
+mod bytes;
 mod source_context;
 #[cfg(feature = "boa")]
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
@@ -174,6 +177,20 @@ impl Drop for DiagJob {
     }
 }
 
+/// HIWAVE PATCH (vm-stats): the interpreter's counters as text (opcode counts, inline-cache misses
+/// by site, receiver kind and identifier-like property name), collected when `RUSTKIT_VM_STATS=1` is
+/// set in the environment; empty otherwise. Diagnostic only.
+#[cfg(feature = "boa")]
+pub fn vm_stats_report() -> String {
+    boa_engine::vm_stats::report()
+}
+
+/// Without the Boa engine there is nothing to report.
+#[cfg(not(feature = "boa"))]
+pub fn vm_stats_report() -> String {
+    String::new()
+}
+
 /// Install the function Boa calls when an interrupt path fires. A null hook
 /// leaves those paths silent. The hook itself decides whether to write.
 #[cfg(feature = "boa")]
@@ -313,6 +330,10 @@ pub struct ConsoleStacks {
 /// and a `console.error`'s stacks.
 pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
 
+/// Whether console calls reach the handler as they are made
+/// ([`JsRuntime::set_console_live`]).
+pub type ConsoleLive = Box<dyn Fn() -> bool + Send + Sync>;
+
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no
 /// handler. By default it holds no text the page chose (see `diag`): the
@@ -366,6 +387,19 @@ pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
 /// called from ([`JsRuntime::register_host_function_with_caller`]).
 pub type HostFunctionWithCaller = Box<dyn Fn(&[JsValue], Option<ScriptPosition>) -> JsValue>;
 
+thread_local! {
+    static NATIVE_STACK_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tell runtimes made on this thread how much native stack a script turn may use before a
+/// built-in that recurses in Rust (JSON.stringify of nested arrays, `flat`, a Proxy chain, the
+/// parser) throws a `RangeError` instead of overflowing the thread. Call it first thing on a
+/// thread whose stack size you chose; about half of it leaves room for the host's own frames. A
+/// thread that never calls it gets Boa's 1 MiB, which fits any 2 MiB thread.
+pub fn set_thread_native_stack_budget(bytes: Option<usize>) {
+    NATIVE_STACK_BUDGET.with(|budget| budget.set(bytes));
+}
+
 fn stack_addr() -> usize {
     let slot = 0u8;
     &slot as *const u8 as usize
@@ -403,6 +437,20 @@ struct PendingTimer {
 
 /// Default maximum number of loop iterations/pumps per `run_jobs` call.
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
+
+/// A function the embedder keeps in a runtime ([`JsRuntime::keep_function`]) and calls by handle. The
+/// handle names the runtime that issued it; another runtime refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptFunction {
+    runtime: u64,
+    index: usize,
+}
+
+/// A process-wide id for each runtime, which its kept-function handles carry.
+fn next_runtime_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// JavaScript runtime configuration.
 #[derive(Clone, Debug)]
@@ -470,7 +518,14 @@ pub struct JsRuntime {
     #[cfg(feature = "boa")]
     executor: std::rc::Rc<executor::HostJobExecutor>,
     config: JsRuntimeConfig,
+    /// The microtask job cap while a watchdog turn is open (H19c): a drain that the budget
+    /// interrupt bounds may run this many jobs. 0 = no raise: the config's cap holds always.
+    armed_job_cap: u64,
     console_handler: Option<Arc<ConsoleHandler>>,
+    console_shape_handler: Option<Arc<ConsoleHandler>>,
+    /// [`set_console_live`](Self::set_console_live)'s predicate, kept so the
+    /// live delivery is rebuilt whenever a handler is set.
+    console_live: Option<Arc<ConsoleLive>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
@@ -483,9 +538,38 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// Bytes left for the embedder's scripts to take by key (`__rk.takeBytes`):
+    /// a response body crosses into script as one buffer, not as text.
+    #[cfg(feature = "boa")]
+    byte_stash: bytes::Stash,
+    /// What stands behind the page's blob URLs (see `bytes::Blobs`).
+    #[cfg(feature = "boa")]
+    blobs: bytes::Blobs,
     /// Page script text, only while an embedder has asked to quote it in
     /// an error log. See [`JsRuntime::set_capture_script_sources`].
     sources: source_context::ScriptSources,
+    /// A test's view of every source handed to the engine (`tap_sources`).
+    source_tap: Option<std::rc::Rc<dyn Fn(&str)>>,
+    /// Functions the embedder kept ([`JsRuntime::keep_function`]), called by handle.
+    #[cfg(feature = "boa")]
+    kept: Vec<boa_engine::JsObject>,
+    /// This runtime's id, carried by the handles it issues.
+    kept_owner: u64,
+}
+
+/// M2: dropping a runtime lets its realm go. The realm's natives (console,
+/// the host object) hold the runtime's `Diagnostics` in an `Rc`, and that
+/// holds the realm's `Error.prototype.stack` getter: a GC handle owned from
+/// Rust, so a root. Left alone, the getter keeps the realm, the realm keeps
+/// the natives and the natives keep the getter, and every document's realm
+/// (its compiled bindings, its DOM wrappers and through them the
+/// `Document`) outlived it: ~10 MB a navigation in the app. Taking the
+/// getter breaks the cycle; the next collection frees the realm.
+#[cfg(feature = "boa")]
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        self.diag.stack_getter.borrow_mut().take();
+    }
 }
 
 impl JsRuntime {
@@ -517,6 +601,14 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        #[cfg(feature = "boa")]
+        if let Some(bytes) = NATIVE_STACK_BUDGET.with(std::cell::Cell::get) {
+            context.runtime_limits_mut().set_native_stack_budget(bytes);
+        }
+
+        // STR-10: running out of frames is a RangeError the page can catch, as in Chrome.
+        #[cfg(feature = "boa")]
+        context.runtime_limits_mut().set_catchable_stack_overflow(true);
         // A stop runs the `finally` blocks it unwinds through, for the stop
         // grace: a scheduler that posts its next task from a `finally` (as
         // React's does) is otherwise left believing a task is still running,
@@ -526,7 +618,11 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let diag = std::rc::Rc::new(diag::Diagnostics::default());
         #[cfg(feature = "boa")]
-        let host = host_object(&diag, &mut context);
+        let byte_stash = bytes::Stash::default();
+        #[cfg(feature = "boa")]
+        let blobs = bytes::Blobs::default();
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &byte_stash, &blobs, &mut context);
 
         let mut runtime = Self {
             #[cfg(feature = "boa")]
@@ -536,7 +632,10 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             executor,
             config,
+            armed_job_cap: 0,
             console_handler: None,
+            console_shape_handler: None,
+            console_live: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
@@ -546,7 +645,15 @@ impl JsRuntime {
             diag,
             #[cfg(feature = "boa")]
             host,
+            #[cfg(feature = "boa")]
+            byte_stash,
+            #[cfg(feature = "boa")]
+            blobs,
             sources: source_context::ScriptSources::default(),
+            source_tap: None,
+            #[cfg(feature = "boa")]
+            kept: Vec::new(),
+            kept_owner: next_runtime_id(),
         };
 
         // Set up built-in APIs
@@ -600,6 +707,63 @@ impl JsRuntime {
         self.console_handler = Some(Arc::new(handler));
         #[cfg(feature = "boa")]
         self.diag.console_capturing.set(true);
+        self.rebuild_console_live();
+    }
+
+    /// Also hand each console call to `handler` as its shape line: each
+    /// argument's type, and a string's length (see `describe::redacted_text`),
+    /// whatever [`set_console_redaction`](Self::set_console_redaction) says.
+    /// For an embedder whose console handler keeps the page's text for one
+    /// reader and must give another reader none of it. Called after the
+    /// console handler, for the same call, and only while one is set.
+    pub fn set_console_shape_handler(&mut self, handler: ConsoleHandler) {
+        self.console_shape_handler = Some(Arc::new(handler));
+        #[cfg(feature = "boa")]
+        self.diag.console_shapes.set(true);
+        self.rebuild_console_live();
+    }
+
+    /// Hand each console call to the handlers as it is made, while `live`
+    /// says so (asked once per call), instead of at the next flush: an
+    /// embedder whose reader must see the console of a script that is
+    /// still running (T6d). Calls held from before go first, so each call
+    /// is handed over once and in order. Past 200 hand-overs in one second
+    /// the calls are held as before (a hand-over also carries what was
+    /// held, so this caps hand-overs, not calls), and a line saying how
+    /// many were dropped comes ahead of the next ones handed over. Calls
+    /// go to the handlers set at the time of the call, whichever order
+    /// they were set in. `None`: flushes only.
+    pub fn set_console_live(&mut self, live: Option<ConsoleLive>) {
+        self.console_live = live.map(Arc::new);
+        self.rebuild_console_live();
+    }
+
+    fn rebuild_console_live(&mut self) {
+        #[cfg(feature = "boa")]
+        {
+            let delivery = self.console_live.clone().zip(self.console_handler.clone()).map(|(on, handler)| {
+                diag::LiveConsole { on, handler, shapes: self.console_shape_handler.clone() }
+            });
+            *self.diag.console_live.borrow_mut() = delivery.map(std::rc::Rc::new);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = &self.console_live;
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter`, which any thread may read: past the live rate cap a
+    /// running script's calls wait for its end, and a script that hangs
+    /// after a hot loop never gets there (T6d review). `None`: not kept.
+    pub fn set_console_held_counter(&mut self, counter: Option<Arc<std::sync::atomic::AtomicUsize>>) {
+        #[cfg(feature = "boa")]
+        {
+            if let Some(counter) = &counter {
+                counter.store(self.diag.console_held_now(), std::sync::atomic::Ordering::Relaxed);
+            }
+            *self.diag.console_held.borrow_mut() = counter;
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = counter;
     }
 
     /// Hand the handler each console argument's type, and a string's length,
@@ -707,10 +871,68 @@ impl JsRuntime {
     /// object is reachable only from the closures such a script builds, so
     /// page script cannot report, forge or read through it.
     pub fn evaluate_with_host(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.call_with_host(source, &[], false)
+    }
+
+    /// Give the host object these names as own properties (`undefined`
+    /// until an embedder's script fills one in), before any script runs:
+    /// what the embedder probes (`__rk.net ? ... : ...`) is then always an
+    /// own property. A name the host already has is left alone.
+    pub fn reserve_host_slots(&mut self, names: &[&str]) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{property::PropertyDescriptor, JsString};
+            for name in names {
+                let key = JsString::from(*name);
+                let owned = self
+                    .host
+                    .has_own_property(key.clone(), &mut self.context)
+                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+                if owned {
+                    continue;
+                }
+                let slot = PropertyDescriptor::builder()
+                    .value(boa_engine::JsValue::undefined())
+                    .writable(true)
+                    .enumerable(true)
+                    .configurable(true)
+                    .build();
+                self.host
+                    .define_property_or_throw(key, slot, &mut self.context)
+                    .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = names;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Run a function body that holds the host object (`__rk`, as
+    /// [`evaluate_with_host`](Self::evaluate_with_host)) as a turn of page
+    /// script: for the engine's own dispatches (a key, typed text), in
+    /// which the page's listeners run. What `evaluate` does around page
+    /// script is done here too: the deadline stop is consumed, a job-queue
+    /// limit or timeout fails the turn, and an error is reported.
+    ///
+    /// `args` are strings the body reads as `__a[0]`, `__a[1]`, ...: text
+    /// that must not be written into the source (what the user typed),
+    /// which is compiled, may be quoted in an error and may be captured
+    /// for a log.
+    pub fn evaluate_host_turn(&mut self, source: &str, args: &[&str]) -> Result<JsValue, JsError> {
+        self.call_with_host(source, args, true)
+    }
+
+    fn call_with_host(&mut self, source: &str, args: &[&str], turn: bool) -> Result<JsValue, JsError> {
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
         #[cfg(feature = "boa")]
         {
             use boa_engine::Source;
-            let wrapped = format!("(function (__rk) {{\n{source}\n}})");
+            let wrapped = format!("(function (__rk, __a) {{\n{source}\n}})");
             let function = self
                 .context
                 .eval(Source::from_bytes(wrapped.as_bytes()).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
@@ -720,17 +942,50 @@ impl JsRuntime {
                 .filter(|f| f.is_callable())
                 .ok_or_else(|| JsError::ExecutionError("host script is not a function".into()))?;
             let host = boa_engine::JsValue::from(self.host.clone());
-            let result = function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context);
-            let _ = self.context.run_jobs();
+            let strings = boa_engine::object::builtins::JsArray::from_iter(
+                args.iter().map(|a| boa_engine::JsValue::from(boa_engine::JsString::from(*a))),
+                &mut self.context,
+            );
+            if turn {
+                self.context.reset_recursion_max();
+            }
+            let result = function.call(&boa_engine::JsValue::undefined(), &[host, strings.into()], &mut self.context);
+            if turn {
+                self.consume_interrupt();
+            }
+            let job_result = self.context.run_jobs();
+            if turn {
+                self.consume_interrupt();
+            }
             self.flush_console_logs();
             match result {
-                Ok(value) => Ok(self.convert_boa_value(&value)),
-                Err(err) => Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context))),
+                Ok(value) => {
+                    if let (true, Err(job_err)) = (turn, job_result) {
+                        // As `evaluate`: only a job-queue limit or timeout
+                        // fails a turn whose own value completed.
+                        let msg = job_err.to_string();
+                        if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                            if self.diag.on.get() {
+                                let report = self.diag.describe_error(&job_err, &mut self.context);
+                                self.diag.push(report);
+                            }
+                            return Err(JsError::ExecutionError(msg));
+                        }
+                    }
+                    Ok(self.convert_boa_value(&value))
+                }
+                Err(err) => {
+                    if turn && self.diag.on.get() {
+                        let report = self.diag.describe_error(&err, &mut self.context);
+                        self.diag.push(report);
+                    }
+                    Err(JsError::ExecutionError(describe::error_text(&err, &mut self.context)))
+                }
             }
         }
         #[cfg(not(feature = "boa"))]
         {
-            let _ = source;
+            let _ = (source, args, turn);
             Err(JsError::NotInitialized)
         }
     }
@@ -814,8 +1069,20 @@ impl JsRuntime {
         self.evaluate(source, Some(path))
     }
 
+    /// Hand every source this runtime evaluates from now on to `tap`, the
+    /// embedder's own scripts included (`None` stops). For tests that pin
+    /// what may never be written into script source, such as text the user
+    /// typed; nothing else should hold on to what it is shown.
+    #[doc(hidden)]
+    pub fn tap_sources(&mut self, tap: Option<std::rc::Rc<dyn Fn(&str)>>) {
+        self.source_tap = tap;
+    }
+
     fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
         trace!(len = source.len(), "Evaluating script");
+        if let Some(tap) = self.source_tap.as_ref() {
+            tap(source);
+        }
 
         #[cfg(feature = "boa")]
         {
@@ -836,47 +1103,115 @@ impl JsRuntime {
                     .context
                     .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
-            self.consume_interrupt();
-            // Promise reactions (`.then`, `await`) are jobs Boa queues but
-            // does not run on its own; a page's async code never resumes
-            // without this.
-            let job_result = self.context.run_jobs();
-            self.consume_interrupt();
-
-            match result {
-                Ok(value) => {
-                    self.flush_console_logs();
-                    if let Err(job_err) = job_result {
-                        let msg = job_err.to_string();
-                        // Only promote job queue limit or timeout breaches (runaway RangeError policy)
-                        // to script failure; ordinary microtask rejections are handled by Promise rejection events
-                        // and do not fail the synchronous script value that already completed successfully.
-                        if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
-                            if self.diag.on.get() {
-                                let report = self.diag.describe_error(&job_err, &mut self.context);
-                                self.diag.push(report);
-                            }
-                            return Err(JsError::ExecutionError(msg));
-                        }
-                    }
-                    let js_value = self.convert_boa_value(&value);
-                    Ok(js_value)
-                }
-                Err(err) => {
-                    self.flush_console_logs();
-                    if self.diag.on.get() {
-                        let report = self.diag.describe_error(&err, &mut self.context);
-                        self.diag.push(report);
-                    }
-                    let msg = describe::error_text(&err, &mut self.context);
-                    Err(JsError::ExecutionError(msg))
-                }
-            }
+            self.settle_evaluation(result)
         }
 
         #[cfg(not(feature = "boa"))]
         {
             let _ = path;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// What follows a script or a kept call: the interrupt state, the microtask drain, console output and
+    /// the error report, then the value.
+    #[cfg(feature = "boa")]
+    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>) -> Result<JsValue, JsError> {
+        self.consume_interrupt();
+        // Promise reactions (`.then`, `await`) are jobs Boa queues but
+        // does not run on its own; a page's async code never resumes
+        // without this.
+        let job_result = self.context.run_jobs();
+        self.consume_interrupt();
+
+        match result {
+            Ok(value) => {
+                self.flush_console_logs();
+                if let Err(job_err) = job_result {
+                    let msg = job_err.to_string();
+                    // Only promote job queue limit or timeout breaches (runaway RangeError policy)
+                    // to script failure; ordinary microtask rejections are handled by Promise rejection events
+                    // and do not fail the synchronous script value that already completed successfully.
+                    if msg.contains("Job queue") || msg.contains("limit") || msg.contains("timeout") {
+                        if self.diag.on.get() {
+                            let report = self.diag.describe_error(&job_err, &mut self.context);
+                            self.diag.push(report);
+                        }
+                        return Err(JsError::ExecutionError(msg));
+                    }
+                }
+                let js_value = self.convert_boa_value(&value);
+                Ok(js_value)
+            }
+            Err(err) => {
+                self.flush_console_logs();
+                if self.diag.on.get() {
+                    let report = self.diag.describe_error(&err, &mut self.context);
+                    self.diag.push(report);
+                }
+                let msg = describe::error_text(&err, &mut self.context);
+                Err(JsError::ExecutionError(msg))
+            }
+        }
+    }
+
+    /// Evaluate `source`, which must give a function, and keep that function: the embedder calls it later
+    /// by handle ([`Self::call_kept`]) instead of looking it up by name, so script that replaces or deletes
+    /// the global it came from does not change what the embedder calls.
+    pub fn keep_function(&mut self, source: &str) -> Result<KeptFunction, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::Source;
+            let value = match self
+                .context
+                .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH)))
+            {
+                Ok(value) => value,
+                Err(e) => return Err(JsError::ExecutionError(describe::error_text(&e, &mut self.context))),
+            };
+            let Some(function) = value.as_callable() else {
+                return Err(JsError::ExecutionError(format!("{source} is not a function")));
+            };
+            self.kept.push(function.clone());
+            Ok(KeptFunction { runtime: self.kept_owner, index: self.kept.len() - 1 })
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = source;
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Call a function kept with [`Self::keep_function`], with string, number, boolean or null arguments
+    /// (anything else is passed as undefined). It runs as a script does: the microtask drain and the
+    /// interrupt state after it, and an exception is an `Err`.
+    pub fn call_kept(&mut self, function: KeptFunction, args: &[JsValue]) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsString, JsValue as BoaValue};
+            if function.runtime != self.kept_owner {
+                return Err(JsError::ExecutionError("a kept function from another runtime".into()));
+            }
+            let Some(callee) = self.kept.get(function.index).cloned() else {
+                return Err(JsError::ExecutionError("no such kept function".into()));
+            };
+            let args: Vec<BoaValue> = args
+                .iter()
+                .map(|a| match a {
+                    JsValue::String(s) => BoaValue::from(JsString::from(s.as_str())),
+                    JsValue::Number(n) => BoaValue::from(*n),
+                    JsValue::Boolean(b) => BoaValue::from(*b),
+                    JsValue::Null => BoaValue::null(),
+                    _ => BoaValue::undefined(),
+                })
+                .collect();
+            self.context.reset_recursion_max();
+            let result = callee.call(&BoaValue::undefined(), &args, &mut self.context);
+            self.settle_evaluation(result)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (function, args);
             Err(JsError::NotInitialized)
         }
     }
@@ -963,9 +1298,34 @@ impl JsRuntime {
         self.arm(turn != 0);
     }
 
+    /// The job cap a microtask drain may run to while a watchdog turn is open (H19c): the
+    /// interrupt, which Boa reads at every call, bounds the time, so the cap can be higher than
+    /// the config's. Outside an open turn (no watchdog, e.g. a chrome IPC evaluation) the
+    /// config's cap holds. 0 turns the raise off.
+    pub fn set_armed_max_job_iterations(&mut self, limit: u64) {
+        self.armed_job_cap = limit;
+        let armed = self.deadline.armed.get();
+        self.apply_job_cap(armed);
+    }
+
+    fn apply_job_cap(&mut self, armed: bool) {
+        #[cfg(feature = "boa")]
+        {
+            let cap = if armed {
+                self.config.max_job_iterations.max(self.armed_job_cap)
+            } else {
+                self.config.max_job_iterations
+            };
+            self.executor.set_max_job_iterations(cap);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = armed;
+    }
+
     /// Whether Boa stops the running turn by the word (`ALL` it always does).
     fn arm(&mut self, armed: bool) {
         self.deadline.armed.set(armed);
+        self.apply_job_cap(armed);
         #[cfg(feature = "boa")]
         self.context
             .set_interrupt_turn(if armed { self.deadline.turn.get() } else { 0 });
@@ -1012,6 +1372,38 @@ impl JsRuntime {
             stamp.end_turn();
             let grace = stamp.begin_turn(&control, control::STOP_GRACE);
             self.set_turn(grace);
+        }
+    }
+
+    /// [`evaluate_bookkeeping`](Self::evaluate_bookkeeping) for what the
+    /// embedder's scripts keep on the host object: `body` is a function
+    /// body whose `__rk` is the host object (`return __rk.now();`). The
+    /// same rules: the interrupt word does not stop it, no promise jobs
+    /// run, and it must call none of the page's functions.
+    pub fn evaluate_host_bookkeeping(&mut self, body: &str) -> Result<JsValue, JsError> {
+        #[cfg(feature = "boa")]
+        {
+            let armed = self.deadline.armed.get();
+            self.arm(false);
+            let wrapped = format!("(function (__rk) {{\n{body}\n}})");
+            let host = boa_engine::JsValue::from(self.host.clone());
+            let result = self
+                .context
+                .eval(boa_engine::Source::from_bytes(wrapped.as_bytes()))
+                .and_then(|function| match function.as_callable() {
+                    Some(function) => function.call(&boa_engine::JsValue::undefined(), &[host], &mut self.context),
+                    None => Ok(boa_engine::JsValue::undefined()),
+                });
+            self.arm(armed);
+            match result {
+                Ok(value) => Ok(self.convert_boa_value(&value)),
+                Err(err) => Err(JsError::ExecutionError(err.to_string())),
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = body;
+            Err(JsError::NotInitialized)
         }
     }
 
@@ -1063,10 +1455,8 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
-            let logs = self.diag.take_console();
-            for (level, msg, at, stack) in logs {
-                handler(level, &msg, at.as_ref(), &stack);
-            }
+            let (dropped, logs, capped) = self.diag.take_console_counted();
+            diag::deliver_console(&handler, self.console_shape_handler.as_ref(), dropped, logs, capped);
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1126,6 +1516,61 @@ impl JsRuntime {
         self.context
             .register_global_callable(js_string!("__rk_reenter"), 1, native)
             .expect("reentry probe");
+    }
+
+    /// Leave `bytes` for the embedder's scripts to take once with
+    /// `__rk.takeBytes(key)`, as an `ArrayBuffer`. Whoever stashes also
+    /// tells script the key; bytes nobody takes are dropped with
+    /// [`drop_stashed_bytes`](Self::drop_stashed_bytes).
+    pub fn stash_bytes(&mut self, key: u64, bytes: Vec<u8>) {
+        #[cfg(feature = "boa")]
+        self.byte_stash.borrow_mut().insert(key, bytes);
+        #[cfg(not(feature = "boa"))]
+        let _ = (key, bytes);
+    }
+
+    /// [`stash_bytes`](Self::stash_bytes) for bytes held as standard
+    /// base64. `false` (and nothing stashed) when `base64` is not base64.
+    pub fn stash_base64(&mut self, key: u64, base64: &str) -> bool {
+        #[cfg(feature = "boa")]
+        {
+            match bytes::base64_decode(base64.as_bytes()) {
+                Some(bytes) => {
+                    self.stash_bytes(key, bytes);
+                    true
+                }
+                None => false,
+            }
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (key, base64);
+            false
+        }
+    }
+
+    /// The bytes behind a blob URL of this runtime's pages (its fragment,
+    /// if any, is not part of the name), or `None` when nothing stands
+    /// behind it. Reads the host's store: no script runs.
+    pub fn blob_bytes(&self, url: &str) -> Option<Vec<u8>> {
+        #[cfg(feature = "boa")]
+        {
+            let name = url.split('#').next().unwrap_or(url);
+            self.blobs.borrow().get(name).map(|(bytes, _)| bytes.clone())
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = url;
+            None
+        }
+    }
+
+    /// Forget the bytes stashed under `key`, if script did not take them.
+    pub fn drop_stashed_bytes(&mut self, key: u64) {
+        #[cfg(feature = "boa")]
+        self.byte_stash.borrow_mut().remove(&key);
+        #[cfg(not(feature = "boa"))]
+        let _ = key;
     }
 
     /// Define a global function `name` that calls `function`.
@@ -1328,7 +1773,12 @@ fn to_boa_value(value: JsValue) -> boa_engine::JsValue {
 /// The host object [`JsRuntime::evaluate_with_host`] hands the embedder's
 /// scripts: natives that write into `diag`, built here, before any script.
 #[cfg(feature = "boa")]
-fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::Context) -> boa_engine::JsObject {
+fn host_object(
+    diag: &std::rc::Rc<diag::Diagnostics>,
+    byte_stash: &bytes::Stash,
+    blobs: &bytes::Blobs,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsObject {
     use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
     let reporter = diag.clone();
     // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
@@ -1353,10 +1803,16 @@ fn host_object(diag: &std::rc::Rc<diag::Diagnostics>, context: &mut boa_engine::
             Ok(boa_engine::JsValue::undefined())
         })
     };
-    ObjectInitializer::new(context)
-        .function(report_error, js_string!("reportError"), 1)
-        .function(unsupported, js_string!("unsupported"), 2)
-        .build()
+    let mut host = ObjectInitializer::new(context);
+    host.function(report_error, js_string!("reportError"), 1)
+        .function(unsupported, js_string!("unsupported"), 2);
+    bytes::install(&mut host, byte_stash, blobs);
+    let host = host.build();
+    // The host object inherits from nothing: a name it does not own reads
+    // as `undefined` and a first write makes an own property, with no
+    // lookup through the realm's `Object.prototype`.
+    host.set_prototype(None);
+    host
 }
 
 #[cfg(feature = "boa")]
@@ -1425,12 +1881,34 @@ where
     std::thread::Builder::new()
         .name(name.into())
         .stack_size(SCRIPT_THREAD_STACK_SIZE)
-        .spawn(f)
+        .spawn(move || {
+            set_thread_native_stack_budget(Some(SCRIPT_THREAD_STACK_SIZE / 2));
+            f()
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M2 / #1005: dropping a runtime takes the stack getter so Boa GC can
+    /// free the realm. Without this, getter → realm → natives → Diagnostics
+    /// → getter keeps every navigated document's realm (~10 MB each).
+    #[cfg(feature = "boa")]
+    #[test]
+    fn dropping_a_runtime_takes_the_stack_getter() {
+        let runtime = JsRuntime::new().unwrap();
+        let diag = runtime.diag.clone();
+        assert!(
+            diag.stack_getter.borrow().is_some(),
+            "a live runtime holds Error.prototype.stack's getter"
+        );
+        drop(runtime);
+        assert!(
+            diag.stack_getter.borrow().is_none(),
+            "Drop must take the getter so the realm is not rooted forever"
+        );
+    }
 
     #[test]
     fn test_basic_evaluation() {
@@ -1704,6 +2182,141 @@ mod tests {
         assert_eq!(logs2[2], ("Error".to_string(), "oops".to_string()));
     }
 
+    /// When each console call reached the handler, and its line.
+    fn timed_handler(runtime: &mut JsRuntime) -> Arc<Mutex<Vec<(std::time::Instant, String)>>> {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            sink.lock().unwrap().push((std::time::Instant::now(), msg.to_string()));
+        }));
+        got
+    }
+
+    const SPIN_300_MS: &str = "console.log('first'); \
+        const t = Date.now(); while (Date.now() - t < 300) {} \
+        console.log('second');";
+
+    #[test]
+    fn a_live_console_call_reaches_the_handler_while_the_script_runs() {
+        // T6d: the calls were held until the script ended, so a panel saw
+        // nothing of a long script's console until it was over.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn with_live_off_the_calls_still_wait_for_the_flush() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| false)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        // Handed over live, 'first' would come a whole spin (300 ms) early.
+        assert!(got[1].0 - got[0].0 < std::time::Duration::from_millis(250), "not handed over together");
+    }
+
+    #[test]
+    fn live_calls_go_to_the_handler_set_last_whatever_the_order() {
+        // #810 R1 nit 1: the live delivery took the handlers set when
+        // `set_console_live` ran, so a handler set after it got only the
+        // flushed calls.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let first = timed_handler(&mut runtime);
+        let got = timed_handler(&mut runtime);
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        assert!(first.lock().unwrap().is_empty(), "a replaced handler got calls");
+        let got = got.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn calls_held_past_the_live_cap_are_counted_while_the_script_hangs() {
+        // #810 review: a hot loop past the cap, then a hang. The held calls
+        // wait for the script's end, and nothing outside the page could see
+        // that any were waiting.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.set_console_held_counter(Some(held.clone()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (held, got, done) = (held.clone(), got.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut last = None;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Count, delivered, count again: a flush landing between
+                    // the reads changes the count, and the pair is skipped.
+                    let n = held.load(std::sync::atomic::Ordering::SeqCst);
+                    let delivered = got.lock().unwrap().len();
+                    if n > 0 && held.load(std::sync::atomic::Ordering::SeqCst) == n {
+                        last = Some((n, delivered));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                last
+            })
+        };
+        runtime
+            .evaluate_script(
+                "for (let i = 0; i < 300; i++) console.log(i); \
+                 const t = Date.now(); while (Date.now() - t < 500) {}",
+            )
+            .unwrap();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (n, delivered) = reader.join().unwrap().expect("no held call was ever counted");
+        assert_eq!(n + delivered, 300, "held {n} + delivered {delivered}");
+        assert_eq!(held.load(std::sync::atomic::Ordering::Relaxed), 0, "the flush left a count");
+        assert_eq!(got.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn a_reader_arriving_mid_script_gets_each_call_once_in_order() {
+        // T6 R1 condition 4: decided per call. Calls held before the reader
+        // came go first, and the flush at the end repeats none of them.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = asked.clone();
+        // Off for the first two calls, on from the third.
+        runtime.set_console_live(Some(Box::new(move || n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2)));
+        runtime
+            .evaluate_script("console.log('a'); console.log('b'); console.log('c'); console.log('d');")
+            .unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(lines, ["a", "b", "c", "d"]);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 4, "not asked once per call");
+    }
+
+    #[test]
+    fn a_hot_loop_is_capped_and_says_how_many_were_dropped() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script("for (let i = 0; i < 3000; i++) console.log(i);").unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        let notes: Vec<_> = lines.iter().filter(|l| l.contains("console calls dropped")).collect();
+        assert!(!notes.is_empty(), "no dropped line");
+        let dropped: usize = notes.iter().map(|l| l.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert_eq!(lines.len() - notes.len() + dropped, 3000, "calls lost without a count");
+        assert!(dropped > 0, "not capped");
+        assert!(notes.iter().all(|l| l.ends_with("; console rate cap)")), "the dropped line names no cause: {notes:?}");
+        // The newest calls are the ones kept.
+        assert_eq!(lines.last().map(String::as_str), Some("2999"));
+    }
+
     /// Every member of the WHATWG Console namespace is a function. A page
     /// that calls one the engine lacked threw "not a callable function" and
     /// lost the rest of its code: squarespace's homepage bundle calls
@@ -1951,6 +2564,27 @@ mod tests {
         assert_eq!(received.lock().unwrap().clone(), vec!["<string len=6> <number>"]);
     }
 
+    /// A shape handler gets each call's types and lengths while the console
+    /// handler keeps the text, for the same calls in the same order.
+    #[test]
+    fn a_shape_handler_gets_shapes_beside_the_text_line() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let texts = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            texts.lock().unwrap().push(format!("text {msg}"));
+        }));
+        let shapes = received.clone();
+        runtime.set_console_shape_handler(Box::new(move |_level, msg, _at, _stack| {
+            shapes.lock().unwrap().push(format!("shape {msg}"));
+        }));
+        runtime.evaluate_script("console.log('SECRET', 1); console.warn({a: 'SECRET'});").unwrap();
+        assert_eq!(
+            received.lock().unwrap().clone(),
+            vec!["text SECRET 1", "shape <string len=6> <number>", "text [object Object]", "shape [object Object]"]
+        );
+    }
+
     /// A page that logs without end holds at most 1024 lines between flushes.
     #[test]
     fn console_lines_waiting_for_a_flush_are_bounded() {
@@ -1965,7 +2599,9 @@ mod tests {
         let _ = runtime.poll_module(&module.unwrap());
         runtime.flush_console();
         let lines = received.lock().unwrap().clone();
-        assert_eq!(lines.len(), 1024);
+        // The 1024 newest, after a line counting the rest (T6d).
+        assert_eq!(lines.len(), 1 + 1024);
+        assert_eq!(lines[0], "3976 console calls dropped (more than 1024 held)");
         assert_eq!(lines.last().map(String::as_str), Some("4999"));
     }
 

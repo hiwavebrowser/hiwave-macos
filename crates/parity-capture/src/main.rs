@@ -8,6 +8,7 @@
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
 mod inspector;
+mod report;
 
 use clap::Parser;
 use rustkit_engine::inspector::{CollectingSink, JsonLinesSink};
@@ -72,7 +73,8 @@ struct Args {
     #[arg(long)]
     dump_layout: Option<String>,
 
-    /// JSON string or path to JSON file defining interaction sequence (wait/click/key/resize/capture)
+    /// JSON string or path to JSON file defining interaction sequence
+    /// (wait/click/hover/key/resize/capture; `key` takes `modifiers`)
     #[arg(long)]
     actions: Option<String>,
 
@@ -101,12 +103,40 @@ struct Args {
     #[arg(long)]
     interrupt_scripts: bool,
 
-    /// After a URL load, turn the live loop as the app does for this many
-    /// milliseconds of real time (timers, script requests, relayouts) and
-    /// report what the turns did as `live_stats`. Off by default; a frame
-    /// taken with it is not comparable with the board.
+    /// After the load, turn the live loop as the app does for this many
+    /// milliseconds of real time (timers, animation frames, observers,
+    /// script requests, relayouts) and report what the turns did as
+    /// `live_stats`. With `--html-file` it also runs the file's scripts, as
+    /// `--run-inline-scripts` does. Off by default; a frame taken with it
+    /// is not comparable with the board.
     #[arg(long)]
     live_ms: Option<u64>,
+
+    /// Load as the app does: what the page asks of the network after its
+    /// `load` event is the live loop's (`--live-ms`), not the load's
+    /// (`EngineConfig::post_load_requests_live`).
+    #[arg(long)]
+    post_load_live: bool,
+
+    /// Run the page's CSS animations and transitions as the app does (the
+    /// parity config holds them still so a frame is reproducible). For
+    /// `--live-ms` measurements of animation frames; a frame taken with it
+    /// is not comparable with the board.
+    #[arg(long)]
+    animations: bool,
+
+    /// Before the `--url` load, load this URL in the same view and turn the
+    /// live loop for `--prelude-live-ms`, as a page visited earlier in a
+    /// browsing session would have been; then navigate to `--url`. For
+    /// measuring what one document leaves to the next (LAT14: a Web
+    /// Animation of the previous page). A frame taken with it is not
+    /// comparable with the board.
+    #[arg(long)]
+    prelude_url: Option<String>,
+
+    /// How long the prelude page's live loop turns, in milliseconds [default: 500]
+    #[arg(long)]
+    prelude_live_ms: Option<u64>,
 
     /// Write the view's Inspector event log for the whole capture to this
     /// file, as JSON Lines (one record per line; see
@@ -138,6 +168,26 @@ struct Args {
     #[arg(long)]
     event_log_error_text: bool,
 
+    /// Append the page's console calls, uncaught exceptions and unhandled
+    /// rejections to this file as JSON Lines, with the text the page wrote
+    /// (the command-line form of `HIWAVE_CONSOLE_LOG=<path>`; see
+    /// docs/INSPECTOR_EVENT_LOG.md). The file holds page content (cookies,
+    /// tokens, form values): never for a log that will be shared.
+    #[arg(long, value_name = "PATH")]
+    console_log: Option<std::path::PathBuf>,
+
+    /// Filter subresources through the app's shield (EasyList, EasyPrivacy
+    /// and the interim domain floor), so a block shows in the event log as
+    /// `failure.blocked_by`. Off by default: the board runs unfiltered.
+    #[arg(long)]
+    shield: bool,
+
+    /// With `--shield`: wait up to this long for the filter lists to be
+    /// built before loading. Until they are, blocks come from the domain
+    /// floor (`blocked_by.list = "domain-floor"`).
+    #[arg(long, default_value_t = 30_000, value_name = "MS")]
+    shield_wait_ms: u64,
+
     /// Print the element diagnostics record (JSON) of the first element
     /// matching this CSS selector. Repeatable.
     #[arg(long, value_name = "SELECTOR")]
@@ -163,9 +213,20 @@ struct Args {
     #[arg(long)]
     diagnostics_keep_query: bool,
 
-    /// Run the page's inline classic scripts after loading an --html-file
-    /// (fixture mode otherwise runs none), as a host does for a built-in
-    /// page it loads directly.
+    /// Write the page report (JSON): page state, covering boxes, content
+    /// per viewport band and a ranked "most likely cause" list, from the
+    /// final layout (dev-tools T4).
+    #[arg(long, value_name = "FILE")]
+    report: Option<String>,
+
+    /// Write the page report as one page of text.
+    #[arg(long, value_name = "FILE")]
+    report_text: Option<String>,
+
+    /// Turn script on for an --html-file load, so the load runs the page's
+    /// inline classic scripts (fixture mode otherwise runs none), as for a
+    /// built-in page a host loads directly. A script that throws fails the
+    /// capture.
     #[arg(long)]
     run_inline_scripts: bool,
 
@@ -236,6 +297,13 @@ struct CaptureResult {
     /// `--inspector-out`
     #[serde(skip_serializing_if = "Option::is_none", default)]
     inspector: Option<inspector::InspectorOutput>,
+    /// `--report`: the layout half, built while the view exists; the event
+    /// rules are added once the load's records are in (`run_capture`).
+    #[serde(skip)]
+    page_report: Option<report::Report>,
+    /// `--live-ms`: milliseconds from the load's start to the window's end.
+    #[serde(skip)]
+    capture_ms: Option<f64>,
     /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
     /// Absent means an older capture tool. `false` is the flag-off worker.
     #[serde(default)]
@@ -270,6 +338,10 @@ struct ActionItem {
     label: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// `key` only: modifier names held while the key is pressed, as
+    /// Playwright spells them (`Control`, `Shift`, `Alt`, `Meta`).
+    #[serde(default)]
+    modifiers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -327,6 +399,8 @@ impl CaptureResult {
             diagnostics: None,
             diagnostics_path: None,
             inspector: None,
+            page_report: None,
+            capture_ms: None,
             content_thread: false,
         }
     }
@@ -365,8 +439,52 @@ struct LiveStats {
     idle_at_end: bool,
 }
 
+/// Wakes the live loop's sleep when work arrives off the page thread, as the
+/// app's event loop is woken (`rustkit_engine::set_live_wake`): an inserted
+/// script's fetch finishing is not `in_flight`, so without it a page with no
+/// timer set slept the rest of `--live-ms` and its inserted scripts ran only
+/// on the last turn.
+#[derive(Default)]
+struct LiveWake {
+    woken: std::sync::Mutex<bool>,
+    arrived: std::sync::Condvar,
+}
+
+impl LiveWake {
+    /// The process's one waker, installed in the engine on first use.
+    fn installed() -> Arc<LiveWake> {
+        static WAKE: std::sync::OnceLock<Arc<LiveWake>> = std::sync::OnceLock::new();
+        WAKE.get_or_init(|| {
+            let wake = Arc::new(LiveWake::default());
+            let engine_side = Arc::clone(&wake);
+            rustkit_engine::set_live_wake(Arc::new(move || engine_side.wake()));
+            wake
+        })
+        .clone()
+    }
+
+    fn wake(&self) {
+        *self.woken.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.arrived.notify_one();
+    }
+
+    /// Sleep up to `limit`, less if woken (or woken since the last sleep).
+    fn sleep(&self, limit: Duration) {
+        let woken = self.woken.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut woken, _) = self
+            .arrived
+            .wait_timeout_while(woken, limit, |woken| !*woken)
+            .unwrap_or_else(|e| e.into_inner());
+        *woken = false;
+    }
+}
+
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due or a request is out, never sooner than the last turn took.
+/// timer is due, a request is out or the engine wakes the loop. Timer and
+/// request waits are never shorter than the last turn took (nor
+/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
+/// once, as the app's poke does, so a page that keeps waking the loop gets
+/// back-to-back turns.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
@@ -379,6 +497,7 @@ fn run_live(
     let began = Instant::now();
     let mut clock = began;
     let mut stats = LiveStats::default();
+    let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
         let started = Instant::now();
@@ -401,9 +520,10 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input wakes it.
+        // An idle page still gets its time: in the app only input, or the
+        // engine's wake, ends the wait.
         let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        std::thread::sleep(wait.min(left));
+        wake.sleep(wait.min(left));
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -422,6 +542,9 @@ struct LayoutStats {
 
 fn main() {
     let args = Args::parse();
+    if let Some(path) = &args.console_log {
+        rustkit_engine::console_file::set_path(path);
+    }
 
     // Initialize tracing - respect RUST_LOG if set, otherwise use defaults
     let default_filter = if args.verbose { "info" } else { "warn" };
@@ -447,6 +570,13 @@ fn main() {
         });
     }
 
+    // The Chrome baselines are captured with `--hide-scrollbars`
+    // (Playwright's default): styled scrollbars take no space there, so
+    // they take none here (CH2.E7). RUSTKIT_SHOW_SCROLLBARS=1 keeps them.
+    if std::env::var("RUSTKIT_SHOW_SCROLLBARS").map_or(true, |v| v != "1") {
+        rustkit_layout::scroll::set_scrollbars_hidden(true);
+    }
+
     let started = Instant::now();
     let args_clone = args.clone();
     // Flag off: today's worker. Flag on: the page thread's name and stack,
@@ -457,7 +587,12 @@ fn main() {
     let handler = std::thread::Builder::new()
         .name(worker_name.into())
         .stack_size(worker_stack)
-        .spawn(move || run_capture(&args_clone))
+        .spawn(move || {
+            // Half the stack is the native-recursion budget: the 1 MiB fallback would throw on
+            // pages Chrome renders and show up as false diffs.
+            rustkit_engine::set_thread_native_stack_budget(Some(worker_stack / 2));
+            run_capture(&args_clone)
+        })
         .expect("failed to spawn capture worker thread");
     let mut result = match handler.join() {
         Ok(r) => r,
@@ -495,13 +630,21 @@ const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7
 /// The capture, then its Inspector event log and summary, whichever way
 /// the capture ended.
 fn run_capture(args: &Args) -> CaptureResult {
-    let wants_events = args.event_log.is_some() || args.event_summary;
+    let wants_report = args.report.is_some() || args.report_text.is_some();
+    let wants_events = args.event_log.is_some() || args.event_summary || wants_report;
     let sink = wants_events.then(CollectingSink::default);
     let mut inspector: Option<Arc<Inspector>> = None;
     let mut result = capture(args, sink.as_ref(), &mut inspector);
     result.content_thread = std::thread::current().name() == Some("page");
     if let Some(sink) = sink {
         let records = sink.records();
+        if let Some(mut page) = result.page_report.take() {
+            let json: Vec<serde_json::Value> =
+                records.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
+            let facts = report::CaptureFacts { shield: args.shield, capture_ms: result.capture_ms };
+            report::apply_events(&mut page, &json, facts);
+            write_report_files(args, &page);
+        }
         if let Some(ref path) = args.event_log {
             match write_event_log(path, &records) {
                 Ok(()) => result.event_log_path = Some(path.clone()),
@@ -576,11 +719,16 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         None => None,
     };
 
-    let engine_result = EngineBuilder::new()
+    let mut builder = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts)
-        .build();
+        .javascript_enabled(
+            url.is_some() || args.actions.is_some() || args.run_inline_scripts || args.live_ms.is_some(),
+        );
+    if let Some(interceptor) = shield_interceptor(args) {
+        builder = builder.request_interceptor(interceptor);
+    }
+    let engine_result = builder.build();
 
     let mut engine = match engine_result {
         Ok(e) => e,
@@ -619,6 +767,17 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             Ok(rt) => rt,
             Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
         };
+        if let Some(prelude) = &args.prelude_url {
+            let prelude = match Url::parse(prelude) {
+                Ok(u) => u,
+                Err(e) => return result.failed("error", format!("Invalid prelude URL: {}", e)),
+            };
+            if let Err(e) = rt.block_on(engine.load_url(view_id, prelude)) {
+                return result.failed("error", format!("Failed to load prelude URL: {:?}", e));
+            }
+            run_live(&rt, &mut engine, view_id, args.prelude_live_ms.unwrap_or(500));
+        }
+        let load_began = Instant::now();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
@@ -646,15 +805,39 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         }
         if let Some(live_ms) = args.live_ms {
             result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
+        let load_began = Instant::now();
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
         }
-        if args.run_inline_scripts {
-            if let Err(e) = engine.run_inline_scripts(view_id) {
-                return result.failed("error", format!("Inline script failed: {:?}", e));
+        // `--run-inline-scripts` and `--live-ms` both turn script on for a
+        // file (T21). A script that threw is a failed capture either way,
+        // the same check the inline-scripts flag already made.
+        if args.run_inline_scripts || args.live_ms.is_some() {
+            let log = engine.script_log(view_id).unwrap_or_default();
+            if let Some(failed) = inline_script_failure(&log) {
+                return result.failed(
+                    "error",
+                    format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
+                );
             }
+        }
+        // `load_html` runs no timer horizon: what a file page does after its
+        // inline scripts (a `setTimeout`, an animation frame, a
+        // ResizeObserver callback) runs only in the live loop, the one a URL
+        // capture turns (T21).
+        if let Some(live_ms) = args.live_ms {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
+            };
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -803,6 +986,64 @@ fn write_diagnostics(
             Err(e) => error!("Failed to build diagnostics: {:?}", e),
         }
     }
+    if args.report.is_some() || args.report_text.is_some() {
+        result.page_report = layout_report(engine, view_id, &opts);
+    }
+}
+
+/// The most elements the page report reads. A consent dialog is often the
+/// last thing in the body, so the report reads past the dump's default cap.
+const REPORT_MAX_ELEMENTS: usize = 20_000;
+
+/// The layout half of `--report`, from the final layout.
+fn layout_report(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    opts: &rustkit_engine::DiagnosticsOptions,
+) -> Option<report::Report> {
+    use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
+    let opts = DiagnosticsOptions { max_elements: opts.max_elements.max(REPORT_MAX_ELEMENTS), ..opts.clone() };
+    let dump = match engine.all_element_diagnostics(view_id, &opts).map(serde_json::to_value) {
+        Ok(Ok(dump)) => dump,
+        Ok(Err(e)) => {
+            error!("Failed to serialise the report's diagnostics: {:?}", e);
+            return None;
+        }
+        Err(e) => {
+            error!("Failed to build the report's diagnostics: {:?}", e);
+            return None;
+        }
+    };
+    let (w, h) = (
+        dump["page"]["viewport"][0].as_f64().unwrap_or(0.0) as f32,
+        dump["page"]["viewport"][1].as_f64().unwrap_or(0.0) as f32,
+    );
+    let centre = engine
+        .element_diagnostics(view_id, &DiagnosticTarget::Point { x: w / 2.0, y: h / 2.0 }, &opts)
+        .ok()
+        .flatten()
+        .and_then(|r| serde_json::to_value(r).ok());
+    let mut page = report::page_report(&dump, centre.as_ref());
+    if dump["truncated"].as_bool() == Some(true) {
+        page.not_checked.push(format!("elements past the first {} (the page has {})", opts.max_elements, page.elements));
+    }
+    Some(page)
+}
+
+/// `--report` and `--report-text`.
+fn write_report_files(args: &Args, page: &report::Report) {
+    if let Some(ref path) = args.report {
+        match serde_json::to_string_pretty(&page).map(|json| fs::write(path, json)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Failed to write the report: {:?}", e),
+            Err(e) => error!("Failed to serialise the report: {:?}", e),
+        }
+    }
+    if let Some(ref path) = args.report_text {
+        if let Err(e) = fs::write(path, report::report_text(&page)) {
+            error!("Failed to write the report text: {:?}", e);
+        }
+    }
 }
 
 /// `--inspector-out`: the Inspector for `dump`, with `--inspector-diff`.
@@ -858,6 +1099,78 @@ fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
     let x = x_part.parse::<f32>().ok()?;
     let y = y_part.parse::<f32>().ok()?;
     Some((x, y))
+}
+
+/// The focused control's value, for telling an engine-typed key from one the
+/// page swallowed.
+const ACTIVE_VALUE_JS: &str =
+    "(function(){ var el = document.activeElement; return String(el && 'value' in el ? el.value : ''); })()";
+/// A one-shot capture listener: did the engine's key reach the page? The
+/// listener is kept on `window` so a read for a key the page never heard
+/// can remove it; otherwise it would fire on the next key before that key
+/// was pressed.
+const KEY_SEEN_ARM_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); } \
+    window.__parityCaptureKeySeen = false; \
+    window.__parityCaptureKeyListener = function(){ window.__parityCaptureKeySeen = true; window.__parityCaptureKeyListener = null; }; \
+    document.addEventListener('keydown', window.__parityCaptureKeyListener, { once: true, capture: true }); })()";
+/// Two answers that are not substrings of each other: `execute_script`
+/// returns the value's debug form (`String("key-heard")`), so the read is a
+/// `contains`, and 'unseen' contains 'seen' (#898 R1).
+const KEY_SEEN_READ_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeySeen) return 'key-heard'; \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); \
+        window.__parityCaptureKeyListener = null; } \
+    return 'key-silent'; })()";
+
+/// Did the page hear the engine's key? Reads what `KEY_SEEN_READ_JS` returned.
+fn key_was_seen(read: &str) -> bool {
+    read.contains("key-heard")
+}
+
+/// A `selector` field may name several selectors to try in order, comma
+/// separated, as `click` has always read it. Top-level commas only: a comma
+/// inside `:is(a, b)`, `[title="x, y"]` or quotes belongs to the selector.
+fn split_selector_list(selector: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in selector.chars() {
+        match quote {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
 }
 
 fn execute_actions(
@@ -916,9 +1229,9 @@ fn execute_actions(
             }
             "click" => {
                 if let Some(ref sel) = a.selector {
-                    let selectors: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
+                    let selectors = split_selector_list(sel);
                     let mut clicked = false;
-                    for s in selectors {
+                    for s in selectors.iter().map(String::as_str) {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
                         let query_js = format!(
                             r#"(function() {{
@@ -987,7 +1300,62 @@ fn execute_actions(
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
                 }
             }
+            "hover" => {
+                // A pointer move to the element's centre and nothing else: the
+                // page sees mousemove/mouseover and `:hover` applies, no press.
+                let point = match (a.selector.as_ref(), a.x, a.y) {
+                    (Some(sel), _, _) => split_selector_list(sel).into_iter().find_map(|s| {
+                        let sel_json = serde_json::to_string(&s).unwrap_or_default();
+                        let query_js = format!(
+                            r#"(function() {{
+                                var el = document.querySelector({0});
+                                if (!el || typeof el.getBoundingClientRect !== 'function') return 'missing';
+                                var r = el.getBoundingClientRect();
+                                if (!r || !(r.width > 0 && r.height > 0)) return 'missing';
+                                return 'point:' + (r.left + r.width / 2.0) + ':' + (r.top + r.height / 2.0);
+                            }})()"#,
+                            sel_json
+                        );
+                        let found = engine
+                            .execute_script(view_id, &query_js)
+                            .ok()
+                            .and_then(|res| parse_point(&res));
+                        if found.is_some() {
+                            a_res.selector_used = Some(s);
+                        }
+                        found
+                    }),
+                    (None, Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                };
+                match point {
+                    Some((cx, cy)) => {
+                        engine.mouse_move_at_point(view_id, cx, cy);
+                        let _ = engine.relayout(view_id);
+                        a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                    }
+                    None if a.selector.is_some() => {
+                        a_res.status = "selector_not_found".to_string();
+                        a_res.error = Some(format!(
+                            "no matching element found for selector {}",
+                            a.selector.as_deref().unwrap_or("")
+                        ));
+                    }
+                    None => {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some("hover action requires selector or (x, y)".to_string());
+                    }
+                }
+            }
             "key" => {
+                let held = |name: &str| {
+                    a.modifiers
+                        .as_ref()
+                        .map(|m| m.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                        .unwrap_or(false)
+                };
+                let (ctrl, shift, alt, meta) =
+                    (held("Control"), held("Shift"), held("Alt"), held("Meta"));
                 if let Some(ref sel) = a.selector {
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
                     let focus_js = format!(
@@ -997,19 +1365,39 @@ fn execute_actions(
                     let _ = engine.execute_script(view_id, &focus_js);
                 }
                 if let Some(ref text) = a.text {
-                    let text_json = serde_json::to_string(text).unwrap_or_default();
-                    let key_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement;
-                            if (el && 'value' in el) {{
-                                el.value = (el.value || '') + {0};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }})()"#,
-                        text_json
-                    );
-                    let _ = engine.execute_script(view_id, &key_js);
+                    // Typed through the engine's keyboard, a key at a time, as
+                    // Playwright's keyboard.type does: the page hears a keydown
+                    // per character and the focused control edits its own
+                    // value (selection replaced, caret moved). The value is
+                    // written from script only when no control took the keys.
+                    let before = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    for ch in text.chars() {
+                        let key = ch.to_string();
+                        let _ = engine.handle_text_key(view_id, 0, &key, false, false, false);
+                    }
+                    let after = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    if after == before {
+                        let text_json = serde_json::to_string(text).unwrap_or_default();
+                        let key_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement;
+                                if (el && 'value' in el) {{
+                                    el.value = (el.value || '') + {0};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }})()"#,
+                            text_json
+                        );
+                        let _ = engine.execute_script(view_id, &key_js);
+                        a_res.method = Some("script_value".to_string());
+                    } else {
+                        a_res.method = Some("engine_keys".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 } else if let Some(ref key) = a.key {
                     let key_code = match key.as_str() {
@@ -1019,19 +1407,37 @@ fn execute_actions(
                         "Tab" => 9,
                         _ => 0,
                     };
-                    let _ = engine.handle_text_key(view_id, key_code, key, false, false, false);
-                    let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let event_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement || document.body;
-                            if (el) {{
-                                el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {0}, bubbles: true }}));
-                                el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {0}, bubbles: true }}));
-                            }}
-                        }})()"#,
-                        key_json
-                    );
-                    let _ = engine.execute_script(view_id, &event_js);
+                    // The engine fires the DOM keydown itself (fire_key). The
+                    // synthetic event below is only for a key the engine did
+                    // not route to the page; sending both made every listener
+                    // hear the key twice and a toggle undo itself.
+                    let _ = engine.execute_script(view_id, KEY_SEEN_ARM_JS);
+                    // The engine's keyboard has no meta flag; Meta is Ctrl's
+                    // equivalent on macOS and the chrome takes either.
+                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl || meta, shift, alt);
+                    let seen = engine
+                        .execute_script(view_id, KEY_SEEN_READ_JS)
+                        .map(|r| key_was_seen(&r))
+                        .unwrap_or(false);
+                    if seen {
+                        a_res.method = Some("engine_key".to_string());
+                    } else {
+                        let key_json = serde_json::to_string(key).unwrap_or_default();
+                        let event_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement || document.body;
+                                if (el) {{
+                                    var init = {{ key: {0}, bubbles: true, cancelable: true,
+                                                  ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
+                                    el.dispatchEvent(new KeyboardEvent('keydown', init));
+                                    el.dispatchEvent(new KeyboardEvent('keyup', init));
+                                }}
+                            }})()"#,
+                            key_json, ctrl, shift, alt, meta
+                        );
+                        let _ = engine.execute_script(view_id, &event_js);
+                        a_res.method = Some("synthetic_key".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 }
             }
@@ -1175,9 +1581,10 @@ fn script_log_json(log: &[ScriptRecord]) -> serde_json::Value {
 ///    the FIRST style in `<head>` — Chrome's capture injects it via an init
 ///    script before the fixture's own styles, so fixture rules win ties there
 ///    and must win ties here too.
+/// 3. Inline local image files as `data:` URLs (`inline_local_images`).
 fn preprocess_html(html: &str, html_path: &Path) -> String {
     let base_dir = html_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut out = inline_stylesheet_links(html, base_dir);
+    let mut out = inline_local_images(&inline_stylesheet_links(html, base_dir), base_dir);
 
     if is_micro_suite_path(html_path) {
         if let Some(reset_css) = read_repo_parity_reset(html_path) {
@@ -1276,6 +1683,8 @@ fn stylesheet_replacement_for_link_tag(tag: &str, base_dir: &Path) -> Option<Str
         return None;
     }
 
+    // A sheet's url()s are relative to the sheet, not to the page.
+    let css = inline_local_images(&css, css_path.parent().unwrap_or(base_dir));
     let media = extract_attr(tag, "media").unwrap_or_default();
     let needs_media_wrap = !media.is_empty() && !media.eq_ignore_ascii_case("all");
     let body = if needs_media_wrap {
@@ -1286,6 +1695,138 @@ fn stylesheet_replacement_for_link_tag(tag: &str, base_dir: &Path) -> Option<Str
     Some(format!(
         "<style data-inlined-href=\"{}\">\n{}\n</style>",
         href, body
+    ))
+}
+
+/// Inline the page's local image files as `data:` URLs: CSS `url(...)`
+/// (backgrounds, masks, ...) and `<img src>`. `load_html` fetches no image
+/// (about:blank base, http(s) only), while the oracle serves the page over
+/// http as wptserve does, so a page that masks or paints with
+/// `support/icon.svg` was captured without it. A `data:` image takes the
+/// engine's own decode path (`cache_data_svg` for SVG). Left alone: any URL
+/// with a scheme, `//host`, `#id` and `file.svg#id` (an element of another
+/// document, not an image), a query, and a path that is not a readable
+/// image file.
+fn inline_local_images(text: &str, base_dir: &Path) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    loop {
+        let url_at = lower[pos..].find("url(").map(|i| (pos + i, true));
+        let src_at = find_img_src(&lower, pos).map(|i| (i, false));
+        let next = match (url_at, src_at) {
+            (Some(a), Some(b)) => if a.0 <= b.0 { a } else { b },
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+        let (start, is_css) = next;
+        // The value's span: inside `url( ... )`, or the quoted/unquoted
+        // attribute value after `src=`.
+        let (value_start, value_end, after) = if is_css {
+            let open = start + 4;
+            let Some(close) = text[open..].find(')').map(|i| open + i) else {
+                break;
+            };
+            (open, close, close)
+        } else {
+            let eq = start + lower[start..].find('=').unwrap() + 1;
+            let ws = text[eq..].len() - text[eq..].trim_start().len();
+            let v = eq + ws;
+            match text[v..].chars().next() {
+                Some(q @ ('"' | '\'')) => match text[v + 1..].find(q) {
+                    Some(e) => (v, v + 1 + e + 1, v + 1 + e + 1),
+                    None => break,
+                },
+                _ => {
+                    let e = text[v..]
+                        .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                        .map_or(text.len(), |i| v + i);
+                    (v, e, e)
+                }
+            }
+        };
+        let raw = text[value_start..value_end].trim();
+        let reference = raw.trim_matches(|c| c == '"' || c == '\'');
+        match local_image_data_url(reference, base_dir) {
+            // A CSS url() is written unquoted: it may sit in a quoted
+            // `style` attribute, and either quote could close it (#966 R1).
+            // base64 needs no quoting there. An `<img src>` value is
+            // replaced with its own quotes, so it is quoted.
+            Some(data) if is_css => {
+                out.push_str(&text[pos..value_start]);
+                out.push_str(&data);
+                pos = after;
+            }
+            Some(data) => {
+                out.push_str(&text[pos..value_start]);
+                out.push('"');
+                out.push_str(&data);
+                out.push('"');
+                pos = after;
+            }
+            None => {
+                let step = if is_css { value_start } else { after.max(start + 1) };
+                out.push_str(&text[pos..step]);
+                pos = step;
+            }
+        }
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
+/// The byte offset of the next `src` attribute of an `<img>` tag at or after
+/// `from` in the lowercased text, pointing at the `s` of `src`.
+fn find_img_src(lower: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(i) = lower[at..].find("<img") {
+        let tag_start = at + i;
+        let tag_end = lower[tag_start..].find('>').map_or(lower.len(), |e| tag_start + e);
+        let tag = &lower[tag_start..tag_end];
+        let mut search = 0;
+        while let Some(j) = tag[search..].find("src") {
+            let k = search + j;
+            let before_ok = tag[..k].chars().next_back().is_some_and(|c| c.is_ascii_whitespace());
+            let rest = tag[k + 3..].trim_start();
+            if before_ok && rest.starts_with('=') {
+                return Some(tag_start + k);
+            }
+            search = k + 3;
+        }
+        at = tag_end.max(tag_start + 4);
+    }
+    None
+}
+
+/// `reference` as a `data:` URL when it names a readable image file
+/// relative to `base_dir` (or an absolute path, as the WPT runner stages
+/// root-absolute references).
+fn local_image_data_url(reference: &str, base_dir: &Path) -> Option<String> {
+    use base64::Engine as _;
+    if reference.is_empty()
+        || reference.starts_with('#')
+        || reference.starts_with("//")
+        || reference.contains('#')
+        || reference.contains('?')
+        || Url::parse(reference).is_ok_and(|u| u.scheme().len() > 1)
+    {
+        return None;
+    }
+    let path = base_dir.join(reference);
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    let bytes = fs::read(&path).ok()?;
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
 }
 
@@ -1391,8 +1932,34 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     Some(stats)
 }
 
+/// The first script of an `--html-file` load that failed: it threw, the
+/// engine failed, the budget stopped it, or it was skipped though the load
+/// meant to run it (too large, or the engine panicked earlier). A script the
+/// HTML load does not run (an external `<script src>`, a module, `nomodule`)
+/// is not a failure.
+fn inline_script_failure(log: &[ScriptRecord]) -> Option<&ScriptRecord> {
+    log.iter().find(|r| match r.outcome {
+        ScriptOutcome::Threw(_) | ScriptOutcome::EngineFailed(_) | ScriptOutcome::OverBudget => true,
+        ScriptOutcome::Skipped(why) => why != rustkit_engine::HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY,
+        _ => false,
+    })
+}
+
 /// The engine configuration a capture runs with: the parity defaults, plus
 /// whatever the command line overrides.
+/// The app's shield as the engine's request interceptor, with `--shield`
+/// only, once its filter lists are built or `--shield-wait-ms` has passed.
+fn shield_interceptor(args: &Args) -> Option<rustkit_net::RequestInterceptor> {
+    if !args.shield {
+        return None;
+    }
+    // The event log names the list and rule of a block.
+    hiwave_shield_intercept::name_matched_rules();
+    let ready = hiwave_shield_intercept::wait_until_ready(Duration::from_millis(args.shield_wait_ms));
+    eprintln!("shield: on, filter lists {}", if ready { "ready" } else { "not ready (domain floor only)" });
+    Some(hiwave_shield_intercept::create_shield_interceptor())
+}
+
 fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     let mut config = EngineConfig::for_parity_testing();
     if let Some(horizon) = args.timer_horizon_ms {
@@ -1402,6 +1969,10 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
         config.script_budget_ms = budget;
     }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    config.post_load_requests_live = args.post_load_live;
+    if args.animations {
+        config.disable_animations = false;
+    }
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -1414,6 +1985,45 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// #799 review (3): `--run-inline-scripts` fails a capture only on a
+    /// script that threw, failed the engine or ran out of budget. An external
+    /// `<script src>` or a module the HTML load skips is not one.
+    #[test]
+    fn run_inline_scripts_fails_only_on_scripts_that_failed() {
+        let log_of = |html: &str| {
+            let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+            let view = engine
+                .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+                .expect("view");
+            engine.load_html(view, html).expect("load_html");
+            engine.script_log(view).unwrap_or_default().to_vec()
+        };
+        let skipped = log_of(
+            "<html><body><script src=\"/app.js\"></script>\
+<script type=\"module\">window.m = 1;</script><script>var ok = 1;</script></body></html>",
+        );
+        assert!(skipped.iter().any(|r| matches!(r.outcome, ScriptOutcome::Skipped(_))), "{skipped:?}");
+        assert!(inline_script_failure(&skipped).is_none(), "{skipped:?}");
+        let threw = log_of("<html><body><script src=\"/app.js\"></script><script>throw new Error('x');</script></body></html>");
+        let failed = inline_script_failure(&threw).expect("a thrown script fails the capture");
+        assert_eq!(failed.source, "inline#2", "{threw:?}");
+        // #799 nit: an inline classic script past the size cap was meant to
+        // run and did not.
+        let big = format!("<html><body><script>/*{}*/</script></body></html>", "x".repeat(4 * 1024 * 1024 + 1));
+        let too_large = log_of(&big);
+        let failed = inline_script_failure(&too_large).expect("a too-large inline script fails the capture");
+        assert!(matches!(failed.outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")), "{too_large:?}");
+    }
+
+    #[test]
+    fn console_log_is_off_unless_a_path_is_given() {
+        assert_eq!(parsed(&[]).console_log, None);
+        assert_eq!(
+            parsed(&["--console-log", "/tmp/console.jsonl"]).console_log,
+            Some(std::path::PathBuf::from("/tmp/console.jsonl"))
+        );
+    }
+
     fn parsed(extra: &[&str]) -> Args {
         let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
         argv.extend_from_slice(extra);
@@ -1422,10 +2032,154 @@ mod tests {
 
     // The live loop is the app's, not the board's: a capture turns it only
     // when asked.
+    // The board runs unfiltered; `--shield` puts the app's shield in front
+    // of every subresource, and a block names its list and rule.
+    #[test]
+    fn the_shield_filters_requests_only_with_the_flag() {
+        assert!(shield_interceptor(&parsed(&[])).is_none());
+        let interceptor = shield_interceptor(&parsed(&["--shield", "--shield-wait-ms", "0"])).expect("an interceptor");
+        let request = |url: &str| {
+            let mut request = rustkit_net::Request::get(Url::parse(url).unwrap());
+            request.destination = rustkit_net::RequestDestination::Script;
+            request.referrer = Some(Url::parse("https://news.example/").unwrap());
+            request
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        match rt.block_on(interceptor.intercept(&request("https://doubleclick.net/pagead.js"))) {
+            rustkit_net::InterceptAction::BlockedBy(reason) => {
+                assert!(!reason.list.is_empty() && reason.rule.is_some(), "{reason:?}")
+            }
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
+        assert!(matches!(
+            rt.block_on(interceptor.intercept(&request("https://news.example/app.js"))),
+            rustkit_net::InterceptAction::Allow
+        ));
+    }
+
     #[test]
     fn the_live_loop_is_turned_only_when_asked() {
         assert_eq!(parsed(&[]).live_ms, None);
         assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
+        assert!(!capture_config(&parsed(&[]), None).post_load_requests_live);
+        assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
+    }
+
+    /// The heights of every box in a `--dump-layout` file, rounded.
+    fn layout_heights(layout: &str) -> Vec<i64> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<i64>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        if k == "height" {
+                            if let Some(h) = v.as_f64() {
+                                out.push(h.round() as i64);
+                            }
+                        }
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&serde_json::from_str(layout).expect("layout JSON"), &mut out);
+        out
+    }
+
+    /// T21 (board 11-04, 11-05): a `--html-file` page that finishes on a
+    /// timer, an animation frame or a ResizeObserver callback (Chart.js,
+    /// the Inspector) captured without them. With `--live-ms` the file is
+    /// turned through the same live loop as `--url`; each box below gets
+    /// its height only from its own kind of callback.
+    const LATE_CALLBACK_PAGE: &str = "<!doctype html><html><head><style>\
+        body{margin:0} div{width:50px;height:10px}\
+        .t{height:137px} .f{height:149px} .r{height:163px}\
+        </style></head><body><div id=t></div><div id=f></div><div id=r></div><script>\
+        setTimeout(function(){ document.getElementById('t').className='t'; }, 0);\
+        requestAnimationFrame(function(){ document.getElementById('f').className='f'; });\
+        new ResizeObserver(function(){ document.getElementById('r').className='r'; })\
+            .observe(document.getElementById('r'));\
+        </script></body></html>";
+
+    fn capture_file_page(name: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (page, layout) = (dir.join("page.html"), dir.join("layout.json"));
+        fs::write(&page, LATE_CALLBACK_PAGE).unwrap();
+        let mut argv = vec![
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--dump-layout",
+            layout.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(extra);
+        let result = run_capture(&Args::try_parse_from(argv).unwrap());
+        let heights = fs::read_to_string(&layout).map(|l| layout_heights(&l)).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        (result, heights)
+    }
+
+    #[test]
+    fn a_file_capture_with_live_ms_runs_timers_frames_and_resize_observers() {
+        let (result, heights) = capture_file_page("t21-live", &["--live-ms", "600"]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        for (what, h) in [("setTimeout(0)", 137), ("requestAnimationFrame", 149), ("ResizeObserver", 163)] {
+            assert!(heights.contains(&h), "{what} callback did not run: heights {heights:?}");
+        }
+        let live = result.live_stats.as_ref().expect("a file capture with --live-ms reports live_stats");
+        assert!(live.timer_callbacks >= 2, "timer + frame callbacks: {}", live.timer_callbacks);
+        assert!(result.capture_ms.is_some_and(|ms| ms > 0.0), "{:?}", result.capture_ms);
+    }
+
+    /// `--live-ms` turns script on by itself. A file whose inline script
+    /// throws fails the capture, the same as `--run-inline-scripts`.
+    #[test]
+    fn a_file_capture_with_live_ms_fails_when_an_inline_script_throws() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-t21-throw-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, "<!doctype html><script>throw new Error('nope')</script>").unwrap();
+        let result = run_capture(&Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--live-ms",
+            "200",
+        ]).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(result.status, "error", "{:?}", result.error);
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("Inline script failed"), "{err}");
+    }
+
+    /// The board's fixture capture is unchanged: without `--live-ms` a file
+    /// runs no script and turns no loop.
+    #[test]
+    fn a_file_capture_without_live_ms_is_the_boards_static_capture() {
+        let (result, heights) = capture_file_page("t21-static", &[]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(result.live_stats.is_none());
+        for h in [137, 149, 163] {
+            assert!(!heights.contains(&h), "no script ran, but a box is {h}px: {heights:?}");
+        }
+    }
+
+    /// With `--run-inline-scripts` (the board's script pages) and no
+    /// `--live-ms`, the inline scripts run but nothing after the load does:
+    /// what the board captured before T21.
+    #[test]
+    fn a_file_capture_with_inline_scripts_only_is_unchanged() {
+        let (result, heights) = capture_file_page("t21-inline", &["--run-inline-scripts"]);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(result.live_stats.is_none());
+        assert!(!heights.contains(&137), "{heights:?}");
     }
 
     // The board is measured at the engine's 5 s script budget, and the live
@@ -1445,6 +2199,24 @@ mod tests {
         );
     }
 
+    /// LAT14: animations run in a capture only with `--animations`; the
+    /// board's frames stay still.
+    #[test]
+    fn animations_run_only_with_the_flag() {
+        assert!(capture_config(&parsed(&[]), None).disable_animations);
+        assert!(capture_config(&parsed(&["--live-ms", "1000"]), None).disable_animations);
+        assert!(!capture_config(&parsed(&["--animations"]), None).disable_animations);
+    }
+
+    /// LAT14: the prelude page and how long it runs live before the
+    /// `--url` load (the fixture path has no live loop and ignores it).
+    #[test]
+    fn a_prelude_is_parsed_with_its_live_time() {
+        assert_eq!(parsed(&["--prelude-url", "http://p/"]).prelude_url.as_deref(), Some("http://p/"));
+        assert_eq!(parsed(&[]).prelude_live_ms, None);
+        assert_eq!(parsed(&["--prelude-live-ms", "250"]).prelude_live_ms, Some(250));
+    }
+
     #[test]
     fn a_running_script_is_stopped_at_the_budget_only_with_the_flag() {
         assert!(!capture_config(&parsed(&[]), None).interrupt_scripts_at_budget);
@@ -1462,8 +2234,10 @@ mod tests {
         assert!(capture_config(&parsed(&["--event-log-console-text"]), None).inspector.keep_console_text);
         assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_error_text);
         assert!(capture_config(&parsed(&["--event-log-error-text"]), None).inspector.keep_error_text);
-        // Nothing records unless asked: no buffer either way.
-        assert!(!capture_config(&parsed(&["--event-summary"]), None).inspector.buffer);
+        // The flags add a sink; the buffer is the tab ring (T6b), on from
+        // the start only with HIWAVE_DEVTOOLS_RING=1.
+        let config = capture_config(&parsed(&["--event-summary"]), None);
+        assert_eq!(config.inspector.capacity, rustkit_engine::InspectorConfig::tab().capacity);
     }
 
     /// A fixture capture with both flags: the log is JSON Lines of the
@@ -1500,6 +2274,73 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A page whose only pending work is an inserted script's fetch (no
+    /// timer set, nothing `in_flight`) still runs the script when its fetch
+    /// arrives, not on the live window's last turn.
+    #[test]
+    fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (ctype, body) = if line.starts_with("GET /late.js") {
+                        std::thread::sleep(Duration::from_millis(300));
+                        ("text/javascript", "console.log('late ran');".to_string())
+                    } else {
+                        let page = "<html><body>x<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/late.js'; document.body.appendChild(s); }, 50);</script></body></html>";
+                        ("text/html", page.to_string())
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("events.jsonl");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "6000",
+            "--event-log",
+            log.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let records: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let at = |pred: &dyn Fn(&serde_json::Value) -> bool| records.iter().find(|r| pred(r)).map(|r| r["t_ms"].as_f64().unwrap());
+        let load = at(&|r| r["type"] == "load_finished").expect("load_finished");
+        let ran = at(&|r| r["type"] == "console").expect("late.js logged");
+        assert!(ran - load < 2_000.0, "late.js ran {:.0} ms after load (the window is 6000 ms)", ran - load);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_script_budget_flag_sets_the_engines_script_budget_and_nothing_else() {
         let config = capture_config(&parsed(&["--script-budget-ms", "60000"]), None);
@@ -1532,6 +2373,131 @@ mod tests {
         let inlined = out.find("color: red").unwrap();
         let fixture = out.find("color:blue").unwrap();
         assert!(inlined < fixture);
+    }
+
+    /// The WPT masking reftests mask a box with an image file beside the
+    /// page (`mask-image: url(support/50x50-opaque-blue.svg)`), served by
+    /// wptserve. `load_html` fetches no image (about:blank base, http(s)
+    /// only), so the box painted nothing and 15 of the 30 css-masking-mask
+    /// cases failed without measuring the mask. Chromium 148 on this page
+    /// served over http: purple at (10, 10), white at (58, 10) and (10, 100).
+    /// (Over file:// Chromium paints nothing either: a mask image is a
+    /// CORS-mode fetch and a file:// page has an opaque origin.)
+    #[test]
+    fn an_html_file_capture_masks_with_an_image_file_beside_the_page() {
+        let dir = std::env::temp_dir().join(format!("pc-test-mask-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_file(
+            &dir,
+            "support/blue.svg",
+            r#"<svg width="50" height="50" xmlns="http://www.w3.org/2000/svg"><rect width="50" height="50" fill="blue"/></svg>"#,
+        );
+        write_file(
+            &dir,
+            "page.html",
+            "<!DOCTYPE html><style>body { margin: 0 } div { width: 64px; height: 128px; \
+background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-repeat; }</style><div></div>",
+        );
+        let frame = dir.join("frame.ppm");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            dir.join("page.html").to_str().unwrap(),
+            "--width",
+            "100",
+            "--height",
+            "160",
+            "--dump-frame",
+            frame.to_str().unwrap(),
+        ])
+        .expect("the command line parses");
+        let result = capture(&args, None, &mut None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let ppm = fs::read(&frame).unwrap();
+        let header_end = ppm.windows(4).position(|w| w == b"255\n").unwrap() + 4;
+        let pixel = |x: usize, y: usize| {
+            let i = header_end + (y * 100 + x) * 3;
+            [ppm[i], ppm[i + 1], ppm[i + 2]]
+        };
+        assert_eq!(pixel(10, 10), [128, 0, 128], "under the mask image");
+        assert_eq!(pixel(58, 10), [255, 255, 255], "right of the 50px mask image");
+        assert_eq!(pixel(10, 100), [255, 255, 255], "below it (no-repeat)");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #966 R1: a url() inside a double-quoted `style` attribute. Writing the
+    /// data URL as `url("data:...")` closed the attribute and the element
+    /// lost its whole style (border and size too). Chrome for Testing 148 on
+    /// this page over http: the 4px green border at (1, 1) and (66, 30),
+    /// white at (70, 30), the blue image inside it at (30, 30).
+    #[test]
+    fn an_image_in_a_double_quoted_style_attribute_keeps_the_rest_of_the_style() {
+        let dir = std::env::temp_dir().join(format!("pc-test-style-attr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_file(
+            &dir,
+            "support/blue.svg",
+            r#"<svg width="60" height="60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="blue"/></svg>"#,
+        );
+        write_file(
+            &dir,
+            "page.html",
+            r#"<!DOCTYPE html><body style="margin:0"><div style="background-image:url(support/blue.svg);width:60px;height:60px;border:4px solid green;background-repeat:no-repeat;background-position:4px 4px"></div>"#,
+        );
+        let frame = dir.join("frame.ppm");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            dir.join("page.html").to_str().unwrap(),
+            "--width",
+            "100",
+            "--height",
+            "100",
+            "--dump-frame",
+            frame.to_str().unwrap(),
+        ])
+        .expect("the command line parses");
+        let result = capture(&args, None, &mut None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let ppm = fs::read(&frame).unwrap();
+        let header_end = ppm.windows(4).position(|w| w == b"255\n").unwrap() + 4;
+        let pixel = |x: usize, y: usize| {
+            let i = header_end + (y * 100 + x) * 3;
+            [ppm[i], ppm[i + 1], ppm[i + 2]]
+        };
+        assert_eq!(pixel(1, 1), [0, 128, 0], "the border survives");
+        assert_eq!(pixel(66, 30), [0, 128, 0], "and the 60px width: right border at 64..68");
+        assert_eq!(pixel(70, 30), [255, 255, 255], "nothing past the border box");
+        // Not pinned: the image itself. Chromium paints it blue at (30, 30);
+        // the engine splits a `style` attribute at every `;`, so the
+        // `;base64,` of any data: URL there cuts the declaration (an engine
+        // gap, C8 queue; a <style> block is not affected).
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What is inlined and what is left: a sheet's url() is relative to the
+    /// sheet; scheme, fragment and missing references are untouched.
+    #[test]
+    fn inlines_local_image_files_and_leaves_other_references() {
+        let dir = std::env::temp_dir().join(format!("pc-test-img-inline-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_file(&dir, "a.svg", "<svg/>");
+        write_file(&dir, "css/b.png", "PNG");
+        write_file(&dir, "css/s.css", "p { background: url( 'b.png' ) }");
+        let html = concat!(
+            r#"<link rel="stylesheet" href="css/s.css">"#,
+            r#"<style>div { mask: url(a.svg) no-repeat; x: url(#m); y: url(a.svg#m); z: url(missing.svg); w: url(https://h/a.svg); }</style>"#,
+            r#"<img alt=x src=a.svg><img src="data:image/png;base64,AA"><img data-src="a.svg">"#,
+        );
+        let out = preprocess_html(html, &dir.join("page.html"));
+        let svg = "url(data:image/svg+xml;base64,PHN2Zy8+)";
+        assert!(out.contains(&format!("mask: {svg} no-repeat")), "{out}");
+        assert!(out.contains("background: url(data:image/png;base64,UE5H)"), "{out}");
+        assert!(out.contains(r#"<img alt=x src="data:image/svg+xml;base64,PHN2Zy8+">"#), "{out}");
+        for kept in ["url(#m)", "url(a.svg#m)", "url(missing.svg)", "url(https://h/a.svg)", r#"src="data:image/png;base64,AA""#, r#"data-src="a.svg""#] {
+            assert!(out.contains(kept), "{kept} should be left alone: {out}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1685,5 +2651,467 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(got, "page");
+    }
+
+    /// `set_live_wake` is one slot per process: a second live window in the
+    /// same test binary takes the first one's wake.
+    static LIVE_WAKE_IS_GLOBAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `--report` and `--report-text` on a fixture: the report JSON and text.
+    fn report_for(name: &str, html: &str) -> (serde_json::Value, String) {
+        report_with(name, html, &[])
+    }
+
+    fn report_with(name: &str, html: &str, extra: &[&str]) -> (serde_json::Value, String) {
+        let dir = std::env::temp_dir().join(format!("parity-capture-report-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, html).unwrap();
+        let (json, text) = (dir.join("report.json"), dir.join("report.txt"));
+        let mut argv = vec![
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+            "--report-text",
+            text.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(extra);
+        let args = Args::try_parse_from(argv).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let report = serde_json::from_str(&fs::read_to_string(&json).expect("report written")).unwrap();
+        let text = fs::read_to_string(&text).expect("report text written");
+        let _ = fs::remove_dir_all(&dir);
+        (report, text)
+    }
+
+    fn causes(report: &serde_json::Value) -> Vec<String> {
+        report["ranked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| format!("{} {}", c["rule"].as_str().unwrap(), c["line"].as_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_fixed_dialog_over_a_locked_body_is_the_first_cause() {
+        let (report, text) = report_for(
+            "lock",
+            "<html><head><style>body { margin: 0; overflow: hidden } .story { height: 3000px }
+#consent { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; background: white }</style></head>
+<body><div class=\"story\"><p>story</p></div><div id=\"consent\" class=\"ot-sdk banner\"><p>cookies</p></div></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec![
+                "R1 scroll locked (body overflow-y:hidden) by overlay: fixed div#consent.ot-sdk.banner (z 9999) covers 100% of the viewport",
+                // The fixture's story is one empty 3000px box.
+                "R9 below the fold is empty from y=800 (document 3016px tall): no text or image starts in 800..1600",
+            ],
+            "{text}"
+        );
+        assert!(text.contains("1. [R1] scroll locked"), "{text}");
+    }
+
+    /// cnn, 2026-10-24: the consent script makes the body `position: fixed`
+    /// with `overflow: hidden`. The body is the lock, not the overlay, and
+    /// its content is still the page's; a bottom bar smaller than the
+    /// covering share is what the lock names.
+    #[test]
+    fn a_fixed_body_is_the_lock_and_the_largest_fixed_box_is_named() {
+        let (report, text) = report_for(
+            "fixed-body",
+            "<html><head><style>body { margin: 0; position: fixed; overflow: hidden; width: 100% }
+p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white }</style></head>
+<body><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><div style=\"position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white\"><p>cookies</p></div></body></html>",
+        );
+        // No id or class: named by its structural selector's last steps.
+        assert_eq!(
+            causes(&report),
+            vec!["R1 scroll locked (body overflow-y:hidden) by overlay: fixed body:nth-child(2) > div:nth-child(7) (z 50) covers 20% of the viewport"],
+            "{text}"
+        );
+        assert_eq!(report["covering"], serde_json::json!([]), "{text}");
+        assert_eq!(report["bands"][1]["text"], 3, "{text}");
+    }
+
+    #[test]
+    fn an_empty_viewport_band_below_content_is_r9() {
+        let (report, text) = report_for(
+            "band",
+            "<html><body style=\"margin: 0\"><p>top</p><div style=\"height: 2400px\"></div><p>end</p></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec!["R9 below the fold is empty from y=800 (document 2500px tall): no text or image starts in 800..1600"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_page_with_nothing_to_read_in_the_first_viewport_is_r10() {
+        let (report, text) = report_for("blank", "<html><body><div style=\"height:10px\"></div></body></html>");
+        let causes = causes(&report);
+        assert_eq!(causes.len(), 1, "{text}");
+        assert!(causes[0].starts_with("R10 the first viewport has no text and no image ("), "{text}");
+    }
+
+    #[test]
+    fn a_short_plain_page_fires_no_rule_and_says_what_it_did_not_check() {
+        let (report, text) = report_for("plain", "<html><body><p>a</p><img src=\"data:,\" width=\"10\" height=\"10\"></body></html>");
+        assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
+        assert!(text.contains("(no rule fired)"), "{text}");
+        // develop has no T2/T3 records: those rules are named as skipped.
+        let skipped: Vec<&str> = report["not_checked"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        assert!(skipped.iter().any(|n| n.starts_with("R3, R4")) && skipped.iter().any(|n| n.starts_with("R7")), "{skipped:?}");
+    }
+
+    /// T9 gap 1: yahoo's feed was grey rows and the bands read as content.
+    /// Ten rows count (colour or gradient); what follows them does not: a dot,
+    /// a hairline, a transparent box, a box with a picture for a background,
+    /// a form control, a hidden box, a positioned scrim and a box holding text.
+    #[test]
+    fn a_band_of_empty_painted_boxes_is_named_as_a_possible_skeleton() {
+        let rows = "<div style=\"height:20px;margin:4px;background:#eee\"></div>".repeat(8)
+            + &"<div style=\"height:20px;margin:4px;background:linear-gradient(#eee,#ddd)\"></div>".repeat(2);
+        let others = "<div style=\"width:8px;height:8px;background:#eee\"></div>
+<div style=\"height:1px;background:#eee\"></div>
+<div style=\"height:20px\"></div>
+<div style=\"height:20px;background:url(pic.png)\"></div>
+<input style=\"background:#eee\">
+<div style=\"height:20px;background:#eee;visibility:hidden\"></div>
+<div style=\"height:20px;background:#eee;opacity:0\"></div>
+<div style=\"position:absolute;left:0;width:100px;height:20px;background:linear-gradient(#eee,#ddd)\"></div>
+<div style=\"height:20px;background:#eee\">words</div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div>{rows}{others}</body></html>"
+        );
+        let (report, text) = report_for("skeleton", &html);
+        assert_eq!(report["bands"][2]["empty_painted"], 10, "{text}");
+        assert_eq!(report["bands"][0]["empty_painted"], 0, "{text}");
+        assert_eq!(causes(&report), vec!["R11 y 1600..2400: 10 painted boxes with no text and no image (skeleton?)"], "{text}");
+        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10, overlapping 0, past right edge 0\n"), "{text}");
+    }
+
+    /// T9 gap 6, through a real layout: three rows pulled over the one before,
+    /// three pushed past the right edge. A clipped strip of slides and an
+    /// out-of-flow label on a row count as neither.
+    #[test]
+    fn overlap_and_overflow_below_the_fold_are_named_from_a_real_layout() {
+        let over = "<div style=\"height:40px;margin-top:-30px\">row</div>".repeat(3);
+        let wide = "<div style=\"width:1500px;height:20px\">wide</div>".repeat(3);
+        let clipped = "<div style=\"overflow:hidden;height:40px\"><div style=\"width:3000px;height:40px\">slides</div></div>";
+        let label = "<div style=\"position:relative;height:40px\">row<div style=\"position:absolute;top:0;left:0\">ad</div></div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div><div style=\"height:40px\">first</div>{over}<div style=\"height:40px\"></div>{wide}{clipped}{label}</body></html>"
+        );
+        let (report, text) = report_for("misplaced", &html);
+        assert_eq!(report["bands"][2]["overlapping"], 3, "{text}");
+        assert_eq!(report["bands"][2]["past_right"], 3, "{text}");
+        assert_eq!(causes(&report), vec!["R12 y 1600..2400: 3 boxes overlap other content, 3 run past the right edge"], "{text}");
+    }
+
+    /// A few empty boxes are a page's decoration, not a placeholder feed.
+    #[test]
+    fn a_few_empty_painted_boxes_fire_no_rule() {
+        let rows = "<div style=\"height:20px;margin:4px;background:#eee\"></div>".repeat(7);
+        let (report, text) = report_for("few-empty", &format!("<html><body style=\"margin:0\"><p>top</p>{rows}</body></html>"));
+        assert_eq!(report["bands"][0]["empty_painted"], 7, "{text}");
+        assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
+    }
+
+    /// The flag reaches the report: T9's three runs had no shield and the
+    /// report could not say so.
+    #[test]
+    fn the_report_says_whether_the_shield_was_installed() {
+        const LINE: &str = "R6 shield: not installed, nothing could be blocked";
+        let page = "<html><body><p>a</p></body></html>";
+        let (without, text) = report_for("no-shield", page);
+        assert_eq!(without["shield"], false, "{text}");
+        assert!(text.contains(LINE), "{text}");
+        let (with, text) = report_with("shield", page, &["--shield", "--shield-wait-ms", "0"]);
+        assert_eq!(with["shield"], true, "{text}");
+        assert!(!text.contains(LINE), "{text}");
+    }
+
+    /// `--live-ms` end to end: the window's end is the capture's end. A request
+    /// still open at the end is pinned in `report.rs`: here a fetch started
+    /// inside the load holds the load, so it answers before the window opens.
+    #[test]
+    fn a_live_capture_reports_whether_the_page_settled() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = "<html><body><p>x</p></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-settled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("report.json");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "4000",
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&json).unwrap()).unwrap();
+        let settled = &report["settled"];
+        assert_eq!(settled["changing"], false, "{settled}");
+        assert_eq!(settled["open_requests"], 0, "{settled}");
+        assert_eq!(settled["navigated"], false, "{settled}");
+        // The layout came with the load, the whole window before the end.
+        let before = settled["last_relayout_ms_before"].as_f64().expect("a layout was recorded");
+        assert!(before >= 3000.0, "{settled}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T9 gap 7, through the engine's own console record: a string logged by
+    /// the page's inline script reaches R5, and its text does not.
+    #[test]
+    fn a_string_console_error_from_the_page_reaches_r5_as_a_shape() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let body = "<html><body><p>top</p><script>console.error('SECRET-TEXT');</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-string-error-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (json, log) = (dir.join("report.json"), dir.join("events.jsonl"));
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--event-log",
+            log.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let written = fs::read_to_string(&json).unwrap();
+        assert!(!written.contains("SECRET-TEXT"), "{written}");
+        let report: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let lines = causes(&report);
+        assert!(
+            lines.iter().any(|l| l.starts_with("R5 the page's own script: logged string in inline#1:1:9;")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // CH3.A1 (chrome board): the board drives HiWave's own chrome pages
+    // through the same action list in RustKit and in Chromium. Two states
+    // need actions the list did not have: "hover on the second tab" (a
+    // pointer move with no press) and "focus mode" (Ctrl+Shift+F — a key
+    // with modifiers). Playwright has `page.hover` and `Control+Shift+F`;
+    // these tests pin the RustKit side.
+    fn board_view(html: &str) -> (rustkit_engine::Engine, rustkit_engine::EngineViewId) {
+        let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load_html");
+        (engine, view)
+    }
+
+    #[test]
+    fn a_hover_action_moves_the_pointer_over_the_selector_without_pressing() {
+        let (mut engine, view) = board_view(
+            "<html><head><style>#t{width:100px;height:40px}</style></head><body>\
+             <div id=\"t\"></div><script>\
+             document.addEventListener('mousedown', function(){ document.body.setAttribute('data-pressed','1'); });\
+             document.addEventListener('click', function(){ document.body.setAttribute('data-pressed','1'); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"hover","selector":"#t"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let res = &result.action_results.as_ref().expect("action results")[0];
+        assert_eq!(res.status, "ok", "hover is an action: {res:?}");
+        assert!(
+            res.method.as_deref().unwrap_or("").starts_with("engine_point("),
+            "hover moves the engine pointer to the element's centre: {res:?}"
+        );
+        let pressed = engine
+            .execute_script(view, "String(document.body.getAttribute('data-pressed'))")
+            .unwrap_or_default();
+        assert!(!pressed.contains('1'), "a hover never presses: {pressed}");
+    }
+
+    #[test]
+    fn a_key_action_carries_its_modifiers_into_the_keyboard_event() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey?'c':'') + (e.shiftKey?'s':'') + (e.metaKey?'m':'') + (e.altKey?'a':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(
+            r#"[{"type":"key","key":"F","modifiers":["Control","Shift"]}]"#,
+        )
+        .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "the page's keydown listener saw Ctrl+Shift+F: {seen}");
+    }
+
+    // The engine's `handle_text_key` fires the DOM keydown itself (fire_key),
+    // and the action then dispatched a synthetic one on top: a page listener
+    // heard every key twice, and a toggle (the chrome's Ctrl+Shift+F focus
+    // mode) switched on and straight off again (chrome board, 2026-11-05).
+    #[test]
+    fn a_key_action_reaches_the_page_listener_once() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             var n = 0;\
+             document.addEventListener('keydown', function(e){ n += 1; document.body.setAttribute('data-n', String(n)); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F3"}]"#).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-n'))")
+            .unwrap_or_default();
+        assert!(seen.contains('1') && !seen.contains('2'), "one keydown per key action: {seen}");
+    }
+
+    // `key` with `text` wrote the string onto the control's value from
+    // script: no keydown, no selection replaced. Playwright types it. The
+    // chrome's address bar selects all on focus, so Chromium showed the typed
+    // URL and RustKit the old one with the typed URL appended (chrome board,
+    // 2026-11-05). Typed text goes through the engine's keyboard, a key at a
+    // time, as a user's does.
+    #[test]
+    fn typed_text_goes_through_the_engines_keyboard_a_key_at_a_time() {
+        let (mut engine, view) = board_view(
+            "<html><body><input id=\"i\" value=\"abc\"><script>\
+             var keys = [];\
+             document.addEventListener('keydown', function(e){ keys.push(e.key); document.body.setAttribute('data-keys', keys.join('')); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"key","selector":"#i","text":"xy"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let keys = engine
+            .execute_script(view, "String(document.body.getAttribute('data-keys'))")
+            .unwrap_or_default();
+        assert!(keys.contains("xy"), "the page heard a keydown per typed character: {keys}");
+        let value = engine
+            .execute_script(view, "String(document.getElementById('i').value)")
+            .unwrap_or_default();
+        assert!(value.contains("abcxy"), "the text landed in the focused control: {value}");
+    }
+
+    // #898 R1 (Prometheus): `KEY_SEEN_READ_JS` answers 'unseen' and the check
+    // was `contains("seen")` — true either way, so the synthetic-key fallback
+    // was dead and every key was labelled engine_key.
+    #[test]
+    fn a_key_the_page_did_not_hear_reads_as_not_seen() {
+        assert!(!key_was_seen("String(\"unseen\")"), "'unseen' is not seen");
+        assert!(!key_was_seen("String(\"key-silent\")"), "the silent answer is not seen");
+        assert!(key_was_seen("String(\"key-heard\")"), "the heard answer is seen");
+    }
+
+    // The one-shot listener armed for a key the page never heard must not
+    // stay armed: the next key would read as seen before it was pressed.
+    #[test]
+    fn an_unheard_key_leaves_no_armed_listener_behind() {
+        let (mut engine, view) = board_view("<html><body></body></html>");
+        let _ = engine.execute_script(view, KEY_SEEN_ARM_JS);
+        let read = engine.execute_script(view, KEY_SEEN_READ_JS).unwrap_or_default();
+        assert!(!key_was_seen(&read), "nothing pressed: {read}");
+        let later = engine
+            .execute_script(
+                view,
+                "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); \
+                 String(window.__parityCaptureKeySeen)",
+            )
+            .unwrap_or_default();
+        assert!(later.contains("false"), "the stale listener was cleared: {later}");
+    }
+
+    // Meta is Ctrl's equivalent on macOS and the chrome's shortcuts take either
+    // (`e.ctrlKey || e.metaKey`); the engine's keyboard has no meta flag, so a
+    // Meta chord goes through as Ctrl.
+    #[test]
+    fn a_meta_chord_reaches_the_page_as_a_control_chord() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey||e.metaKey?'c':'') + (e.shiftKey?'s':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F","modifiers":["Meta","Shift"]}]"#)
+            .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "Meta+Shift+F reached the page as a modifier chord: {seen}");
+    }
+
+    // A selector list splits on top-level commas only: `:is(a, b)` is one
+    // selector, not two broken ones.
+    #[test]
+    fn a_selector_list_splits_on_top_level_commas_only() {
+        assert_eq!(split_selector_list("#a, .b"), vec!["#a", ".b"]);
+        assert_eq!(
+            split_selector_list(":is(#a, .b) > span, [title=\"x, y\"]"),
+            vec![":is(#a, .b) > span", "[title=\"x, y\"]"]
+        );
     }
 }

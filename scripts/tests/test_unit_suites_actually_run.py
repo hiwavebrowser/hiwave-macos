@@ -21,7 +21,7 @@ it:
    lane that scored that green would be the instrument lie this campaign
    exists to end — a did-not-run wearing a green check.
 3. A red suite is reported RED.
-4. It runs on macos-14, and F1's whole-workspace compile falsifier survives.
+4. It runs on macos-15, and F1's whole-workspace compile falsifier survives.
 
 Property 4 is static (there is nothing to execute); 1-3 are behavioural.
 
@@ -185,20 +185,23 @@ def test_the_lane_is_blocking():
 
 
 def test_the_lane_runs_where_coretext_is():
-    assert _lane()["runs-on"] == "macos-14", (
-        "the unit suites must run on macos-14: two of #199's justify tests are "
+    assert _lane()["runs-on"] == "macos-15", (
+        "the unit suites must run on macos-15: two of #199's justify tests are "
         "green on CoreText and red on a Linux font stack (measured 09-17), so "
         "a ubuntu lane would red-lock on font substitution"
     )
 
 
 def test_the_lane_is_not_skipped_on_pull_requests():
+    # Batch-level CI (Pete 2026-11-13, #1125): the heavy lane runs on push,
+    # schedule, dispatch and on the batch PR (head batch/NN), not on every
+    # member PR. Exactly that condition is allowed; anything else that keeps
+    # the lane off pull_request (or off the batch PR) still fails.
     cond = str(_lane().get("if", "")).strip()
-    assert "pull_request" not in cond, (
-        f"unit-suites is conditioned away from the PR lane (if: {cond}); "
-        "pr_merge is where this campaign enforces its bars"
+    allowed = "github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')"
+    assert cond in ("", allowed), (
+        f"lane condition changed from the batch-level rule (if: {cond})"
     )
-
 
 def test_f1_still_compiles_the_whole_workspace():
     """F2 is narrower than F1 on purpose — it runs two packages, F1 compiles

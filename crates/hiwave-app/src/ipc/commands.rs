@@ -235,8 +235,10 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
             // This is handled in main.rs via UserEvent
             IpcResponse::success(serde_json::json!({ "action": "trigger_autofill" }))
         }
-        IpcMessage::GetCredentialsForAutofill { ref domain } => {
-            handle_get_credentials_for_autofill(state, domain)
+        // Content-view only, answered by the app through `ipc::autofill`
+        // with the view's own URL; never from the vault here.
+        IpcMessage::GetCredentialsForAutofill { .. } | IpcMessage::AutofillPick { .. } => {
+            IpcResponse::error("autofill is handled by the app")
         }
 
         // Inspector (DevTools) - handled via main.rs
@@ -266,46 +268,10 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
     }
 }
 
-fn handle_get_credentials_for_autofill(state: &Arc<Mutex<AppState>>, domain: &str) -> IpcResponse {
-    let state = state.lock().unwrap();
-
-    if !state.vault.is_unlocked() {
-        return IpcResponse::error("Vault is locked");
-    }
-
-    // Create a URL from the domain to use the vault's get_credentials
-    let url_string = if domain.starts_with("http://") || domain.starts_with("https://") {
-        domain.to_string()
-    } else {
-        format!("https://{}", domain)
-    };
-
-    match Url::parse(&url_string) {
-        Ok(url) => {
-            match state.vault.get_credentials(&url) {
-                Ok(credentials) => {
-                    let autofill_creds: Vec<super::AutofillCredential> = credentials
-                        .iter()
-                        .map(|c| super::AutofillCredential {
-                            id: c.id,
-                            domain: c.url.clone(),
-                            username: c.username.clone(),
-                            password: c.password.clone(),
-                        })
-                        .collect();
-                    IpcResponse::success(autofill_creds)
-                }
-                Err(e) => IpcResponse::error(format!("Failed to get credentials: {}", e)),
-            }
-        }
-        Err(e) => IpcResponse::error(format!("Invalid domain: {}", e)),
-    }
-}
-
 // Navigation handlers
 
 fn handle_navigate(_state: &Arc<Mutex<AppState>>, url: &str) -> IpcResponse {
-    info!("Navigate to: {}", url);
+    info!("Navigate to: {}", crate::page_url_for_log(&url));
     // Navigation will be handled by the WebView directly
     IpcResponse::success(serde_json::json!({ "navigated": true, "url": url }))
 }
@@ -433,7 +399,8 @@ fn handle_activate_tab(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse {
     match state.shell.set_active_tab(tab_id) {
         Ok(Some(tab)) => {
             let url = tab.url.to_string();
-            info!("Activated tab: {:?}, navigating to {}", tab_id, url);
+            info!("Activated tab: {:?}, navigating to {}", tab_id, crate::page_url_for_log(&url));
+            crate::tab_shortcuts::activation_landed(&mut state, tab_id);
             if let Err(e) = state.save_workspace_state() {
                 warn!("Failed to persist workspace state: {}", e);
             }
@@ -519,7 +486,7 @@ fn handle_update_active_tab_url(state: &Arc<Mutex<AppState>>, url: &str) -> IpcR
             if let Err(e) = state.shell.update_tab_url(tab_id, parsed_url) {
                 return IpcResponse::error(format!("Failed to update tab URL: {}", e));
             }
-            info!("Updated active tab URL to: {}", url);
+            info!("Updated active tab URL to: {}", crate::page_url_for_log(&url));
             if let Err(e) = state.save_workspace_state() {
                 warn!("Failed to persist workspace state: {}", e);
             }
@@ -1121,7 +1088,7 @@ fn handle_save_credential(
 
     match state.vault.save_credential(&url, username, password) {
         Ok(id) => {
-            info!("Credential saved for: {}", url);
+            info!("Credential saved for: {}", crate::url_for_log(url.as_str()));
             IpcResponse::success(serde_json::json!({ "saved": true, "id": id }))
         }
         Err(e) => {
@@ -1345,7 +1312,7 @@ fn handle_log(level: &str, message: &str) -> IpcResponse {
 }
 
 fn handle_open_external(url: &str) -> IpcResponse {
-    info!("Opening in external browser: {}", url);
+    info!("Opening in external browser: {}", crate::page_url_for_log(&url));
 
     match platform().open_external(url) {
         Ok(()) => IpcResponse::success(serde_json::json!({ "opened": true, "url": url })),

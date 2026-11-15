@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E22 focus ring</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* A wide field with a thick border across the top half: its border is
+     red at rest and green under `:focus` (CH2.E22). The bottom half is
+     blank, a place to click that focuses nothing. */
+  #f { position: fixed; left: 5%; top: 5%; width: 90%; height: 40%; box-sizing: border-box; margin: 0;
+       border: 40px solid #ff0000; outline: none; background: #ffffff; font-size: 20px; }
+  #f:focus { border-color: #00ff00; }
+</style>
+<input id="f">
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  var f = document.getElementById('f');
+  f.addEventListener('focus', function () { beacon('e22-focus'); });
+  f.addEventListener('blur', function () { beacon('e22-blur'); });
+  beacon('e22-ready');
+</script>

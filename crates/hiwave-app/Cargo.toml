@@ -13,6 +13,10 @@ path = "src/main.rs"
 [features]
 # Default to RustKit hybrid mode on macOS (RustKit for content, WRY for Chrome/Shelf)
 default = ["rustkit"]
+# The real-window checks' panel probe (HIWAVE_RUSTKIT_PANEL_PROBE, CH3.A4):
+# compiled into debug builds, and into a release build only with this
+# feature. Never in a shipped build.
+test-hooks = []
 # RustKit: Pure Rust browser engine for content rendering (hybrid mode)
 # WRY is still used for Chrome UI and Shelf components
 rustkit = [
@@ -21,6 +25,7 @@ rustkit = [
   "rustkit-text",
   "rustkit-compositor",
   "rustkit-net",
+  "hiwave-shield-intercept",
   "wgpu",
   "tokio",
 ]
@@ -67,6 +72,7 @@ rustkit-viewhost = { workspace = true, optional = true }
 rustkit-text = { workspace = true, optional = true }
 rustkit-compositor = { workspace = true, optional = true }
 rustkit-net = { workspace = true, optional = true }
+hiwave-shield-intercept = { workspace = true, optional = true }
 wgpu = { version = "24", optional = true }
 tokio = { version = "1.42", features = ["rt", "time"], optional = true }
 

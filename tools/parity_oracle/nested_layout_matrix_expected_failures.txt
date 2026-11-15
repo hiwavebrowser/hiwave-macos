@@ -10,11 +10,8 @@
 
 # intrinsic-width-keyword-unparsed: 36
 core--block--block--w-min-content--h-auto            intrinsic-width-keyword-unparsed
-core--block--block--w-max-content--h-50pct           intrinsic-width-keyword-unparsed
 core--block--flex-row--w-min-content--h-auto         intrinsic-width-keyword-unparsed
-core--block--flex-row--w-max-content--h-50pct        intrinsic-width-keyword-unparsed
 core--block--flex-col--w-min-content--h-auto         intrinsic-width-keyword-unparsed
-core--block--flex-col--w-max-content--h-50pct        intrinsic-width-keyword-unparsed
 core--block--grid--w-min-content--h-auto             intrinsic-width-keyword-unparsed
 core--block--grid--w-max-content--h-50pct            intrinsic-width-keyword-unparsed
 core--flex-col--block--w-min-content--h-auto         intrinsic-width-keyword-unparsed
@@ -51,7 +48,6 @@ core--flex-row--grid--w-auto--h-auto         grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-50pct--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-200px--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-min-content--h-auto  grid-item-of-flex-laid-out-as-block
-clamp--flex-row--max-height-grid             grid-item-of-flex-laid-out-as-block
 margin-auto--flex-row--grid                  grid-item-of-flex-laid-out-as-block
 margin-auto--flex-col--grid                  grid-item-of-flex-laid-out-as-block
 gap--flex-row--grid                          grid-item-of-flex-laid-out-as-block
@@ -107,26 +103,9 @@ core--abspos--grid--w-max-content--h-50pct       grid-max-content-width-no-grid-
 core--inline-block--grid--w-fit-content--h-120px grid-max-content-width-no-grid-arm
 
 # flex-item-min-width-is-its-own-width: 20
-core--float--flex-row--w-50pct--h-auto         flex-item-min-width-is-its-own-width
-core--float--flex-row--w-50pct--h-50pct        flex-item-min-width-is-its-own-width
-core--float--flex-row--w-50pct--h-120px        flex-item-min-width-is-its-own-width
 core--inline-block--flex-row--w-50pct--h-auto  flex-item-min-width-is-its-own-width
 core--inline-block--flex-row--w-50pct--h-50pct flex-item-min-width-is-its-own-width
 core--inline-block--flex-row--w-50pct--h-120px flex-item-min-width-is-its-own-width
-core--abspos--flex-row--w-50pct--h-auto        flex-item-min-width-is-its-own-width
-core--abspos--flex-row--w-50pct--h-50pct       flex-item-min-width-is-its-own-width
-core--abspos--flex-row--w-50pct--h-120px       flex-item-min-width-is-its-own-width
-clamp--block--max-width-flex                   flex-item-min-width-is-its-own-width
-clamp--flex-row--max-width-flex                flex-item-min-width-is-its-own-width
-clamp--grid--max-width-flex                    flex-item-min-width-is-its-own-width
-flex-min-auto--block--empty-basis-0            flex-item-min-width-is-its-own-width
-flex-min-auto--flex-row--empty-basis-0         flex-item-min-width-is-its-own-width
-flex-min-auto--flex-col--empty-basis-0         flex-item-min-width-is-its-own-width
-flex-min-auto--grid--empty-basis-0             flex-item-min-width-is-its-own-width
-flex-min-auto--block--content-overflows        flex-item-min-width-is-its-own-width
-flex-min-auto--flex-row--content-overflows     flex-item-min-width-is-its-own-width
-flex-min-auto--flex-col--content-overflows     flex-item-min-width-is-its-own-width
-flex-min-auto--grid--content-overflows         flex-item-min-width-is-its-own-width
 
 # table-cell-percent-height: 16
 core--table-cell--block--w-auto--h-50pct               table-cell-percent-height
@@ -159,11 +138,6 @@ grid-span--grid--auto-rows-auto            grid-auto-rows-not-stretched-to-non-p
 gap--grid--grid                            grid-auto-rows-not-stretched-to-non-px-height
 
 # column-flex-item-stretches-to-outer-width: 5
-core--flex-row--flex-col--w-auto--h-auto         column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-min-content--h-auto  column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-50pct        column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-max-content--h-50pct column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-120px        column-flex-item-stretches-to-outer-width
 
 # fit-content-grid-item-stretches: 5
 core--grid--block--w-fit-content--h-120px        fit-content-grid-item-stretches
@@ -179,22 +153,18 @@ grid-span--flex-row--auto-rows-40     grid-max-content-width-zero-with-column-sp
 grid-span--abspos--auto-rows-40       grid-max-content-width-zero-with-column-span
 grid-span--flex-row--auto-rows-auto   grid-max-content-width-zero-with-column-span
 
-# aspect-ratio-width-not-derived-from-height: 4
+# aspect-ratio-width-not-derived-from-height: 3 (flex-row--fixed-height fixed by C10 e)
 aspect-ratio--flex-row--auto         aspect-ratio-width-not-derived-from-height
 aspect-ratio--block--fixed-height    aspect-ratio-width-not-derived-from-height
-aspect-ratio--flex-row--fixed-height aspect-ratio-width-not-derived-from-height
 aspect-ratio--grid--fixed-height     aspect-ratio-width-not-derived-from-height
 
-# aspect-ratio-height-of-column-flex-item: 2
-aspect-ratio--flex-col--auto        aspect-ratio-height-of-column-flex-item
-aspect-ratio--flex-col--fixed-width aspect-ratio-height-of-column-flex-item
+# aspect-ratio-height-of-column-flex-item: 0 (both fixed by C10 e)
 
 # grid-item-auto-margins-ignored: 2
 margin-auto--block--grid grid-item-auto-margins-ignored
 margin-auto--grid--grid  grid-item-auto-margins-ignored
 
 # percent-height-chain-in-stretched-grid-item: 1
-percent-height--grid--through-auto percent-height-chain-in-stretched-grid-item
 
 # max-height-ignored-on-stretched-item: 1
 clamp--grid--max-height-grid max-height-ignored-on-stretched-item

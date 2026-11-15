@@ -11,6 +11,9 @@ license = "MIT"
 rustkit-css = { path = "../rustkit-css" }
 rustkit-dom = { path = "../rustkit-dom" }
 
+# Rasterizer (BSD-3-Clause): the bitmap behind getImageData
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+
 # Core
 thiserror = "1.0"
 tracing = "0.1"

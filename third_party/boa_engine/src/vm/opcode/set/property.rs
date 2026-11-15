@@ -1,5 +1,6 @@
 use crate::JsExpect;
 use crate::JsValue;
+use crate::object::JsObject;
 use crate::value::JsVariant;
 use crate::vm::opcode::{IndexOperand, RegisterOperand};
 use crate::{
@@ -10,6 +11,20 @@ use crate::{
     vm::opcode::Operation,
 };
 use boa_macros::js_str;
+use crate::string::StaticJsStrings;
+
+/// HIWAVE PATCH (array-length-ic): whether `object` defines properties the ordinary way, the
+/// only case in which `SetPropertyByName` may write a cached slot directly.
+#[inline(always)]
+fn has_ordinary_define_own_property(object: &JsObject) -> bool {
+    let ordinary: fn(
+        &JsObject,
+        &PropertyKey,
+        PropertyDescriptor,
+        &mut InternalMethodPropertyContext<'_>,
+    ) -> JsResult<bool> = crate::object::internal_methods::ordinary_define_own_property;
+    std::ptr::fn_addr_eq(object.vtable().__define_own_property__, ordinary)
+}
 
 fn set_by_name(
     value: RegisterOperand,
@@ -25,7 +40,15 @@ fn set_by_name(
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    if let Some((shape, slot)) = ic.get(object_borrowed.shape())
+        // HIWAVE PATCH (array-length-ic): a cached slot is written directly only on an object whose
+        // [[DefineOwnProperty]] is the ordinary one, or on an array for any name but `length`. An
+        // Array subclass instance has the same shape as `Object.create(Q.prototype)` given a
+        // writable own `length`, so a site that cached that object's `length` would otherwise
+        // write a real array's `length` past ArraySetLength.
+        && (has_ordinary_define_own_property(&object)
+            || (object.is_array() && ic.name != StaticJsStrings::LENGTH))
+    {
         let slot_index = slot.index as usize;
 
         if slot.attributes.is_accessor_descriptor() {
@@ -72,6 +95,15 @@ fn set_by_name(
 
     // Cache the property.
     let slot = *context.slot();
+    // HIWAVE PATCH (vm-stats): an inline-cache miss, by receiver kind and name.
+    if crate::vm::stats::enabled() {
+        crate::vm::stats::miss(
+            crate::vm::stats::Site::SetByName,
+            &name.to_string(),
+            crate::vm::stats::receiver_kind(receiver),
+            succeeded && slot.is_cacheable(),
+        );
+    }
     if succeeded && slot.is_cacheable() {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
@@ -154,6 +186,47 @@ impl SetPropertyByValue {
         ),
         context: &mut Context,
     ) -> JsResult<()> {
+        // HIWAVE PATCH (js-perf2): `a[i] = v` on an extensible array's dense element, or a typed
+        // array's element (an ordinary assignment, where the receiver is the base itself), before
+        // anything is cloned and the key converted.
+        if let Some(index) = crate::vm::opcode::get::fast_index(context.vm.get_register(key.into()))
+            && let Some(base) = context.vm.get_register(object.into()).as_object()
+        {
+            // The receiver must be the base itself: `super[i] = v` on an array home object, or
+            // `Reflect.set(arr, i, v, other)`, defines the element on the receiver instead.
+            if base.is_array()
+                && context
+                    .vm
+                    .get_register(receiver.into())
+                    .as_object()
+                    .is_some_and(|r| JsObject::equals(&r, &base))
+            {
+                let mut base_borrowed = base.borrow_mut();
+                if base_borrowed.extensible
+                    && base_borrowed
+                        .properties_mut()
+                        .set_dense_property(index, context.vm.get_register(value.into()))
+                {
+                    return Ok(());
+                }
+            } else if base.is::<crate::builtins::typed_array::TypedArray>()
+                && context
+                    .vm
+                    .get_register(receiver.into())
+                    .as_object()
+                    .is_some_and(|r| JsObject::equals(&r, &base))
+            {
+                let value = context.vm.get_register(value.into()).clone();
+                crate::builtins::typed_array::object::typed_array_set_element(
+                    &base,
+                    f64::from(index),
+                    &value,
+                    &mut context.into(),
+                )?;
+                return Ok(());
+            }
+        }
+
         let value = context.vm.get_register(value.into()).clone();
         let key = context.vm.get_register(key.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
@@ -164,7 +237,9 @@ impl SetPropertyByValue {
 
         // Fast Path:
         'fast_path: {
+            // HIWAVE PATCH (js-perf2): only when the receiver is the array itself.
             if object.is_array()
+                && receiver.as_object().is_some_and(|r| JsObject::equals(&r, &object))
                 && let PropertyKey::Index(index) = &key
             {
                 let mut object_borrowed = object.borrow_mut();

@@ -20,6 +20,7 @@ use rustkit_css::{
     WhiteSpace, WordBreak as CssWordBreak,
 };
 use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
+use rustkit_text::GlyphFace;
 use rustkit_text::line_break::{LineBreaker, OverflowWrap, WordBreak as LineBreakWordBreak};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -186,13 +187,24 @@ impl FontFamilyChain {
 
     /// Resolve a CSS font-family value to a chain.
     pub fn from_css_value(value: &str) -> Self {
-        let families: Vec<&str> = value
+        let listed: Vec<&str> = value
             .split(',')
             .map(|s| s.trim().trim_matches('"').trim_matches('\''))
             .collect();
+        // `-apple-system` is WebKit's name for the system font; Chrome has
+        // never supported it, so it is an unknown family and the stack goes
+        // on to the next one (Chrome for Testing 148: `-apple-system` alone
+        // is the default serif, `-apple-system, "Segoe UI", Helvetica` is
+        // Helvetica). CB7b.
+        let families: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|f| !f.eq_ignore_ascii_case("-apple-system"))
+            .collect();
 
         if families.is_empty() {
-            return Self::sans_serif();
+            // Only unknown names: Chrome's default (standard) font.
+            return if listed.is_empty() { Self::sans_serif() } else { Self::serif() };
         }
 
         let primary = families[0];
@@ -202,7 +214,7 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
-            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
+            "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
@@ -216,10 +228,7 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui"
-                        || lower == "-apple-system"
-                        || lower == "blinkmacsystemfont"
-                    {
+                    if lower == "system-ui" || lower == "blinkmacsystemfont" {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
@@ -354,6 +363,12 @@ pub struct PositionedGlyph {
     pub character: char,
     /// Cluster index for multi-glyph characters.
     pub cluster: u32,
+    /// The face this glyph was measured in (`rustkit_text::macos::select_face`,
+    /// ONE decision for layout and paint): the run's own face, a fallback
+    /// face by presentation, or nothing for a selector. The display list
+    /// carries it to paint (`DisplayCommand::Text::faces`), which draws
+    /// from that face and never decides again.
+    pub face: GlyphFace,
 }
 
 /// A shaped text run.
@@ -520,11 +535,15 @@ impl GlyphRun {
         if run.direction != TextDirection::Ltr {
             return None;
         }
-        if run
-            .glyphs
-            .iter()
-            .any(|g| g.glyph_id == 0 || is_color_glyph_char(g.character))
-        {
+        // A glyph measured in a fallback face (`select_face`) is not this
+        // face's to draw: `©️` keeps the primary's glyph id but is the
+        // emoji face's, so its line stays on the per-character path, where
+        // paint reads the recorded face.
+        if run.glyphs.iter().any(|g| {
+            g.glyph_id == 0
+                || matches!(g.face, GlyphFace::Fallback { .. })
+                || is_color_glyph_char(g.character)
+        }) {
             return None;
         }
 
@@ -1150,6 +1169,12 @@ pub const TARGET_FONT_BACKEND: Option<&str> = if cfg!(windows) {
 /// and can never be a parity receipt.
 pub const TEXT_METRICS_ARE_FONT_DERIVED: bool = cfg!(any(windows, target_os = "macos"));
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how many shapes missed the per-thread memo on this thread.
+    static MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -1164,9 +1189,9 @@ impl TextShaper {
         }
     }
 
-    /// Shape text with the given style.
+    /// Shape text using DirectWrite on Windows (uncached; see `shape`).
     #[cfg(windows)]
-    pub fn shape(
+    fn shape_uncached(
         &self,
         text: &str,
         font_chain: &FontFamilyChain,
@@ -1295,6 +1320,7 @@ impl TextShaper {
                             advance,
                             character: c,
                             cluster: i as u32,
+                            face: GlyphFace::Primary,
                         });
 
                         x_offset += advance;
@@ -1385,6 +1411,7 @@ impl TextShaper {
                 advance,
                 character: c,
                 cluster: i as u32,
+                face: GlyphFace::Primary,
             });
 
             x_offset += advance;
@@ -1409,7 +1436,7 @@ impl TextShaper {
         })
     }
 
-    /// Shape text using Core Text on macOS.
+    /// Shape text with the given style, on every platform.
     ///
     /// Results are memoised per thread. Layout shapes the same strings over
     /// and over: every flex/grid measuring pass re-wraps its text, and each
@@ -1417,8 +1444,8 @@ impl TextShaper {
     /// 29% of the main thread, spread over thousands of small repeated
     /// shapes. The answer depends only on the arguments and on the installed
     /// `@font-face` set, so entries are dropped whenever that set changes
-    /// (the rule `create_ct_font_with_traits` uses).
-    #[cfg(target_os = "macos")]
+    /// (the rule `create_ct_font_with_traits` uses). The measuring itself is
+    /// each platform's `shape_uncached`.
     pub fn shape(
         &self,
         text: &str,
@@ -1484,6 +1511,8 @@ impl TextShaper {
         if let Some(run) = cached {
             return Ok(run);
         }
+        #[cfg(test)]
+        MISSES.with(|c| c.set(c.get() + 1));
         let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
         MEMO.with(|m| {
             let mut m = m.borrow_mut();
@@ -1622,8 +1651,31 @@ impl TextShaper {
             // fallback faces this run actually used.
             let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
 
+            // EM1: characters still to fold into the emoji sequence glyph
+            // the previous head started (Chrome shapes a ZWJ family, a
+            // skin-toned emoji, a flag, a keycap as ONE cluster with one
+            // advance). They are recorded `Ignorable`: no advance, nothing
+            // drawn of their own; paint draws the sequence at the head.
+            let mut fold_left = 0usize;
+            let primary_emoji_advance = rustkit_text::macos::apple_emoji_advance(&ct_font);
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
+                if fold_left > 0 {
+                    fold_left -= 1;
+                    glyphs.push(PositionedGlyph {
+                        glyph_id: glyph_ids[utf16_idx],
+                        x: x_offset,
+                        y: 0.0,
+                        advance: 0.0,
+                        character: c,
+                        cluster: char_idx as u32,
+                        face: GlyphFace::Ignorable,
+                    });
+                    utf16_idx += c.len_utf16();
+                    char_idx += 1;
+                    continue;
+                }
                 let advance = glyph_advances[utf16_idx].width as f32;
 
                 // A character the chosen face has no glyph for is shaped by
@@ -1638,11 +1690,57 @@ impl TextShaper {
                 // 15.69px on SF at 16px — so the miss is the id, never a
                 // zero advance.
                 let notdef_advance = if advance == 0.0 { size * 0.5 } else { advance };
-                let final_advance = if glyph_ids[utf16_idx] == 0 {
-                    if c.is_whitespace() || c.is_control() {
-                        notdef_advance
-                    } else {
-                        match Self::fallback_glyph_advance(c, &ct_font) {
+                let primary_has_glyph = glyph_ids[utf16_idx] != 0;
+                let primary_advance = advance + kern.get(utf16_idx).copied().unwrap_or(0.0);
+                // THE face decision (rustkit_text::macos::select_face), made
+                // here and recorded on the glyph: paint reads it from the
+                // display list and never decides again. The next character
+                // takes part: U+FE0F asks for the emoji face even when this
+                // face has the glyph (`©️`), U+FE0E for a text face.
+                let next = text_chars.get(char_idx + 1).copied();
+                let face = if c.is_whitespace() || c.is_control() {
+                    GlyphFace::Primary
+                } else {
+                    rustkit_text::macos::select_face(
+                        &ct_font,
+                        c,
+                        rustkit_text::Variation::after(next),
+                        primary_has_glyph,
+                    )
+                };
+                // The head of an emoji sequence its emoji face forms as one
+                // glyph takes the rest of its grapheme cluster with it.
+                // So does the head of a run whose own face is an Apple
+                // emoji face (`font-family: "Apple Color Emoji"`).
+                let primary_emoji_head =
+                    face == GlyphFace::Primary && primary_has_glyph && primary_emoji_advance.is_some();
+                if face == (GlyphFace::Fallback { emoji: true }) || primary_emoji_head {
+                    let n = rustkit_text::macos::emoji_cluster_len(&text_chars[char_idx..]);
+                    if n > 1 {
+                        let cluster: String = text_chars[char_idx..char_idx + n].iter().collect();
+                        let formed = if primary_emoji_head {
+                            rustkit_text::macos::emoji_cluster_glyph(&ct_font, &cluster)
+                        } else {
+                            rustkit_text::macos::fallback_face_for_presentation(&ct_font, c, true)
+                                .and_then(|(face, _)| rustkit_text::macos::emoji_cluster_glyph(&face, &cluster))
+                        };
+                        if let Some((_, covered)) = formed {
+                            fold_left = covered - 1;
+                        }
+                    }
+                }
+                let final_advance = match face {
+                    // A primary Apple emoji face advances as it does when
+                    // reached by fallback (#1072 R1 nit 4).
+                    GlyphFace::Primary if primary_has_glyph => {
+                        primary_emoji_advance.unwrap_or(primary_advance)
+                    }
+                    GlyphFace::Primary => notdef_advance,
+                    // Variation selectors / joiners are zero-width
+                    // wherever they land (they modify a neighbour).
+                    GlyphFace::Ignorable => 0.0,
+                    GlyphFace::Fallback { emoji } => {
+                        match Self::fallback_glyph_advance(c, emoji, &ct_font) {
                             Some((adv, asc, desc, lead)) => {
                                 used_fallback_extents = Some(match used_fallback_extents {
                                     Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
@@ -1650,14 +1748,9 @@ impl TextShaper {
                                 });
                                 adv
                             }
-                            // Variation selectors / joiners are zero-width
-                            // wherever they land (they modify a neighbour).
-                            None if is_default_ignorable(c) => 0.0,
                             None => notdef_advance, // tofu
                         }
                     }
-                } else {
-                    advance + kern.get(utf16_idx).copied().unwrap_or(0.0)
                 };
 
                 glyphs.push(PositionedGlyph {
@@ -1667,6 +1760,7 @@ impl TextShaper {
                     advance: final_advance,
                     character: c,
                     cluster: char_idx as u32,
+                    face,
                 });
 
                 x_offset += final_advance;
@@ -1811,39 +1905,20 @@ impl TextShaper {
         deltas
     }
 
-    /// Advance and face extents for a character `primary` lacks, from the
-    /// face rustkit-text's `fallback_face_for` gives: the one paint draws
-    /// the character from. Returns `(advance, ascent, descent, leading)`.
+    /// Advance and face extents for a character measured in a fallback face
+    /// (`GlyphFace::Fallback { emoji }`, from `select_face`), from the face
+    /// rustkit-text's `fallback_face_for_presentation` gives: the one paint
+    /// draws the character from, by the same record. Returns `(advance,
+    /// ascent, descent, leading)`.
     #[cfg(target_os = "macos")]
     fn fallback_glyph_advance(
         c: char,
+        emoji: bool,
         primary: &core_text::font::CTFont,
     ) -> Option<(f32, f32, f32, f32)> {
-        extern "C" {
-            fn CTFontGetAdvancesForGlyphs(
-                font: core_text::font::CTFontRef,
-                orientation: u32,
-                glyphs: *const u16,
-                advances: *mut CGSize,
-                count: isize,
-            ) -> f64;
-        }
-
-        let (font, glyph) = rustkit_text::macos::fallback_face_for(primary, c)?;
-        let mut advance = CGSize::new(0.0, 0.0);
-        // SAFETY: `font` is a live CTFont; one glyph id is read and one
-        // advance written.
-        unsafe {
-            CTFontGetAdvancesForGlyphs(
-                font.as_concrete_TypeRef(),
-                0, // kCTFontOrientationHorizontal
-                &glyph,
-                &mut advance,
-                1,
-            );
-        }
+        let (font, glyph) = rustkit_text::macos::fallback_face_for_presentation(primary, c, emoji)?;
         Some((
-            advance.width as f32,
+            rustkit_text::macos::glyph_advance(&font, glyph),
             rustkit_text::macos::blink_ascent(&font),
             font.descent() as f32,
             font.leading() as f32,
@@ -1998,9 +2073,10 @@ impl TextShaper {
         Err(TextError::FontNotFound(family.to_string()))
     }
 
-    /// Simplified shaping fallback for non-Windows, non-macOS platforms.
+    /// Simplified shaping fallback for non-Windows, non-macOS platforms
+    /// (uncached; see `shape`).
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    pub fn shape(
+    fn shape_uncached(
         &self,
         text: &str,
         font_chain: &FontFamilyChain,
@@ -2028,6 +2104,7 @@ impl TextShaper {
                 advance,
                 character: c,
                 cluster: i as u32,
+                face: GlyphFace::Primary,
             });
 
             x_offset += advance;
@@ -2753,17 +2830,6 @@ fn is_collapsible_space(c: char) -> bool {
 /// Default-ignorable code points that modify a neighbouring character and
 /// take no space of their own when no face maps them: variation selectors
 /// (U+FE00–FE0F, U+E0100–E01EF), ZWSP/ZWNJ/ZWJ, word joiner, BOM.
-fn is_default_ignorable(c: char) -> bool {
-    matches!(
-        c,
-        '\u{200B}'..='\u{200D}'
-            | '\u{2060}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FEFF}'
-            | '\u{E0100}'..='\u{E01EF}'
-    )
-}
-
 /// A wrapped line of text.
 #[derive(Debug, Clone)]
 pub struct WrappedLine {
@@ -3101,11 +3167,36 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(system.primary, "Segoe UI");
 
-        let apple = FontFamilyChain::from_css_value("-apple-system");
-        #[cfg(target_os = "macos")]
-        assert_eq!(apple.primary, ".AppleSystemUIFont");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(apple.primary, "Segoe UI");
+        let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
+        assert_eq!(blink.primary, system.primary);
+    }
+
+    /// `-apple-system` is WebKit's name for the system font. Chrome has never
+    /// supported it: it is an unknown family, skipped in the stack like any
+    /// font that is not installed (CB7b). Chrome for Testing 148 on macOS,
+    /// `getBoundingClientRect` of "Hello world" at 14px: `-apple-system`
+    /// alone is 67.27, as the default serif (Times) is, where the system
+    /// font is 72.34; `-apple-system, BlinkMacSystemFont` is the system
+    /// font; `-apple-system, "Segoe UI", Helvetica` is Helvetica (69.25).
+    #[test]
+    fn apple_system_is_an_unknown_family_as_in_chrome() {
+        let serif = FontFamilyChain::serif();
+        let alone = FontFamilyChain::from_css_value("-apple-system");
+        assert_eq!(alone.primary, serif.primary, "-apple-system alone is the default serif");
+        let system = FontFamilyChain::from_css_value("system-ui");
+        let then_blink = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont");
+        assert_eq!(then_blink.primary, system.primary, "the next family, the system font");
+        let stack = FontFamilyChain::from_css_value("-apple-system, \"Segoe UI\", Helvetica");
+        let mut walk = std::iter::once(stack.primary.as_str())
+            .chain(stack.fallbacks.iter().map(String::as_str));
+        assert!(
+            !walk.any(|f| f == system.primary || f.eq_ignore_ascii_case("-apple-system")),
+            "no system font ahead of Helvetica: {} {:?}",
+            stack.primary,
+            stack.fallbacks
+        );
+        assert_eq!(stack.primary, "Segoe UI");
+        assert_eq!(stack.fallbacks.first().map(String::as_str), Some("Helvetica"));
     }
 
     /// A generic keyword after families that are not installed resolves
@@ -4052,6 +4143,110 @@ mod tests {
         assert!(!line.is_empty());
         assert_eq!(line.start_offset, 0);
         assert_eq!(line.end_offset, 4);
+    }
+}
+
+/// LAT12: the shape memo and its `font-size: 0` guard are the same on every
+/// platform (they used to wrap only the macOS shape). Nothing here is gated on
+/// a platform.
+#[cfg(test)]
+mod shape_memo_tests {
+    use super::*;
+
+    fn shape(shaper: &TextShaper, text: &str, weight: u16, size: f32) -> ShapedRun {
+        shaper
+            .shape(
+                text,
+                &FontFamilyChain::from_css_value("sans-serif"),
+                FontWeight(weight),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                size,
+            )
+            .expect("shape")
+    }
+
+    fn misses() -> usize {
+        MISSES.with(|c| c.get())
+    }
+
+    #[test]
+    fn font_size_zero_shapes_to_nothing() {
+        let run = shape(&TextShaper::new(), "hidden", 400, 0.0);
+        assert!(run.glyphs.is_empty());
+        assert_eq!((run.font_size, run.width()), (0.0, 0.0));
+        assert_eq!(run.text, "hidden");
+    }
+
+    #[test]
+    fn a_repeat_is_a_hit_and_agrees_with_the_uncached_measure() {
+        let shaper = TextShaper::new();
+        // The web-font generation is process-wide and other tests install
+        // sets on their own threads: only judge a hit when it held still.
+        // Each attempt shapes its own text, so a retry can never be answered
+        // by the entry an earlier (discarded) attempt left in the memo.
+        let mut judged = None;
+        for attempt in 0..20 {
+            let text = format!("Handgloves quick wizard memo {attempt}");
+            let text = text.as_str();
+            let generation = rustkit_text::webfonts::generation();
+            let first = shape(&shaper, text, 400, 16.0);
+            let before = misses();
+            let again = shape(&shaper, text, 400, 16.0);
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(misses(), before, "a repeat is served from the memo");
+                assert_eq!(
+                    (first.width().to_bits(), first.glyphs.len()),
+                    (again.width().to_bits(), again.glyphs.len())
+                );
+                judged = Some(attempt);
+                break;
+            }
+        }
+        let attempt = judged.expect("the web-font generation never held still");
+        let text = format!("Handgloves quick wizard memo {attempt}");
+        let text = text.as_str();
+        let uncached = shaper
+            .shape_uncached(
+                text,
+                &FontFamilyChain::from_css_value("sans-serif"),
+                FontWeight(400),
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+            )
+            .expect("shape");
+        assert_eq!(
+            shape(&shaper, text, 400, 16.0).width().to_bits(),
+            uncached.width().to_bits(),
+            "the memo returns what the measure returns"
+        );
+        // A different size is its own entry, never answered from the 16px one.
+        let before = misses();
+        let big = shape(&shaper, text, 400, 32.0);
+        assert!(misses() > before, "a new size is shaped");
+        assert!(big.width() > uncached.width() * 1.5);
+    }
+
+    #[test]
+    fn a_new_web_font_set_empties_the_memo() {
+        let shaper = TextShaper::new();
+        let text = "generation probe text";
+        let _ = shape(&shaper, text, 400, 15.0);
+        let before = misses();
+        let generation = rustkit_text::webfonts::generation();
+        // Bumps the generation where a web-font registry exists (macOS and
+        // Linux); elsewhere it installs nothing and the generation holds still.
+        rustkit_text::webfonts::install("lat12-shape-memo-probe", &[]);
+        let changed = rustkit_text::webfonts::generation() != generation;
+        let _ = shape(&shaper, text, 400, 15.0);
+        if changed {
+            assert!(misses() > before, "re-shaped after the set changed");
+        } else {
+            assert_eq!(misses(), before, "no change to the set: still a hit");
+        }
+        let has_registry = cfg!(any(target_os = "macos", target_os = "linux"));
+        assert_eq!(changed, has_registry);
     }
 }
 

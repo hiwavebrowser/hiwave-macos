@@ -24,10 +24,11 @@
 use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+pub(crate) mod editing;
 mod node_apis;
 mod shadow;
 
@@ -55,16 +56,249 @@ pub struct BoxGeometry {
     pub scroll_height: f32,
     /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
     pub position: u8,
+    /// The nearest element scroller or transformed box that moves this box
+    /// (`x`, `y` are where layout put it, before any of them). Follow it up
+    /// to add them up.
+    pub scroller: Option<usize>,
+    /// This box's own transform, about its origin, in layout coordinates, as
+    /// `[a, b, c, d, e, f]`.
+    pub transform: Option<[f32; 6]>,
+    /// Whether this box is an element scroller itself.
+    pub scrolls: bool,
+    /// `position: sticky`: where it moves to. A sticky box is on the
+    /// `scroller` chain of the boxes under it, since it moves them too.
+    pub sticky: Option<rustkit_css::StickyRule>,
+    /// In a fixed box the window's scroll does not move: its rect is where
+    /// layout put it, wherever the page is.
+    pub held: bool,
 }
+
+/// Element ids on a box's `scroller` chain that actually scroll (#850 /
+/// ec0b831d). Transformed boxes ride the same chain so rects follow paint,
+/// but `scrollChain` / `setOwn` must skip them.
+pub(crate) fn scrolling_chain_ids(
+    geometry: &HashMap<usize, BoxGeometry>,
+    start: Option<usize>,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut at = start;
+    while let Some(id) = at {
+        match geometry.get(&id) {
+            Some(g) => {
+                if g.scrolls {
+                    out.push(id);
+                }
+                at = g.scroller;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// What moves a box from where layout put it (`DomHost::moved_by`).
+#[derive(Clone, Copy, Default)]
+struct MovedBy {
+    /// By the element scrollers above it.
+    scrolled: (f32, f32),
+    /// By sticky boxes: its own shift and those above it.
+    stuck: (f32, f32),
+    /// The part of `stuck` from inside the nearest scroller.
+    above: (f32, f32),
+}
+
+/// The offsets script scrolled a view's elements to, by raw NodeId: one table
+/// the bindings and the engine share. Script writes it and reads it back at
+/// once; the engine applies it when script settles (paint) and on a hit test.
+/// It outlives the boxes: an element that goes `display: none` has its offset
+/// back when it returns.
+#[derive(Debug, Default)]
+pub struct ElementScrolls {
+    pub offsets: HashMap<usize, (f32, f32)>,
+    /// Bumped by each write, so a layout tree knows it is behind.
+    pub generation: u64,
+    /// Whether a write has not been painted yet.
+    pub unpainted: bool,
+}
+
+impl ElementScrolls {
+    /// A new document: node ids restart.
+    pub fn clear(&mut self) {
+        self.offsets.clear();
+        self.generation += 1;
+        self.unpainted = false;
+    }
+}
+
+/// What `DomBindings::share_element_scrolls` takes.
+pub type SharedElementScrolls = Rc<std::cell::RefCell<ElementScrolls>>;
+
+/// The animated-style layer page script drives through Web Animations,
+/// shared between the bindings (script writes it) and the engine's build
+/// (which overlays it on each element's cascaded style, above its CSS
+/// animations and transitions, and leaves the `style` attribute alone),
+/// plus the engine's own CSS animations as script sees them.
+#[derive(Debug, Default)]
+pub struct AnimatedStyles {
+    /// Per raw NodeId, in animation order: `(property, value, composite)`
+    /// with composite `replace`, `add` or `accumulate`. An entry composes
+    /// on what the entries before it (and the CSS) left.
+    pub script: HashMap<usize, Vec<(String, String, String)>>,
+    /// Bumped by each write.
+    pub generation: u64,
+    /// The engine's CSS animations and transitions as of the last layout,
+    /// what `getAnimations()` lists.
+    pub css: Vec<CssAnimationInfo>,
+    /// The properties those animate, per raw NodeId: a `getComputedStyle`
+    /// read keeps the published row for them rather than the inline text.
+    pub css_props: HashMap<usize, Vec<String>>,
+    /// Script's `pause()`/`play()`/`cancel()`/`finish()` on those, for the
+    /// engine to apply at its next layout.
+    pub controls: Vec<CssAnimationControl>,
+}
+
+/// One of the engine's CSS animations or transitions, for script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssAnimationInfo {
+    /// The engine's id for this one animation or transition, unique in the
+    /// view: script's `CSSAnimation`/`CSSTransition` object is keyed on it,
+    /// so a restart or a same-name replacement is a new object.
+    pub id: u64,
+    /// The element: the originating element of a pseudo-element's.
+    pub node: usize,
+    /// `::before` or `::after` for a pseudo-element's animation
+    /// (`effect.pseudoElement`), `None` for the element's own.
+    pub pseudo: Option<&'static str>,
+    /// `animation` or `transition`.
+    pub kind: &'static str,
+    /// The `animation` list index, or the transition's property index.
+    pub index: usize,
+    /// The `@keyframes` name, or the transitioned property.
+    pub name: String,
+    /// When it started (its delay counts from here), on the page's clock.
+    pub start_ms: f64,
+    /// The local time it is held at, when paused.
+    pub paused_ms: Option<f64>,
+    pub delay_ms: f64,
+    pub duration_ms: f64,
+    /// `f32::INFINITY` for `infinite`.
+    pub iterations: f32,
+    pub direction: &'static str,
+    pub fill: &'static str,
+    pub easing: String,
+    /// Its active phase is over.
+    pub ended: bool,
+}
+
+/// Script's control of one of the engine's CSS animations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssAnimationControl {
+    /// The animation's `CssAnimationInfo::id`.
+    pub id: u64,
+    pub node: usize,
+    pub kind: String,
+    /// `pause`, `play`, `cancel` or `finish`.
+    pub op: String,
+}
+
+/// What `DomBindings::share_animated_styles` takes.
+pub type SharedAnimatedStyles = Rc<std::cell::RefCell<AnimatedStyles>>;
 
 /// Builds the geometry and computed-style maps of the layout it was made
 /// for (`DomBindings::set_geometry_source`).
 pub type GeometrySource =
     Box<dyn FnOnce() -> (HashMap<usize, BoxGeometry>, HashMap<usize, String>)>;
 
+/// One element's computed style as `name\tvalue` lines, formatted on the
+/// first read of that element (LAT8): a read of one element no longer
+/// formats every element's. `None` when the layout has no style for it.
+pub type ComputedLines = Rc<dyn Fn(usize) -> Option<String>>;
+
 /// The node under a viewport point, from the layout's hit test. `scroll`
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
+
+/// Where characters `[start, end)` of a text node (by NodeId, offsets in
+/// characters) are in the layout: `[x, y, width, height]` per line, in
+/// document coordinates (`Range.getClientRects`).
+///
+/// The second pair is the same span counted after white-space collapsing
+/// (each run of white space as one character): the numbering of a run whose
+/// white space collapses.
+pub type TextRects = Rc<dyn Fn(usize, (usize, usize), (usize, usize)) -> Vec<[f32; 4]>>;
+
+/// Control writes script made that the engine has not taken yet. A forced
+/// layout copies them into the engine's edit state before it builds, and
+/// drains what it applied (`ForcedLayout`).
+#[derive(Default)]
+pub struct ControlWrites {
+    pub values: Vec<(usize, String)>,
+    pub checked: Vec<(usize, Option<bool>)>,
+    /// LAT19: the only write since the last published layout is Web
+    /// Animations' layer: an animation frame over the published boxes
+    /// answers the read without a build when it can. LAT22: whatever
+    /// properties the layer holds, not only the paint ones (`transform`,
+    /// `opacity`, colours); the frame itself refuses when a value a
+    /// layout places moved (`LayoutCtx::animation_frame`), and the read
+    /// then builds. Until 2026-11-12 one property outside the paint list
+    /// (a constant `width` beside a `transform`) made every read of every
+    /// frame build the whole tree.
+    pub layer_only: bool,
+    /// LAT22 probe: what the read was and what was pending, for the
+    /// engine's log line when the read builds the tree.
+    pub probe: ForcedReadProbe,
+}
+
+/// LAT22 probe (diagnostics only; shapes, never page content): the read
+/// that asked for a forced layout and the writes pending at it.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ForcedReadProbe {
+    /// The read's kind (`rect`, `offset`, `computed_style`, ...).
+    pub read: &'static str,
+    /// The kind of the first write since the last published layout.
+    pub cause: &'static str,
+    /// The element read, when the read is of one element.
+    pub read_node: Option<usize>,
+    /// A write other than Web Animations' layer is pending (a style,
+    /// attribute, child-list, text or form write, logged or not).
+    pub other_write_pending: bool,
+    /// A write a layout can see is pending (false: only paint-layer
+    /// writes, which is what `layer_only` says).
+    pub layout_write_pending: bool,
+}
+
+/// A layout of the DOM as it is now: what a forced layout publishes.
+pub struct ForcedGeometry {
+    /// Builds the geometry and computed-style maps of this layout, on the
+    /// first read that needs them (as `DomBindings::set_geometry_source`).
+    pub source: GeometrySource,
+    pub hit_tester: Option<HitTester>,
+    /// The layout's text geometry, for `Range` rects.
+    pub text_rects: Option<TextRects>,
+    /// Formats one element's computed style of this layout on its first
+    /// read (LAT8); `None` keeps whatever `source` returns.
+    pub computed_lines: Option<ComputedLines>,
+    /// The furthest the view can scroll over this layout, as
+    /// `DomBindings::set_scroll_state` takes it.
+    pub max_scroll: (f32, f32),
+    /// LAT19: answered from an animation frame over the published boxes
+    /// (`ControlWrites::layer_only`), not a build: not a forced layout.
+    pub framed: bool,
+}
+
+/// Lays the page out again for a read of geometry or computed style that
+/// follows a script write in the same task (forced layout,
+/// `DomBindings::set_forced_layout`). `None` when it cannot now: the read
+/// answers from the last layout published.
+pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
+
+/// How many forced layouts one script task gets before its reads answer
+/// from the last layout (Prometheus, #812 review): a write-read loop that
+/// never settles cannot hold the page thread forever. cnn's header loop
+/// needs 8. A count, not a time: a time limit made the page's answer depend
+/// on the machine's load (at 1 s, cnn's loop ran out on a loaded seat and
+/// laid the header out as before forced layout).
+pub(crate) const FORCED_LAYOUTS_PER_TASK: u64 = 256;
 
 /// The document the host functions read, and its generation.
 #[derive(Default)]
@@ -77,19 +311,65 @@ pub(crate) struct DomHost {
     /// laid the page out (`DomBindings::set_geometry`).
     pub(crate) geometry: HashMap<usize, BoxGeometry>,
     /// The computed style of each laid-out element, by NodeId, as
-    /// `name\tvalue` lines (`DomBindings::set_computed_styles`).
-    pub(crate) computed: HashMap<usize, String>,
+    /// `name\tvalue` lines (`DomBindings::set_computed_styles`); with
+    /// `computed_lines`, the elements read so far.
+    pub(crate) computed: RefCell<HashMap<usize, String>>,
+    /// Formats an element's computed style of the last layout on its first
+    /// read (`DomBindings::set_computed_lines`, LAT8).
+    pub(crate) computed_lines: Option<ComputedLines>,
     /// What builds `geometry` and `computed` from the last layout, until
     /// script first reads either (`DomBindings::set_geometry_source`).
     pub(crate) geometry_source: Option<GeometrySource>,
     /// How many times a pending source was built (`DomBindings::geometry_builds`).
     pub(crate) geometry_builds: u64,
+    /// Lays out the document the engine last published a layout of.
+    pub(crate) forced_layout: Option<ForcedLayout>,
+    /// LAT22 probe: the element of the geometry read in progress.
+    pub(crate) forced_read_node: Option<usize>,
+    /// Forced layouts since the engine last took the count
+    /// (`DomBindings::take_forced_layouts`).
+    pub(crate) forced_layouts: u64,
+    /// The forced layouts against this task's budget, and their time (ms,
+    /// for the decline log), since the engine last published a layout or
+    /// took the count.
+    forced_in_task: u64,
+    forced_ms: f64,
+    /// The forced layouts since the engine last took the count, by cause,
+    /// with their time (`DomBindings::take_forced_report`).
+    forced_report: crate::ForcedLayoutReport,
+    /// Whether the page's sheets have a `:has()` rule now (the engine's
+    /// rule index), so a write deep in a subtree can restyle an ancestor.
+    /// `None` until the engine installs it: assumed yes.
+    pub(crate) has_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// Whether a read since the count was taken answered from the last
+    /// layout instead (budget spent, or the build state busy): logged once.
+    forced_declined: bool,
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
+    /// The view's element scroll offsets (web_scroll.js).
+    pub(crate) element_scrolls: SharedElementScrolls,
+    /// The view's animated-style layer and CSS animations (web_animations.js).
+    pub(crate) animated: SharedAnimatedStyles,
+    /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
+    /// a forced layout moves its maximum.
+    pub(crate) scroll_state: crate::web_scroll::SharedScroll,
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
+    /// Something on the page can hear the user's wheel: a `wheel` or
+    /// `mousewheel` listener, or an `onwheel` / `onmousewheel` handler
+    /// (assigned, or an attribute). Without one a scroll runs no script.
+    wants_wheel: std::cell::Cell<bool>,
+    /// One of those can cancel it: a listener that is not passive, or a
+    /// handler (never passive). Without one the engine does not ask which
+    /// listeners are on the path; the wheel goes after the scroll.
+    wheel_blocking: std::cell::Cell<bool>,
+    /// A wheel handler attribute (`onwheel`, `onmousewheel`) was parsed or
+    /// written in this document: it can hear and cancel the wheel.
+    wheel_handler_attribute: std::cell::Cell<bool>,
+    /// The layout's text geometry (`TextRects`), installed with a layout.
+    text_rects: Option<TextRects>,
     /// HTML §4.10.5.4 "dirty value" of the `<input>`/`<textarea>` controls
     /// that script or the user changed, by NodeId. A control missing here
     /// shows its default value (the `value` attribute, or a textarea's text).
@@ -121,6 +401,11 @@ pub(crate) struct DomHost {
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
+    /// The `<img>` elements (by NodeId) whose `src` or `srcset` script has
+    /// written since the engine last took them, in or out of the document
+    /// and whether or not the value changed: writing either starts the
+    /// image's load over (`DomBindings::take_image_writes`).
+    pub(crate) image_writes: RefCell<HashSet<usize>>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -130,9 +415,260 @@ impl DomHost {
     /// the layout changed since script last read them.
     pub(crate) fn ensure_geometry(&mut self) {
         if let Some(source) = self.geometry_source.take() {
-            (self.geometry, self.computed) = source();
+            let computed;
+            (self.geometry, computed) = source();
+            // A source with `computed_lines` returns no styles: what was
+            // formatted for this layout already stays.
+            if !computed.is_empty() {
+                *self.computed.borrow_mut() = computed;
+            }
             self.geometry_builds += 1;
         }
+    }
+
+    /// An element's computed-style lines from the last layout: formatted on
+    /// the first read when the layout publishes them lazily (LAT8).
+    pub(crate) fn computed_of(&self, node: usize) -> Option<String> {
+        if let Some(lines) = self.computed.borrow().get(&node) {
+            return Some(lines.clone());
+        }
+        let lines = (self.computed_lines.as_ref()?)(node)?;
+        self.computed.borrow_mut().insert(node, lines.clone());
+        Some(lines)
+    }
+
+    /// The rect of a box under a transform, its own or one above it, as x, y,
+    /// width, height: the bounding box of its corners taken up the chain. At
+    /// each box its transform, about where layout put it, then its sticky
+    /// shift, which carries the transform's origin along; then the scroll of
+    /// the scroller above, inside that scroller's own transform. `None` when
+    /// no transform is on the chain, and `moved_by` is the whole answer.
+    fn transformed_rect(&self, geometry: &BoxGeometry) -> Option<(f32, f32, f32, f32)> {
+        let mut chain = vec![(None, geometry)];
+        let mut at = geometry.scroller;
+        while let Some((node, above)) = at.and_then(|node| Some((node, self.geometry.get(&node)?))) {
+            chain.push((Some(node), above));
+            at = above.scroller;
+        }
+        if chain.iter().all(|(_, g)| g.transform.is_none()) {
+            return None;
+        }
+        let scrolls = self.element_scrolls.borrow();
+        // Each shift depends on those above it, so these go from the top.
+        let mut shifts = vec![(0.0, 0.0); chain.len()];
+        let mut moved = MovedBy::default();
+        for (i, (node, g)) in chain.iter().enumerate().rev() {
+            let before = moved.stuck;
+            self.add_sticky(g, &scrolls.offsets, &mut moved);
+            shifts[i] = (moved.stuck.0 - before.0, moved.stuck.1 - before.1);
+            if node.is_some() && g.scrolls {
+                moved.above = (0.0, 0.0);
+            }
+        }
+        let (x, y, r, b) = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height);
+        let mut corners = [(x, y), (r, y), (x, b), (r, b)];
+        for (i, (node, g)) in chain.iter().enumerate() {
+            let scroll = node.filter(|_| g.scrolls).and_then(|node| scrolls.offsets.get(&node));
+            let (dx, dy) = scroll.copied().unwrap_or((0.0, 0.0));
+            for c in corners.iter_mut() {
+                let (px, py) = (c.0 - dx, c.1 - dy);
+                let (tx, ty) = match g.transform {
+                    Some(m) => (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]),
+                    None => (px, py),
+                };
+                *c = (tx + shifts[i].0, ty + shifts[i].1);
+            }
+        }
+        let (mut left, mut top) = corners[0];
+        let (mut right, mut bottom) = corners[0];
+        for c in &corners[1..] {
+            left = left.min(c.0);
+            top = top.min(c.1);
+            right = right.max(c.0);
+            bottom = bottom.max(c.1);
+        }
+        Some((left, top, right - left, bottom - top))
+    }
+
+    /// Where the window is now, script's own scroll included.
+    fn window_scroll(&self) -> (f32, f32) {
+        let state = self.scroll_state.borrow();
+        (state.x, state.y)
+    }
+
+    /// What the scrollers and sticky boxes above a box, and the box itself
+    /// when it is sticky, have moved it by. Live: script reads a rect right
+    /// after a scroll, before the engine hears of it.
+    fn moved_by(&self, geometry: &BoxGeometry) -> MovedBy {
+        let scrolls = self.element_scrolls.borrow();
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, &scrolls.offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, &scrolls.offsets, &mut moved);
+        moved
+    }
+
+    /// `moved_by` for what is under the box `node`, its own scroll included.
+    fn moved_by_chain(&self, node: usize, offsets: &HashMap<usize, (f32, f32)>) -> MovedBy {
+        let Some(geometry) = self.geometry.get(&node) else {
+            return MovedBy::default();
+        };
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, offsets, &mut moved);
+        if geometry.scrolls {
+            if let Some((dx, dy)) = offsets.get(&node) {
+                moved.scrolled = (moved.scrolled.0 + dx, moved.scrolled.1 + dy);
+            }
+            moved.above = (0.0, 0.0);
+        }
+        moved
+    }
+
+    fn add_sticky(&self, geometry: &BoxGeometry, offsets: &HashMap<usize, (f32, f32)>, moved: &mut MovedBy) {
+        let Some(rule) = geometry.sticky else {
+            return;
+        };
+        let scroll = match rule.port {
+            rustkit_css::StickyPort::Window => self.window_scroll(),
+            rustkit_css::StickyPort::Still => (0.0, 0.0),
+            rustkit_css::StickyPort::Element(node) => offsets.get(&node).copied().unwrap_or((0.0, 0.0)),
+        };
+        let (x, y) = rule.shift(scroll, moved.above);
+        moved.stuck = (moved.stuck.0 + x, moved.stuck.1 + y);
+        moved.above = (moved.above.0 + x, moved.above.1 + y);
+    }
+
+    /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
+    /// when script wrote to the DOM since the last layout was published, the
+    /// page is laid out again first (forced layout), as in a browser.
+    /// `read` names the read for the forced-layout log (`offset`, `rect`,
+    /// `computed_style`, ...).
+    pub(crate) fn ensure_fresh_geometry(host: &SharedDomHost, dirty: &crate::DirtyMark, read: &'static str) {
+        Self::force_layout_if_written(host, dirty, read);
+        host.borrow_mut().ensure_geometry();
+    }
+
+    /// The forced layout half of `ensure_fresh_geometry`, for reads that
+    /// need the layout current but not the geometry maps (the scroll
+    /// maximum).
+    pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark, read: &'static str) {
+        if !dirty.needs_layout_for(read) {
+            return;
+        }
+        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        let cause = match dirty.written_since_layout() {
+            true => dirty.cause().unwrap_or("other"),
+            false => "animation",
+        };
+        let forced = {
+            let mut h = host.borrow_mut();
+            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
+            match (h.forced_layout.clone(), spent) {
+                (Some(_), true) => {
+                    h.note_forced_decline("budget spent");
+                    None
+                }
+                (forced, _) => forced,
+            }
+        };
+        let Some(forced) = forced else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        // Outside the host borrow: the build does not read the host, and
+        // runs no script.
+        let mut writes = {
+            let mut h = host.borrow_mut();
+            ControlWrites {
+                values: std::mem::take(&mut h.value_writes),
+                checked: std::mem::take(&mut h.checked_writes),
+                layer_only: dirty.only_layer_written_since_layout(),
+                probe: ForcedReadProbe {
+                    read,
+                    cause,
+                    read_node: h.forced_read_node.take(),
+                    other_write_pending: dirty.beyond_animation_layer(),
+                    layout_write_pending: dirty.written_since_layout(),
+                },
+            }
+        };
+        let laid = forced(&mut writes);
+        let mut h = host.borrow_mut();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        h.forced_ms += ms;
+        // What the layout did not apply stays for the engine's flush.
+        writes.values.append(&mut h.value_writes);
+        h.value_writes = writes.values;
+        writes.checked.append(&mut h.checked_writes);
+        h.checked_writes = writes.checked;
+        let Some(laid) = laid else {
+            h.note_forced_decline("build state in use");
+            return;
+        };
+        h.geometry.clear();
+        h.computed.borrow_mut().clear();
+        h.computed_lines = laid.computed_lines;
+        h.geometry_source = Some(laid.source);
+        h.hit_tester = laid.hit_tester;
+        h.text_rects = laid.text_rects;
+        // The document may have grown or shrunk: scrollTo clamps to the new
+        // end, and an offset past it comes back to it.
+        let scroll = h.scroll_state.clone();
+        let mut s = scroll.borrow_mut();
+        (s.max_x, s.max_y) = laid.max_scroll;
+        s.x = s.x.min(s.max_x.max(0.0));
+        s.y = s.y.min(s.max_y.max(0.0));
+        h.scroll = (s.x, s.y);
+        h.forced_in_task += 1;
+        if laid.framed {
+            // LAT19: a frame over the published boxes, not a layout.
+            h.forced_report.framed += 1;
+            h.forced_report.framed_ms += ms;
+        } else {
+            h.forced_layouts += 1;
+            h.forced_report.note(cause, read, ms);
+        }
+        dirty.laid_out();
+    }
+
+    /// A read that wanted a forced layout answers from the last layout:
+    /// one log line per script task (until `take_forced_layouts`).
+    fn note_forced_decline(&mut self, why: &'static str) {
+        if !std::mem::replace(&mut self.forced_declined, true) {
+            tracing::info!(
+                why,
+                forced_layouts = self.forced_in_task,
+                forced_ms = self.forced_ms,
+                "Forced layout declined; reads answer from the last layout"
+            );
+        }
+    }
+
+    /// A new budget for forced layouts: the engine took the task's count,
+    /// or published a layout of its own.
+    pub(crate) fn renew_forced_budget(&mut self) {
+        self.forced_in_task = 0;
+        self.forced_ms = 0.0;
+        self.forced_declined = false;
+    }
+
+    /// The forced layouts since the last call, which starts a new task's
+    /// count and budget.
+    pub(crate) fn take_forced_layouts(&mut self) -> u64 {
+        self.renew_forced_budget();
+        self.forced_report = crate::ForcedLayoutReport::default();
+        std::mem::take(&mut self.forced_layouts)
+    }
+
+    /// `take_forced_layouts`, with the causes and time of the layouts.
+    pub(crate) fn take_forced_report(&mut self) -> crate::ForcedLayoutReport {
+        let report = std::mem::take(&mut self.forced_report);
+        let count = self.take_forced_layouts();
+        crate::ForcedLayoutReport { count, ..report }
     }
 
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {
@@ -143,13 +679,54 @@ impl DomHost {
         self.hit_tester = tester;
     }
 
+    pub(crate) fn wants_wheel(&self) -> bool {
+        self.wants_wheel.get()
+    }
+
+    pub(crate) fn wheel_blocking(&self) -> bool {
+        self.wheel_blocking.get()
+    }
+
+    /// A wheel handler attribute was written or parsed: something can hear
+    /// and cancel the wheel.
+    pub(crate) fn note_wheel_handler_attribute(&self, name: &str) {
+        if name.eq_ignore_ascii_case("onwheel") || name.eq_ignore_ascii_case("onmousewheel") {
+            self.wheel_handler_attribute.set(true);
+            self.wants_wheel.set(true);
+            self.wheel_blocking.set(true);
+        }
+    }
+
+    pub(crate) fn set_text_rects(&mut self, rects: Option<TextRects>) {
+        self.text_rects = rects;
+    }
+
     /// Bind `document`, returning the new generation.
     pub(crate) fn bind(&mut self, document: Rc<Document>) -> u32 {
+        // A new document: what can hear the wheel is learned again, from
+        // its handler attributes now and its listeners as they come.
+        self.wants_wheel.set(false);
+        self.wheel_blocking.set(false);
+        self.wheel_handler_attribute.set(false);
+        let mut pending = vec![document.root().clone()];
+        while let Some(node) = pending.pop() {
+            if let NodeType::Element { attributes, .. } = &node.node_type {
+                for name in attributes.keys() {
+                    self.note_wheel_handler_attribute(name);
+                }
+            }
+            pending.extend(node.children());
+        }
         let templates = self.templates.get_mut();
         templates.clear();
+        // The page's own document owns itself and every node it has; what
+        // is made or moved in later takes its document from there.
+        document.root().set_owner(document.root().id.raw());
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
+        // The engine installs one for the new document with its first layout.
+        self.forced_layout = None;
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
@@ -157,6 +734,7 @@ impl DomHost {
         self.submit_requests.clear();
         self.navigation_requests.clear();
         self.inserted_scripts.clear();
+        self.image_writes.get_mut().clear();
         self.generation
     }
 
@@ -194,6 +772,12 @@ impl DomHost {
             JsValue::Number(n) if *n == self.generation as f64 => self.document.as_ref(),
             _ => None,
         }
+    }
+
+    /// The NodeId of the node `args[0]` (generation) and `args[1]` name,
+    /// if it is in the bound document.
+    pub(crate) fn node_of(host: &SharedDomHost, args: &[JsValue]) -> Option<usize> {
+        host.borrow().node(args).map(|n| n.id.raw())
     }
 
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
@@ -269,15 +853,17 @@ fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
 
 /// DOM §4.2.3 "pre-insert" `node` into `parent` before `child` (`None`
 /// appends). Returns the DOMException name on a failed validity check,
-/// before anything is touched.
+/// before anything is touched. `replacing`: the caller takes `child` out
+/// next (replaceChild, replaceWith), so a Document is checked by the
+/// "replace" rules, which do not count `child` itself.
 fn pre_insert(
     parent: &Rc<Node>,
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
+    replacing: bool,
 ) -> Result<(), &'static str> {
-    // Only elements and fragments take children here; a Document's
-    // one-element rules come with a later rung.
-    if !parent.is_element() && !is_fragment(parent) {
+    let document = matches!(parent.node_type, NodeType::Document);
+    if !document && !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
     if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
@@ -286,11 +872,14 @@ fn pre_insert(
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
         return Err("NotFoundError");
     }
-    if matches!(
-        node.node_type,
-        NodeType::Document | NodeType::DocumentType { .. }
-    ) {
-        return Err("HierarchyRequestError");
+    match node.node_type {
+        NodeType::Document => return Err("HierarchyRequestError"),
+        NodeType::DocumentType { .. } if !document => return Err("HierarchyRequestError"),
+        NodeType::Text(_) if document => return Err("HierarchyRequestError"),
+        _ => {}
+    }
+    if document {
+        document_child_check(parent, node, child.as_ref(), replacing)?;
     }
     // Inserting a node before itself inserts it before its next sibling.
     let child = match child {
@@ -313,6 +902,48 @@ fn pre_insert(
     Ok(())
 }
 
+/// DOM §4.2.3 step 6 of "ensure pre-insert validity" (and step 6 of
+/// "replace"): a Document has at most one element child and one doctype,
+/// the doctype before the element.
+fn document_child_check(
+    document: &Rc<Node>,
+    node: &Rc<Node>,
+    child: Option<&Rc<Node>>,
+    replacing: bool,
+) -> Result<(), &'static str> {
+    let is_doctype = |n: &Rc<Node>| matches!(n.node_type, NodeType::DocumentType { .. });
+    let kids = document.children();
+    // When replacing, `child` is about to leave and does not count.
+    let counted = |n: &&Rc<Node>| !(replacing && child.is_some_and(|c| c.id == n.id));
+    let has_element = kids.iter().filter(counted).any(|n| n.is_element());
+    let has_doctype = kids.iter().filter(counted).any(is_doctype);
+    let at = child.and_then(|c| kids.iter().position(|k| k.id == c.id));
+    let doctype_after = at.is_some_and(|i| kids[i + 1..].iter().any(is_doctype));
+    let element_before = at.is_some_and(|i| kids[..i].iter().any(|n| n.is_element()));
+    let before_doctype = !replacing && child.is_some_and(is_doctype);
+    let one_element = |elements: usize| {
+        elements == 1 && (has_element || before_doctype || doctype_after)
+    };
+    let bad = match node.node_type {
+        NodeType::DocumentFragment => {
+            let inner = node.children();
+            let elements = inner.iter().filter(|n| n.is_element()).count();
+            elements > 1
+                || inner.iter().any(|n| matches!(n.node_type, NodeType::Text(_)))
+                || one_element(elements)
+        }
+        NodeType::Element { .. } => one_element(1),
+        NodeType::DocumentType { .. } => {
+            has_doctype || element_before || (child.is_none() && has_element)
+        }
+        _ => false,
+    };
+    match bad {
+        true => Err("HierarchyRequestError"),
+        false => Ok(()),
+    }
+}
+
 fn is_fragment(node: &Node) -> bool {
     matches!(node.node_type, NodeType::DocumentFragment)
 }
@@ -327,17 +958,42 @@ fn is_template(node: &Node) -> bool {
 /// the moved content) a content fragment and moves its children there.
 /// Run on freshly parsed nodes only: children script appends to a
 /// template later stay real children, as in the spec.
+/// Where the table of template contents keeps the inert document that
+/// owns them all (HTML §4.12.3 "template contents owner document"). No
+/// node has NodeId 0.
+const TEMPLATE_OWNER: usize = 0;
+
+/// The document that owns every template's contents, made on first use.
+fn template_owner(document: &Document, templates: &mut HashMap<usize, Rc<Node>>) -> usize {
+    templates
+        .entry(TEMPLATE_OWNER)
+        .or_insert_with(|| {
+            let doc = document.create_node(NodeType::Document);
+            doc.set_owner(doc.id.raw());
+            doc
+        })
+        .id
+        .raw()
+}
+
 fn adopt_template_contents(
     document: &Document,
     root: &Rc<Node>,
     templates: &mut HashMap<usize, Rc<Node>>,
 ) {
+    let owner = template_owner(document, templates);
     let mut pending = vec![root.clone()];
     while let Some(node) = pending.pop() {
         if is_template(&node) {
             let content = templates
                 .entry(node.id.raw())
-                .or_insert_with(|| document.create_node(NodeType::DocumentFragment))
+                .or_insert_with(|| {
+                    // A template's contents are in the inert document that
+                    // holds every template's contents (its owner document).
+                    let fragment = document.create_node(NodeType::DocumentFragment);
+                    fragment.set_owner(owner);
+                    fragment
+                })
                 .clone();
             for child in node.children() {
                 child.remove_from_parent();
@@ -362,7 +1018,8 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
                 None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
                 Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
             };
-            pre_insert(&parent, &node, child)
+            let replacing = matches!(args.get(5), Some(JsValue::Boolean(true)));
+            pre_insert(&parent, &node, child, replacing)
         }
         Some("remove") if is_child_of(&node, &parent) => {
             node.remove_from_parent();
@@ -405,8 +1062,21 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "fragmentHTML" {
             let context = if data.is_empty() { "body" } else { data.as_str() };
             let html = string_arg(args, 3).unwrap_or("");
-            let nodes = document.parse_fragment(html, context).map_err(|_| "SyntaxError")?;
+            // The fragment is the range's document's (`args[4]`, its
+            // Document node) and is parsed with that document's scripting
+            // flag: on only for the page's own document when it runs
+            // script; off for any other, or when the document is unknown.
+            let owner = number_arg(args, 4)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .filter(|n| matches!(n.node_type, NodeType::Document))
+                .map_or(0, |n| n.owner_document_id());
+            let scripting = document.scripting() && owner == document.root().id.raw();
+            let nodes = document
+                .parse_fragment_scripted(html, context, true, false, scripting)
+                .map_err(|_| "SyntaxError")?;
             let fragment = document.create_node(NodeType::DocumentFragment);
+            fragment.set_owner(owner);
             let templates = &mut host.templates.borrow_mut();
             for child in nodes {
                 adopt_template_contents(document, &child, templates);
@@ -417,6 +1087,8 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         if kind == "document" {
             let parsed = Document::parse_html(&data).map_err(|_| "SyntaxError")?;
             let doc = document.create_node(NodeType::Document);
+            // Scripting is off in it: what is put in it is its.
+            doc.set_owner(doc.id.raw());
             let templates = &mut host.templates.borrow_mut();
             for child in parsed.root().children() {
                 // The parsed tree's NodeIds are its own: clone with an
@@ -425,12 +1097,13 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             // An HTML document always has a body, but rustkit-html drops
             // it (and the text) for text-only input; supply an empty one.
+            // A frameset document's body element is its frameset (§3.1.3).
             if let Some(html) = doc
                 .children()
                 .into_iter()
                 .find(|n| n.tag_name() == Some("html"))
             {
-                if !html.children().iter().any(|n| n.tag_name() == Some("body")) {
+                if !html.children().iter().any(|n| matches!(n.tag_name(), Some("body") | Some("frameset"))) {
                     html.append_child(document.create_node(NodeType::Element {
                         tag_name: String::from("body"),
                         namespace: String::from("http://www.w3.org/1999/xhtml"),
@@ -478,6 +1151,18 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             } else {
                 name.to_string()
             };
+            // An `<img>` in a template's contents is in an inert document:
+            // Chrome does not fetch it, so the engine is not told of it.
+            if op == "setAttr" && tag_name == "img" && matches!(name.as_str(), "src" | "srcset") {
+                let mut top = node.clone();
+                while let Some(parent) = top.parent() {
+                    top = parent;
+                }
+                let in_template = host.templates.borrow().values().any(|content| Rc::ptr_eq(content, &top));
+                if !in_template {
+                    host.image_writes.borrow_mut().insert(node.id.raw());
+                }
+            }
             let mut attributes = attributes.clone();
             let changed = if op == "setAttr" {
                 let value = string_arg(args, 4).unwrap_or("").to_string();
@@ -500,15 +1185,20 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             // restyles too, since attribute selectors can match on it.
             Ok((JsValue::Null, DomDirty::Style))
         }
-        ("setText", NodeType::Text(_) | NodeType::Comment(_)) => {
+        ("setText", NodeType::Text(old) | NodeType::Comment(old)) => {
             let data = string_arg(args, 3).unwrap_or("").to_string();
-            let node_type = match node.node_type {
-                NodeType::Text(_) => NodeType::Text(data),
-                _ => NodeType::Comment(data),
+            // LAT7: the same data again changes nothing.
+            if *old == data {
+                return Ok((JsValue::Null, DomDirty::Clean));
+            }
+            let (node_type, bucket) = match node.node_type {
+                // Pin §3.3: a text change relayouts.
+                NodeType::Text(_) => (NodeType::Text(data), DomDirty::Layout),
+                // A comment is never styled or laid out.
+                _ => (NodeType::Comment(data), DomDirty::Clean),
             };
             document.replace_node_data(node.id, node_type);
-            // Pin §3.3: a text change relayouts.
-            Ok((JsValue::Null, DomDirty::Layout))
+            Ok((JsValue::Null, bucket))
         }
         // DOM §4.4 textContent setter on an element or fragment: replace
         // all children with one Text node (none for the empty string).
@@ -534,18 +1224,48 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("clone", _) => {
             let deep = matches!(args.get(3), Some(JsValue::Boolean(true)));
             let templates = &mut host.templates.borrow_mut();
-            Ok((
-                node_id(Some(clone_node(document, &node, deep, templates))),
-                DomDirty::Clean,
-            ))
+            let copy = clone_node(document, &node, deep, templates);
+            Ok((node_id(Some(copy)), DomDirty::Clean))
+        }
+        // `adoptTo(doc)`: the node (just made by, adopted by or imported
+        // into the document `doc`) takes that document's scripting state.
+        ("adoptTo", _) => {
+            let owner = number_arg(args, 3)
+                .filter(|n| *n >= 0.0)
+                .and_then(|n| document.get_node(NodeId::new(n as usize)))
+                .ok_or("NotFoundError")?;
+            if !matches!(owner.node_type, NodeType::Document) {
+                return Err("NotSupportedError");
+            }
+            // Every Document node owns itself, the page's included.
+            node.set_owner(owner.owner_document_id());
+            Ok((JsValue::Null, DomDirty::Clean))
         }
         // HTML §8.5 innerHTML setter: parse as the element's contents (the
         // fragment parsing algorithm), then replace all children with it.
         // A template's innerHTML is its content's (HTML §4.12.3).
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
+            // The fragment's scripting flag is its context element's
+            // document's (HTML §13.4): off in a template's contents and in
+            // a document `DOMParser` or `createHTMLDocument` made, whose
+            // nodes live in this Document under a Document node of their
+            // own, so `<noscript>` content there is elements.
+            let mut top = node.clone();
+            while let Some(parent) = top.parent() {
+                top = parent;
+            }
+            let inert = tag_name.eq_ignore_ascii_case("template")
+                || node.owner_document_id() != document.root().id.raw()
+                || (matches!(top.node_type, NodeType::Document) && !Rc::ptr_eq(&top, document.root()));
             let nodes = document
-                .parse_fragment(html, tag_name)
+                .parse_fragment_scripted(
+                    html,
+                    tag_name,
+                    is_in_html_content(&node),
+                    node.holds_svg_content(),
+                    document.scripting() && !inert,
+                )
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -588,6 +1308,11 @@ fn write_record(host: &DomHost, args: &[JsValue]) -> Option<MutationRecord> {
     match (string_arg(args, 1)?, &node.node_type) {
         ("setAttr" | "removeAttr", NodeType::Element { .. }) => {
             let name = string_arg(args, 3)?;
+            // Every attribute write passes here: a wheel handler attribute
+            // can hear and cancel the wheel (`note_wheel_handler_attribute`).
+            if string_arg(args, 1) == Some("setAttr") {
+                host.note_wheel_handler_attribute(name);
+            }
             let name = if is_html_element(&node) {
                 name.to_ascii_lowercase()
             } else {
@@ -711,6 +1436,152 @@ fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
     }
 }
 
+/// Whether a script write can change a box of the published layout, which
+/// decides whether a geometry read after it lays the page out again (LAT7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reach {
+    /// It can: the read forces a layout.
+    Seen,
+    /// It cannot: the node is in no document, or inside a `display: none`
+    /// subtree the write cannot show. The engine still lays it out when
+    /// script settles (the bucket and the mutation log are kept), so what
+    /// it builds next is the same; only the read in between is spared.
+    Unseen,
+}
+
+impl Reach {
+    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str) {
+        match self {
+            Reach::Seen => dirty.mark(bucket, cause),
+            Reach::Unseen => dirty.mark_unseen(bucket),
+        }
+    }
+}
+
+/// Elements a write under or to which may change something outside its
+/// box even when hidden: sheets, metadata, scripts, templates and slots,
+/// what a select or a picture draws from, replaced and embedded content,
+/// and the root elements.
+const UNSEEN_DENIED: &[&str] = &[
+    "html", "head", "body", "style", "link", "meta", "base", "title", "script", "noscript", "template",
+    "slot", "select", "option", "optgroup", "datalist", "picture", "source", "track", "img", "video",
+    "audio", "canvas", "iframe", "frame", "object", "embed", "input", "textarea", "label", "form",
+    "details", "summary", "dialog", "svg", "math",
+];
+
+/// In the document, a shadow tree's nodes through their host.
+fn rendered_connected(node: &Rc<Node>, document: &Document) -> bool {
+    let root = document.root().id;
+    let mut current = Some(node.clone());
+    while let Some(n) = current {
+        if n.id == root {
+            return true;
+        }
+        current = n.parent().or_else(|| n.shadow_host());
+    }
+    false
+}
+
+/// Whether a write to `container` itself (its attributes, children or
+/// text) is inside a `display: none` subtree of the published layout that
+/// it cannot show: a strict ancestor of `container` computed `display:
+/// none`, and every element from `container` up to it a plain HTML element
+/// (`UNSEEN_DENIED`). Only answered from what is already known: the
+/// layout must be current (no write since it), its computed styles built
+/// or formattable (a read built them; LAT8 formats each on its read), the page without `:has()` rules or shadow roots.
+/// Anything else answers no, and the read lays out as before.
+fn under_hidden(host: &DomHost, container: &Rc<Node>, dirty: &crate::DirtyMark) -> bool {
+    if dirty.written_since_layout()
+        || host.geometry_source.is_some()
+        || (host.computed_lines.is_none() && host.computed.borrow().is_empty())
+    {
+        return false;
+    }
+    if host.document.as_ref().is_none_or(|d| d.has_shadow_roots()) {
+        return false;
+    }
+    if host.has_rules.as_ref().is_none_or(|has| has()) {
+        return false;
+    }
+    let plain = |n: &Rc<Node>| {
+        is_html_element(n) && n.tag_name().is_some_and(|t| !UNSEEN_DENIED.iter().any(|d| t.eq_ignore_ascii_case(d)))
+    };
+    let display_none = |lines: &str| lines.lines().any(|l| l == "display\tnone");
+    if !plain(container) {
+        return false;
+    }
+    // A box of its own: shown.
+    if host.computed_of(container.id.raw()).is_some_and(|l| !display_none(&l)) {
+        return false;
+    }
+    let mut up = container.parent();
+    while let Some(n) = up {
+        if !plain(&n) {
+            return false;
+        }
+        if let Some(lines) = host.computed_of(n.id.raw()) {
+            return display_none(&lines);
+        }
+        up = n.parent();
+    }
+    false
+}
+
+/// What a `write` op would reach, and its cause name for the forced-layout
+/// log, read before the write (a `textContent` write takes the children
+/// out).
+fn write_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (Reach, &'static str) {
+    let Some(node) = host.node_at(args, 2) else {
+        return (Reach::Seen, "other");
+    };
+    let op = string_arg(args, 1).unwrap_or("");
+    let cause = match op {
+        "setAttr" | "removeAttr" => match string_arg(args, 3).map(str::to_ascii_lowercase).as_deref() {
+            Some("class") => "class",
+            Some("style") => "style",
+            _ => "attribute",
+        },
+        "setHTML" => "html",
+        _ => "text",
+    };
+    let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+        return (Reach::Seen, cause);
+    };
+    if !rendered_connected(&node, document) {
+        return (Reach::Unseen, cause);
+    }
+    let container = if node.is_element() { Some(node.clone()) } else { node.parent() };
+    match container {
+        Some(c) if under_hidden(host, &c, dirty) => (Reach::Unseen, cause),
+        _ => (Reach::Seen, cause),
+    }
+}
+
+/// `write_reach` for a `mutate` op: an insert of a node from no document
+/// into none, or into a hidden subtree, and a removal from either.
+fn mutate_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (Reach, &'static str) {
+    let cause = match string_arg(args, 1) {
+        Some("remove") => "remove",
+        _ => "insert",
+    };
+    let (Some(parent), Some(node), Some(document)) = (
+        host.node_at(args, 2),
+        host.node_at(args, 3),
+        args.first().and_then(|g| host.document_for(g)),
+    ) else {
+        return (Reach::Seen, cause);
+    };
+    let node_in = cause == "insert" && rendered_connected(&node, document);
+    if node_in {
+        // A move takes it out of where it was laid out.
+        return (Reach::Seen, cause);
+    }
+    if !rendered_connected(&parent, document) || under_hidden(host, &parent, dirty) {
+        return (Reach::Unseen, cause);
+    }
+    (Reach::Seen, cause)
+}
+
 /// Record a write that dirtied the page (`bucket` not `Clean`).
 fn note_mutation(
     mutations: &RefCell<ScriptMutations>,
@@ -827,8 +1698,12 @@ fn clone_node(
             copy.append_child(clone_node(document, &child, true, templates));
         }
     }
+    // A clone is in its original's document.
+    copy.set_owner(node.owner_document_id());
     if let Some(content) = templates.get(&node.id.raw()).cloned() {
         let content = clone_node(document, &content, deep, templates);
+        // A template's contents are always the template contents' document's.
+        content.set_owner(template_owner(document, templates));
         templates.insert(copy.id.raw(), content);
     }
     copy
@@ -841,6 +1716,26 @@ fn node_id(node: Option<Rc<Node>>) -> JsValue {
 fn id_list(nodes: impl IntoIterator<Item = Rc<Node>>) -> JsValue {
     let ids: Vec<String> = nodes.into_iter().map(|n| n.id.raw().to_string()).collect();
     JsValue::String(ids.join(" "))
+}
+
+/// A UTF-16 offset in a text node's data as the two character counts the
+/// layout numbers a run by: the characters before it, and those characters
+/// after white-space collapsing (each run of white space as one).
+fn text_offsets(data: &str, offset: usize) -> (usize, usize) {
+    let (mut units, mut chars, mut collapsed, mut in_space) = (0, 0, 0, false);
+    for c in data.chars() {
+        if units >= offset {
+            break;
+        }
+        units += c.len_utf16();
+        chars += 1;
+        let space = matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        if !(space && in_space) {
+            collapsed += 1;
+        }
+        in_space = space;
+    }
+    (chars, collapsed)
 }
 
 fn number_arg(args: &[JsValue], index: usize) -> Option<f32> {
@@ -895,6 +1790,25 @@ fn is_html_element(node: &Node) -> bool {
         if namespace.is_empty() || namespace == "http://www.w3.org/1999/xhtml")
 }
 
+/// Is `node` an HTML element for the fragment parser? The parser gives an
+/// element in `<math>` the HTML namespace, so one there (and not under a
+/// `foreignObject`) is foreign by its ancestors.
+fn is_in_html_content(node: &Node) -> bool {
+    if !is_html_element(node) {
+        return false;
+    }
+    let mut up = node.parent();
+    while let Some(ancestor) = up {
+        match ancestor.tag_name().map(str::to_ascii_lowercase).as_deref() {
+            Some("foreignobject") => return true,
+            Some("svg") | Some("math") => return false,
+            _ => {}
+        }
+        up = ancestor.parent();
+    }
+    true
+}
+
 /// Is `node` a descendant of `scope` (not `scope` itself)?
 fn is_descendant(node: &Rc<Node>, scope: &Rc<Node>) -> bool {
     let mut current = node.parent();
@@ -913,15 +1827,34 @@ const VOID_ELEMENTS: &[&str] = &[
     "keygen", "link", "meta", "param", "source", "track", "wbr",
 ];
 
-/// Elements whose Text children serialize unescaped.
-const RAW_TEXT_ELEMENTS: &[&str] = &[
-    "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext",
-];
+/// Elements whose Text children serialize unescaped, wherever they are.
+/// `noscript` is one more only where scripting is on for the node
+/// (`noscript_is_raw`).
+const RAW_TEXT_ELEMENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
+
+/// Whether a `<noscript>` under `node` writes its text children as they
+/// are (HTML §13.3: when scripting is enabled for the node). That is when
+/// the node's document is the page's own and the page runs script, in the
+/// tree or not (HTML2, Chrome for Testing 148). Its text is escaped like
+/// any other when its document is one `DOMParser` or `createHTMLDocument`
+/// made, or a template's contents, and when no path has given the node a
+/// document (`Node::owner_document_id`, which follows the node through
+/// creation, insertion, adoption, import, cloning and data writes).
+fn noscript_is_raw(node: &Rc<Node>, page: Option<&Rc<Document>>) -> bool {
+    let Some(page) = page.filter(|d| d.scripting()) else {
+        return false;
+    };
+    // Only a node positively of the page's own document: one of another
+    // document, or one no path has given a document, is escaped.
+    node.owner_document_id() == page.root().id.raw()
+}
 
 /// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
-/// Attributes come out sorted by name: rustkit-dom keeps them in a
-/// HashMap, so source order is gone.
-fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
+/// Attributes come out in the element's own order (the order they were
+/// written or set in), as Chrome writes them.
+///
+/// `raw_noscript`: `noscript_is_raw` for this tree.
+fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
     match &node.node_type {
         NodeType::Element {
             tag_name,
@@ -930,18 +1863,16 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         } => {
             out.push('<');
             out.push_str(tag_name);
-            let mut names: Vec<&String> = attributes.keys().collect();
-            names.sort();
-            for name in names {
+            for (name, value) in attributes.iter() {
                 out.push(' ');
                 out.push_str(name);
                 out.push_str("=\"");
-                escape_into(&attributes[name], true, out);
+                escape_into(value, true, out);
                 out.push('"');
             }
             out.push('>');
             if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
-                serialize_children(node, out, templates);
+                serialize_children(node, out, templates, raw_noscript);
                 out.push_str("</");
                 out.push_str(tag_name);
                 out.push('>');
@@ -950,7 +1881,10 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
         NodeType::Text(data) => {
             let raw = node
                 .parent()
-                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t)))
+                // HTML elements only: an SVG or MathML `style`, `script`
+                // or `noscript` writes its text escaped (Chrome for Testing 148).
+                .filter(|p| is_html_element(p))
+                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t) || (raw_noscript && t == "noscript")))
                 .unwrap_or(false);
             if raw {
                 out.push_str(data);
@@ -975,16 +1909,20 @@ fn serialize_node(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, 
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out, templates, raw_noscript),
     }
 }
 
 /// The children of `node`, serialized (`innerHTML`); a template's are
 /// its content's children.
-fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>) {
-    let source = templates.get(&node.id.raw()).unwrap_or(node);
+fn serialize_children(node: &Rc<Node>, out: &mut String, templates: &HashMap<usize, Rc<Node>>, raw_noscript: bool) {
+    // A template's contents are in an inert document: scripting is off.
+    let (source, raw_noscript) = match templates.get(&node.id.raw()) {
+        Some(contents) => (contents, false),
+        None => (node, raw_noscript),
+    };
     for child in source.children() {
-        serialize_node(&child, out, templates);
+        serialize_node(&child, out, templates, raw_noscript);
     }
 }
 
@@ -1004,7 +1942,12 @@ fn escape_into(s: &str, attribute: bool, out: &mut String) {
 }
 
 /// `info(gen, id, field)`: one read of one node.
-fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>) -> JsValue {
+fn node_info(
+    node: &Rc<Node>,
+    field: &str,
+    templates: &HashMap<usize, Rc<Node>>,
+    page: Option<&Rc<Document>>,
+) -> JsValue {
     match field {
         "type" => JsValue::Number(match node.node_type {
             NodeType::Element { .. } => 1.0,
@@ -1043,33 +1986,36 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
             }
         },
         "parent" => node_id(node.parent()),
+        // web_cssom.js: the lifetime of a <style>'s sheet (new children or
+        // a move make a new one); a sheet's `disabled` belongs to one.
+        "sheetGen" => JsValue::Number(node.sheet_generation() as f64),
         "first" => node_id(node.first_child()),
         "last" => node_id(node.last_child()),
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
-        // Space-separated (a name never holds whitespace) and sorted:
-        // rustkit-dom keeps attributes in a HashMap, so source order is gone.
+        // Space-separated (a name never holds whitespace), in the element's
+        // own order.
         "attrNames" => match &node.node_type {
             NodeType::Element { attributes, .. } => {
-                let mut names: Vec<&str> = attributes.keys().map(String::as_str).collect();
-                names.sort_unstable();
+                let names: Vec<&str> = attributes.keys().map(String::as_str).collect();
                 JsValue::String(names.join(" "))
             }
             _ => JsValue::Null,
         },
         "innerHTML" => {
             let mut out = String::new();
-            serialize_children(node, &mut out, templates);
+            serialize_children(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "outerHTML" => {
             let mut out = String::new();
-            serialize_node(node, &mut out, templates);
+            serialize_node(node, &mut out, templates, noscript_is_raw(node, page));
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
-        "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
+        // The NodeId of the node's Document node, 0 for the page's (HTML2).
+        "owner" => JsValue::Number(node.owner_document_id() as f64),
         _ => JsValue::Undefined,
     }
 }
@@ -1080,7 +2026,7 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
 pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
-    dirty: &Rc<Cell<DomDirty>>,
+    dirty: &Rc<crate::DirtyMark>,
     mutations: &Rc<RefCell<ScriptMutations>>,
     log: &Rc<RefCell<MutationLog>>,
 ) -> Result<(), JsError> {
@@ -1174,6 +2120,36 @@ pub(crate) fn install(
                 descendant_elements(&scope, &mut all);
                 return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
             }
+            // HTML §7.2.2.3 named access on the Window object: the elements
+            // whose id is `arg`, or whose name is `arg` on an embed, form,
+            // img or object, in tree order. "frame" when none is but an
+            // iframe/frame is named `arg` (a browsing-context name, which
+            // is not supported). The spec gives a child browsing context's
+            // name precedence over element matches; with iframe access
+            // unsupported, an element match wins over a same-named iframe.
+            // Shadow trees and template contents are not children here, so
+            // only document-tree elements are seen (pinned in the tests).
+            if string_arg(args, 2) == Some("windowNamed") {
+                if arg.is_empty() {
+                    return JsValue::String(String::new());
+                }
+                let (mut all, mut frame) = (Vec::new(), false);
+                document.traverse(|n| {
+                    let Some(tag) = n.tag_name() else { return };
+                    let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
+                    if n.get_attribute("id") == Some(arg)
+                        || (n.get_attribute("name") == Some(arg) && is(&["embed", "form", "img", "object"]))
+                    {
+                        all.push(n.clone());
+                    } else if n.get_attribute("name") == Some(arg) && is(&["iframe", "frame"]) {
+                        frame = true;
+                    }
+                });
+                if all.is_empty() && frame {
+                    return JsValue::String("frame".into());
+                }
+                return id_list(all.into_iter().filter(|n| is_connected(n, document)));
+            }
             let found = match string_arg(args, 2) {
                 Some("tag") if arg == "*" => {
                     let mut all = Vec::new();
@@ -1226,20 +2202,51 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
-            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
-                h.borrow_mut().ensure_geometry();
+            // innerText reads computed display/visibility (CH2.E13).
+            // `geom:<read>` names the geometry read for the forced-layout log.
+            let (field, why) = match string_arg(args, 2) {
+                Some(f) => match f.split_once(':') {
+                    Some((f, why)) => (Some(f), Some(why)),
+                    None => (Some(f), None),
+                },
+                None => (None, None),
+            };
+            let read = match (field, why) {
+                (Some("geom"), Some("offset")) => Some("offset"),
+                (Some("geom"), Some("client")) => Some("client"),
+                (Some("geom"), Some("scroll_size")) => Some("scroll_size"),
+                (Some("geom"), _) => Some("rect"),
+                (Some("laidout"), _) => Some("laid_out"),
+                (Some("computed"), _) => Some("computed_style"),
+                (Some("scroll"), _) => Some("element_scroll"),
+                (Some("scrollChain"), _) => Some("scroll_chain"),
+                (Some("innerText"), _) => Some("inner_text"),
+                _ => None,
+            };
+            if let Some(read) = read {
+                // LAT22 probe: which element the read is of.
+                {
+                    let mut host = h.borrow_mut();
+                    host.forced_read_node = host.node(args).map(|n| n.id.raw());
+                }
+                DomHost::ensure_fresh_geometry(&h, &d, read);
+                h.borrow_mut().forced_read_node = None;
             }
             let host = h.borrow();
-            match (host.node(args), string_arg(args, 2)) {
+            match (host.node(args), field) {
+                (Some(_), Some("stale")) => {
+                    JsValue::String(if d.written_since_layout() { "1".into() } else { String::new() })
+                }
                 (Some(_), Some("laidout")) => {
                     JsValue::String(if host.geometry.is_empty() { String::new() } else { "1".into() })
                 }
                 (Some(node), Some("computed")) => JsValue::String(
-                    host.computed.get(&node.id.raw()).cloned().unwrap_or_default(),
+                    host.computed_of(node.id.raw()).unwrap_or_default(),
                 ),
                 (Some(node), Some("geom")) => match host.geometry.get(&node.id.raw()) {
                     Some(g) => {
@@ -1247,17 +2254,318 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
+                        // The first two and the last two are for rects: where
+                        // the scrollers, sticky boxes and transforms put the
+                        // box. The rest, `offsetTop` among them, leave the
+                        // scrollers and transforms out.
+                        let moved = host.moved_by(g);
+                        let (x, y) = (g.x + moved.stuck.0, g.y + moved.stuck.1);
+                        let (rx, ry, rw, rh) = host
+                            .transformed_rect(g)
+                            .unwrap_or((x - moved.scrolled.0, y - moved.scrolled.1, g.width, g.height));
+                        // The rect's reader takes the window's scroll off.
+                        let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
-                            "{} {} {} {} {} {} {} {} {} {} {}",
-                            n(g.x), n(g.y), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
-                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position
+                            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            n(rx + page.0), n(ry + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
+                            n(x), n(y), n(rw), n(rh)
                         ))
                     }
                     None => JsValue::String(String::new()),
                 },
-                (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
+                // "x y" of an element that can scroll now, else "".
+                (Some(node), Some("scroll")) => {
+                    let raw = node.id.raw();
+                    if host.geometry.get(&raw).is_some_and(|g| g.scrolls) {
+                        let scrolls = host.element_scrolls.borrow();
+                        let (x, y) = scrolls.offsets.get(&raw).copied().unwrap_or((0.0, 0.0));
+                        JsValue::String(format!("{x} {y}"))
+                    } else {
+                        JsValue::String(String::new())
+                    }
+                }
+                // What scrolling to this element moves: "w" when the window
+                // does ("f" under a fixed box), then the scrollers, innermost
+                // first. "" when it has no box.
+                (Some(node), Some("scrollChain")) => match host.geometry.get(&node.id.raw()) {
+                    Some(g) => {
+                        let mut fixed = false;
+                        let mut up = Some(node.clone());
+                        while let (false, Some(n)) = (fixed, up) {
+                            fixed = host.geometry.get(&n.id.raw()).is_some_and(|g| g.position == 2);
+                            up = n.parent();
+                        }
+                        let mut chain = String::from(if fixed { "f" } else { "w" });
+                        for scroller in scrolling_chain_ids(&host.geometry, g.scroller) {
+                            chain.push_str(&format!(" {scroller}"));
+                        }
+                        JsValue::String(chain)
+                    }
+                    None => JsValue::String(String::new()),
+                },
+                (Some(node), Some("innerText")) if node.is_element() => {
+                    let style = |n: &rustkit_dom::Node| {
+                        host.computed_of(n.id.raw()).and_then(|l| inner_text::Computed::from_lines(&l))
+                    };
+                    JsValue::String(inner_text::inner_text(&node, &style))
+                }
+                (Some(node), Some(field)) => {
+                    node_info(&node, field, &host.templates.borrow(), host.document.as_ref())
+                }
                 _ => JsValue::Null,
             }
+        }),
+    )?;
+
+    // scroll_element(gen, id, x, y): store where script scrolled an element.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_scroll_element",
+        4,
+        Box::new(move |args| {
+            let host = h.borrow();
+            if let (Some(node), Some(x), Some(y)) = (host.node(args), number_arg(args, 2), number_arg(args, 3)) {
+                let mut scrolls = host.element_scrolls.borrow_mut();
+                scrolls.offsets.insert(node.id.raw(), (x, y));
+                scrolls.generation += 1;
+                scrolls.unpainted = true;
+            }
+            JsValue::Undefined
+        }),
+    )?;
+
+    // animate(gen, id, entries): what Web Animations put on an element's
+    // animated-style layer, as JSON `[[property, value, composite], ...]`
+    // in animation order, or null to take the layer off. A script write
+    // that lays the page out (the layer is read by the build).
+    let (h, d, l) = (host.clone(), dirty.clone(), log.clone());
+    runtime.register_host_function(
+        "__rustkit_dom_animate",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            let entries: Option<Vec<(String, String, String)>> = match args.get(2) {
+                Some(JsValue::String(json)) => serde_json::from_str(json).ok(),
+                _ => None,
+            };
+            let mut layer = host.animated.borrow_mut();
+            // What the layer held and holds for the element: the reads a
+            // change can reach are those of both (LAT7c).
+            let (changed, reads) = match entries {
+                Some(entries) => {
+                    let reads = layer_reads(entries.iter().map(|e| e.0.as_str()));
+                    let old = layer.script.insert(node.id.raw(), entries.clone());
+                    let old_reads = old.as_ref().map_or(Some(0), |o| layer_reads(o.iter().map(|e| e.0.as_str())));
+                    (old.as_ref() != Some(&entries), reads.zip(old_reads).map(|(a, b)| a | b))
+                }
+                None => match layer.script.remove(&node.id.raw()) {
+                    Some(old) => (true, layer_reads(old.iter().map(|e| e.0.as_str()))),
+                    None => (false, None),
+                },
+            };
+            if changed {
+                layer.generation += 1;
+                match reads {
+                    // Paint properties only: the boxes did not move.
+                    Some(reads) => d.mark_animation_paint(crate::DomDirty::Layout, reads),
+                    None => d.mark_animation_layer(crate::DomDirty::Layout, "animation"),
+                }
+                // The element restyles as if its inline style changed, so
+                // the next build walks it rather than keep its box.
+                l.borrow_mut().push(MutationRecord {
+                    node: node.id.raw(),
+                    kind: MutationKind::Style,
+                    attr: None,
+                    old: None,
+                    child: None,
+                });
+            }
+            JsValue::Undefined
+        }),
+    )?;
+    // cssAnimations(): the engine's CSS animations and transitions as of
+    // the last layout, as JSON, for `getAnimations()`.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_css_animations",
+        0,
+        Box::new(move |_| {
+            let host = h.borrow();
+            let layer = host.animated.borrow();
+            let items: Vec<String> = layer
+                .css
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{{\"id\":{},\"node\":{},\"pseudo\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
+                         \"duration\":{},\"iterations\":{},\"direction\":{:?},\"fill\":{:?},\"easing\":{},\"ended\":{}}}",
+                        a.id,
+                        a.node,
+                        a.pseudo.map_or("null".to_string(), |p| format!("{p:?}")),
+                        a.kind,
+                        a.index,
+                        serde_json::to_string(&a.name).unwrap_or_default(),
+                        a.start_ms,
+                        a.paused_ms.map_or("null".to_string(), |p| p.to_string()),
+                        a.delay_ms,
+                        a.duration_ms,
+                        if a.iterations.is_infinite() { "null".to_string() } else { a.iterations.to_string() },
+                        a.direction,
+                        a.fill,
+                        serde_json::to_string(&a.easing).unwrap_or_default(),
+                        a.ended
+                    )
+                })
+                .collect();
+            JsValue::String(format!("[{}]", items.join(",")))
+        }),
+    )?;
+    // animated(gen, id, property): whether the property is animated on the
+    // element, by script's layer or by a CSS animation or transition, so a
+    // computed read keeps the published (animated) row over the inline
+    // text (#861's at-once read of a plain inline value).
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_animated",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let (Some(node), Some(property)) = (host.node(args), string_arg(args, 2)) else {
+                return JsValue::Boolean(false);
+            };
+            let layer = host.animated.borrow();
+            let raw = node.id.raw();
+            let by_script = layer
+                .script
+                .get(&raw)
+                .is_some_and(|entries| entries.iter().any(|(p, _, _)| p == property));
+            let by_css = layer
+                .css_props
+                .get(&raw)
+                .is_some_and(|props| props.iter().any(|p| p == property));
+            JsValue::Boolean(by_script || by_css)
+        }),
+    )?;
+    // cssControl(gen, id, kind, animationId, op): script's pause/play/
+    // cancel/finish of one of them, by the engine's animation id; the
+    // engine applies it at its next build.
+    let (h, d) = (host.clone(), dirty.clone());
+    runtime.register_host_function(
+        "__rustkit_dom_css_control",
+        5,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            let (Some(JsValue::String(kind)), Some(id), Some(JsValue::String(op))) =
+                (args.get(2), number_arg(args, 3), args.get(4))
+            else {
+                return JsValue::Undefined;
+            };
+            host.animated.borrow_mut().controls.push(CssAnimationControl {
+                id: id.max(0.0) as u64,
+                node: node.id.raw(),
+                kind: kind.clone(),
+                op: op.clone(),
+            });
+            d.mark(crate::DomDirty::Layout, "animation");
+            JsValue::Undefined
+        }),
+    )?;
+
+    // noteWheel(listening, blocking): whether a wheel or mousewheel
+    // listener or handler is registered now, and whether one of them is
+    // not passive. Kept up to date as listeners come and go.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_note_wheel",
+        2,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let attribute = host.wheel_handler_attribute.get();
+            host.wants_wheel.set(matches!(args.first(), Some(JsValue::Boolean(true))) || attribute);
+            host.wheel_blocking.set(matches!(args.get(1), Some(JsValue::Boolean(true))) || attribute);
+            JsValue::Null
+        }),
+    )?;
+
+    // wheelAttribute(): a wheel handler attribute was parsed or written.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_wheel_attribute",
+        0,
+        Box::new(move |_| JsValue::Boolean(h.borrow().wheel_handler_attribute.get())),
+    )?;
+
+    // rangeTextRects(gen, "node from to;node from to;..."): where the
+    // characters [from, to) of each of those text nodes are (offsets in
+    // UTF-16 units, as a Range has them), as a JSON array with one flat
+    // [x, y, w, h, ...] array per node, in document coordinates; an empty
+    // one before a layout or for a node with no box. One call for a whole
+    // range: a selection over a long page asks about thousands of nodes.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_range_text_rects",
+        2,
+        Box::new(move |args| {
+            DomHost::ensure_fresh_geometry(&h, &d, "text_rects");
+            let host = h.borrow();
+            let asks = string_arg(args, 1).unwrap_or("");
+            let document = args.first().and_then(|g| host.document_for(g));
+            let answers: Vec<String> = asks
+                .split(';')
+                .filter(|ask| !ask.is_empty())
+                .map(|ask| {
+                    let mut numbers = ask.split(' ').filter_map(|n| n.parse::<usize>().ok());
+                    let (Some(id), Some(from), Some(to)) = (numbers.next(), numbers.next(), numbers.next()) else {
+                        return "[]".to_string();
+                    };
+                    let (Some(rects), Some(node)) =
+                        (host.text_rects.as_ref(), document.and_then(|d| d.get_node(NodeId::new(id))))
+                    else {
+                        return "[]".to_string();
+                    };
+                    let NodeType::Text(data) = &node.node_type else {
+                        return "[]".to_string();
+                    };
+                    let (from, to) = (text_offsets(data, from), text_offsets(data, to));
+                    let flat: Vec<String> = rects(id, (from.0, to.0), (from.1, to.1))
+                        .iter()
+                        .flat_map(|r| r.iter().map(|v| if v.is_finite() { v.to_string() } else { "0".to_string() }))
+                        .collect();
+                    format!("[{}]", flat.join(","))
+                })
+                .collect();
+            JsValue::String(format!("[{}]", answers.join(",")))
+        }),
+    )?;
+
+    // svgHit(gen, svg, x, y, width, height): the shape of an `<svg>` a point
+    // is on (from the top left of its content box, whose size is given),
+    // as its NodeId; -1 when it is on none.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_svg_hit",
+        6,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let number = |i: usize| match args.get(i) {
+                Some(JsValue::Number(n)) if n.is_finite() => Some(*n),
+                _ => None,
+            };
+            let (Some(svg), Some(x), Some(y), Some(w), Some(height)) =
+                (host.node(args), number(2), number(3), number(4), number(5))
+            else {
+                return JsValue::Number(-1.0);
+            };
+            crate::svg_geometry::shape_at(&svg, (x, y), (w, height))
+                .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64))
         }),
     )?;
 
@@ -1265,21 +2573,24 @@ pub(crate) fn install(
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_hit",
         2,
         Box::new(move |args| {
-            let mut host = h.borrow_mut();
-            host.ensure_geometry();
+            DomHost::ensure_fresh_geometry(&h, &d, "hit_test");
+            let host = h.borrow();
             if host.geometry.is_empty() {
                 return JsValue::Null;
             }
             let (Some(x), Some(y)) = (number_arg(args, 0), number_arg(args, 1)) else {
                 return JsValue::Null;
             };
+            // With a layout, a point no box is under answers -1: the
+            // root element's, in the wrappers.
             if let Some(tester) = host.hit_tester.clone() {
-                return tester(x, y, host.scroll)
-                    .map_or(JsValue::Null, |id| JsValue::Number(id as f64));
+                return tester(x, y, host.window_scroll())
+                    .map_or(JsValue::Number(-1.0), |id| JsValue::Number(id as f64));
             }
             box_hit(&host, x, y).map_or(JsValue::Null, |id| JsValue::Number(id as f64))
         }),
@@ -1314,6 +2625,7 @@ pub(crate) fn install(
         5,
         Box::new(move |args| {
             let records = mutate_records(&h.borrow(), args);
+            let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
             match mutate(&h.borrow(), args) {
             Ok(()) => {
                 let mut log = l.borrow_mut();
@@ -1326,7 +2638,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                d.set(d.get().max(DomDirty::Style));
+                reach.mark(&d, DomDirty::Style, cause);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1345,6 +2657,7 @@ pub(crate) fn install(
         5,
         Box::new(move |args| {
             let record = write_record(&h.borrow(), args);
+            let (reach, cause) = write_reach(&h.borrow(), args, &d);
             match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
                 if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
@@ -1354,7 +2667,7 @@ pub(crate) fn install(
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                d.set(d.get().max(bucket));
+                reach.mark(&d, bucket, cause);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1386,7 +2699,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket, "form");
             result
         }),
     )?;
@@ -1406,7 +2719,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket, "form");
             JsValue::Null
         }),
     )?;
@@ -1457,9 +2770,58 @@ pub(crate) fn install(
                         url: url.clone(),
                         in_order,
                         inserted_by: caller,
+                        inserted_at: std::time::Instant::now(),
                     });
                 }
             }
+            JsValue::Null
+        }),
+    )?;
+
+    // `set_adopted(gen, id, json)`: CSS text of `node`'s adoptedStyleSheets,
+    // a JSON array of strings in array order. An empty string is a disabled
+    // sheet. The next layout applies them. Nothing is injected into the tree.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_adopted",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(json) = string_arg(args, 2) else {
+                return JsValue::Null;
+            };
+            let Ok(texts) = serde_json::from_str::<Vec<String>>(json) else {
+                return JsValue::Null;
+            };
+            node.set_adopted_styles(texts);
+            d.mark(DomDirty::Style, "sheet");
+            JsValue::Null
+        }),
+    )?;
+
+    // `set_sheet_disabled(gen, id, on)`: `<style>.sheet.disabled`. The
+    // engine leaves the element's sheet out of the cascade while its text
+    // is the text it had now (web_cssom.js calls again after a CSSOM edit).
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_sheet_disabled",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+                return JsValue::Null;
+            };
+            let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
+            document.set_style_sheet_disabled(&node, on);
+            d.mark(DomDirty::Style, "sheet");
             JsValue::Null
         }),
     )?;
@@ -1471,7 +2833,7 @@ pub(crate) fn install(
 }
 
 /// Wrapper prototypes, the identity cache, and the `document` read
-/// surface. `window.__rustkit_dom_reset(gen)` rebinds it to a new document.
+/// surface. `__rk.domReset(gen)` rebinds it to a new document.
 #[cfg(test)]
 pub(crate) const WRAPPERS_JS_FOR_TESTS: &str = WRAPPERS_JS;
 
@@ -1485,12 +2847,173 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit
+        hit: __rustkit_dom_hit, svgHit: __rustkit_dom_svg_hit, noteWheel: __rustkit_dom_note_wheel,
+        wheelAttribute: __rustkit_dom_wheel_attribute,
+        rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
+        setSheetDisabled: __rustkit_dom_set_sheet_disabled,
+        scrollElement: __rustkit_dom_scroll_element,
+        animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
+        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+    // The DOM's dirty flag (a native registered as a global), for
+    // web_observers_live.js.
+    __rk.domDirty = g.__rustkit_dom_dirty;
+    delete g.__rustkit_dom_dirty;
+
+    // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
+    // this closure's and are read with methods taken now, before any page
+    // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
+    // or `Object.defineProperty` afterwards changes nothing here.
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
+        setDrop = uncurry(WeakSet.prototype['delete']);
+    var defineOwn = Object.defineProperty;
+    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
+    // `defaultPrevented` is read-only and only `preventDefault()` (or
+    // `returnValue = false`, or an on<type> handler returning false) by a
+    // listener that may cancel sets it: a passive listener cannot.
+    var CANCELED = new WeakSet(), CANCELABLE = new WeakSet();
+    function setCancelable(ev, on) { if (on) setAdd(CANCELABLE, ev); else setDrop(CANCELABLE, ev); }
+    var isProto = uncurry(Object.prototype.isPrototypeOf);
+    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    // Give an event object its `isTrusted`: an own accessor with no setter
+    // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
+    // for an object that will not take it.
+    function stamp(ev) {
+        if (setHas(STAMPED, ev)) return;
+        defineOwn(ev, 'isTrusted', getterDesc(TRUST_GET));
+        setAdd(STAMPED, ev);
+    }
+    // The engine made this event. It reads trusted through its one
+    // dispatch, the next `dispatchEvent` of it; one dispatched again (by
+    // a page that kept it) is not trusted any more.
+    //
+    // Only an event this code just made with a constructor kept at install
+    // (`make`) can be trusted, and once: whatever a page has put on the
+    // window since never builds an event the engine marks.
+    var CTORS = Object.create(null), MADE = new WeakSet();
+    // The engine builds its events with nothing a page can reach: these
+    // built-ins are taken now, and every descriptor has no prototype.
+    var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
+    var setProto = Object.setPrototypeOf, mathMax = Math.max, mathRound = Math.round, mathAbs = Math.abs;
+    // What describes an engine event (the embedder's literal) inherits
+    // from nothing before the engine reads or writes a field of it.
+    function bare(o) { return setProto(o, null); }
+    // An event's dispatch state under the engine's own keys: own
+    // properties of an engine event from the start (`make`).
+    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
+    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    function getterDesc(get) {
+        var d = objCreate(null);
+        d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;
+        return d;
+    }
+    function fixed(o, k, v) {
+        var d = objCreate(null);
+        d.value = v; d.writable = true; d.enumerable = true; d.configurable = false;
+        defineOwn(o, k, d);
+    }
+    // What the engine adds to its event past the interface's fields (a
+    // point's page and offset coordinates), defined as the fields are.
+    function extra(ev, at) {
+        for (var k in at) {
+            if (!hasOwn(at, k)) continue;
+            if (hasOwn(ev, k)) { fixed(ev, k, at[k]); continue; }
+            var d = objCreate(null);
+            d.value = at[k]; d.writable = false; d.enumerable = true; d.configurable = true;
+            defineOwn(ev, k, d);
+        }
+    }
+    // An interface's own fields (`[name, default]` pairs), its parent and
+    // a finishing step (a direct call; WheelEvent's legacy deltas).
+    var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
+    // The install scripts give the engine its constructors here (host
+    // object only; the last one an install script gives wins).
+    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    // An event's dispatch state, private: `target`, `currentTarget` and
+    // `eventPhase` are read-only getters over these (as in Chrome), and an
+    // event being dispatched is in DISPATCHING, which the initializers
+    // check.
+    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
+    var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
+    __rk.keepCtor = function (name, C, parent, fields) {
+        if (typeof C !== 'function') return;
+        CTORS[name] = C;
+        PROTOS[name] = C.prototype;
+        if (typeof parent === 'string') { PARENT[name] = parent; FIELDS[name] = fields || []; }
+        // An interface's prototype cannot be replaced (Web IDL).
+        try { defineOwn(C, 'prototype', { writable: false }); } catch (_) {}
+    };
+    // An event's type as its constructor or initEvent set it: what dispatch
+    // and activation read, whatever a page defines on the prototypes.
+    // An engine event is always in the map; only a page's own event, which
+    // is never trusted, falls back to its `type`.
+    function evType(e) { return mapHas(EVTYPE, e) ? mapGet(EVTYPE, e) : e.type; }
+    __rk.keepFinish = function (name, fn) { if (typeof fn === 'function') FINISH[name] = fn; };
+    // A click made by the engine as a mouse or pointer event, or made by
+    // script with the MouseEvent of install time.
+    function isMouseClick(e) {
+        var k = mapGet(KIND, e);
+        if (k !== undefined) return k === 'MouseEvent' || k === 'PointerEvent';
+        return !!PROTOS.MouseEvent && isProto(PROTOS.MouseEvent, e);
+    }
+    __rk.hasCtor = function (name) { return typeof CTORS[name] === 'function'; };
+    // The engine's event: an object of the interface's prototype with
+    // every field an own, non-configurable property, built here and
+    // nowhere else (no constructor, no call through a built-in a page can
+    // replace). `init` is the engine's own object literal.
+    function make(name, type, init) {
+        if (!PROTOS[name] || (name !== 'Event' && !FIELDS[name])) name = 'Event';
+        var i = init || objCreate(null);
+        function arg(k) { return hasOwn(i, k) ? i[k] : undefined; }
+        var ev = objCreate(PROTOS[name]);
+        mapSet(EVTYPE, ev, '' + type);
+        defineOwn(ev, 'type', getterDesc(TYPE_GET));
+        fixed(ev, 'bubbles', !!arg('bubbles'));
+        setCancelable(ev, !!arg('cancelable'));
+        fixed(ev, 'composed', !!arg('composed'));
+        stamp(ev);
+        fixed(ev, 'timeStamp', dateNow());
+        fixed(ev, ORIGIN, null); fixed(ev, PATH, null);
+        fixed(ev, STOP, false); fixed(ev, STOP_NOW, false);
+        // The fields, the root interface's first.
+        var chain = objCreate(null), depth = 0, n;
+        for (n = name; n !== 'Event' && FIELDS[n]; n = PARENT[n]) chain[depth++] = n;
+        while (depth > 0) {
+            var fields = FIELDS[chain[--depth]];
+            for (var j = 0; j < fields.length; j++) {
+                var f = fields[j], v = arg(f[0]);
+                fixed(ev, f[0], v === undefined ? (isArray(f[1]) ? [] : f[1]) : v);
+            }
+        }
+        var finish = FINISH[name];
+        if (finish) finish(ev, i);
+        mapSet(KIND, ev, name);
+        setAdd(MADE, ev);
+        return ev;
+    }
+    __rk.make = make;
+    function trust(ev) {
+        if (!setHas(MADE, ev) || !mapHas(EVTYPE, ev)) throw new TypeError('not an engine-made event');
+        setDrop(MADE, ev);
+        stamp(ev);
+        setAdd(TRUSTED, ev);
+        setAdd(UNDISPATCHED, ev);
+        return ev;
+    }
+    // For the embedder's other scripts, which hold the host object.
+    __rk.trust = trust;
+    // A field the user edited (it commits with `change` when it loses the
+    // focus): kept here, not as a property of the element.
+    var EDITED = new WeakSet();
+    __rk.markEdited = function (el) { setAdd(EDITED, el); };
+    __rk.takeEdited = function (el) { var was = setHas(EDITED, el); if (was) setDrop(EDITED, el); return was; };
 
     if (typeof g.DOMException !== 'function') {
         g.DOMException = function DOMException(message, name) {
@@ -1498,8 +3021,15 @@ const WRAPPERS_JS: &str = r#"
             this.message = message === undefined ? '' : String(message);
             this.name = name === undefined ? 'Error' : String(name);
         };
+        // The legacy `code` of the named errors (DOMException.code), as Chrome reports them.
+        var DOM_CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+            NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+            InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15,
+            TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+            QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
         g.DOMException.prototype = Object.create(Error.prototype, {
-            constructor: { value: g.DOMException, writable: true, configurable: true }
+            constructor: { value: g.DOMException, writable: true, configurable: true },
+            code: { get: function () { return DOM_CODES[this.name] || 0; }, configurable: true, enumerable: true }
         });
     }
     var DOMException = g.DOMException;
@@ -1515,8 +3045,13 @@ const WRAPPERS_JS: &str = r#"
     // what to record once it has. `scripts` is web_scripts.js's: it hears of
     // each element script creates, each insert before it happens (and gets
     // back what to run once it has), and each write to a node's own data.
-    var HOOKS = {};
-    Object.defineProperty(g, '__rkDomHooks', { value: HOOKS, configurable: true, enumerable: false });
+    // It inherits from nothing and owns every hook from the start, so a
+    // hook nobody installed reads as its own `undefined`.
+    var HOOKS = objCreate(null);
+    HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = undefined;
+    // On the host object, for the embedder's other scripts.
+    __rk.domHooks = HOOKS;
     var gen = 0;
     var cache = new Map();
 
@@ -1565,7 +3100,7 @@ const WRAPPERS_JS: &str = r#"
             a: 'HTMLAnchorElement', area: 'HTMLAreaElement', audio: 'HTMLAudioElement', base: 'HTMLBaseElement',
             body: 'HTMLBodyElement', br: 'HTMLBRElement', button: 'HTMLButtonElement', canvas: 'HTMLCanvasElement',
             data: 'HTMLDataElement', details: 'HTMLDetailsElement', dialog: 'HTMLDialogElement', div: 'HTMLDivElement',
-            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', head: 'HTMLHeadElement',
+            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', frameset: 'HTMLFrameSetElement', head: 'HTMLHeadElement',
             h1: 'HTMLHeadingElement', h2: 'HTMLHeadingElement', h3: 'HTMLHeadingElement', h4: 'HTMLHeadingElement',
             h5: 'HTMLHeadingElement', h6: 'HTMLHeadingElement', hr: 'HTMLHRElement', html: 'HTMLHtmlElement',
             iframe: 'HTMLIFrameElement', img: 'HTMLImageElement', label: 'HTMLLabelElement', legend: 'HTMLLegendElement',
@@ -1588,12 +3123,15 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
-        // There is no canvas drawing and no media playback here, and a page
-        // must be able to find that out the way it asks: a canvas has no
-        // context of any kind, and a media element is one with nothing to
+        // There is no media playback here, and a page must be able to find
+        // that out the way it asks: a media element is one with nothing to
         // play. Without the methods the question itself threw (github.com's
-        // `getContext("webgl")` and `video.load()`, each in an effect).
-        made.HTMLCanvasElement.prototype.getContext = function getContext() { return null; };
+        // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
+        // which takes this way to a canvas's node and deletes it.
+        Object.defineProperty(g, '__rustkit_canvas_slot', {
+            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
+            configurable: true, writable: true, enumerable: false
+        });
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;
@@ -1698,11 +3236,17 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Removing an absent attribute runs no attribute-change steps (DOM
+        // "remove an attribute by name"), so it must not drop an assigned
+        // on<type> handler. N.attr matches the name as the write does.
+        var changed = op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
+        if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
@@ -1733,6 +3277,12 @@ const WRAPPERS_JS: &str = r#"
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
         if (info(this, 'type') === 9) return null;
+        // A node of another document, in a tree or not (HTML2).
+        var owner = info(this, 'owner');
+        if (typeof owner === 'number' && owner > 0) {
+            if (g.document && g.document[SLOT] && g.document[SLOT].id === owner) return g.document;
+            var od = wrap(owner); if (od) return od;
+        }
         var n = this;
         while (n.parentNode) n = n.parentNode;
         return n.nodeType === 9 ? n : g.document;
@@ -1748,7 +3298,10 @@ const WRAPPERS_JS: &str = r#"
         }
         return o[SLOT];
     }
-    function write(op, parent, node, child, method) {
+    // `replacing`: `child` is the node this call takes out (replaceChild,
+    // and replaceWith while `this` is still in place), so the Document
+    // checks do not count it.
+    function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
         function here(s) { return s.gen === gen ? s.id : -1; }
@@ -1756,7 +3309,7 @@ const WRAPPERS_JS: &str = r#"
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c);
+        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
@@ -1797,7 +3350,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var self = this;
         return batch(function () {
-            write('insert', self, node, child, 'replaceChild');
+            write('insert', self, node, child, 'replaceChild', true);
             return write('remove', self, child, null, 'replaceChild');
         });
     };
@@ -1815,8 +3368,8 @@ const WRAPPERS_JS: &str = r#"
         nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
         return nodes;
     }
-    function insertAll(parent, nodes, ref, method) {
-        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    function insertAll(parent, nodes, ref, method, replacing) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method, replacing); });
     }
     // DOM queues one record per call of these; they make several writes,
     // which an observer merges into one while `fn` runs.
@@ -1873,7 +3426,7 @@ const WRAPPERS_JS: &str = r#"
             var self = this, nodes = toNodes(args);
             batch(function () {
                 if (self.parentNode === p) {
-                    insertAll(p, nodes, self, 'replaceWith');
+                    insertAll(p, nodes, self, 'replaceWith', true);
                     p.removeChild(self);
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');
@@ -1906,10 +3459,11 @@ const WRAPPERS_JS: &str = r#"
     function equalNodes(a, b) {
         if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
         if (a.nodeType === 1) {
+            // The same attributes, in any order (DOM §4.4 "equals").
             var names = a.getAttributeNames();
-            if (names.join(' ') !== b.getAttributeNames().join(' ')) return false;
+            if (names.length !== b.getAttributeNames().length) return false;
             for (var k = 0; k < names.length; k++) {
-                if (a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
+                if (!b.hasAttribute(names[k]) || a.getAttribute(names[k]) !== b.getAttribute(names[k])) return false;
             }
         } else if (a.nodeType === 3 || a.nodeType === 7 || a.nodeType === 8) {
             if (a.textContent !== b.textContent) return false;
@@ -1974,7 +3528,30 @@ const WRAPPERS_JS: &str = r#"
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
-    getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
+    // The outerHTML setter: the markup, parsed in the context of the
+    // element's parent by a holder of the element's document, replaces the
+    // element. As Chrome for Testing 148, and not as the HTML spec (which
+    // has a no-op and a body context there): an element with no parent, or
+    // whose parent is not an element, throws NoModificationAllowedError.
+    accessor(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); }, function (v) {
+        var parent = this.parentNode;
+        if (!parent) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element has no parent node.", 'NoModificationAllowedError');
+        }
+        if (parent.nodeType !== 1) {
+            throw new DOMException("Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '" +
+                parent.nodeName + "', which is not an element node.", 'NoModificationAllowedError');
+        }
+        var ctx = parent.localName;
+        var holder = parent.namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(parent.namespaceURI, ctx)
+            : create('element', ctx, 'outerHTML');
+        ownedBy(holder, this.ownerDocument);
+        holder.innerHTML = text(v);
+        var self = this;
+        Array.prototype.slice.call(holder.childNodes).forEach(function (n) { parent.insertBefore(n, self); });
+        parent.removeChild(self);
+    });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
@@ -2131,20 +3708,29 @@ const WRAPPERS_JS: &str = r#"
     }, function (v) {
         v = v === null ? '' : String(v);
         if (inputMode(this) !== 'value') return this.setAttribute('value', v);
-        var n = controlValue(this, v).length;
-        selectionOf(this).start = selectionOf(this).end = n;
+        setValueMovingCaret(this, v);
     });
     accessor(HTMLTextAreaElement.prototype, 'value', function () { return controlValue(this); },
-        function (v) {
-            var n = controlValue(this, v === null ? '' : String(v)).length;
-            selectionOf(this).start = selectionOf(this).end = n;
-        });
-    // Script's view of the selection (HTML §4.10.5.2.10). The engine's caret
-    // is not synced to it yet; setting a value moves both ends to its end.
+        function (v) { setValueMovingCaret(this, v === null ? '' : String(v)); });
+    // Setting a different value moves both ends of the selection to its
+    // end; the same value leaves the selection alone (HTML §4.10.5.4).
+    function setValueMovingCaret(el, v) {
+        if (controlValue(el) === v) return;
+        var n = controlValue(el, v).length;
+        selectionOf(el).start = selectionOf(el).end = n;
+    }
+    // Script's view of the selection (HTML §4.10.5.2.10).
+    // Once a control has an edit state (it was focused, typed in, or
+    // script set its selection), the engine's state is the selection
+    // (`engineSelection`, from dom/editing.js; CH2.E12); this copy stands
+    // in before that.
     var selections = new WeakMap();
+    var engineSelection = null;
     function selectionOf(el) {
         var s = selections.get(el);
         if (!s) { s = { start: 0, end: 0, dir: 'none' }; selections.set(el, s); }
+        var e = engineSelection ? engineSelection(el) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; return s; }
         var n = controlValue(el).length;
         s.start = Math.min(s.start, n); s.end = Math.min(s.end, n);
         return s;
@@ -2154,6 +3740,8 @@ const WRAPPERS_JS: &str = r#"
         s.end = Math.min(end >>> 0, n);
         s.start = Math.min(start >>> 0, s.end);
         s.dir = dir === 'forward' || dir === 'backward' ? dir : 'none';
+        var e = engineSelection ? engineSelection(el, s.start, s.end, s.dir) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; }
     }
     // Validity (HTML §4.10.20.3) for the constraints this rung models.
     var customValidity = new WeakMap();
@@ -2199,6 +3787,25 @@ const WRAPPERS_JS: &str = r#"
             }, function (v) { this.setAttribute(p[1], String(v)); });
         });
     });
+    // HTML §4.10.5.3.2: how many characters wide the field is; 20 unless
+    // the attribute is a number above zero.
+    // The attribute is read by the rules for parsing non-negative integers
+    // (leading whitespace, an optional "+", then digits up to the first
+    // other character) and is 20 unless that gives 1 to 2147483647; layout
+    // reads it the same way (engine `input_size_attribute`). Setting the
+    // property converts to unsigned long: 0 throws, and a value above
+    // 2147483647 writes 20 (Chrome for Testing 148).
+    accessor(HTMLInputElement.prototype, 'size', function () {
+        var m = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(this.getAttribute('size') || '');
+        var n = m ? Number(m[1]) : 0;
+        return n >= 1 && n <= 2147483647 ? n : 20;
+    }, function (v) {
+        v = v >>> 0;
+        if (v === 0) {
+            throw new g.DOMException("Failed to set the 'size' property on 'HTMLInputElement': The value provided is 0, which is an invalid size.", 'IndexSizeError');
+        }
+        this.setAttribute('size', String(v > 2147483647 ? 20 : v));
+    });
     [['rows', 2], ['cols', 20]].forEach(function (p) {
         accessor(HTMLTextAreaElement.prototype, p[0], function () {
             var n = parseInt(this.getAttribute(p[0]), 10);
@@ -2230,15 +3837,25 @@ const WRAPPERS_JS: &str = r#"
             return tags.test(el.localName);
         });
     }
-    HTMLFormElement.prototype.reset = function () {
-        if (!this.dispatchEvent(new Event('reset', { bubbles: true, cancelable: true }))) return;
-        controls(this, /^(input|textarea)$/).forEach(function (el) {
+    // The form's reset (HTML: "reset" a form): the cancelable `reset`
+    // event, then the text controls. Whether it went ahead. The engine's
+    // own resets (a reset button) call this, not the form's `reset`
+    // property, which a control named `reset` shadows and a page can
+    // replace.
+    function resetForm(form) {
+        // Trusted, also when script called reset() (Chrome 148).
+        var e = make('Event', 'reset', { bubbles: true, cancelable: true });
+        trust(e);
+        if (!dispatchTo(form, e)) return false;
+        controls(form, /^(input|textarea)$/).forEach(function (el) {
             var s = slotOf(el);
             if (s.gen === gen && (el.localName === 'textarea' || inputMode(el) === 'value')) {
                 N.value(s.gen, s.id, null);
             }
         });
-    };
+        return true;
+    }
+    HTMLFormElement.prototype.reset = function reset() { resetForm(this); };
     // Navigation from script is not wired; submission stays engine-side.
     HTMLFormElement.prototype.submit = function () {};
     // `action` is web_reflect.js's: the attribute resolved against the
@@ -2264,14 +3881,25 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
     Element.prototype.hasAttribute = function (name) { return this.getAttribute(name) !== null; };
+    // A write to an `<img>`'s `src` or `srcset` starts its load over
+    // (E54): the marks script reads `complete` and `decode()` from are
+    // updated at once, not on the next event.
+    function imageWritten(el, name) {
+        var n = String(name).toLowerCase();
+        if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
+            __rk.imageWritten(el);
+        }
+    }
     Element.prototype.setAttribute = function (name, value) {
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
         setData(this, 'setAttr', String(name), String(value), 'setAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.removeAttribute = function (name) {
         setData(this, 'removeAttr', String(name), null, 'removeAttribute');
+        imageWritten(this, name);
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -2321,7 +3949,12 @@ const WRAPPERS_JS: &str = r#"
         // The fragment parses in the context of the element it lands in
         // (<html> parses as <body>), through a detached holder of that name.
         var ctx = spot[0].localName === 'html' ? 'body' : spot[0].localName;
-        var holder = create('element', ctx, 'insertAdjacentHTML');
+        var holder = spot[0].namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(spot[0].namespaceURI, ctx)
+            : create('element', ctx, 'insertAdjacentHTML');
+        // The holder is the target's document's, so the markup parses with
+        // that document's scripting flag (Chrome for Testing 148).
+        ownedBy(holder, spot[0].nodeType === 9 ? spot[0] : spot[0].ownerDocument);
         holder.innerHTML = String(html);
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
             spot[0].insertBefore(n, spot[1]);
@@ -2406,14 +4039,46 @@ const WRAPPERS_JS: &str = r#"
     // next layout. An element with no box (display:none, not rendered, or
     // measured before any layout) reads as all zeros, and has no offsetParent.
     function finite(v) { v = Number(v); return isFinite(v) ? v : 0; }
-    function geom(el) {
-        var raw = info(el, 'geom');
+    function geom(el, why) {
+        var raw = info(el, why ? 'geom:' + why : 'geom');
         if (!raw) return null;
         var p = raw.split(' ');
         var n = [];
         for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
-        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10] };
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12], rw: n[13], rh: n[14] };
     }
+    // What web_scroll.js scrolls an element with; it takes this and deletes
+    // it. read: null when the element cannot scroll now.
+    g.__rustkit_element_scroll = {
+        read: function (el) {
+            var raw = info(el, 'scroll');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { x: finite(p[0]), y: finite(p[1]) };
+        },
+        write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); },
+        chain: function (el) {
+            var raw = info(el, 'scrollChain');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { window: p[0] === 'w', scrollers: p.slice(1).map(function (id) { return wrap(+id); }) };
+        },
+        byId: function (id) { return wrap(id); }
+    };
+    // What web_animations.js drives the engine's animated-style layer
+    // with; it takes this and deletes it. write: the element's entries,
+    // `[[property, value, composite], ...]`, or null for none. css: the
+    // engine's CSS animations and transitions as of the last layout.
+    // control: pause/play/cancel/finish one of them.
+    g.__rustkit_animated_style = {
+        write: function (el, entries) {
+            var s = slotOf(el);
+            N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
+        },
+        css: function () { return JSON.parse(N.cssAnimations()); },
+        control: function (el, kind, id, op) { var s = slotOf(el); N.cssControl(s.gen, s.id, kind, id, op); },
+        byId: function (id) { return wrap(id); }
+    };
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
         return finite(typeof v === 'number' ? v : 0);
@@ -2431,33 +4096,40 @@ const WRAPPERS_JS: &str = r#"
     Element.prototype.getBoundingClientRect = function () {
         var b = geom(this);
         if (!b) return rect(0, 0, 0, 0);
-        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h);
+        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh);
     };
     Element.prototype.getClientRects = function () {
         var b = geom(this);
-        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h)] : [];
+        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh)] : [];
         return out;
     };
     function metric(name, pick) {
         getter(HTMLElement.prototype, name, function () {
-            var b = geom(this);
+            var b = geom(this, 'offset');
             return b ? pick(b, this) : 0;
         });
     }
     function round(v) { return Math.round(v); }
     metric('offsetWidth', function (b) { return round(b.w); });
     metric('offsetHeight', function (b) { return round(b.h); });
-    // offsetParent: the nearest positioned ancestor, else body. null when
-    // the element has no box, is fixed, or is the body itself.
+    // offsetParent: the nearest positioned ancestor with a box, else body
+    // (CSSOM View). A static element also stops at the nearest `td`, `th`
+    // or `table` with a box: by element name, whatever its display, as
+    // Chromium does. null when the element has no box, is fixed, or is the
+    // body itself.
+    var TABLE_PARENTS = { TD: 1, TH: 1, TABLE: 1 };
     function offsetParentOf(el) {
-        var b = geom(el);
+        var b = geom(el, 'offset');
         if (!b || b.pos === 2) return null;
         var body = document.body;
         if (el === body || el === document.documentElement) return null;
+        var isStatic = b.pos === 0;
         for (var p = el.parentElement; p; p = p.parentElement) {
             if (p === body) return body;
-            var pb = geom(p);
-            if (pb && pb.pos !== 0) return p;
+            var pb = geom(p, 'offset');
+            if (!pb) continue;
+            if (pb.pos !== 0) return p;
+            if (isStatic && p.namespaceURI === 'http://www.w3.org/1999/xhtml' && TABLE_PARENTS[p.tagName]) return p;
         }
         return body;
     }
@@ -2465,35 +4137,224 @@ const WRAPPERS_JS: &str = r#"
     // Offsets are from the offsetParent's padding edge; from the document
     // origin when that is the body.
     function offsetFrom(el, axis) {
-        var b = geom(el);
+        var b = geom(el, 'offset');
         if (!b) return 0;
         var parent = offsetParentOf(el);
         var base = 0;
         if (parent && parent !== document.body) {
-            var pb = geom(parent);
-            if (pb) base = axis === 'x' ? pb.x + pb.bl : pb.y + pb.bt;
+            var pb = geom(parent, 'offset');
+            if (pb) base = axis === 'x' ? pb.lx + pb.bl : pb.ly + pb.bt;
         }
-        return round((axis === 'x' ? b.x : b.y) - base);
+        return round((axis === 'x' ? b.lx : b.ly) - base);
     }
     getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
     getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });
-    // getComputedStyle. The engine publishes each laid-out element's computed
-    // style (`set_computed_styles`); a read answers from the last layout,
-    // with the element's own inline declarations laid over it so that
-    // `el.style.display = 'none'` is seen at once. An element with no box
-    // after a layout is not rendered (display:none, or <head>, <script>,
-    // <style>, ...): its display reads 'none'. Before any layout everything
-    // reads as the empty string.
+    // getComputedStyle. The engine publishes each styled element's computed
+    // style (`set_computed_styles`), with or without a box; a read answers
+    // from the last layout, with the element's own inline declarations laid
+    // over it so that `el.style.display = 'none'` is seen at once. An
+    // element with no published style after a layout was not styled (a
+    // descendant of display:none, or <head>, <script>, <style>, ...): its
+    // display reads 'none'. Before any layout everything reads as the empty
+    // string. Custom properties come as `custom` rows on the nearest
+    // element (self or ancestor) whose set is its own; `customVars` walks up.
     var COMPUTED_NAMES = {};
-    function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
-    function computedMap(el) {
+    // What a property reads when the engine published no row for it: Chromium's
+    // serialized initial value (`computed_read.rs` publishes only what differs).
+    var COMPUTED_INITIAL = {
+        '-webkit-box-orient': 'horizontal', '-webkit-clip-path': 'none', '-webkit-filter': 'none',
+        '-webkit-line-clamp': 'none', '-webkit-mask': 'none', '-webkit-mask-clip': 'border-box',
+        '-webkit-mask-image': 'none', '-webkit-mask-origin': 'border-box',
+        '-webkit-mask-position': '0% 0%', '-webkit-mask-repeat': 'repeat',
+        '-webkit-mask-size': 'auto', '-webkit-text-fill-color': 'rgb(0, 0, 0)',
+        'align-content': 'normal', 'align-items': 'normal', 'align-self': 'auto',
+        'animation': 'none 0s ease 0s 1 normal none running', 'animation-delay': '0s',
+        'animation-direction': 'normal', 'animation-duration': '0s', 'animation-fill-mode': 'none',
+        'animation-iteration-count': '1', 'animation-name': 'none',
+        'animation-play-state': 'running', 'animation-timing-function': 'ease',
+        'aspect-ratio': 'auto', 'backdrop-filter': 'none',
+        'background': 'rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box',
+        'background-clip': 'border-box', 'background-image': 'none',
+        'background-origin': 'padding-box', 'background-position': '0% 0%',
+        'background-position-x': '0%', 'background-position-y': '0%',
+        'background-repeat': 'repeat', 'background-size': 'auto',
+        'border': '0px none rgb(0, 0, 0)', 'border-block': '0px none rgb(0, 0, 0)',
+        'border-block-end': '0px none rgb(0, 0, 0)', 'border-block-start': '0px none rgb(0, 0, 0)',
+        'border-bottom': '0px none rgb(0, 0, 0)', 'border-bottom-color': 'rgb(0, 0, 0)',
+        'border-bottom-style': 'none', 'border-collapse': 'separate',
+        'border-color': 'rgb(0, 0, 0)', 'border-end-end-radius': '0px',
+        'border-end-start-radius': '0px', 'border-inline': '0px none rgb(0, 0, 0)',
+        'border-inline-end': '0px none rgb(0, 0, 0)',
+        'border-inline-start': '0px none rgb(0, 0, 0)', 'border-left': '0px none rgb(0, 0, 0)',
+        'border-left-color': 'rgb(0, 0, 0)', 'border-left-style': 'none',
+        'border-right': '0px none rgb(0, 0, 0)', 'border-right-color': 'rgb(0, 0, 0)',
+        'border-right-style': 'none', 'border-spacing': '0px', 'border-start-end-radius': '0px',
+        'border-start-start-radius': '0px', 'border-style': 'none',
+        'border-top': '0px none rgb(0, 0, 0)', 'border-top-color': 'rgb(0, 0, 0)',
+        'border-top-style': 'none', 'border-width': '0px', 'box-shadow': 'none', 'clear': 'none',
+        'clip-path': 'none', 'column-count': 'auto', 'column-gap': 'normal', 'container': 'none',
+        'container-name': 'none', 'container-type': 'normal', 'cursor': 'auto', 'filter': 'none', 'flex': '0 1 auto',
+        'flex-basis': 'auto', 'flex-flow': 'row nowrap', 'flex-grow': '0', 'flex-shrink': '1',
+        'flex-wrap': 'nowrap', 'font': '16px Times', 'gap': 'normal', 'grid-area': 'auto',
+        'grid-auto-columns': 'auto', 'grid-auto-flow': 'row', 'grid-auto-rows': 'auto',
+        'grid-column': 'auto', 'grid-column-end': 'auto', 'grid-column-start': 'auto',
+        'grid-row': 'auto', 'grid-row-end': 'auto', 'grid-row-start': 'auto',
+        'grid-template': 'none', 'grid-template-areas': 'none', 'grid-template-columns': 'none',
+        'grid-template-rows': 'none', 'inset': 'auto', 'inset-block': 'auto',
+        'inset-block-end': 'auto', 'inset-block-start': 'auto', 'inset-inline': 'auto',
+        'inset-inline-end': 'auto', 'inset-inline-start': 'auto', 'justify-content': 'normal',
+        'justify-items': 'normal', 'justify-self': 'auto', 'line-break': 'auto', 'margin': '0px',
+        'margin-block': '0px', 'margin-block-end': '0px', 'margin-block-start': '0px',
+        'margin-inline': '0px', 'margin-inline-end': '0px', 'margin-inline-start': '0px',
+        'mask': 'none', 'mask-clip': 'border-box', 'mask-image': 'none',
+        'mask-origin': 'border-box', 'mask-position': '0% 0%', 'mask-repeat': 'repeat',
+        'mask-size': 'auto', 'max-height': 'none', 'max-width': 'none', 'min-height': '0px',
+        'min-width': '0px', 'object-fit': 'fill', 'object-position': '50% 50%', 'order': '0',
+        'overflow': 'visible', 'overflow-wrap': 'normal', 'padding': '0px', 'padding-block': '0px',
+        'padding-block-end': '0px', 'padding-block-start': '0px', 'padding-inline': '0px',
+        'padding-inline-end': '0px', 'padding-inline-start': '0px', 'place-content': 'normal',
+        'place-items': 'normal', 'place-self': 'auto', 'rotate': 'none', 'row-gap': 'normal',
+        'scale': 'none', 'text-decoration': 'none', 'text-decoration-color': 'rgb(0, 0, 0)',
+        'text-decoration-line': 'none', 'text-decoration-style': 'solid', 'text-overflow': 'clip',
+        'transform': 'none', 'transition': 'all', 'transition-delay': '0s',
+        'transition-duration': '0s', 'transition-property': 'all',
+        'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
+        'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
+    };
+    var hasOwn = function (o, n) { return Object.prototype.hasOwnProperty.call(o, n); };
+    // Names a read answers but an enumeration leaves out, as Chromium does:
+    // shorthands (still readable by name).
+    var COMPUTED_SHORTHANDS = {};
+    ('animation background border border-block border-block-end border-block-start border-bottom ' +
+     'border-color border-inline border-inline-end border-inline-start border-left border-radius ' +
+     'border-right border-style border-top border-width container flex flex-flow font gap grid-area ' +
+     'grid-column grid-row grid-template inset inset-block inset-inline margin margin-block ' +
+     'margin-inline mask -webkit-mask outline overflow padding padding-block padding-inline place-content ' +
+     'place-items place-self text-decoration transition').split(' ').forEach(function (n) {
+        COMPUTED_SHORTHANDS[n] = true;
+    });
+    // `-webkit-` names Chromium answers as the unprefixed property.
+    var WEBKIT_ALIASES = {};
+    ('transform transform-origin transition transition-property transition-duration ' +
+     'transition-delay transition-timing-function animation animation-name animation-duration ' +
+     'animation-delay animation-timing-function animation-iteration-count animation-direction ' +
+     'animation-fill-mode animation-play-state box-shadow box-sizing flex flex-grow flex-shrink ' +
+     'flex-basis flex-direction flex-wrap flex-flow order justify-content align-items align-self ' +
+     'align-content border-radius border-top-left-radius border-top-right-radius ' +
+     'border-bottom-right-radius border-bottom-left-radius opacity').split(' ').forEach(function (n) {
+        WEBKIT_ALIASES['-webkit-' + n] = n;
+    });
+    // `m.__fill` says whether the initial values stand behind the rows:
+    // looked up on read, never copied (`true`, or `'pseudo'`, which leaves
+    // out what a box that was never laid out cannot answer).
+    function initialOf(m, n) {
+        var fill = m.__fill;
+        if (!fill || !hasOwn(COMPUTED_INITIAL, n)) return undefined;
+        if (fill === 'pseudo' && /^(margin|padding|inset|transform-origin)/.test(n)) return undefined;
+        return COMPUTED_INITIAL[n];
+    }
+    function computedValue(m, n) {
+        if (hasOwn(m, n)) return m[n];
+        var v = initialOf(m, n);
+        if (v === undefined && hasOwn(WEBKIT_ALIASES, n)) return computedValue(m, WEBKIT_ALIASES[n]);
+        return v;
+    }
+    function markFill(m, how) {
+        Object.defineProperty(m, '__fill', { value: how, enumerable: false });
+    }
+    // Inline text the engine is known to drop or to keep only in part: the
+    // published row (or the initial value) would be a confident wrong answer,
+    // where the text is what the page wrote. Listed in #866.
+    function lossyInline(name, v) {
+        var t = v.toLowerCase().trim();
+        var listed = function () {
+            var depth = 0;
+            for (var i = 0; i < t.length; i++) {
+                var c = t.charAt(i);
+                if (c === '(') depth++;
+                else if (c === ')') depth--;
+                else if (c === ',' && depth === 0) return true;
+            }
+            return false;
+        };
+        if (/^(transition|animation)/.test(name) && name !== 'transition-property') return listed();
+        if (name === 'box-shadow') return listed();
+        if (name === 'transform') {
+            return /(3d|rotate[xyz]|translatez|scalez|perspective)\s*\(/.test(t) || /[0-9.](vw|vh|vmin|vmax)\b/.test(t);
+        }
+        if (name === 'text-decoration') {
+            return t.split(/\s+/).some(function (w) { return !/^(none|underline|overline|line-through)$/.test(w); });
+        }
+        if (name === 'border-color' || name === 'overflow') return /\s/.test(t.replace(/\([^)]*\)/g, ''));
+        if (name === 'vertical-align') return /[0-9]/.test(t);
+        if (name === 'aspect-ratio') return t.indexOf('/') < 0 && t.indexOf('.') >= 0;
+        return name === 'flex-flow' || name === 'background-position-x' || name === 'background-position-y';
+    }
+    var LOSSY_LONGHANDS = {
+        'transition': ['transition-property', 'transition-duration', 'transition-delay', 'transition-timing-function'],
+        'animation': ['animation-name', 'animation-duration', 'animation-delay', 'animation-timing-function',
+            'animation-iteration-count', 'animation-direction', 'animation-fill-mode', 'animation-play-state'],
+        'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color'],
+        'text-decoration': ['text-decoration-line', 'text-decoration-style', 'text-decoration-color']
+    };
+    var REPLACED = { IMG: 1, VIDEO: 1, CANVAS: 1, IFRAME: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1,
+        BUTTON: 1, OBJECT: 1, EMBED: 1, SVG: 1 };
+    // Where layout does not apply, `width`/`height` are the declared values
+    // (Chromium's resolved value is the used one only for a laid-out box).
+    function declaredBox(el, m, name) {
+        if (name !== 'width' && name !== 'height') return false;
+        if (m.display === 'none') return true;
+        return m.display === 'inline' && !hasOwn(REPLACED, String(el.tagName || '').toUpperCase());
+    }
+    // Memoized: a page reads the same few dozen names over and over.
+    var KEBAB = Object.create(null);
+    function kebab(p) {
+        var k = KEBAB[p];
+        if (k === undefined) {
+            k = KEBAB[p] = p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+        }
+        return k;
+    }
+    function customVars(el) {
+        for (var e = el; e; e = e.parentElement) {
+            var raw = info(e, 'computed');
+            if (!raw || raw.indexOf('\ncustom\t') < 0) continue;
+            var vars = {};
+            raw.split('\n').forEach(function (line) {
+                if (line.indexOf('custom\t') !== 0) return;
+                var rest = line.slice(7), j = rest.indexOf('\t');
+                if (j > 0) vars[rest.slice(0, j)] = rest.slice(j + 1);
+            });
+            return vars;
+        }
+        return null;
+    }
+    function computedMap(el, pseudo) {
         var raw = info(el, 'computed');
-        var m = {};
+        var m = {}, own = null, prefix = pseudo ? pseudo + ' ' : null;
         if (raw) {
             raw.split('\n').forEach(function (line) {
                 var i = line.indexOf('\t');
-                if (i > 0) m[line.slice(0, i)] = line.slice(i + 1);
+                if (i <= 0) return;
+                var name = line.slice(0, i);
+                if (name === 'custom') return;
+                // The element's rows, then its pseudo-elements' (`::before name`).
+                if (name.charAt(0) !== ':') m[name] = line.slice(i + 1);
+                else if (prefix && name.indexOf(prefix) === 0) {
+                    var key = name.slice(prefix.length), val = line.slice(i + 1);
+                    own = own || {};
+                    if (key === 'custom') {
+                        // The pseudo's own custom properties (`--c\tvalue`):
+                        // only a pseudo that declares some publishes them.
+                        var j = val.indexOf('\t');
+                        if (j > 0) {
+                            if (!own.__vars) Object.defineProperty(own, '__vars', { value: {}, enumerable: false });
+                            own.__vars[val.slice(0, j)] = val.slice(j + 1);
+                        }
+                    } else own[key] = val;
+                }
             });
+            markFill(m, true);
         } else if (info(el, 'laidout')) {
             m.display = 'none';
             m.visibility = 'visible';
@@ -2506,48 +4367,159 @@ const WRAPPERS_JS: &str = r#"
                 if (!Object.prototype.hasOwnProperty.call(m, n)) m[n] = '0px';
             });
         }
+        // A layout that has seen the attribute already answers for what it
+        // publishes: `transform: rotate(10deg)` reads a matrix, `width: 50%`
+        // pixels. The text stands in where the engine published no row (the
+        // initial values stand behind the rows, they are not rows), where the
+        // row is empty, where the engine is known to drop part of the value,
+        // where layout does not apply, and when the write has not been laid
+        // out (the forced-layout budget). `display: none` has no transform.
+        // A declaration `el.style` leaves out (a bad url, CH2.E29) is not
+        // here at all, so the cascaded value shows. No row cannot be read as
+        // "initial" in general: the engine stores `justify-content:
+        // flex-start` and `align-items: stretch` as its defaults
+        // and publishes no row for them, where Chromium reads the value.
         var inline = el.style;
         if (inline) {
+            var stale = !!info(el, 'stale');
+            var slot = inline.length ? slotOf(el) : null;
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
-                if (v) m[name] = v;
+                if (!v) continue;
+                // An animated property (Web Animations' layer, a CSS
+                // animation or transition) reads the engine's row: the
+                // animation is above the inline text in the cascade.
+                if (slot && N.animated(slot.gen, slot.id, name)) continue;
+                if (name === 'opacity') {
+                    // #861: a plain value is seen at once, as a number in 0..1.
+                    // What needs the cascade (`calc()`, `var()`, `inherit`) or
+                    // is invalid reads the last layout's row.
+                    if (/^[+-]?(\d*\.)?\d+(e[+-]?\d+)?%?$/i.test(v)) {
+                        var n = parseFloat(v) / (v.charAt(v.length - 1) === '%' ? 100 : 1);
+                        m[name] = String(Math.min(1, Math.max(0, n)));
+                    }
+                    continue;
+                }
+                if (name === 'transform' && m.display === 'none' && !stale) continue;
+                var lossy = !stale && lossyInline(name, v);
+                if (stale || lossy || !hasOwn(m, name) || m[name] === '' || declaredBox(el, m, name)) {
+                    m[name] = v;
+                }
+                // The longhands of a shorthand the engine dropped part of are
+                // unknown too: they read '' (as before #866), not a guess.
+                if (lossy && hasOwn(LOSSY_LONGHANDS, name)) {
+                    LOSSY_LONGHANDS[name].forEach(function (n) { if (!inline.getPropertyValue(n)) m[n] = ''; });
+                }
             }
         }
-        return m;
+        return pseudo ? pseudoMap(m, own, pseudo) : m;
     }
-    function makeComputed(el) {
-        var m = computedMap(el);
-        var names = Object.keys(m).sort();
+    // What a pseudo-element reads: its own cascaded rows, or, with no rule
+    // that set `content`, the initial values and what it inherits.
+    var INHERITED = ['color', 'font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing',
+        'line-height', 'text-align', 'text-transform', 'visibility', 'white-space'];
+    function pseudoMap(m, own, pseudo) {
+        var isBox = pseudo === '::before' || pseudo === '::after';
+        if (own) {
+            if (own.content === 'normal') own.content = 'none';
+            markFill(own, 'pseudo');
+            return own;
+        }
+        if (!m.display) return {};
+        var out = { display: 'inline', position: 'static', width: 'auto', height: 'auto',
+            content: isBox ? 'none' : 'normal' };
+        INHERITED.forEach(function (n) { if (m[n]) out[n] = m[n]; });
+        return out;
+    }
+    // The canonical name of getComputedStyle's second argument, '' for the
+    // element itself, or null for one that names no pseudo-element.
+    function pseudoArgument(p) {
+        if (p === undefined || p === null) return '';
+        p = String(p).toLowerCase();
+        if (p === '') return '';
+        var named = /^(?:::?)?(before|after|first-line|first-letter)$/.exec(p);
+        if (named) return '::' + named[1];
+        return /^::(marker|selection|backdrop|placeholder)$/.test(p) ? p : null;
+    }
+    function makeComputed(el, pseudo) {
+        var m = pseudo === null ? {} : computedMap(el, pseudo);
+        // Listed on demand: a read of one property should not pay for the
+        // list. Longhands with a value, `-webkit-` names last, as Chromium.
+        // Built once per object. Only a published value can be empty; a name
+        // from the initial table never is, so it is not looked at.
+        var sorted = null;
+        function names() {
+            if (sorted) return sorted;
+            var seen = Object.create(null), list = [];
+            var add = function (n) {
+                if (seen[n] || hasOwn(COMPUTED_SHORTHANDS, n)) return;
+                seen[n] = true;
+                list.push(n);
+            };
+            for (var n in m) {
+                if (hasOwn(m, n) && m[n] !== '') add(n);
+                else if (hasOwn(m, n)) seen[n] = true;
+            }
+            if (m.__fill) {
+                for (var k in COMPUTED_INITIAL) {
+                    if (!(k in seen) && initialOf(m, k) !== undefined) add(k);
+                }
+            }
+            var webkit = [], plain = [];
+            list.forEach(function (x) { (x.charCodeAt(0) === 45 ? webkit : plain).push(x); });
+            sorted = plain.sort().concat(webkit.sort());
+            return sorted;
+        }
+        var cache = Object.create(null);
+        function read(n) {
+            var v = cache[n];
+            if (v !== undefined) return v;
+            v = computedValue(m, n);
+            if (v === undefined) return customValue(n);
+            return (cache[n] = v);
+        }
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
+        // A custom property not set inline: the cascaded (inherited) value.
+        function customValue(n) {
+            if (pseudo === null || n.indexOf('--') !== 0) return '';
+            var vars = m.__vars || customVars(el);
+            return vars && Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : '';
+        }
         var own = {
-            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : ''; },
+            // A custom property name is case-sensitive (Primer's
+            // `--fgColor-*`): only a standard property is kebab-cased.
+            getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return read(n); },
             getPropertyPriority: function () { return ''; },
-            item: function (i) { return names[i >>> 0] || ''; },
+            item: function (i) { return names()[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
-            cssText: names.map(function (n) { return n + ': ' + m[n] + ';'; }).join(' '),
-            length: names.length,
             parentRule: null
         };
         Object.keys(own).forEach(function (k) {
             Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
         });
+        Object.defineProperty(decl, 'cssText', { configurable: true, enumerable: false,
+            get: function () { return names().map(function (n) { return n + ': ' + read(n) + ';'; }).join(' '); } });
+        Object.defineProperty(decl, 'length', { configurable: true, enumerable: false,
+            get: function () { return names().length; } });
         return new Proxy(decl, {
             get: function (t, p, r) {
-                if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
-                if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
-                var n = kebab(p.indexOf('--') === 0 ? p : p);
-                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : '');
+                if (typeof p !== 'string') return Reflect.get(t, p, r);
+                var c0 = p.charCodeAt(0);
+                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                if (p in t) return Reflect.get(t, p, r);
+                var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
+                return p === 'cssFloat' ? (m['float'] || '') : read(n);
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
         });
     }
-    g.getComputedStyle = function getComputedStyle(el) {
+    g.getComputedStyle = function getComputedStyle(el, pseudo) {
         if (!el || el.nodeType !== 1) {
             throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
         }
-        return makeComputed(el);
+        return makeComputed(el, pseudoArgument(pseudo));
     };
 
     // The root element's client size is the viewport's, and its scroll size
@@ -2564,38 +4536,120 @@ const WRAPPERS_JS: &str = r#"
     }
     getter(Element.prototype, 'clientWidth', function () {
         if (isRoot(this)) return round(viewport('x'));
-        var b = geom(this); return b ? round(b.cw) : 0;
+        var b = geom(this, 'client'); return b ? round(b.cw) : 0;
     });
     getter(Element.prototype, 'clientHeight', function () {
         if (isRoot(this)) return round(viewport('y'));
-        var b = geom(this); return b ? round(b.ch) : 0;
+        var b = geom(this, 'client'); return b ? round(b.ch) : 0;
     });
-    getter(Element.prototype, 'clientLeft', function () { var b = geom(this); return b ? round(b.bl) : 0; });
-    getter(Element.prototype, 'clientTop', function () { var b = geom(this); return b ? round(b.bt) : 0; });
+    getter(Element.prototype, 'clientLeft', function () { var b = geom(this, 'client'); return b ? round(b.bl) : 0; });
+    getter(Element.prototype, 'clientTop', function () { var b = geom(this, 'client'); return b ? round(b.bt) : 0; });
     getter(Element.prototype, 'scrollWidth', function () {
         if (isRoot(this)) return round(documentExtent('x'));
-        var b = geom(this); return b ? round(Math.max(b.sw, b.cw)) : 0;
+        var b = geom(this, 'scroll_size'); return b ? round(Math.max(b.sw, b.cw)) : 0;
     });
     getter(Element.prototype, 'scrollHeight', function () {
         if (isRoot(this)) return round(documentExtent('y'));
-        var b = geom(this); return b ? round(Math.max(b.sh, b.ch)) : 0;
+        var b = geom(this, 'scroll_size'); return b ? round(Math.max(b.sh, b.ch)) : 0;
     });
 
     // style: a CSSStyleDeclaration over the style attribute, one per
     // element. Reads parse the attribute; writes reserialize it, so the
     // cascade sees them through the attribute (and the write marks Style).
-    // A `;` inside a string or url() is not yet split correctly.
     var CSSStyleDeclaration = iface('CSSStyleDeclaration');
     var OWNER = Symbol('rustkit.styleOwner');
+    // The attribute is a declaration list (CH2.E27): only a top-level `;`
+    // ends a declaration, not one inside a string, a ()/[]/{} block, an
+    // unquoted url( token (one token to its first unescaped `)`, with no
+    // string, comment or block inside: `url(a/*b)`, `url(it's)`) or a
+    // comment; `\;` is text. Comments drop out. At the end a custom property
+    // keeps its text as written; any other declaration gets its open url,
+    // string and blocks closed. rustkit_cssparser::split_declaration_list is
+    // the Rust copy of this rule; both run declaration_list_cases.json.
+    function splitDecls(text) {
+        var out = [], cur = '', closers = [], quote = null, openUrl = false, i = 0, c, j;
+        var pairs = { '(': ')', '[': ']', '{': '}' };
+        while (i < text.length) {
+            c = text.charAt(i++);
+            if (c === '\\') { cur += c + text.charAt(i++); continue; }
+            if (quote) { if (c === quote) quote = null; cur += c; continue; }
+            if (c === '/' && text.charAt(i) === '*') {
+                var end = text.indexOf('*/', i + 1);
+                i = end < 0 ? text.length : end + 2;
+                cur += ' ';
+                continue;
+            }
+            if (c === '(' && /(^|[^\w\-\\\u0080-￿])url$/i.test(cur)) {
+                cur += c;
+                for (j = i; j < text.length && /\s/.test(text.charAt(j)); j++) {}
+                if (text.charAt(j) === '"' || text.charAt(j) === "'") { closers.push(')'); continue; }
+                openUrl = true;
+                while (i < text.length) {
+                    c = text.charAt(i++);
+                    cur += c;
+                    if (c === '\\') cur += text.charAt(i++);
+                    else if (c === ')') { openUrl = false; break; }
+                }
+                continue;
+            }
+            if (c === '"' || c === "'") quote = c;
+            else if (pairs[c]) closers.push(pairs[c]);
+            else if (closers.length && c === closers[closers.length - 1]) closers.pop();
+            else if (c === ';' && !closers.length) { out.push(cur); cur = ''; continue; }
+            cur += c;
+        }
+        if (!/^\s*--/.test(cur)) {
+            if (openUrl) cur += ')';
+            if (quote) cur += quote;
+            while (closers.length) cur += closers.pop();
+        }
+        out.push(cur);
+        return out;
+    }
+    // A value holding a bad url (CSS Syntax 3 §4.3.6: an unquoted url with a
+    // quote, `(`, inner whitespace or a control character in it) is invalid
+    // for every property, so the declaration is not in the block (CH2.E29:
+    // Chromium's `el.style.length` leaves it out and the earlier value
+    // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    function hasBadUrl(value) {
+        var quote = null, i, j, k, c;
+        for (i = 0; i < value.length; i++) {
+            c = value.charAt(i);
+            if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+            if (c === '"' || c === "'") { quote = c; continue; }
+            if (c === '\\') { i++; continue; }
+            // `url(` as its own function name, not the tail of `foourl(`.
+            if (value.substr(i, 4).toLowerCase() !== 'url(' ||
+                (i > 0 && /[\w\-\\\u0080-￿]/.test(value.charAt(i - 1)))) continue;
+            for (j = i + 4; j < value.length && /\s/.test(value.charAt(j)); j++) {}
+            // A quoted url is a function with a string: the strings rule above reads it.
+            if (value.charAt(j) === '"' || value.charAt(j) === "'") { i = j - 1; continue; }
+            for (; j < value.length; j++) {
+                c = value.charAt(j);
+                if (c === '\\') { j++; continue; }
+                if (c === ')') break;
+                if (c === '"' || c === "'" || c === '(' || /[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(c)) return true;
+                if (/\s/.test(c)) {
+                    for (k = j; k < value.length && /\s/.test(value.charAt(k)); k++) {}
+                    // Whitespace is allowed only before the closing `)`.
+                    if (k < value.length && value.charAt(k) !== ')') return true;
+                    j = k - 1;
+                }
+            }
+            i = j;
+        }
+        return false;
+    }
     function decls(st) {
         var out = [];
-        (st[OWNER].getAttribute('style') || '').split(';').forEach(function (d) {
+        splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
             var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
+            if (hasBadUrl(value)) return;
             out = out.filter(function (x) { return x.name !== name; });
             out.push({ name: name, value: value, important: important });
         });
@@ -2627,8 +4681,14 @@ const WRAPPERS_JS: &str = r#"
             name = String(name).trim().toLowerCase();
             value = value == null ? '' : String(value).trim();
             if (value === '') { this.removeProperty(name); return; }
+            // An invalid value changes nothing (the attribute is not rewritten).
+            if (hasBadUrl(value)) return;
             var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             var important = String(priority || '').toLowerCase() === 'important';
+            // The same declaration again changes nothing: the attribute is
+            // not rewritten (Blink's set-property returns "did not change"),
+            // so a geometry read after it lays nothing out (LAT7).
+            if (d && d.value === value && d.important === important) return;
             if (d) { d.value = value; d.important = important; }
             else ds.push({ name: name, value: value, important: important });
             storeDecls(this, ds);
@@ -2743,17 +4803,28 @@ const WRAPPERS_JS: &str = r#"
         }
         return null;
     };
+    // A node a document makes is that document's (`adoptTo`): one made by
+    // a DOMParser document is in a document with scripting off.
+    function ownedBy(node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen && doc.nodeType === 9) N.write(gen, 'adoptTo', s.id, d.id);
+        return node;
+    }
+    __rk.adoptTo = function (node, doc) {
+        var s = node && node[SLOT], d = doc && doc[SLOT];
+        if (s && d && s.gen === gen && d.gen === gen) N.write(gen, 'adoptTo', s.id, d.id);
+    };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
-        var el = create('element', tag, 'createElement');
+        var el = ownedBy(create('element', tag, 'createElement'), this);
         if (HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
     };
     Document.prototype.createTextNode = function (data) {
-        return create('text', String(data), 'createTextNode');
+        return ownedBy(create('text', String(data), 'createTextNode'), this);
     };
     Document.prototype.createComment = function (data) {
-        return create('comment', String(data), 'createComment');
+        return ownedBy(create('comment', String(data), 'createComment'), this);
     };
     // DOM §4.5 importNode: a copy for this document. Nodes here all share
     // the one Rust Document, so importing is cloning.
@@ -2763,10 +4834,10 @@ const WRAPPERS_JS: &str = r#"
             throw new DOMException("Failed to execute 'importNode' on 'Document': " +
                 'The node provided is a document, which may not be imported.', 'NotSupportedError');
         }
-        return node.cloneNode(!!deep);
+        return ownedBy(node.cloneNode(!!deep), this);
     };
     Document.prototype.createDocumentFragment = function () {
-        return create('fragment', '', 'createDocumentFragment');
+        return ownedBy(create('fragment', '', 'createDocumentFragment'), this);
     };
     // DOM Range (DOM §5) and createContextualFragment (DOM Parsing). A new
     // range is collapsed at the start of its document. createContextualFragment
@@ -2830,6 +4901,50 @@ const WRAPPERS_JS: &str = r#"
     }
     Object.defineProperty(Range.prototype, Symbol.toStringTag, { value: 'Range' });
     g.Range = Range;
+    // AbstractRange and StaticRange (DOM §5.3, §5.4): a StaticRange is four
+    // plain values, never updated and never validated beyond its containers'
+    // types. `InputEvent.getTargetRanges()` answers them.
+    function AbstractRange() { throw new TypeError('Illegal constructor'); }
+    Object.defineProperty(AbstractRange.prototype, Symbol.toStringTag, { value: 'AbstractRange', configurable: true });
+    Object.setPrototypeOf(Range.prototype, AbstractRange.prototype);
+    Object.setPrototypeOf(Range, AbstractRange);
+    g.AbstractRange = AbstractRange;
+    var STATIC = Symbol('rustkit.staticRange');
+    function StaticRange(init) {
+        if (!new.target) throw new TypeError("Failed to construct 'StaticRange': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        if (arguments.length < 1) throw new TypeError("Failed to construct 'StaticRange': 1 argument required, but only 0 present.");
+        if (init === null || typeof init !== 'object') throw new TypeError("Failed to construct 'StaticRange': The provided value is not of type 'StaticRangeInit'.");
+        ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+            if (init[k] === undefined) {
+                throw new TypeError("Failed to construct 'StaticRange': Failed to read the '" + k + "' property from 'StaticRangeInit': Required member is undefined.");
+            }
+        });
+        [init.startContainer, init.endContainer].forEach(function (n) {
+            if (!(n instanceof Node)) throw new TypeError("Failed to construct 'StaticRange': Failed to read a container from 'StaticRangeInit': it is not of type 'Node'.");
+            if (n.nodeType === 10 || n.nodeType === 2) {
+                throw new DOMException("Failed to construct 'StaticRange': Neither startContainer nor endContainer can be a DocumentType or Attribute node.", 'InvalidNodeTypeError');
+            }
+        });
+        Object.defineProperty(this, STATIC, { value: {
+            startContainer: init.startContainer, startOffset: init.startOffset >>> 0,
+            endContainer: init.endContainer, endOffset: init.endOffset >>> 0 } });
+    }
+    StaticRange.prototype = Object.create(AbstractRange.prototype, { constructor: { value: StaticRange, writable: true, configurable: true } });
+    Object.setPrototypeOf(StaticRange, AbstractRange);
+    Object.defineProperty(StaticRange.prototype, Symbol.toStringTag, { value: 'StaticRange', configurable: true });
+    ['startContainer', 'startOffset', 'endContainer', 'endOffset'].forEach(function (k) {
+        getter(StaticRange.prototype, k, function () {
+            var s = this[STATIC];
+            if (!s) throw new TypeError('Illegal invocation');
+            return s[k];
+        });
+    });
+    getter(StaticRange.prototype, 'collapsed', function () {
+        var s = this[STATIC];
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.startContainer === s.endContainer && s.startOffset === s.endOffset;
+    });
+    g.StaticRange = StaticRange;
     function slots(range, method) {
         var r = range && range[RANGE];
         if (!r) {
@@ -2895,8 +5010,9 @@ const WRAPPERS_JS: &str = r#"
         if (r.start.node === r.end.node) {
             if (n.nodeType === 3 || n.nodeType === 8) {
                 var data = n.data.slice(r.start.offset, r.end.offset);
-                if (!cutting) frag.appendChild(g.document.createTextNode(data));
-                else n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
+                // Cutting hands the removed text back too (extractContents, surroundContents).
+                frag.appendChild(g.document.createTextNode(data));
+                if (cutting) n.data = n.data.slice(0, r.start.offset) + n.data.slice(r.end.offset);
             } else {
                 var kids = Array.prototype.slice.call(n.childNodes, r.start.offset, r.end.offset);
                 kids.forEach(function (k) {
@@ -2935,6 +5051,74 @@ const WRAPPERS_JS: &str = r#"
     }
     Range.prototype.cloneContents = function () { return contentsOf(this, false); };
     Range.prototype.deleteContents = function () { contentsOf(this, true); };
+    // DOM §5.5 extractContents: what deleteContents removes, handed back.
+    Range.prototype.extractContents = function () { return contentsOf(this, true); };
+    function isInclusiveAncestor(ancestor, node) {
+        for (; node; node = node.parentNode) if (node === ancestor) return true;
+        return false;
+    }
+    // DOM §5.5 insertNode: split a Text start node, insert before the reference
+    // node, and (for a collapsed range) put the end after what went in.
+    Range.prototype.insertNode = function (node) {
+        var r = slots(this, 'insertNode');
+        if (node == null || !node[SLOT]) {
+            throw new TypeError("Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        var s = r.start.node;
+        if (s.nodeType === 8 || (s.nodeType === 3 && !s.parentNode) || s === node) {
+            throw new DOMException("Failed to execute 'insertNode' on 'Range': The node to be inserted cannot be placed at the range start.", 'HierarchyRequestError');
+        }
+        var wasCollapsed = r.start.node === r.end.node && r.start.offset === r.end.offset;
+        var ref;
+        var parent;
+        if (s.nodeType === 3) {
+            var off = r.start.offset;
+            parent = s.parentNode;
+            ref = g.document.createTextNode(s.data.slice(off));
+            s.data = s.data.slice(0, off);
+            parent.insertBefore(ref, s.nextSibling);
+            // The end boundary that sat in the cut-off tail moves with it.
+            if (!wasCollapsed && r.end.node === s && r.end.offset > off) {
+                r.end = { node: ref, offset: r.end.offset - off };
+            }
+        } else {
+            ref = r.start.offset < s.childNodes.length ? s.childNodes[r.start.offset] : null;
+            parent = s;
+        }
+        if (node === ref) ref = ref.nextSibling;
+        var newOffset = (ref ? childIndex(parent, ref) : nodeLength(parent)) + (node.nodeType === 11 ? node.childNodes.length : 1);
+        parent.insertBefore(node, ref);
+        if (wasCollapsed) r.end = { node: parent, offset: newOffset };
+    };
+    // DOM §5.5 surroundContents: refuse a range that cuts an element in two,
+    // empty `newParent`, move the contents into it, and select it.
+    Range.prototype.surroundContents = function (newParent) {
+        var r = slots(this, 'surroundContents');
+        if (newParent == null || !newParent[SLOT]) {
+            throw new TypeError("Failed to execute 'surroundContents' on 'Range': parameter 1 is not of type 'Node'.");
+        }
+        function partiallyContained(node) {
+            return node.nodeType !== 3 && isInclusiveAncestor(node, r.start.node) !== isInclusiveAncestor(node, r.end.node);
+        }
+        for (var a = r.start.node; a; a = a.parentNode) {
+            if (partiallyContained(a)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        for (var b = r.end.node; b; b = b.parentNode) {
+            if (partiallyContained(b)) {
+                throw new DOMException("Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.", 'InvalidStateError');
+            }
+        }
+        if (newParent.nodeType === 9 || newParent.nodeType === 10 || newParent.nodeType === 11) {
+            throw new DOMException("Failed to execute 'surroundContents' on 'Range': The node provided is of an invalid type.", 'InvalidNodeTypeError');
+        }
+        var fragment = contentsOf(this, true);
+        while (newParent.firstChild) newParent.removeChild(newParent.firstChild);
+        this.insertNode(newParent);
+        newParent.appendChild(fragment);
+        this.selectNode(newParent);
+    };
     function rangeContext(node) {
         if (node.nodeType === 1) return node;
         if (node.nodeType === 3 || node.nodeType === 8) return node.parentElement;
@@ -2944,7 +5128,9 @@ const WRAPPERS_JS: &str = r#"
         var r = slots(this, 'createContextualFragment');
         var ctx = rangeContext(r.start.node);
         var tag = ctx && ctx.localName ? ctx.localName : 'body';
-        var made = N.write(gen, 'create:fragmentHTML', tag, String(html));
+        var home = r.start.node.nodeType === 9 ? r.start.node : r.start.node.ownerDocument;
+        var hs = home && home[SLOT];
+        var made = N.write(gen, 'create:fragmentHTML', tag, String(html), hs && hs.gen === gen ? hs.id : -1);
         if (typeof made === 'string') {
             throw new DOMException("Failed to execute 'createContextualFragment' on 'Range'.", made);
         }
@@ -2962,6 +5148,488 @@ const WRAPPERS_JS: &str = r#"
     Document.prototype.createRange = function () {
         return makeRange(this.nodeType === 9 ? this : g.document);
     };
+    // Range stringifier (DOM §5.5): the data of the Text nodes the range
+    // contains, the partial ends included.
+    function nextInTree(n) {
+        if (n.firstChild) return n.firstChild;
+        return nextSkipping(n);
+    }
+    function nextSkipping(n) {
+        while (n) {
+            if (n.nextSibling) return n.nextSibling;
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function rangeText(r) {
+        var s = r.start, e = r.end;
+        if (s.node === e.node && s.node.nodeType === 3) return s.node.data.slice(s.offset, e.offset);
+        var out = s.node.nodeType === 3 ? s.node.data.slice(s.offset) : '';
+        var n = s.node.nodeType === 3 ? nextSkipping(s.node)
+              : (s.offset < s.node.childNodes.length ? s.node.childNodes[s.offset] : nextSkipping(s.node));
+        while (n) {
+            if (n === e.node) {
+                if (n.nodeType === 3) {
+                    out += n.data.slice(0, e.offset);
+                    break;
+                }
+                n = nextInTree(n);
+                continue;
+            }
+            var p = n.parentNode;
+            if (!p || !pointBefore({ node: p, offset: childIndex(p, n) }, e)) break;
+            if (n.nodeType === 3) out += n.data;
+            n = nextInTree(n);
+        }
+        return out;
+    }
+    Range.prototype.toString = function () { return rangeText(slots(this, 'toString')); };
+    // The rects of a range (CSSOM View §10.1): the client rects of each
+    // element it selects whose parent it does not select, and of the part
+    // of each text node it selects or ends in, in tree order. The text
+    // rects are per line and per character (layout's `text_range_rects`).
+    var DOMRectList = g.DOMRectList;
+    if (typeof DOMRectList !== 'function') {
+        DOMRectList = function DOMRectList() { throw new TypeError('Illegal constructor'); };
+        Object.defineProperty(DOMRectList.prototype, Symbol.toStringTag, { value: 'DOMRectList' });
+        DOMRectList.prototype.item = function (i) { i = i >>> 0; return i < this.length ? this[i] : null; };
+        g.DOMRectList = DOMRectList;
+    }
+    function rectList(rects) {
+        var list = Object.create(DOMRectList.prototype);
+        rects.forEach(function (r, i) { Object.defineProperty(list, i, { value: r, enumerable: true }); });
+        Object.defineProperty(list, 'length', { value: rects.length });
+        return list;
+    }
+    function rangeRects(r) {
+        // `out` in tree order, a text node as null until the one host call
+        // below answers for all of them (`asks`).
+        var out = [], asks = [], start = r.start, end = r.end;
+        // The first node at or after the start, and the first one past the end.
+        var node = start.node.nodeType === 1 || start.node.nodeType === 9 || start.node.nodeType === 11
+            ? (start.node.childNodes[start.offset] || nextSkipping(start.node)) : start.node;
+        var stop = end.node.nodeType === 1 || end.node.nodeType === 9 || end.node.nodeType === 11
+            ? (end.node.childNodes[end.offset] || nextSkipping(end.node)) : nextSkipping(end.node);
+        // A node is selected when the range holds all of it: neither end
+        // is in it. (Every node this is asked about is one the walk below
+        // visits, or the parent of one: none is wholly before the start or
+        // wholly after the end.) Looked up in two sets made once, not by
+        // counting siblings for each node: a range over a long list asked
+        // about every item, and counted to it each time.
+        var holdsAnEnd = new Set();
+        [start.node, end.node].forEach(function (n) { for (; n; n = n.parentNode) holdsAnEnd.add(n); });
+        function selected(n) { return !!n.parentNode && !holdsAnEnd.has(n); }
+        for (; node && node !== stop; node = nextInTree(node)) {
+            if (node.nodeType === 3) {
+                var from = node === start.node ? start.offset : 0;
+                var to = node === end.node ? end.offset : node.length;
+                var s = node[SLOT];
+                if (s && s.gen === gen) {
+                    asks.push(s.id + ' ' + from + ' ' + to);
+                    out.push(null);
+                }
+            } else if (node.nodeType === 1 && selected(node) && !(node.parentNode && node.parentNode.nodeType === 1 && selected(node.parentNode))) {
+                var own = node.getClientRects();
+                for (var k = 0; k < own.length; k++) out.push(own[k]);
+            }
+        }
+        if (!asks.length) return out;
+        var answers = JSON.parse(N.rangeTextRects(gen, asks.join(';'))), next = 0, all = [];
+        var sx = scrollOffset('x'), sy = scrollOffset('y');
+        out.forEach(function (item) {
+            if (item !== null) { all.push(item); return; }
+            var flat = answers[next++] || [];
+            for (var i = 0; i + 3 < flat.length; i += 4) all.push(rect(flat[i] - sx, flat[i + 1] - sy, flat[i + 2], flat[i + 3]));
+        });
+        return all;
+    }
+    Range.prototype.getClientRects = function () {
+        return rectList(rangeRects(slots(this, 'getClientRects')));
+    };
+    // The smallest rect around those that are not empty in both
+    // directions; all zeros when there are none.
+    Range.prototype.getBoundingClientRect = function () {
+        var rects = rangeRects(slots(this, 'getBoundingClientRect')).filter(function (b) { return b.width !== 0 || b.height !== 0; });
+        if (!rects.length) return rect(0, 0, 0, 0);
+        var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+        rects.forEach(function (b) {
+            left = Math.min(left, b.left); top = Math.min(top, b.top);
+            right = Math.max(right, b.right); bottom = Math.max(bottom, b.bottom);
+        });
+        return rect(left, top, right - left, bottom - top);
+    };
+    Range.prototype.cloneRange = function () {
+        var r = slots(this, 'cloneRange');
+        var made = makeRange(g.document);
+        made[RANGE].start = { node: r.start.node, offset: r.start.offset };
+        made[RANGE].end = { node: r.end.node, offset: r.end.offset };
+        return made;
+    };
+    if (!Range.prototype.setStartBefore) {
+        Range.prototype.setStartBefore = function (n) { this.setStart(n.parentNode, childIndex(n.parentNode, n)); };
+        Range.prototype.setStartAfter = function (n) { this.setStart(n.parentNode, childIndex(n.parentNode, n) + 1); };
+        Range.prototype.setEndBefore = function (n) { this.setEnd(n.parentNode, childIndex(n.parentNode, n)); };
+        Range.prototype.setEndAfter = function (n) { this.setEnd(n.parentNode, childIndex(n.parentNode, n) + 1); };
+    }
+    Range.prototype.detach = function () {};
+
+    // The document's selection (Selection API §2): at most one range, and a
+    // direction that says which end is the anchor. The engine paints it and
+    // moves it with the mouse: `__rk.setSelection` is how a drag reaches
+    // script, `__rk.takeSelection` how a script's change reaches the engine.
+    var SELN = { range: null, backward: false, gen: -1, sent: '', pending: false };
+    function selRange() {
+        if (SELN.gen !== gen) {
+            SELN.range = null;
+            SELN.gen = gen;
+        }
+        return SELN.range;
+    }
+    function selectionChanged() {
+        if (SELN.pending) return;
+        SELN.pending = true;
+        Promise.resolve().then(function () {
+            SELN.pending = false;
+            if (!g.Event) return;
+            dispatchTo(g.document, new Event('selectionchange', { bubbles: false, cancelable: false }));
+        });
+    }
+    function setSel(anchor, focus) {
+        selRange();
+        if (!anchor) {
+            if (!SELN.range) return;
+            SELN.range = null;
+            SELN.backward = false;
+            selectionChanged();
+            return;
+        }
+        var backward = pointBefore(focus, anchor);
+        var range = makeRange(g.document);
+        range[RANGE].start = backward ? focus : anchor;
+        range[RANGE].end = backward ? anchor : focus;
+        SELN.range = range;
+        SELN.backward = backward;
+        selectionChanged();
+    }
+    function selEnds() {
+        var r = selRange();
+        if (!r) return null;
+        var s = r[RANGE];
+        return SELN.backward ? { anchor: s.end, focus: s.start } : { anchor: s.start, focus: s.end };
+    }
+    function Selection() { throw new TypeError('Illegal constructor'); }
+    var selection = Object.create(Selection.prototype);
+    Object.defineProperty(Selection.prototype, Symbol.toStringTag, { value: 'Selection' });
+    g.Selection = Selection;
+    getter(Selection.prototype, 'anchorNode', function () { var e = selEnds(); return e ? e.anchor.node : null; });
+    getter(Selection.prototype, 'anchorOffset', function () { var e = selEnds(); return e ? e.anchor.offset : 0; });
+    getter(Selection.prototype, 'focusNode', function () { var e = selEnds(); return e ? e.focus.node : null; });
+    getter(Selection.prototype, 'focusOffset', function () { var e = selEnds(); return e ? e.focus.offset : 0; });
+    getter(Selection.prototype, 'isCollapsed', function () { var r = selRange(); return !r || r.collapsed; });
+    getter(Selection.prototype, 'rangeCount', function () { return selRange() ? 1 : 0; });
+    getter(Selection.prototype, 'type', function () {
+        var r = selRange();
+        return !r ? 'None' : r.collapsed ? 'Caret' : 'Range';
+    });
+    getter(Selection.prototype, 'direction', function () {
+        var r = selRange();
+        return !r || r.collapsed ? 'none' : SELN.backward ? 'backward' : 'forward';
+    });
+    Selection.prototype.getRangeAt = function (i) {
+        var r = selRange();
+        if (!r || Number(i) !== 0) {
+            throw new DOMException("Failed to execute 'getRangeAt' on 'Selection': " + i + " is not a valid index.", 'IndexSizeError');
+        }
+        return r;
+    };
+    Selection.prototype.addRange = function (range) {
+        slots(range, 'addRange');
+        if (selRange()) return;
+        SELN.range = range;
+        SELN.backward = false;
+        selectionChanged();
+    };
+    Selection.prototype.removeRange = function (range) {
+        if (selRange() !== range) {
+            throw new DOMException("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError');
+        }
+        setSel(null);
+    };
+    Selection.prototype.removeAllRanges = function () { setSel(null); };
+    Selection.prototype.empty = Selection.prototype.removeAllRanges;
+    Selection.prototype.collapse = function (node, offset) {
+        if (node == null) return setSel(null);
+        var p = rangeBoundary(node, offset || 0, 'collapse');
+        setSel(p, { node: p.node, offset: p.offset });
+    };
+    Selection.prototype.setPosition = Selection.prototype.collapse;
+    Selection.prototype.collapseToStart = function () {
+        var r = selRange();
+        if (!r) throw new DOMException("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError');
+        var s = r[RANGE].start;
+        setSel({ node: s.node, offset: s.offset }, { node: s.node, offset: s.offset });
+    };
+    Selection.prototype.collapseToEnd = function () {
+        var r = selRange();
+        if (!r) throw new DOMException("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError');
+        var e = r[RANGE].end;
+        setSel({ node: e.node, offset: e.offset }, { node: e.node, offset: e.offset });
+    };
+    Selection.prototype.extend = function (node, offset) {
+        var ends = selEnds();
+        if (!ends) throw new DOMException("Failed to execute 'extend' on 'Selection': This Selection object doesn't have any Ranges.", 'InvalidStateError');
+        var p = rangeBoundary(node, offset || 0, 'extend');
+        setSel({ node: ends.anchor.node, offset: ends.anchor.offset }, p);
+    };
+    Selection.prototype.setBaseAndExtent = function (an, ao, fn, fo) {
+        var a = rangeBoundary(an, ao, 'setBaseAndExtent');
+        var f = rangeBoundary(fn, fo, 'setBaseAndExtent');
+        setSel(a, f);
+    };
+    Selection.prototype.selectAllChildren = function (node) {
+        var a = rangeBoundary(node, 0, 'selectAllChildren');
+        setSel(a, { node: node, offset: node.childNodes.length });
+    };
+    Selection.prototype.deleteFromDocument = function () {
+        var r = selRange();
+        if (r) {
+            r.deleteContents();
+            selectionChanged();
+        }
+    };
+    Selection.prototype.containsNode = function (node, partly) {
+        var r = selRange();
+        if (!r || !node || !node.parentNode) return false;
+        var s = r[RANGE];
+        var at = { node: node.parentNode, offset: childIndex(node.parentNode, node) };
+        var after = { node: node.parentNode, offset: at.offset + 1 };
+        if (partly) return pointBefore(at, s.end) && pointBefore(s.start, after);
+        return !pointBefore(at, s.start) && !pointBefore(s.end, after);
+    };
+    Selection.prototype.modify = function () {};
+    Selection.prototype.toString = function () {
+        var r = selRange();
+        return r ? rangeText(r[RANGE]) : '';
+    };
+    g.getSelection = function () { return selection; };
+    Document.prototype.getSelection = function () { return selection; };
+    // The engine moved the selection (a drag, a double-click): ids and
+    // UTF-16 offsets, or null to clear it.
+    __rk.setSelection = function (aId, aOff, fId, fOff) {
+        var a = typeof aId === 'number' ? wrap(aId) : null;
+        var f = typeof fId === 'number' ? wrap(fId) : null;
+        if (!a || !f) setSel(null);
+        else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
+        SELN.sent = selKey();
+    };
+    function selKey() {
+        var e = selEnds();
+        if (!e) return '';
+        var a = e.anchor.node[SLOT], f = e.focus.node[SLOT];
+        if (!a || !f || a.gen !== gen || f.gen !== gen) return '';
+        return a.id + ' ' + e.anchor.offset + ' ' + f.id + ' ' + e.focus.offset;
+    }
+    // Plain-text editing in a contenteditable host (CH2.E2): the engine
+    // hands each editing key here; it edits the DOM at the selection,
+    // moves the selection, and fires `input` at the host. Returns true
+    // when something changed.
+    function inside(host, node) {
+        for (var n = node; n; n = n.parentNode) if (n === host) return true;
+        return false;
+    }
+    function lastDeep(n) { while (n.lastChild) n = n.lastChild; return n; }
+    function firstDeep(n) { while (n.firstChild) n = n.firstChild; return n; }
+    function prevLeaf(host, n) {
+        while (n && n !== host) {
+            if (n.previousSibling) return lastDeep(n.previousSibling);
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function nextLeaf(host, n) {
+        while (n && n !== host) {
+            if (n.nextSibling) return firstDeep(n.nextSibling);
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function isLeaf(n) { return (n.nodeType === 3 && n.data.length > 0) || n.localName === 'br'; }
+    // The text node or <br> just before / after a collapsed point, or null.
+    function leafBefore(host, p) {
+        var n = p.node.nodeType === 3 ? prevLeaf(host, p.node)
+              : p.offset > 0 ? lastDeep(p.node.childNodes[p.offset - 1]) : prevLeaf(host, p.node);
+        while (n && !isLeaf(n)) n = prevLeaf(host, n);
+        return n;
+    }
+    function leafAfter(host, p) {
+        var n = p.node.nodeType === 3 ? nextLeaf(host, p.node)
+              : p.offset < p.node.childNodes.length ? firstDeep(p.node.childNodes[p.offset]) : nextLeaf(host, p.node);
+        while (n && !isLeaf(n)) n = nextLeaf(host, n);
+        return n;
+    }
+    function caretAt(node, offset) { setSel({ node: node, offset: offset }, { node: node, offset: offset }); }
+    function insertText(host, p, text) {
+        if (p.node.nodeType === 3) {
+            p.node.data = p.node.data.slice(0, p.offset) + text + p.node.data.slice(p.offset);
+            caretAt(p.node, p.offset + text.length);
+            return;
+        }
+        var before = p.offset > 0 ? p.node.childNodes[p.offset - 1] : null;
+        if (before && before.nodeType === 3) {
+            before.data += text;
+            caretAt(before, before.data.length);
+            return;
+        }
+        var t = g.document.createTextNode(text);
+        p.node.insertBefore(t, p.node.childNodes[p.offset] || null);
+        caretAt(t, text.length);
+    }
+    function preformatted(host) {
+        if (/^plaintext-only$/i.test(host.getAttribute('contenteditable') || '')) return true;
+        var ws = g.getComputedStyle ? String(g.getComputedStyle(host).whiteSpace || '') : '';
+        return /^(pre|pre-wrap|pre-line|break-spaces)$/.test(ws);
+    }
+    __rk.editKey = function (hostId, op, text) {
+        var host = typeof hostId === 'number' ? wrap(hostId) : null;
+        if (!host) return false;
+        var r = selRange();
+        if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
+            caretAt(host, host.childNodes.length);
+            r = selRange();
+        }
+        if (op === 'all') {
+            setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
+            return true;
+        }
+        var p = r[RANGE].start, leaf;
+        if (op === 'left' || op === 'right') {
+            if (!r.collapsed) {
+                var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
+                caretAt(end.node, end.offset);
+                return true;
+            }
+            if (op === 'left') {
+                if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
+                leaf = leafBefore(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
+            } else {
+                if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
+                leaf = leafAfter(host, p);
+                if (!leaf) return false;
+                if (leaf.nodeType === 3) caretAt(leaf, 1);
+                else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
+            }
+            return true;
+        }
+        var inputType, data = null, changed = false;
+        if (!r.collapsed) {
+            r.deleteContents();
+            p = r[RANGE].start;
+            caretAt(p.node, p.offset);
+            changed = true;
+        }
+        if (op === 'insert') {
+            inputType = 'insertText';
+            data = String(text);
+            // A typed space at an edge or beside another space would
+            // collapse away: it goes in as a no-break space, as in Chrome.
+            if (data === ' ' && !preformatted(host)) {
+                var t = p.node.nodeType === 3 ? p.node.data : '';
+                var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
+                if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
+            }
+            insertText(host, p, data);
+            changed = true;
+        } else if (op === 'enter') {
+            inputType = 'insertParagraph';
+            if (preformatted(host)) {
+                insertText(host, p, '\n');
+            } else {
+                var br = g.document.createElement('br');
+                var after = null;
+                if (p.node.nodeType === 3) {
+                    var rest = p.node.data.slice(p.offset);
+                    p.node.data = p.node.data.slice(0, p.offset);
+                    p.node.parentNode.insertBefore(br, p.node.nextSibling);
+                    after = g.document.createTextNode(rest);
+                    br.parentNode.insertBefore(after, br.nextSibling);
+                } else {
+                    p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
+                }
+                // A line break at the very end needs a second one to
+                // show the new empty line.
+                if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
+                    br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
+                }
+                if (after) caretAt(after, 0);
+                else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
+            }
+            changed = true;
+        } else if (op === 'back' || op === 'del') {
+            inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
+            if (!changed) {
+                if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
+                    var cut = p.offset - 1;
+                    var code = p.node.data.charCodeAt(cut);
+                    if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
+                    p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
+                    caretAt(p.node, cut);
+                    changed = true;
+                } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
+                    var stop = p.offset + 1;
+                    var hi = p.node.data.charCodeAt(p.offset);
+                    if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
+                    p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
+                    caretAt(p.node, p.offset);
+                    changed = true;
+                } else {
+                    leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
+                    if (leaf && leaf.nodeType === 3) {
+                        if (op === 'back') {
+                            leaf.data = leaf.data.slice(0, -1);
+                            caretAt(leaf, leaf.data.length);
+                        } else {
+                            leaf.data = leaf.data.slice(1);
+                            caretAt(leaf, 0);
+                        }
+                        changed = true;
+                    } else if (leaf) {
+                        var parent = leaf.parentNode, at = childIndex(parent, leaf);
+                        parent.removeChild(leaf);
+                        if (p.node.nodeType !== 3) caretAt(parent, at);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (!changed) return false;
+        var ev = make('InputEvent', 'input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
+        trust(ev);
+        dispatchTo(host, ev);
+        return true;
+    };
+    // The selection as the engine last heard it changed: null when it did
+    // not, else '' (none) or "anchorId anchorOffset focusId focusOffset".
+    __rk.takeSelection = function () {
+        var key = selKey();
+        if (key === SELN.sent) return null;
+        SELN.sent = key;
+        return key;
+    };
+    // An `<svg>` is one box in the layout. The shape of it a client point
+    // is on, else the `<svg>`: found host-side, from the shapes' geometry
+    // (svg_geometry.rs `shape_at`), with nothing a page can replace on the
+    // way.
+    var svgClientRect = Element.prototype.getBoundingClientRect;
+    function svgShapeAt(svg, x, y) {
+        var s = svg[SLOT];
+        if (!s || s.gen !== gen) return svg;
+        var r = svgClientRect.call(svg), b = geom(svg, 'client');
+        var id = N.svgHit(s.gen, s.id, x - r.left - (b ? round(b.bl) : 0), y - r.top - (b ? round(b.bt) : 0), r.width, r.height);
+        return id >= 0 ? (wrap(id) || svg) : svg;
+    }
     function pointHit(x, y, method) {
         x = Number(x);
         y = Number(y);
@@ -2973,6 +5641,12 @@ const WRAPPERS_JS: &str = r#"
         var w = g.innerWidth, h = g.innerHeight;
         if (typeof w === 'number' && typeof h === 'number' && (x < 0 || y < 0 || x >= w || y >= h)) return null;
         var id = N.hit(x, y);
+        // A point of the viewport no box is under is the root element's
+        // (Chrome for Testing 148: HTML below a short body, not BODY).
+        if (id === -1) {
+            var root = g.document.documentElement;
+            return root && root[SLOT] ? root[SLOT].id : null;
+        }
         return id == null ? null : id;
     }
     Document.prototype.elementFromPoint = function (x, y) {
@@ -2980,6 +5654,9 @@ const WRAPPERS_JS: &str = r#"
         if (id == null) return null;
         var node = wrap(id);
         while (node && node.nodeType !== 1) node = node.parentElement || node.parentNode;
+        // An `<svg>` is one box in the layout: the shape under the point
+        // is found from its geometry (web_svg_geometry.js).
+        if (node && node.localName === 'svg') node = svgShapeAt(node, Number(x), Number(y));
         return node && node.nodeType === 1 ? node : null;
     };
     Document.prototype.elementsFromPoint = function (x, y) {
@@ -2991,6 +5668,20 @@ const WRAPPERS_JS: &str = r#"
         for (; node && node.nodeType === 1; node = node.parentElement) out.push(node);
         return out;
     };
+    // Named access on the Window object (web_named_access.js): the element
+    // the id or name picks out, an HTMLCollection when several do, else
+    // undefined. Looked up each time, so ids added or removed are seen.
+    HOOKS.windowNamed = function (name) {
+        var d = g.document;
+        if (!d || typeof name !== 'string' || name === '') return undefined;
+        var ids = collect(d, 'windowNamed', name);
+        if (!ids) return undefined;
+        if (ids === 'frame') return HOOKS.windowNamed.FRAME;
+        var c = list(HTMLCollection.prototype, ids, true);
+        return c.length === 0 ? undefined : c.length === 1 ? c[0] : c;
+    };
+    // Answered for a name only an iframe/frame carries (unsupported).
+    Object.defineProperty(HOOKS.windowNamed, 'FRAME', { value: Object.freeze({}) });
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
         if (this !== g.document) return findById(this, id);
@@ -3013,11 +5704,45 @@ const WRAPPERS_JS: &str = r#"
             return s.gen === gen ? wrap(N.root(s.gen, k)) : null;
         });
     });
-    // The global document's title is an own property the engine sets; a
-    // DOMParser document reads its first <title> (HTML §3.1.3).
-    getter(Document.prototype, 'title', function () {
-        var t = this.querySelector('title');
-        return t ? t.textContent.replace(/[\t\n\f\r ]+/g, ' ').trim() : '';
+    // `document.title` (HTML §3.1.3): the document's first HTML <title>
+    // in tree order (an SVG <title> inside the page is not one). Read, it
+    // is that element's own text with ASCII whitespace stripped and
+    // collapsed; set, it replaces the element's children, making a <title>
+    // at the end of the head when the document has none.
+    // Chrome 148 goes one step past the standard: set with no <title> and
+    // no <head> to hold one, the value is still read back until a <title>
+    // appears. `titleless` keeps that value.
+    var titleless = new WeakMap();
+    function titleElement(doc) {
+        var all = doc.querySelectorAll('title');
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].namespaceURI === 'http://www.w3.org/1999/xhtml') return all[i];
+        }
+        return null;
+    }
+    function collapsed(text) {
+        return text.replace(/[\t\n\f\r ]+/g, ' ').replace(/^ | $/g, '');
+    }
+    accessor(Document.prototype, 'title', function () {
+        var t = titleElement(this);
+        if (!t) return collapsed(titleless.get(this) || '');
+        titleless.delete(this);
+        var text = '';
+        for (var c = t.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3) text += c.data;
+        }
+        return collapsed(text);
+    }, function (value) {
+        value = String(value);
+        var t = titleElement(this);
+        if (!t) {
+            var head = this.head;
+            if (!head) { titleless.set(this, value); return; }
+            t = this.createElement('title');
+            head.appendChild(t);
+        }
+        titleless.delete(this);
+        t.textContent = value;
     });
 
     // `document.currentScript` (HTML §3.1.1): the classic <script> element
@@ -3026,118 +5751,365 @@ const WRAPPERS_JS: &str = r#"
     // `publicPath` detection (`document.currentScript.src`). With it
     // missing, both threw "cannot convert null or undefined to object" and
     // the rest of the script never ran. The engine names the element
-    // through `__rkSetCurrentScript(id)` before each script and clears it
+    // through `__rk.setCurrentScript(id)` before each script and clears it
     // after; the hook is not enumerable.
     var currentScript = null;
     getter(Document.prototype, 'currentScript', function () {
         var s = slotOf(this); return s.gen === gen ? currentScript : null;
     });
-    Object.defineProperty(Document.prototype, '__rkSetCurrentScript', {
-        value: function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.setCurrentScript = function (id) { currentScript = typeof id === 'number' ? wrap(id) : null; };
     // The engine reports a script's outcome to its element: `load` or
     // `error`, which do not bubble (HTML "execute the script element").
-    Object.defineProperty(Document.prototype, '__rkFireOn', {
-        value: function (id, type) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (target) target.dispatchEvent(new Event(type));
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.fireOn = function (id, type) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (target) dispatchTo(target, new Event(type));
+    };
+    // The engine reports that an `<img>`'s image failed to load (a 404, a
+    // failed connection, bytes that do not decode, its budget spent): the
+    // element is marked with the `src`/`srcset` that failed, which is what
+    // `img.complete` reads (web_reflect.js), and hears `error`.
+    var failedImages = new WeakMap();
+    __rk.imageFailed = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        loadedImages.delete(target);
+        failedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        var ev = make('Event', 'error');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, false);
+    };
+    // The engine reports that an `<img>`'s image is in (E54): the element
+    // is marked with the `src`/`srcset` that loaded, the image's own size
+    // and the URL it came from, which `complete`, `naturalWidth`,
+    // `naturalHeight` and `currentSrc` read (web_reflect.js), and then
+    // hears `load`: trusted, at the element only. The mark and the event
+    // are one step, so a handler never runs for an image that reads as
+    // still loading.
+    var loadedImages = new WeakMap();
+    __rk.imageLoaded = function (id, width, height, url) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        failedImages.delete(target);
+        // No URL: a `data:` image, which is its own `src`.
+        loadedImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset'), width, height, url || target.getAttribute('src') || '']);
+        var ev = make('Event', 'load');
+        trust(ev);
+        dispatchTo(target, ev);
+        settleDecodes(target, true);
+    };
+    // `decode()` promises waiting on an `<img>` (web_reflect.js): each with
+    // the `src`/`srcset` it waits for. They settle with the image's event,
+    // and resolve when the engine gives up on it (E54 R1: a slow image the
+    // engine stopped loading hears nothing, and a decode waiting on it
+    // would wait for good). A `src` change rejects them, as in Chrome.
+    var pendingDecodes = new WeakMap();
+    var gaveUpImages = new WeakMap();
+    function decodeError() {
+        var E = g.DOMException;
+        return E ? new E('The source image cannot be decoded.', 'EncodingError') : new Error('The source image cannot be decoded.');
+    }
+    function sameSource(img, mark) {
+        return !!mark && mark[0] === img.getAttribute('src') && mark[1] === img.getAttribute('srcset');
+    }
+    function settleDecodes(img, ok) {
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        pendingDecodes.delete(img);
+        list.forEach(function (p) { if (ok) p[2](); else p[3](decodeError()); });
+    }
+    __rk.decodeWait = function (img, resolve, reject) {
+        if (sameSource(img, gaveUpImages.get(img))) return resolve();
+        var list = pendingDecodes.get(img) || [];
+        list.push([img.getAttribute('src'), img.getAttribute('srcset'), resolve, reject]);
+        pendingDecodes.set(img, list);
+    };
+    __rk.imageGaveUp = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        gaveUpImages.set(target, [target.getAttribute('src'), target.getAttribute('srcset')]);
+        settleDecodes(target, true);
+    };
+    __rk.imageWritten = function (img) {
+        // A failure is not held against the restarted load, nor is a
+        // give-up; a successful image stays readable while the same
+        // `src` reloads (its mark is checked against `src`).
+        failedImages.delete(img);
+        gaveUpImages.delete(img);
+        var list = pendingDecodes.get(img);
+        if (!list) return;
+        var keep = list.filter(function (p) { return sameSource(img, p); });
+        list.filter(function (p) { return !sameSource(img, p); }).forEach(function (p) { p[3](decodeError()); });
+        if (keep.length) pendingDecodes.set(img, keep); else pendingDecodes.delete(img);
+    };
+    // The mark of the image an `<img>` shows now: null while its current
+    // `src`/`srcset` has not loaded.
+    __rk.imageLoadedFor = function (img) {
+        var mark = loadedImages.get(img);
+        if (!mark || mark[0] !== img.getAttribute('src') || mark[1] !== img.getAttribute('srcset')) return null;
+        return mark;
+    };
+    __rk.imageFailedFor = function (img) { return failedImages.get(img) || null; };
+    // The engine's CSS transitions report their phases (css-transitions-2
+    // §4): a trusted TransitionEvent that bubbles; `transitionend` can be
+    // cancelled, the others not. An element taken out of the document
+    // still hears its `transitioncancel`.
+    __rk.fireTransition = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init = bare(init);
+        init.bubbles = true;
+        init.cancelable = type === 'transitionend';
+        var ev = make('TransitionEvent', type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
+    // Likewise the engine's `@keyframes` animations (css-animations-1 §5):
+    // a trusted AnimationEvent that bubbles and cannot be cancelled.
+    __rk.fireAnimation = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        init = bare(init);
+        init.bubbles = true;
+        init.cancelable = false;
+        var ev = make('AnimationEvent', type, init);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     // The engine delivers the user's mouse input: a trusted event that
     // bubbles and can be cancelled (UI Events §3.4), except the enter and
     // leave events, which do neither and go to one element each.
     // `pointer*` and `click` are PointerEvents of the mouse (Pointer
     // Events §4, §12); `mousedown`, `mouseup` and `click` carry the click
     // count. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireMouse', {
-        value: function (id, type, init) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (!target) return true;
-            var pointer = type === 'click' || type.indexOf('pointer') === 0;
-            var edge = /(enter|leave)$/.test(type);
-            var press = type === 'mousedown' || type === 'mouseup' || type === 'click';
-            init.bubbles = !edge;
-            init.cancelable = !edge;
-            init.composed = !edge;
-            init.view = g;
-            init.detail = press ? 1 : 0;
-            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
-            if (pointer) {
-                init.pointerId = 1;
-                init.pointerType = 'mouse';
-                init.isPrimary = true;
-                init.pressure = init.buttons ? 0.5 : 0;
+    __rk.fireMouse = function (id, type, init) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return true;
+        init = bare(init);
+        // The pointer is on a shape of an `<svg>`, which the layout
+        // sees as one box: the event's target is the shape.
+        if (target.localName === 'svg' && typeof init.clientX === 'number') {
+            target = svgShapeAt(target, init.clientX, init.clientY);
+        }
+        // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
+        var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
+            type.indexOf('pointer') === 0;
+        var edge = /(enter|leave)$/.test(type);
+        var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
+        init.bubbles = !edge;
+        init.cancelable = !edge && type !== 'pointercancel';
+        init.composed = !edge;
+        init.view = g;
+        init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        if (pointer) {
+            init.pointerId = 1;
+            init.pointerType = 'mouse';
+            init.isPrimary = true;
+            init.pressure = init.buttons ? 0.5 : 0;
+        }
+        var ev = make(pointer && __rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', type, init);
+        // Where the point is in the document and in the target's box.
+        var at = bare({
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY,
+            movementX: init.movementX, movementY: init.movementY
+        });
+        // A move or a boundary event has no button of its own: `which`
+        // is the primary button while it is held.
+        if (!press && !pointer) at.which = init.buttons & 1;
+        extra(ev, at);
+        trust(ev);
+        return dispatchTo(target, ev);
+    };
+
+    // Whether a wheel at this element can be cancelled: something on its
+    // way up to the window listens for `wheel` and is not passive (an
+    // `onwheel` handler never is). Chrome for Testing 148 asks the same
+    // before it scrolls: with only passive listeners it scrolls first and
+    // tells them afterwards.
+    // On the host object, like the key dispatch: not the page's to call.
+    // The path is walked with the dispatch's own parent links and plain
+    // loops: nothing a page can replace (an array method, a parentNode
+    // getter) runs here.
+    function blocks(list) {
+        if (!list) return false;
+        for (var i = 0; i < list.length; i++) if (!list[i].removed && !list[i].passive) return true;
+        return false;
+    }
+    __rk.wheelBlocks = function (id) {
+            var n = typeof id === 'number' ? wrap(id) : null, probe = { type: 'wheel' };
+            // The legacy type is looked for only when something could hear
+            // it: each handler lookup reads the node's attributes.
+            var legacy = mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute();
+            while (n) {
+                var all = LISTENERS.get(n);
+                if (all && (blocks(all.wheel) || (legacy && blocks(all.mousewheel)))) return true;
+                if (typeof handlerOf(n, 'wheel') === 'function' || (legacy && typeof handlerOf(n, 'mousewheel') === 'function')) return true;
+                n = eventParent(n, probe);
             }
-            var ev = new (pointer && g.PointerEvent || g.MouseEvent)(type, init);
-            ev.isTrusted = true;
-            // Where the point is in the document and in the target's box.
-            var at = {
+            return false;
+    };
+    // The engine delivers the user's wheel (UI Events §5.5): a trusted
+    // WheelEvent that bubbles, in pixels, with the legacy deltas Chrome
+    // reports (120 a notch, a notch per 100px and at least one). Before
+    // the scroll when it can be cancelled (`wheelBlocks`), and then it
+    // returns false when a listener called preventDefault(): the engine
+    // leaves the scroll alone. After the scroll, and not cancelable, when
+    // only passive listeners hear it.
+    __rk.fireWheel = function (id, init, cancelable) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target || !__rk.hasCtor('WheelEvent')) return true;
+            init = bare(init);
+            if (target.localName === 'svg') target = svgShapeAt(target, init.clientX, init.clientY);
+            init.bubbles = true;
+            init.cancelable = cancelable !== false;
+            init.composed = true;
+            init.view = g;
+            init.deltaZ = 0;
+            init.deltaMode = 0;
+            var notches = function (d) { return d === 0 ? 0 : -120 * (d < 0 ? -1 : 1) * mathMax(1, mathRound(mathAbs(d) / 100)); };
+            init.wheelDeltaX = notches(init.deltaX);
+            init.wheelDeltaY = notches(init.deltaY);
+            var ev = make('WheelEvent', 'wheel', init);
+            // A target with no `wheel` listener or handler hears the legacy
+            // `mousewheel` instead (Chrome for Testing 148; the user's
+            // wheel only). Kept in a private map, read by `invoke`.
+            if (mousewheelListeners > 0 || mousewheelHandler || N.wheelAttribute()) mapSet(LEGACY_TYPE, ev, 'mousewheel');
+            var at = bare({
                 pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
-                offsetX: init.offsetX, offsetY: init.offsetY,
-                movementX: init.movementX, movementY: init.movementY
-            };
-            // A move or a boundary event has no button of its own: `which`
-            // is the primary button while it is held.
-            if (!press && !pointer) at.which = init.buttons & 1;
-            Object.keys(at).forEach(function (k) {
-                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+                offsetX: init.offsetX, offsetY: init.offsetY
             });
-            return target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            extra(ev, at);
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
+
+    // The engine's drag-and-drop processing model (HTML §6.11.5) delivers
+    // a trusted DragEvent with the drag's DataTransfer (web_dnd.js): every
+    // drag event bubbles; dragleave and dragend cannot be cancelled. `op`
+    // is the current drag operation. Returns 'notCancelled:operation',
+    // the operation being what the dataTransfer's effects allow after the
+    // listeners ran.
+    __rk.fireDrag = function (id, type, init, op) {
+        var store = __rk.dragStore;
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!store || !target) return '1:none';
+        init = bare(init);
+        if (type === 'dragstart') store.begin(target);
+        var dt = store.prepare(type, op);
+        var cancelable = type !== 'dragleave' && type !== 'dragend';
+        init.bubbles = true;
+        init.cancelable = cancelable;
+        init.composed = true;
+        init.view = g;
+        init.detail = 0;
+        init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+        init.dataTransfer = dt;
+        var ev = make(__rk.hasCtor('DragEvent') ? 'DragEvent' : 'MouseEvent', type, init);
+
+        var at = bare({
+            pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+            offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0, dataTransfer: dt
+        });
+        extra(ev, at);
+        trust(ev);
+        var notCancelled = dispatchTo(target, ev);
+        // A cancelled dragstart ends the drag before it began.
+        var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
+        return (notCancelled ? '1:' : '0:') + settled;
+    };
 
     // The engine delivers the user's key press or release to the focused
     // element: a trusted KeyboardEvent that bubbles and can be cancelled
     // (UI Events §3.7). With nothing focused in the engine (`id` null) it
     // goes to the page's active element: what script focused, else the
     // body. Returns false when a listener called preventDefault().
-    Object.defineProperty(Document.prototype, '__rkFireKey', {
-        value: function (id, type, init) {
+    // On the host object, not the document: a page can neither call it
+    // (the event is trusted) nor replace it. The key arrives as an
+    // argument, never in script source (`DomBindings::fire_key_event`).
+    __rk.fireKey = function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : g.document.activeElement;
             if (!target) return true;
+            init = bare(init);
             init.bubbles = true;
             init.cancelable = true;
             init.composed = true;
             init.view = g;
-            var ev = new g.KeyboardEvent(type, init);
-            ev.isTrusted = true;
-            return target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            // The legacy codes (UI Events §7.3; Chrome for Testing 148):
+            // `keydown` and `keyup` carry the key's virtual-key code and no
+            // charCode; `keypress` carries the character in both.
+            if (type === 'keypress') {
+                init.keyCode = init.charCode = init.key === 'Enter' ? 13 : (init.key.codePointAt(0) || 0);
+            } else {
+                init.keyCode = virtualKey(init.key);
+                init.charCode = 0;
+            }
+            var ev = make('KeyboardEvent', type, init);
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
+    // A key's Windows virtual-key code, which is what `keyCode` is on every
+    // platform, for a US layout: a letter is its capital, a shifted digit or
+    // mark is the key it is on.
+    var VK_NAMED = { Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20,
+        Escape: 27, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
+        ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, ContextMenu: 93, NumLock: 144, ScrollLock: 145 };
+    var VK_MARKS = { ' ': 32, ')': 48, '!': 49, '@': 50, '#': 51, '$': 52, '%': 53, '^': 54, '&': 55, '*': 56, '(': 57,
+        ';': 186, ':': 186, '=': 187, '+': 187, ',': 188, '<': 188, '-': 189, '_': 189, '.': 190, '>': 190,
+        '/': 191, '?': 191, '`': 192, '~': 192, '[': 219, '{': 219, '\\': 220, '|': 220, ']': 221, '}': 221,
+        "'": 222, '"': 222 };
+    function virtualKey(key) {
+        if (hasOwn(VK_NAMED, key)) return VK_NAMED[key];
+        if (hasOwn(VK_MARKS, key)) return VK_MARKS[key];
+        if (/^[a-z]$/.test(key)) return key.charCodeAt(0) - 32;
+        if (/^[A-Z0-9]$/.test(key)) return key.charCodeAt(0);
+        var f = /^F([1-9]|1[0-9]|2[0-4])$/.exec(key);
+        return f ? 111 + Number(f[1]) : 0;
+    }
+    // The text a key is about to insert in an editable element: a trusted
+    // `textInput` TextEvent after the keypress, before the insertion and its
+    // `input` (Chrome for Testing 148). Returns false when cancelled.
+    // On the host object, as `fireKey` is.
+    __rk.fireTextInput = function (id, data) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target || typeof __rk.newTextEvent !== 'function') return true;
+            var ev = make('TextEvent', 'textInput', { bubbles: true, cancelable: true, composed: true, view: g, data: data });
+            trust(ev);
+            return dispatchTo(target, ev);
+    };
     // What the user typed changed the control's value: `input`, which
     // bubbles and cannot be cancelled (Input Events §5.1). `data` is the
     // inserted text, null for a deletion.
-    Object.defineProperty(Document.prototype, '__rkFireInput', {
-        value: function (id, data) {
+    // These three are the engine's alone: on the host object (`__rk`),
+    // which page script cannot reach, not on `document`.
+    __rk.fireInput = function (id, data) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return;
             // The user edited it: `change` when it loses the focus
             // (node_apis.js).
-            Object.defineProperty(target, '__rkEdited', {
-                value: true, configurable: true, enumerable: false, writable: true
-            });
-            var ev = new g.InputEvent('input', {
+            __rk.markEdited(target);
+            var ev = make('InputEvent', 'input', {
                 bubbles: true, composed: true, view: g, data: data,
                 inputType: data === null ? 'deleteContentBackward' : 'insertText'
             });
-            ev.isTrusted = true;
-            target.dispatchEvent(ev);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+            trust(ev);
+            dispatchTo(target, ev);
+    };
+    // The user picked an option of a select in its drop-down or with a
+    // key (web_forms.js's pick: selectedness, `input`, `change`). Returns
+    // whether the selection changed.
+    var pickOption = null;
+    __rk.pickOption = function (id, index) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        return !!(target && pickOption && pickOption(target, index));
+    };
     // Enter in a field (web_forms.js's implicit submission).
     var implicitSubmit = null;
-    Object.defineProperty(Document.prototype, '__rkImplicitSubmit', {
-        value: function (id) {
-            var target = typeof id === 'number' ? wrap(id) : null;
-            if (target && implicitSubmit) implicitSubmit(target);
-        },
-        configurable: true, enumerable: false, writable: true
-    });
+    __rk.implicitSubmit = function (id) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (target && implicitSubmit) implicitSubmit(target);
+    };
 
     // EventTarget (DOM §2.7) for node wrappers, document and window: a
     // JS-side listener registry, and dispatch through capture, target and
@@ -3145,11 +6117,33 @@ const WRAPPERS_JS: &str = r#"
     // Engine input events still dispatch Rust-side (events.rs, pin §4);
     // this is what page script registers and fires itself.
     var LISTENERS = new WeakMap();
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
     function thisTarget(o) { return o == null ? g : o; }
     function flag(opts, key) {
         return typeof opts === 'boolean' ? key === 'capture' && opts : !!(opts && opts[key]);
     }
+    var PASSIVE_BY_DEFAULT = { wheel: true, mousewheel: true, touchstart: true, touchmove: true };
+    // The event a passive listener is hearing now, if one is: it cannot
+    // cancel that event. Held here, not on the event, where a page could
+    // clear it.
+    var passiveNow = null;
+    // The engine dispatches `wheel` only once something can hear it, so a
+    // page with no wheel listener scrolls without running any script.
+    // How many wheel and mousewheel listeners there are, and how many of
+    // them are not passive, plus whether a handler was ever set; the
+    // engine is told when either answer changes (`noteWheel`).
+    var wheelListeners = 0, wheelBlocking = 0, wheelHandler = false, wheelSaid = '';
+    // Whether anything could hear the legacy `mousewheel`: only then does a
+    // wheel carry the legacy type, so a page without one pays nothing for
+    // it at each node of the path.
+    var mousewheelListeners = 0, mousewheelHandler = false;
+    function noteWheel() {
+        var now = (wheelListeners > 0 || wheelHandler) + ':' + (wheelBlocking > 0 || wheelHandler);
+        if (now === wheelSaid) return;
+        wheelSaid = now;
+        N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
+    }
+    function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
+    var LEGACY_TYPE = new WeakMap();
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -3163,10 +6157,23 @@ const WRAPPERS_JS: &str = r#"
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) return;
         }
-        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), removed: false });
+        // `passive` (DOM §2.7): such a listener cannot cancel the event.
+        // Left out, it is on for `wheel`, `mousewheel` and the touch moves
+        // on the window, the document, its root and its body, as in Chrome.
+        var passive = opts && typeof opts === 'object' && opts.passive !== undefined ? !!opts.passive
+            : PASSIVE_BY_DEFAULT[type] === true && (t === g || t === doc || t === doc.documentElement || t === doc.body);
+        list.push({ cb: cb, capture: capture, once: flag(opts, 'once'), passive: passive, removed: false });
+        if (wheelType(type)) { wheelListeners++; if (!passive) wheelBlocking++; if (type === 'mousewheel') mousewheelListeners++; noteWheel(); }
         if (signal != null && typeof signal.addEventListener === 'function') {
             signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
         }
+    };
+    // Does `target` have a listener for `type` right now? For the installs
+    // that keep a target alive only while something can hear it
+    // (web_match_media.js prunes its document list of media query lists).
+    HOOKS.hasListener = function (target, type) {
+        var all = LISTENERS.get(thisTarget(target)), list = all && all[String(type)];
+        return !!(list && list.length > 0);
     };
     EventTarget.prototype.removeEventListener = function (type, cb, opts) {
         var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
@@ -3175,6 +6182,7 @@ const WRAPPERS_JS: &str = r#"
         for (var i = 0; i < list.length; i++) {
             if (list[i].cb === cb && list[i].capture === capture) {
                 list[i].removed = true;
+                if (wheelType(String(type))) { wheelListeners--; if (!list[i].passive) wheelBlocking--; if (String(type) === 'mousewheel') mousewheelListeners--; noteWheel(); }
                 list.splice(i, 1);
                 return;
             }
@@ -3182,68 +6190,251 @@ const WRAPPERS_JS: &str = r#"
     };
     // A listener's exception goes to the engine's error log, not to the
     // dispatcher (as in a browser, where it reaches window.onerror).
+    var callNow = uncurry(Function.prototype.call);
     function callListener(t, cb, event) {
         try {
-            return typeof cb === 'function' ? cb.call(t, event) : cb.handleEvent(event);
+            // The call of install time: a page that replaces
+            // Function.prototype.call does not stand between the engine's
+            // dispatch and a listener.
+            return typeof cb === 'function' ? callNow(cb, t, event) : cb.handleEvent(event);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
         }
     }
-    // An element's on<type> handler: the property when one was assigned
-    // (`null` included, which turns the handler off), else its `on<type>`
-    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
-    // `function (event)`, with the element and its document in scope,
-    // compiled on first use and again when the text changes. A body that
-    // does not compile is logged once and is no handler.
-    var INLINE = new WeakMap();
-    function handlerOf(t, type) {
-        if (PLAIN.has(t)) return undefined;
-        var h = t['on' + type];
-        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+    // An element's on<type> handler (HTML §8.1.8): the value assigned through
+    // its `on<type>` IDL attribute (`null` included, which turns the handler
+    // off), else its `on<type>` content attribute. The attribute's text is
+    // the body of `function (event)`, with the element and its document in
+    // scope, compiled on first use and again when the text changes. A body
+    // that does not compile is logged once and is no handler. Setting or
+    // removing the attribute drops the assigned value: the attribute is the
+    // handler again (§8.1.8.1 "event handler content attributes").
+    var INLINE = new WeakMap(), ASSIGNED = new WeakMap();
+    // `src` as the body of `function (event)`, with `el`'s document and
+    // then `el` in scope (§8.1.8.1 "getting the current value of the event
+    // handler", the scope chain). `this` is whatever the handler is called
+    // on: the element, or the Window for a body handler the Window owns.
+    //
+    // Known deviation (L2): for a handler the Window owns (`<body onload>`,
+    // `<frameset onresize>`), the spec's scope chain is the global only: its
+    // "element" is null, so neither the document nor the body is put in
+    // scope (§8.1.8.1 steps 10 and 12 apply to an element's handler). This
+    // compiles every attribute the same way, with the document and the
+    // element in scope, so `<body onload="getElementById(...)">` resolves
+    // where the spec would throw. Kept deliberately: nothing on the web
+    // depends on the throw, and one compile path is one place to get right.
+    function compileHandler(src, el) {
+        try {
+            return new Function('__rk_doc', '__rk_el',
+                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
+            )(el.ownerDocument || {}, el);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+            return null;
+        }
+    }
+    function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return h;
+        if (src === null) return null;
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
-        if (!c || c.src !== src) {
-            c = all[type] = { src: src, fn: null };
-            try {
-                c.fn = new Function('event',
-                    'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
-            } catch (e) {
-                try { __rk.reportError(e); } catch (_) {}
-            }
-        }
+        if (!c || c.src !== src) c = all[type] = { src: src, fn: compileHandler(src, t) };
         return c.fn;
     }
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    // HTML §8.1.8.1 "determine the target of an event handler", for a
+    // Window type (WINDOW_HANDLER_TYPES) on an element:
+    //   1. not a body or frameset element: the element itself;
+    //   3. a body/frameset whose node document is not the active document
+    //      (a DOMParser body: no Window): null, so the getter answers null
+    //      and the setter does nothing;
+    //   4. else the Window: the body's or frameset's node document is the
+    //      global document, attached to it or not (`createElement('body')`
+    //      forwards too; the spec never asks whether it is THE body element).
+    function isBodyOrFrameset(t) {
+        if (t.nodeType !== 1) return false;
+        var n = t.localName;
+        return n === 'body' || n === 'frameset';
+    }
+    function windowHandlerTarget(t) {
+        return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
+    function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
+        // A body or frameset has no handler of its own for a Window type,
+        // assigned or inline: the target is the Window (its handler runs
+        // when the event reaches the Window) or nothing.
+        if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
+        // A type with no accessor (a custom event) is still a data property.
+        if (!HANDLER_TYPES[type]) {
+            var h = t['on' + type];
+            if (h !== undefined) return h;
+        }
+        return inlineHandler(t, type);
+    }
+    function attributeChanged(t, name) {
+        // The native setAttr/removeAttr lowercases the name for HTML elements
+        // (`OnClick` is the `onclick` attribute), so compare the lowercased
+        // name here too. Lowercasing unconditionally is fine: SVG's on<type>
+        // attributes are lowercase already, so a case-sensitive SVG name
+        // either is lowercase or names no handler attribute at all.
+        name = String(name).toLowerCase();
+        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+            var type = name.slice(2), a = ASSIGNED.get(t);
+            if (a) delete a[type];
+            // The body's attribute for a Window type is the Window's
+            // handler: it replaces what was assigned to `window.on<type>`.
+            // Only the body element's attribute (L1): the Window's getter
+            // reads `doc.body`'s attribute lazily, so a detached body's
+            // attribute, which the spec would also compile into the
+            // Window's handler, is left alone rather than dropping the
+            // assigned handler for nothing.
+            if (WINDOW_HANDLER_TYPES[type] && t === doc.body && windowHandlerTarget(t) === g) {
+                delete WINDOW_ASSIGNED[type];
+            }
+        }
+    }
+    // HTML §8.1.8.2 GlobalEventHandlers: `on<type>` is an accessor on
+    // HTMLElement.prototype (and SVGElement.prototype), not a data property
+    // of each element. The getter answers the assigned value, else the
+    // compiled content attribute, else null; the setter keeps a function or
+    // object and makes anything else null. Script that wraps the native
+    // accessor needs the descriptor to exist: a script-retry shim takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own, and
+    // without it every later `onerror` read and write on any element threw,
+    // which stopped Next's bootstrap and webpack's chunk loader at the first
+    // `<script src>` they inserted.
+    var HANDLER_TYPES = Object.create(null);
+    ('abort animationcancel animationend animationiteration animationstart auxclick beforeinput ' +
+     'beforematch beforetoggle blur cancel canplay canplaythrough change click close contextlost ' +
+     'contextmenu contextrestored copy cuechange cut dblclick drag dragend dragenter dragleave ' +
+     'dragover dragstart drop durationchange emptied ended error focus formdata gotpointercapture ' +
+     'input invalid keydown keypress keyup load loadeddata loadedmetadata loadstart ' +
+     'lostpointercapture mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup ' +
+     'paste pause play playing pointercancel pointerdown pointerenter pointerleave pointermove ' +
+     'pointerout pointerover pointerrawupdate pointerup progress ratechange reset resize scroll ' +
+     'scrollend securitypolicyviolation seeked seeking select selectionchange selectstart ' +
+     'slotchange stalled submit suspend timeupdate toggle touchcancel touchend touchmove ' +
+     'touchstart transitioncancel transitionend transitionrun transitionstart volumechange ' +
+     'waiting wheel').split(' ').forEach(function (type) {
+        HANDLER_TYPES[type] = true;
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () { return elementHandlerGet(this, type); },
+            set: function (v) { elementHandlerSet(this, type, v); }
+        };
+        Object.defineProperty(HTMLElement.prototype, 'on' + type, desc);
+        Object.defineProperty(g.SVGElement.prototype, 'on' + type, desc);
+    });
+    function elementHandlerGet(t, type) {
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        return t[SLOT] && t.nodeType === 1 ? inlineHandler(t, type) : null;
+    }
+    function handlerValue(v) {
+        return typeof v === 'function' || (typeof v === 'object' && v !== null) ? v : null;
+    }
+    function elementHandlerSet(t, type, v) {
+        if (wheelType(type) && typeof v === 'function') { wheelHandler = true; if (type === 'mousewheel') mousewheelHandler = true; noteWheel(); }
+        var a = ASSIGNED.get(t);
+        if (!a) { a = Object.create(null); ASSIGNED.set(t, a); }
+        a[type] = handlerValue(v);
+    }
+    // HTML §8.1.8.2.1, event handlers on body and frameset elements: the
+    // WindowEventHandlers set (onhashchange, onpopstate, onstorage, ...) and
+    // the Window-reflecting set (onload, onresize, onscroll, onerror,
+    // onfocus, onblur) on the body element are the Window's handlers. The
+    // IDL attributes on HTMLBodyElement.prototype (and the frameset's)
+    // forward to `window.on<type>` for any body or frameset of the global
+    // document (windowHandlerTarget), and `<body onload="...">` is the
+    // Window's `load` handler: compiled from the attribute with the
+    // document and the body in scope, the Window as `this`, and run by the
+    // Window's `load` dispatch (which is where `load` fires; older pages
+    // put their start-up there). A frameset document's body element is its
+    // frameset (§3.1.3), so `<frameset onload>` is the same. A body in
+    // another document has no Window to forward to: null, no assignment.
+    //
+    // `window.on<type>` for these types is an accessor on the Window over
+    // one slot: the value assigned (through the Window or the body), else
+    // the body element's compiled content attribute, else null. Setting or
+    // removing the body element's attribute drops the assigned value, as
+    // on elements. The Window's dispatch reads `window['on' + type]`, so it
+    // sees the slot. The other on<type> on the Window stay data properties.
+    var WINDOW_HANDLER_TYPES = Object.create(null), WINDOW_ASSIGNED = Object.create(null);
+    ('afterprint beforeprint beforeunload blur error focus hashchange languagechange load message ' +
+     'messageerror offline online pagehide pagereveal pageshow pageswap popstate rejectionhandled ' +
+     'resize scroll storage unhandledrejection unload').split(' ').forEach(function (type) {
+        WINDOW_HANDLER_TYPES[type] = true;
+        var name = 'on' + type;
+        Object.defineProperty(g, name, {
+            configurable: true, enumerable: true,
+            get: function () {
+                if (type in WINDOW_ASSIGNED) return WINDOW_ASSIGNED[type];
+                var body = doc.body;
+                return body ? inlineHandler(body, type) : null;
+            },
+            set: function (v) { WINDOW_ASSIGNED[type] = handlerValue(v); }
+        });
+        // §8.1.8.2 getter step 2 / setter step 2: a null target answers
+        // null and takes no assignment.
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () {
+                var target = windowHandlerTarget(this);
+                return target === g ? g[name] : target === null ? null : elementHandlerGet(this, type);
+            },
+            set: function (v) {
+                var target = windowHandlerTarget(this);
+                if (target === g) g[name] = v; else if (target !== null) elementHandlerSet(this, type, v);
+            }
+        };
+        Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
+        Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
+    });
     function invoke(t, event, phase, capture) {
-        event.currentTarget = t;
-        event.eventPhase = phase;
+        mapSet(EV_CURRENT, event, t);
+        mapSet(EV_PHASE, event, phase);
         // A listener sees the target as its own tree sees it: a node inside a
         // shadow tree is the host to a listener outside.
-        if (HOOKS.retarget && event[ORIGIN]) event.target = HOOKS.retarget(event[ORIGIN], t);
-        var all = LISTENERS.get(t), list = all && all[event.type];
+        if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
+        var type = evType(event);
+        var all = LISTENERS.get(t), list = all && all[type];
+        // The legacy type, at a target with no listener or handler for the
+        // event's own (the user's wheel as `mousewheel`). The engine's
+        // event changes type in the type map only, never by assignment.
+        var legacy = mapGet(LEGACY_TYPE, event);
+        if (legacy && mapHas(EVTYPE, event) && !(list && list.length) && typeof handlerOf(t, type) !== 'function' &&
+            ((all && all[legacy] && all[legacy].length) || typeof handlerOf(t, legacy) === 'function')) {
+            mapSet(EVTYPE, event, legacy);
+            try { invoke(t, event, phase, capture); } finally { mapSet(EVTYPE, event, type); }
+            return;
+        }
         if (list) {
             list = list.slice();
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
-                if (l.once) t.removeEventListener(event.type, l.cb, { capture: l.capture });
-                callListener(t, l.cb, event);
+                if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
+                var passiveBefore = passiveNow;
+                passiveNow = l.passive === true ? event : null;
+                try { callListener(t, l.cb, event); } finally { passiveNow = passiveBefore; }
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, event.type);
-        if (typeof h === 'function' && callListener(t, h, event) === false && event.cancelable) {
-            event.defaultPrevented = true;
+        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
+        if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
+            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
     // never reaches window from a node).
     function eventParent(n, event) {
         if (n === g) return null;
-        if (n === doc) return event.type === 'load' ? null : g;
+        if (n === doc) return evType(event) === 'load' ? null : g;
         if (!n[SLOT]) return null;
         var p = n.parentNode;
         // A composed event goes on from a shadow root to its host.
@@ -3256,38 +6447,60 @@ const WRAPPERS_JS: &str = r#"
     // call with "was not cancelled" once the listeners have run, or null.
     var activation = null, SYNTHETIC_CLICK = Symbol('rustkit.click');
     function activationFor(t, event) {
-        if (!activation || event.type !== 'click' || !t[SLOT]) return null;
-        if (!event[SYNTHETIC_CLICK] && !(typeof g.MouseEvent === 'function' && event instanceof g.MouseEvent)) return null;
-        return activation(t);
+        if (!activation || evType(event) !== 'click' || !t[SLOT]) return null;
+        if (!event[SYNTHETIC_CLICK] && !isMouseClick(event)) return null;
+        return activation(t, event);
     }
     EventTarget.prototype.dispatchEvent = function (event) {
-        if (event == null || typeof event !== 'object' || event.type === undefined) {
+        // An Event: made by one of the Event constructors or by the engine
+        // (both stamp it). Anything else, a look-alike or a Proxy of an
+        // event included, is a TypeError, as in Chrome.
+        if (event == null || typeof event !== 'object' || !setHas(STAMPED, event)) {
             throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': " +
                 "parameter 1 is not of type 'Event'.");
         }
+        // An event already being dispatched cannot be dispatched again.
+        if (setHas(DISPATCHING, event)) {
+            throw new DOMException("Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.", 'InvalidStateError');
+        }
+        // Only the engine's own event, on its one dispatch, is trusted.
+        stamp(event);
+        if (setHas(UNDISPATCHED, event)) setDrop(UNDISPATCHED, event); else setDrop(TRUSTED, event);
         var t = thisTarget(this), path = [], i;
         for (var n = t; n; n = eventParent(n, event)) path.push(n);
-        event.target = t;
+        mapSet(EV_TARGET, event, t);
         event[ORIGIN] = t;
         event[PATH] = path;
         var activated = activationFor(t, event);
-        for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
-        if (!event[STOP]) invoke(t, event, 2, true);
-        if (!event[STOP]) invoke(t, event, 2, false);
-        if (event.bubbles) {
-            for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+        setAdd(DISPATCHING, event);
+        try {
+            for (i = path.length - 1; i > 0 && !event[STOP]; i--) invoke(path[i], event, 1, true);
+            if (!event[STOP]) invoke(t, event, 2, true);
+            if (!event[STOP]) invoke(t, event, 2, false);
+            if (event.bubbles) {
+                for (i = 1; i < path.length && !event[STOP]; i++) invoke(path[i], event, 3, false);
+            }
+        } finally {
+            setDrop(DISPATCHING, event);
+            event[STOP] = event[STOP_NOW] = false;
+            mapSet(EV_CURRENT, event, null);
+            mapSet(EV_PHASE, event, 0);
+            // After dispatch the target is the outermost host (the node
+            // itself when it is in the document), and there is no path.
+            mapSet(EV_TARGET, event, HOOKS.retarget ? HOOKS.retarget(t, g) : t);
+            event[ORIGIN] = null;
+            event[PATH] = null;
         }
-        event[STOP] = event[STOP_NOW] = false;
-        event.currentTarget = null;
-        event.eventPhase = 0;
-        // After dispatch the target is the outermost host (the node itself
-        // when it is in the document), and there is no path.
-        event.target = HOOKS.retarget ? HOOKS.retarget(t, g) : t;
-        event[ORIGIN] = null;
-        event[PATH] = null;
-        if (activated) activated(!event.defaultPrevented);
-        return !event.defaultPrevented;
+        // The canceled flag, not a property a listener can redefine; an
+        // object that is not an Event keeps its own.
+        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        if (activated) activated(!canceled);
+        return !canceled;
     };
+    // The engine's own dispatches go through this, whatever a page has put
+    // in place of `dispatchEvent` since.
+    var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
+    __rk.dispatchTo = dispatchTo;
 
     function Event(type, init) {
         if (!(this instanceof Event)) {
@@ -3297,30 +6510,62 @@ const WRAPPERS_JS: &str = r#"
             throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present.");
         }
         init = init || {};
-        this.type = String(type);
-        this.bubbles = !!init.bubbles;
-        this.cancelable = !!init.cancelable;
-        this.composed = !!init.composed;
-        this.defaultPrevented = false;
-        this.target = null;
-        this.currentTarget = null;
-        this.eventPhase = 0;
-        this.isTrusted = false;
-        this.timeStamp = Date.now();
+        // Own properties, defined (not assigned): what a page puts on the
+        // prototypes is never run for them. The type is kept here too, and
+        // `cancelable` in a private set (WHL3).
+        mapSet(EVTYPE, this, String(type));
+        defineOwn(this, 'type', getterDesc(TYPE_GET));
+        own(this, 'bubbles', !!init.bubbles);
+        setCancelable(this, !!init.cancelable);
+        own(this, 'composed', !!init.composed);
+        stamp(this);
+        own(this, 'timeStamp', Date.now());
     }
+    var TYPE_GET = Object.getOwnPropertyDescriptor({ get type() { return mapGet(EVTYPE, this); } }, 'type').get;
+    function own(o, k, v) { defineOwn(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
     // The legacy initializers; they do nothing during dispatch.
+    // Re-initialising clears the canceled flag (DOM §2.2 "initialize");
+    // during dispatch it does nothing.
     Event.prototype.initEvent = function (type, bubbles, cancelable) {
-        if (this.eventPhase !== 0) return;
-        this.type = String(type);
-        this.bubbles = !!bubbles;
-        this.cancelable = !!cancelable;
+        if (setHas(DISPATCHING, this)) return;
+        if (mapHas(EVTYPE, this)) mapSet(EVTYPE, this, String(type)); else this.type = String(type);
+        own(this, 'bubbles', !!bubbles);
+        setCancelable(this, !!cancelable);
+        setDrop(CANCELED, this);
     };
-    Event.prototype.preventDefault = function () { if (this.cancelable) this.defaultPrevented = true; };
+    function cancel(ev) { if (setHas(CANCELABLE, ev) && passiveNow !== ev) setAdd(CANCELED, ev); }
+    // `cancelable` is read-only, as in Chrome for Testing 148 (assignment
+    // does nothing; strict code throws).
+    Object.defineProperty(Event.prototype, 'cancelable', {
+        get: function () { return setHas(CANCELABLE, this); }, enumerable: true, configurable: true
+    });
+    Event.prototype.preventDefault = function () { cancel(this); };
+    // Read-only (no setter: an assignment does nothing, and throws in
+    // strict code); the canceled flag above (Chrome for Testing 148).
+    Object.defineProperty(Event.prototype, 'defaultPrevented', {
+        get: function () { return setHas(CANCELED, this); }, enumerable: true, configurable: true
+    });
+    // The legacy alias (DOM §2.2): false cancels, as preventDefault() does.
+    Object.defineProperty(Event.prototype, 'returnValue', {
+        get: function () { return !setHas(CANCELED, this); },
+        set: function (v) { if (!v) cancel(this); },
+        enumerable: true, configurable: true
+    });
     // The nodes the event is going through, target first; empty outside dispatch.
     Event.prototype.composedPath = function () { return this[PATH] ? this[PATH].slice() : []; };
     Event.prototype.stopPropagation = function () { this[STOP] = true; };
+    // DOM §2.2: the legacy alias. Reading it is the stop-propagation flag;
+    // setting it true is stopPropagation(), setting it false does nothing.
+    Object.defineProperty(Event.prototype, 'cancelBubble', {
+        get: function () { return this[STOP] === true; },
+        set: function (v) { if (v) this[STOP] = true; },
+        enumerable: true, configurable: true
+    });
     Event.prototype.stopImmediatePropagation = function () { this[STOP] = this[STOP_NOW] = true; };
     getter(Event.prototype, 'srcElement', function () { return this.target; });
+    getter(Event.prototype, 'target', function () { return mapHas(EV_TARGET, this) ? mapGet(EV_TARGET, this) : null; });
+    getter(Event.prototype, 'currentTarget', function () { return mapHas(EV_CURRENT, this) ? mapGet(EV_CURRENT, this) : null; });
+    getter(Event.prototype, 'eventPhase', function () { return mapHas(EV_PHASE, this) ? mapGet(EV_PHASE, this) : 0; });
     Object.defineProperty(Event.prototype, Symbol.toStringTag, { value: 'Event' });
     ['NONE', 'CAPTURING_PHASE', 'AT_TARGET', 'BUBBLING_PHASE'].forEach(function (k, i) {
         Event[k] = Event.prototype[k] = i;
@@ -3337,12 +6582,14 @@ const WRAPPERS_JS: &str = r#"
     });
     Object.defineProperty(CustomEvent.prototype, Symbol.toStringTag, { value: 'CustomEvent' });
     CustomEvent.prototype.initCustomEvent = function (type, bubbles, cancelable, detail) {
-        if (this.eventPhase !== 0) return;
+        if (setHas(DISPATCHING, this)) return;
         this.initEvent(type, bubbles, cancelable);
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
     g.CustomEvent = CustomEvent;
+    __rk.keepCtor('Event', Event);
+    __rk.keepCtor('CustomEvent', CustomEvent);
 
     // DOMParser (HTML §8.5.1), for 'text/html' only: the XML types need an
     // XML parser, which RustKit does not have yet.
@@ -3367,13 +6614,25 @@ const WRAPPERS_JS: &str = r#"
     };
     Object.defineProperty(DOMParser.prototype, Symbol.toStringTag, { value: 'DOMParser' });
     g.DOMParser = DOMParser;
-    HTMLElement.prototype.click = function () {
-        var e = new Event('click', { bubbles: true, cancelable: true });
-        e[SYNTHETIC_CLICK] = true;
+    // HTML §6.4.4 "click()": nothing on a disabled form control; otherwise a
+    // synthetic pointer event, which in Chrome for Testing 148 is an
+    // untrusted, composed PointerEvent with detail 0, button 0, pointerId -1
+    // and an empty pointerType, at 0,0, with the window as its view.
+    // `clickElement` is that click: script's `click()`, and the click a
+    // label's activation gives its control (trusted when the label's was).
+    function clickElement(el, trusted) {
+        if (el.disabled === true && /^(button|input|select|textarea|fieldset|optgroup|option)$/.test(el.localName)) return;
+        var init = { bubbles: true, cancelable: true, composed: true, view: g, detail: 0, button: 0, buttons: 0,
+                     pointerId: -1, pointerType: '' };
+        var e = make(__rk.hasCtor('PointerEvent') ? 'PointerEvent' : 'MouseEvent', 'click', init);
+        // An own property, defined: no setter on a prototype sees the event.
+        fixed(e, SYNTHETIC_CLICK, true);
+        if (trusted) trust(e);
         // A link's activation behaviour (HTML §4.6.4): the user's click is
         // followed by the engine, script's own click() here.
-        if (this.dispatchEvent(e) && g.__rustkit_follow_link) g.__rustkit_follow_link(this);
-    };
+        if (dispatchTo(el, e) && __rk.followLink) __rk.followLink(el);
+    }
+    HTMLElement.prototype.click = function click() { clickElement(this, false); };
 
     // The global `document` becomes the Document wrapper.
     var doc = g.document;
@@ -3401,7 +6660,13 @@ const WRAPPERS_JS: &str = r#"
             if (s && s.gen === gen) N.submit(s.gen, s.id, b && b.gen === gen ? b.id : null);
         },
         setActivation: function (f) { activation = f; },
-        setImplicitSubmit: function (f) { implicitSubmit = f; }
+        // The engine's own click, reset and dispatch, for the activation
+        // behaviours: never the page-visible methods of those names.
+        click: clickElement,
+        reset: resetForm,
+        dispatch: function (target, event) { return dispatchTo(target, event); },
+        setImplicitSubmit: function (f) { implicitSubmit = f; },
+        setPickOption: function (f) { pickOption = f; }
     };
     // For web_history.js, which deletes it: script asks for a navigation.
     g.__rkNavInternals = { navigate: function (url, replace) { N.navigate(String(url), !!replace); } };
@@ -3415,10 +6680,43 @@ const WRAPPERS_JS: &str = r#"
         // answers what it was.
         current: function (el) { var was = currentScript; currentScript = el; return was; }
     };
+    // web_cssom.js publishes constructed-sheet text through this. The
+    // wrapper's slot is private to this closure.
+    __rk.setAdoptedStyles = function (node, json) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setAdopted(s.gen, s.id, String(json));
+    };
+    // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
+    __rk.setSheetDisabled = function (node, on) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setSheetDisabled(s.gen, s.id, !!on);
+    };
+    // web_cssom.js: which sheet a <style> owns now (a number that changes
+    // when its children change or it moves); -1 for a node of another
+    // document.
+    __rk.sheetGeneration = function (node) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return -1;
+        return N.info(s.gen, s.id, 'sheetGen');
+    };
+
+    // For dom/editing.js, which deletes it.
+    g.__rkEditInternals = {
+        wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        selectionOf: function (el) { return selectionOf(el); },
+        setEngineSelection: function (f) { engineSelection = f; },
+        setSelection: function (el, start, end, dir) {
+            var s = selectionOf(el);
+            s.start = start; s.end = end; s.dir = dir;
+        }
+    };
 
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        local: function (id) { return N.info(gen, id, 'local'); },
         setFragmentProto: function (f) { fragmentProto = f; },
         extendElementProto: function (f) {
             var base = elementProto;
@@ -3426,14 +6724,14 @@ const WRAPPERS_JS: &str = r#"
         }
     };
 
-    g.__rustkit_dom_reset = function (newGen) {
+    __rk.domReset = function (newGen) {
         gen = newGen;
         cache = new Map();
         var root = N.root(gen, 'document');
         Object.defineProperty(doc, SLOT, { value: { id: root, gen: gen }, configurable: true });
         if (typeof root === 'number') cache.set(root, doc);
     };
-    g.__rustkit_dom_reset(0);
+    __rk.domReset(0);
 })(globalThis);
 "#;
 
@@ -3522,7 +6820,7 @@ mod tests {
                  try { m.isEqualNode({}); } catch (e) { r.push(e.name); } \
                  r.join('|')"
             ),
-            "class,data-z,id|0|false|true|false|true|false|true|false|false|true|false|TypeError"
+            "id,class,data-z|0|false|true|false|true|false|true|false|false|true|false|TypeError"
         );
     }
 
@@ -3961,4 +7259,21 @@ mod tests {
         let (_, label) = b.take_script_mutations().first.expect("a write");
         assert_eq!(label, format!("div#{}…", "b".repeat(48)));
     }
+}
+
+/// LAT7c: the reads a Web Animations layer write of `props` reaches, or
+/// `None` when one of them is one layout reads (the boxes may move). The
+/// paint properties are the engine's paint-only animation frame's
+/// (`animations::is_paint_prop`).
+fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
+    let mut reads = 0;
+    for prop in props {
+        reads |= match prop {
+            "opacity" | "color" | "background-color" | "border-top-color" | "border-right-color"
+            | "border-bottom-color" | "border-left-color" => crate::LAYER_PAINT,
+            "transform" | "translate" | "rotate" | "scale" => crate::LAYER_PAINT | crate::LAYER_TRANSFORM,
+            _ => return None,
+        };
+    }
+    Some(reads)
 }

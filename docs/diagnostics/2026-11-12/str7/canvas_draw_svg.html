@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset=utf-8><style>body{margin:0}canvas{display:block}</style></head><body>
+<canvas id="fill_curves" width="50" height="50"></canvas>
+<canvas id="fill_hole" width="50" height="50"></canvas>
+<canvas id="stroke_lines" width="50" height="50"></canvas>
+<canvas id="stroke_curves" width="50" height="50"></canvas>
+<canvas id="fill_and_stroke" width="50" height="50"></canvas>
+<canvas id="aa_edges" width="50" height="50"></canvas>
+<script>
+// Draws each SVG into its 50x50 canvas, as MotionMark's Images test does, and
+// leaves `window.__str7` = {name: hex RGBA of getImageData(0, 0, 50, 50)}.
+window.__str7 = null;
+(function () {
+  var names = ["fill_curves", "fill_hole", "stroke_lines", "stroke_curves", "fill_and_stroke", "aa_edges"], out = {}, left = names.length;
+  names.forEach(function (name) {
+    var img = new Image();
+    img.addEventListener('load', function () {
+      var ctx = document.getElementById(name).getContext('2d');
+      ctx.drawImage(img, 0, 0, 50, 50);
+      var d = ctx.getImageData(0, 0, 50, 50).data, hex = '';
+      for (var i = 0; i < d.length; i++) hex += (d[i] < 16 ? '0' : '') + d[i].toString(16);
+      out[name] = hex;
+      if (--left === 0) window.__str7 = out;
+    });
+    img.src = name + '.svg';
+  });
+})();
+</script></body></html>

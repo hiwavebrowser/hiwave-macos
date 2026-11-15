@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>stress harness: offline positive control</title></head>
+<body>
+<p>This page tries to leave the machine once, then reports a score. A run of it must end <code>invalid</code>.</p>
+<script>
+// 203.0.113.1 is TEST-NET-3 (RFC 5737): documentation space, routed nowhere.
+function report() {
+    fetch('/__stress/result', { method: 'POST', body: JSON.stringify({ score: 1, control: true }) });
+}
+fetch('http://203.0.113.1/stress-offline-control').then(report, report);
+</script>
+</body></html>

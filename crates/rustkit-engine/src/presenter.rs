@@ -44,7 +44,7 @@ use url::Url;
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 
-use super::wgate::{self, HoldStage, InputLatency, InputMark};
+use super::wgate::{self, HoldStage, InputLatency, InputMark, VisitTag};
 use super::{EngineError, EngineViewId, PresentedFrame};
 
 /// One frame, as the page side hands it over: everything the presenter
@@ -73,13 +73,61 @@ pub struct FrameCommit {
     /// The viewport the list was laid out for, in CSS pixels (0 x 0 before
     /// the first layout).
     pub laid_out_for: (u32, u32),
-    /// The earliest input the page took since its last commit, for the
-    /// input-to-present log.
-    pub input: Option<InputMark>,
+    /// Every input the page took since its last commit (moves sampled:
+    /// the earliest one), for the input-to-present log (LAT1c). The
+    /// presenter measures each once, when it presents this frame.
+    pub inputs: Vec<InputMark>,
+    /// Inputs since the last commit whose turn changed no frame, or that
+    /// a navigation overtook (`no_frame` on the input-to-present line).
+    pub inputs_unpresented: u32,
+    /// The view and host this frame belongs to (LAT1c).
+    pub visit: VisitTag,
     /// The page's canvas colour (CSS 2.1 §14.2), as the window should
     /// clear a surface that is larger than `laid_out_for`. Opaque; a
     /// transparent canvas is white.
     pub canvas: [f64; 4],
+    /// A `<select>` drop-down is open in this frame (CH2.E6b). Like the
+    /// platform popup it stands for, it takes every press while open: a
+    /// press outside it closes it and goes nowhere else, so a view with a
+    /// region (the RustKit chrome over the page) is hit everywhere.
+    pub modal_popup: bool,
+    /// The `@font-face` set `list` was built with (E56). The window draws
+    /// a content thread's frame on its own thread, whose slot holds other
+    /// faces or none; it installs these before drawing, because a line
+    /// drawn per character resolves its family by name when drawn.
+    pub web_fonts: rustkit_layout::webfonts::FaceSet,
+}
+
+impl FrameCommit {
+    /// Take the inputs this commit carries (LAT1c), leaving none: the
+    /// window calls it once the commit has been handed to its presenter,
+    /// so a redraw of the same commit (a resize) does not measure them
+    /// again.
+    pub fn take_inputs(&mut self) -> (Vec<InputMark>, u32) {
+        (std::mem::take(&mut self.inputs), std::mem::take(&mut self.inputs_unpresented))
+    }
+
+    /// `older` is being replaced by this commit before the window drew it
+    /// (LAT1c): its inputs ride this one, ahead of this one's own, so an
+    /// input made while the window was slow is measured by the frame that
+    /// finally shows it rather than lost with the frame it skipped. Inputs
+    /// of another visit are counted `no_frame` instead.
+    pub fn absorb_undrawn(&mut self, older: &mut FrameCommit) {
+        let (mut inputs, unpresented) = older.take_inputs();
+        if inputs.is_empty() && unpresented == 0 {
+            return;
+        }
+        if older.visit != self.visit {
+            self.inputs_unpresented = self
+                .inputs_unpresented
+                .saturating_add(unpresented)
+                .saturating_add(inputs.len() as u32);
+            return;
+        }
+        self.inputs_unpresented = self.inputs_unpresented.saturating_add(unpresented);
+        inputs.append(&mut self.inputs);
+        self.inputs = inputs;
+    }
 }
 
 /// The window thread's half of the engine: every NSView/HWND, every GPU
@@ -100,6 +148,8 @@ pub(crate) struct Presenter {
     /// `EngineConfig::background_color`: what a view shows before its
     /// first frame.
     background_color: [f64; 4],
+    /// Host views drawn as transparent surfaces (CH3.A3c).
+    transparent: HashSet<ViewId>,
     /// Images handed to the renderer so far (tests: one upload per image,
     /// however often the frame is drawn).
     #[cfg(test)]
@@ -142,6 +192,7 @@ impl Presenter {
             latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color,
+            transparent: HashSet::new(),
             #[cfg(test)]
             images_uploaded: 0,
         })
@@ -159,6 +210,7 @@ impl Presenter {
             latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color: super::EngineConfig::default().background_color,
+            transparent: HashSet::new(),
             images_uploaded: 0,
         }
     }
@@ -181,6 +233,49 @@ impl Presenter {
     #[cfg(test)]
     pub(crate) fn latency_samples(&self) -> u64 {
         self.latency.samples
+    }
+
+    /// The input-to-present samples and lines so far (tests).
+    #[cfg(test)]
+    pub(crate) fn latency(&mut self) -> &mut InputLatency {
+        &mut self.latency
+    }
+
+    /// `commit` was just presented for view `id`: one sample per input it
+    /// carries, and its `no_frame` count, under its visit. Once: a commit
+    /// drawn again (a new surface size, the one-second refresh) is not
+    /// those inputs' frame a second time.
+    fn measure_inputs(&mut self, id: EngineViewId, commit: &FrameCommit) {
+        if commit.inputs.is_empty() && commit.inputs_unpresented == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        // The `no_frame` count first: a navigation's first commit carries
+        // the inputs the document being left took and never drew, which
+        // are the line of the visit before.
+        self.latency.unpresented(u64::from(commit.inputs_unpresented));
+        self.latency.begin(&commit.visit);
+        for input in &commit.inputs {
+            let ms = now.saturating_duration_since(input.at).as_secs_f64() * 1000.0;
+            debug!(ms, seq = input.seq, kind = input.kind.name(), "Input to present");
+            self.latency.record(input.kind, ms);
+        }
+        if let Some(stored) = self.commits.get_mut(&id) {
+            stored.inputs.clear();
+            stored.inputs_unpresented = 0;
+        }
+    }
+
+    /// `commit`'s inputs were not presented by this presenter (its frame
+    /// was already on screen, not laid out, or failed to draw): they are
+    /// `no_frame` for its visit.
+    pub(crate) fn note_unpresented(&mut self, commit: &FrameCommit) {
+        let n = commit.inputs.len() as u64 + u64::from(commit.inputs_unpresented);
+        if n == 0 {
+            return;
+        }
+        self.latency.begin(&commit.visit);
+        self.latency.unpresented(n);
     }
 
     // ----- views and surfaces -------------------------------------------
@@ -240,6 +335,39 @@ impl Presenter {
     pub(crate) fn clear_to_background(&self, viewhost_id: ViewId) -> Result<(), EngineError> {
         self.compositor
             .render_solid_color(viewhost_id, self.background_color)
+            .map_err(|e| EngineError::RenderError(e.to_string()))
+    }
+
+    /// Whether `viewhost_id` is drawn as a transparent surface (CH3.A3c,
+    /// the RustKit chrome over the page): its frame is cleared to
+    /// (0, 0, 0, 0) instead of its canvas, so what it does not paint shows
+    /// the views below; the surface is premultiplied and not opaque.
+    pub(crate) fn set_transparent(&mut self, viewhost_id: ViewId, transparent: bool) {
+        if transparent {
+            self.transparent.insert(viewhost_id);
+        } else {
+            self.transparent.remove(&viewhost_id);
+        }
+        match self.compositor.set_surface_transparent(viewhost_id, transparent) {
+            Ok(_) => {}
+            Err(error) => warn!(%error, "surface alpha mode not changed"),
+        }
+    }
+
+    /// The colour a view shows before its first frame: its background, or
+    /// nothing for a transparent view.
+    pub(crate) fn clear_to_empty(&self, viewhost_id: ViewId) -> Result<(), EngineError> {
+        let colour = if self.transparent.contains(&viewhost_id) { [0.0; 4] } else { self.background_color };
+        self.compositor
+            .render_solid_color(viewhost_id, colour)
+            .map_err(|e| EngineError::RenderError(e.to_string()))
+    }
+
+    /// A headless view's texture as RGBA, alpha kept (tests).
+    #[cfg(test)]
+    pub(crate) fn read_headless_rgba(&self, viewhost_id: ViewId) -> Result<(u32, u32, Vec<u8>), EngineError> {
+        self.compositor
+            .read_headless_rgba(viewhost_id)
             .map_err(|e| EngineError::RenderError(e.to_string()))
     }
 
@@ -396,10 +524,20 @@ impl Presenter {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: (0, 0),
-            input: None,
+            inputs: Vec::new(),
+            inputs_unpresented: 0,
+            visit: VisitTag::none(),
             canvas: self.background_color,
+            modal_popup: false,
+            web_fonts: Default::default(),
         });
-        let canvas = commit.canvas;
+        // The faces the frame was built with, on the thread that draws it
+        // (E56): this thread's slot may hold another document's, or none.
+        rustkit_layout::webfonts::install_set(&commit.web_fonts);
+        // A transparent view clears to nothing: what its document does not
+        // paint shows the views below (CH3.A3c).
+        let transparent = self.transparent.contains(&viewhost_id);
+        let canvas = if transparent { [0.0; 4] } else { commit.canvas };
         let display_list: Option<&DisplayList> = commit.list.as_deref();
         let generation = commit.generation;
         let scroll_offset = commit.scroll_offset;
@@ -456,7 +594,7 @@ impl Presenter {
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let Some(renderer) = &mut self.renderer {
                 // A headless view is drawn unscrolled, as it always was.
-                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas)?;
+                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas, transparent)?;
             } else {
                 // Fallback to compositor solid color
                 self.compositor
@@ -487,7 +625,7 @@ impl Presenter {
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let Some(renderer) = &mut self.renderer {
-                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas)?;
+                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas, transparent)?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
                     drop(output); // Release the texture
@@ -505,21 +643,10 @@ impl Presenter {
             self.compositor.present(output);
         }
 
-        // The W-gate's second figure: from the input's arrival at the
-        // app's queue to this present. A headless view presents nothing,
+        // The W-gate's second figure (LAT1c): from each input's native
+        // event time to this present. A headless view presents nothing,
         // but its draw is the same work, so it is measured the same way.
-        if let Some(input) = commit.input {
-            let ms = input.at.elapsed().as_millis().min(u32::MAX as u128) as u32;
-            debug!(ms, seq = input.seq, "Input to present");
-            if let Some(summary) = self.latency.record(ms) {
-                info!("{summary}");
-            }
-            // Once: a commit drawn again (a new surface size, the one-second
-            // refresh) is not that input's frame a second time.
-            if let Some(stored) = self.commits.get_mut(&id) {
-                stored.input = None;
-            }
-        }
+        self.measure_inputs(id, &commit);
 
         Ok(Some(presented))
     }
@@ -533,10 +660,12 @@ impl Presenter {
         scroll_offset: (f32, f32),
         target: &wgpu::TextureView,
         canvas: [f64; 4],
+        transparent: bool,
     ) -> Result<(), EngineError> {
         let commands = display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]);
         renderer.set_scroll_offset(scroll_offset);
         renderer.set_clear_color(canvas);
+        renderer.set_transparent(transparent);
         let drawn = renderer
             .execute(commands, target)
             .map_err(|e| EngineError::RenderError(e.to_string()));
@@ -571,6 +700,7 @@ impl Presenter {
                     scroll_offset,
                     &target,
                     [1.0, 1.0, 1.0, 1.0],
+                    false,
                 )
             }
             Some(path) => {
@@ -583,6 +713,12 @@ impl Presenter {
                 captured
             }
         }
+    }
+
+    /// Wait until the GPU has run everything submitted (frame-time tests).
+    #[cfg(test)]
+    pub(crate) fn wait_for_gpu(&self) {
+        self.compositor.device().poll(wgpu::Maintain::Wait);
     }
 
     /// The renderer, for tests that read its caches.
@@ -635,6 +771,7 @@ impl Presenter {
         let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>, bool)> =
             Vec::new();
         let mut urls_seen = HashSet::new();
+        let mut canvas_uploads = Vec::new();
 
         for cmd in commands {
             // Extract URL from BackgroundImage, Image and MaskedColor commands
@@ -654,9 +791,18 @@ impl Presenter {
                 continue;
             }
 
+            // A canvas bitmap (STR-7b) comes from the engine's canvas
+            // paints, not the image cache.
+            if crate::canvas_paint::is_bitmap_key(url) {
+                if let Some(frame) = crate::canvas_paint::bitmap_frame(url) {
+                    canvas_uploads.push((url.clone(), frame));
+                }
+                continue;
+            }
+
             // Try to parse as URL
             let Ok(parsed_url) = url::Url::parse(url) else {
-                tracing::warn!(%url, "Invalid URL for image");
+                tracing::warn!(url = %rustkit_net::str_url_for_log(url), "Invalid URL for image");
                 continue;
             };
 
@@ -668,7 +814,7 @@ impl Presenter {
                 match images.load_blocking(parsed_url.clone()) {
                     Ok(img) => Some(img),
                     Err(e) => {
-                        tracing::warn!(?e, %url, "Failed to decode data URL image");
+                        tracing::warn!(?e, url = %rustkit_net::url_for_log(&parsed_url), "Failed to decode data URL image");
                         None
                     }
                 }
@@ -683,8 +829,20 @@ impl Presenter {
             }
         }
 
+        // A canvas's earlier bitmaps go once a list no longer names them:
+        // every new bitmap has a key of its own.
+        renderer.retain_images(|key| {
+            !crate::canvas_paint::is_bitmap_key(key) || urls_seen.contains(&(key.to_string(), false))
+        });
+
         // Now upload all collected images
         let mut uploaded_count = 0;
+        for (key, frame) in canvas_uploads {
+            match renderer.upload_premultiplied_image(&key, frame.width, frame.height, &frame.rgba) {
+                Ok(()) => uploaded_count += 1,
+                Err(e) => tracing::warn!(?e, "Failed to upload a canvas bitmap"),
+            }
+        }
         for (url_str, image, mask) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
             let uploaded = if mask {
@@ -693,7 +851,7 @@ impl Presenter {
                 renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
             };
             if let Err(e) = uploaded {
-                tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
+                tracing::warn!(?e, url = %rustkit_net::str_url_for_log(&url_str), "Failed to upload image to renderer");
             } else {
                 uploaded_count += 1;
                 tracing::debug!(%url_str, "Uploaded image to renderer");
@@ -857,6 +1015,11 @@ impl WindowSurface {
         self.presenter.raw_view(self.viewhost_id)
     }
 
+    /// The host view's id, which tags the input its NSView records.
+    pub fn viewhost_id(&self) -> ViewId {
+        self.viewhost_id
+    }
+
     /// The NSView and the GPU surface take `bounds` now. The page lays out
     /// when it receives the same bounds as a message. The surface is new,
     /// so the caller draws the commit already published again: anchored at
@@ -871,11 +1034,26 @@ impl WindowSurface {
         self.presenter.grab_keyboard(self.viewhost_id)
     }
 
+    /// Draw this surface transparent (CH3.A3c, the RustKit chrome over the
+    /// page): the layer is not opaque, frames clear to (0, 0, 0, 0) and hold
+    /// premultiplied colour. The frame on screen is cleared now and the
+    /// next commit is drawn again, whatever it is.
+    pub fn set_transparent(&mut self, transparent: bool) -> Result<(), EngineError> {
+        self.presenter.set_transparent(self.viewhost_id, transparent);
+        self.shown = None;
+        self.presenter.clear_to_empty(self.viewhost_id)
+    }
+
     /// Draw `commit` when its navigation, generation or scroll offset
     /// differs from the frame on screen. A commit that has not been laid
     /// out is not drawn and does not become the frame on screen.
+    ///
+    /// The commit's inputs (LAT1c) are measured by this present, or
+    /// counted as `no_frame` when it draws nothing; either way the caller
+    /// should not hand the same inputs in again (`FrameCommit::take_inputs`).
     pub fn present_commit(&mut self, commit: &FrameCommit, images: &ImageManager) -> Result<(), EngineError> {
         if present_choice(self.shown, commit) != PresentChoice::Draw {
+            self.presenter.note_unpresented(commit);
             return Ok(());
         }
         let key = ShownFrame {
@@ -892,8 +1070,25 @@ impl WindowSurface {
         self.presenter.note_render_result(self.id, &noted);
         if drawn.is_ok() {
             self.shown = Some(key);
+        } else {
+            self.presenter.note_unpresented(commit);
         }
         drawn.map(|_| ())
+    }
+}
+
+/// CH2.E35: a surface owns its host view. Dropping it (a closed tab, a
+/// closed panel) releases the GPU surface first, then removes and releases
+/// the host view and its view-host registration
+/// ([`Presenter::destroy_view`]), so no shell has to tear the window or
+/// view down itself. Without this the presenter's fields dropped in
+/// declaration order: the view host (and the view under the swapchain)
+/// before the compositor's surface.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl Drop for WindowSurface {
+    fn drop(&mut self) {
+        self.shown = None;
+        self.presenter.destroy_view(self.id, self.viewhost_id);
     }
 }
 
@@ -909,8 +1104,12 @@ mod present_choice_tests {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: if laid_out { (800, 600) } else { (0, 0) },
-            input: None,
+            inputs: Vec::new(),
+            inputs_unpresented: 0,
+            visit: VisitTag::none(),
             canvas: [1.0, 1.0, 1.0, 1.0],
+            modal_popup: false,
+            web_fonts: Default::default(),
         }
     }
 

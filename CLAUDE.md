@@ -1,130 +1,257 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for every AI agent working in this repository: lead, implementer,
+reviewer, batch agent or bot.
 
-## Project Overview
+## Ownership
 
-HiWave is a privacy-first browser for macOS built in Rust. It features a custom browser engine called **RustKit** that provides pure-Rust rendering with GPU acceleration via wgpu, alongside native ad/tracker blocking via Brave's adblock-rust engine.
+**This codebase is yours: Pete has given you the goals, you decide how to get
+there in all aspects, and you'll keep building on it until it's done.**
 
-## Build Commands
+What that means in practice:
+
+- You do not wait to be told how. Pick the approach, measure it, land it.
+- If you find a bug, a wrong test or a stale document while doing something
+  else, fix it or file it as a row in the plan. Do not walk past it.
+- Finish what you start. A branch nobody pushed and a PR nobody batched are
+  lost work.
+- Ownership is exercised through the method below (red test first, a pinned
+  Chrome measurement, independent review, the batch gate). The gates are how
+  we know a change is right; they are not permission slips from Pete.
+
+Three things stay Pete's call. Ask him; do not decide them yourself:
+
+1. **Goals and priorities.** The mission, what "done" means, and the current
+   focus (which board or row comes first).
+2. **Releases.** Promoting `develop` to `master`, and anything users download.
+3. **Outward-facing acts.** Security advisories, public posts, licence
+   changes, spending money, and loading live sites beyond the approved lists.
+
+## Goals and "done"
+
+The mission and its six pillars are in `MISSION.md`: a from-scratch browser in
+Rust, as good as Chrome and better, private by default, outside Google's
+ecosystem. Read it once.
+
+"Done" is measured, not felt. The bars and where each is defined are in
+`docs/GATES.md`:
+
+| Bar | Done when | Tool |
+|---|---|---|
+| Chrome board (our own UI vs Chrome) | every row green | `scripts/chrome_board.py` |
+| Real-site board (top sites vs Chrome) | every site loads, is readable and looks right, top 20 then top 100 | `scripts/realsite_board.py` (its baseline is on the `atlas/trench-realsite` branch) |
+| Latency | the exit metric in `trench/latency/BASELINE.md` | `tools/latency/` |
+| 100% RustKit | `wry`, `tao` and `muda` are deleted from the workspace | `Cargo.toml` |
+
+The order between these bars is a priority, so it is Pete's. The current
+order and the open rows live in the plan files: `trench/z/PLAN-z.md` and
+`trench/devtools/PLAN-devtools.md` on the `atlas/z` branch of the
+`hiwavebrowser/hiwave` hub repository. The plan file is
+the project's memory: if it is not in the plan, it will be forgotten.
+
+## Project overview
+
+HiWave is a privacy-first browser for macOS built in Rust. Its engine,
+**RustKit**, renders pages in pure Rust with GPU output through wgpu.
+JavaScript is Boa (vendored and patched in `third_party/boa_engine`, see its
+`PATCHES.md`). Ad and tracker blocking is Brave's adblock-rust.
+
+On macOS, RustKit draws everything by default: page content and the browser's
+own UI (tab bar, address bar, shelf, Inspector, settings). The system WebKit
+view survives only as an escape hatch for the browser UI
+(`HIWAVE_RUSTKIT_CHROME=0`). `tao` still provides the window and event loop
+and `muda` the menu bar. The Windows and Linux ports live in their own
+repositories (`hiwave-windows`, `hiwave-linux`) and sync from this one.
+
+## Build and test
+
+Rust toolchain is pinned in `rust-toolchain.toml`.
 
 ```bash
-# Build and run (the `rustkit` feature is on by default)
+# Run the browser (the `rustkit` feature is on by default)
 cargo run -p hiwave-app
-
-# Release build
 cargo run -p hiwave-app --release
 
-# Quick syntax check (macOS; on Linux, wry needs the GTK/WebKitGTK dev packages)
+# Gate 0: must compile, with no new warnings, after every change
+cargo check -p rustkit-engine --features headless
 cargo check -p hiwave-app
 
-# What CI runs (macOS): compile every test target, then the per-crate suites
-cargo test --workspace --no-run
-cargo test -p rustkit-layout --lib        # likewise rustkit-engine, rustkit-js, ...
-for t in scripts/tests/test_*.py; do python3 "$t"; done   # instrument guards
+# Engine tests (headless: offscreen GPU, no window)
+cargo test -p rustkit-engine --lib --features headless
+cargo test -p rustkit-engine --lib --features headless my_module_tests   # one module
 
-# Run tests
-cargo test --workspace                    # All tests
-cargo test -p hiwave-shield               # Specific crate
-cargo test test_name -- --nocapture       # Single test with output
+# Other crates
+cargo test -p rustkit-layout --lib        # likewise rustkit-css, rustkit-bindings, ...
+cargo test -p hiwave-app --bin hiwave     # the app crate is bin-only: --bins, not --lib
 
-# Format and lint
+# Script guards
+for t in scripts/tests/test_*.py; do python3 "$t"; done
+
+# Format
 cargo fmt --all
-cargo clippy --workspace -- -D warnings
 ```
 
-## Parity Testing (Visual Regression)
+Measurement builds use the `parity` profile (opt-level 3, no LTO):
+`cargo build --profile parity -p parity-capture`.
 
-RustKit rendering is compared against Chrome baselines for pixel-level accuracy:
+### Rules for running tests
 
-```bash
-# Build parity capture tool
-cargo build --release -p parity-capture
-
-# Run parity test suite
-python3 scripts/parity_test.py                     # All cases
-python3 scripts/parity_test.py --scope builtins    # Built-in pages only
-python3 scripts/parity_test.py --case new_tab      # Single case
-
-# Run parity swarm (parallel testing)
-python3 scripts/parity_swarm.py --jobs 4 --scope all
-
-# Generate baselines from Chrome
-python3 scripts/generate_baselines.py
-```
+- **Every test run has a time limit.** macOS has no `timeout`; wrap the
+  command in a wall-clock limiter. A hang is a finding: report it.
+- **The Mac's CPU is the bottleneck.** While you implement, run gate 0 and
+  the test filters for what you touched. The full suites run once on GitHub
+  Actions and once in the batch. Do not run them a third time.
+- **One heavy job at a time.** Serialise cargo across checkouts, and do not
+  start a build or suite while the 1-minute load average is above 10.
+- **Judge a run by its exit code**, not by the tail of its log.
+- **Never rerun CI to fish for green**, and never push an empty commit to
+  retrigger it. A red check is read, explained and fixed.
 
 ## Architecture
 
-### Three-WebView Model
+### Views
 
-The browser uses a multi-WebView architecture:
-- **Chrome WebView** (WRY/WebKit): Browser UI, tabs, address bar, sidebar
-- **Content WebView**: Web page rendering. RustKit on macOS; WRY on Windows/Linux
-- **Shelf WebView** (WRY/WebKit): Command palette, collapsible panels
+- **Content views**: RustKit. A web document gets no app bridge: no
+  `window.ipc`, no host objects.
+- **Chrome, shelf, Inspector, settings**: the browser's own pages in
+  `crates/hiwave-app/src/ui/`, drawn by RustKit as app-owned views. They talk
+  to Rust through `window.ipc.postMessage()`; Rust handles messages in
+  `ipc/commands.rs` and answers with `evaluate_script()`.
 
-### Workspace Crates
+App-owned pages are privileged. Anything a web page can influence (titles,
+URLs, history, console lines) is untrusted when it reaches them: build DOM
+with `textContent` and listeners, never markup or inline handlers from
+strings. Logs carry shapes (command name, kind, size), never bodies.
 
-**HiWave Application Crates:**
-- `hiwave-app` - Main application, event loop, IPC handling
-- `hiwave-core` - Shared types (TabId, WorkspaceId, etc.)
-- `hiwave-shell` - Tab/workspace management, command palette
-- `hiwave-shield` - Ad blocking engine (Brave's adblock-rust)
-- `hiwave-vault` - Password manager (AES-256 encryption)
-- `hiwave-analytics` - Local-only usage analytics
+### Workspace crates
 
-**RustKit Engine Crates:**
-- `rustkit-engine` - Engine orchestration, multi-view management, style cascade
-- `rustkit-core` / `rustkit-common` - Engine runtime, shared utilities and errors
-- `rustkit-dom` - DOM tree representation
-- `rustkit-html` - HTML parser
-- `rustkit-css` / `rustkit-cssparser` - CSS parsing and styling
-- `rustkit-layout` - Block/inline/flex/grid layout
-- `rustkit-text` - Text shaping and rendering
-- `rustkit-renderer` - GPU rendering via wgpu
-- `rustkit-compositor` - Layer compositing
-- `rustkit-viewhost` - Window/surface management
-- `rustkit-js` / `rustkit-bindings` - JavaScript (Boa, vendored in `third_party/boa_engine`) and DOM bindings
-- `rustkit-net` / `rustkit-http` - Network stack
-- `rustkit-image` / `rustkit-codecs` / `rustkit-svg` - Images, codecs, SVG
-- `rustkit-animation`, `rustkit-canvas`, `rustkit-webgl`, `rustkit-media` - CSS animations, Canvas 2D, WebGL, audio/video
-- `rustkit-worker`, `rustkit-sw`, `rustkit-idb` - Web Workers, Service Workers, IndexedDB
-- `rustkit-a11y` - Accessibility
-- `rustkit-test` / `rustkit-bench` - WPT-style harness, benchmarks
+**Application**
+- `hiwave-app` - the app: event loop, IPC, chrome pages, RustKit integration
+- `hiwave-core` - shared types (TabId, WorkspaceId, ...)
+- `hiwave-shell` - tabs, workspaces, command palette
+- `hiwave-shield` / `hiwave-shield-intercept` - ad and tracker blocking
+- `hiwave-vault` - password manager
+- `hiwave-analytics` - local-only usage analytics
 
-**Tools:**
-- `parity-capture` - Headless frame capture for parity testing
-- `hiwave-mcp` - MCP server exposing the engine to agents (see `docs/HIWAVE_MCP_PLAN.md`)
-- `hiwave-smoke` - Scripted smoke harness (macOS)
+**RustKit engine**
+- `rustkit-engine` - orchestration, views, style cascade, page lifecycle
+- `rustkit-core` / `rustkit-common` - runtime, shared utilities and errors
+- `rustkit-dom`, `rustkit-html` - DOM tree, HTML parser
+- `rustkit-css` / `rustkit-cssparser` - CSS values and parsing
+- `rustkit-layout` - block, inline, flex, grid
+- `rustkit-text` - shaping and glyph rasterisation
+- `rustkit-renderer` / `rustkit-compositor` - GPU drawing, layers
+- `rustkit-viewhost` - windows, surfaces, input
+- `rustkit-js` / `rustkit-bindings` - Boa and the DOM bindings
+- `rustkit-net` / `rustkit-http` - networking
+- `rustkit-image` / `rustkit-codecs` / `rustkit-svg` - images, codecs, SVG
+- `rustkit-animation`, `rustkit-canvas`, `rustkit-webgl`, `rustkit-media`
+- `rustkit-worker`, `rustkit-sw`, `rustkit-idb`
+- `rustkit-a11y`
+- `rustkit-test` / `rustkit-bench`
 
-### Key Files
+**Tools**
+- `parity-capture` - headless frame capture; every board and campaign uses it
+- `hiwave-mcp` - MCP server exposing the engine to agents
+- `tools/real_window/` - drives the built app in its real window
+- `tools/parity_oracle/` - the Chrome side of every comparison
+- `tools/latency/` - latency sessions and baselines
+
+### Key files
 
 | File | Purpose |
-|------|---------|
-| `crates/hiwave-app/src/main.rs` | Entry point, event loop, WebView setup |
-| `crates/hiwave-app/src/state.rs` | AppState, persistence, shelf logic |
-| `crates/hiwave-app/src/ipc/` | IPC message types and command handlers |
-| `crates/hiwave-app/src/ui/` | HTML/CSS/JS for browser UI |
-| `crates/hiwave-app/src/webview_rustkit.rs` | RustKit content WebView integration |
-| `crates/hiwave-app/src/shield_adapter.rs` | Ad blocking for RustKit requests |
-| `crates/rustkit-engine/src/lib.rs` | Engine orchestration layer |
+|---|---|
+| `crates/hiwave-app/src/main.rs` | entry point, event loop, IPC routing |
+| `crates/hiwave-app/src/webview_rustkit.rs` | RustKit content views, content thread |
+| `crates/hiwave-app/src/webview_rustkit_chrome.rs` | RustKit chrome views |
+| `crates/hiwave-app/src/ipc/` | IPC message types and handlers |
+| `crates/hiwave-app/src/ui/` | the browser's own pages |
+| `crates/hiwave-app/src/state.rs` | AppState, persistence |
+| `crates/rustkit-engine/src/lib.rs` | engine orchestration, cascade, selector matching |
+| `crates/rustkit-layout/src/lib.rs` | layout |
+| `crates/rustkit-renderer/src/lib.rs` | drawing |
+| `crates/rustkit-css/src/lib.rs` | CSS values |
 
-### Feature Flags
+### Feature flags (`hiwave-app`)
 
-The `hiwave-app` crate uses feature flags:
-- `rustkit` (default) - Use RustKit for content, WRY for chrome
-- `headless` (dev) - Offscreen rendering for tests (enabled on `rustkit-engine` for hiwave-app's macOS dev-dependency)
+- `rustkit` (default) - RustKit views
+- `test-hooks` - the real-window checks' panel probe in a release build.
+  Never in a shipped build.
+- `headless` (on `rustkit-engine`) - offscreen rendering for tests
 
-On macOS, page content is always drawn by RustKit; the `webview-fallback`
-feature (system WebKit for content) was removed in threads plan step T3.
-On Windows and Linux the content WebView is still WRY.
+## How a change gets to develop
 
-## Test Fixtures
+1. **Take a row.** Work comes from the plan files. New findings become rows.
+2. **Fresh checkout, own branch off `develop`.** One task per checkout;
+   remove it after the push. Never work on `develop` or `master` directly.
+3. **Measure Chrome first.** Expected values come from the pinned oracle,
+   Chrome for Testing 148.0.7778.216, never from memory, the spec alone, or
+   what RustKit does today. Say in the PR which Chrome produced each number.
+4. **Red, then fix.** Commit the failing test, then the fix. A test that
+   also passes on the old code proves nothing: show it red.
+5. **Prove it where it runs.** A unit test is not proof for app behaviour;
+   use the real-window driver for anything that goes through the event loop.
+6. **Open a draft PR on `develop`.** State what was measured, what was not
+   run, and what is left. Keep at most 16 PRs open across the fleet.
+7. **Independent review (R1).** Someone who did not write it reviews it on
+   GitHub: CLEAR, CLEAR WITH NITS, or HOLD. The review body on GitHub is the
+   record. A new head needs a delta review. Take the nits or backlog them
+   with a row; do not ignore them.
+8. **The batch gate.** Review-clear PRs are merged together onto `develop`
+   in a batch checkout and the whole tree is tested on the Mac (below).
+   Implementers do not merge their own PRs.
+9. **Landing.** Each PR is merged with `--match-head-commit`. The landed
+   tree must equal the tested tree; verify the tree hash and say so.
 
-- `fixtures/` - HTML test files for rendering tests
-- `websuite/` - Web compatibility test cases (micro tests, full pages)
-- `baselines/` - Chrome reference screenshots
-- `parity-baseline/` - RustKit vs Chrome comparison results
-- `goldens/` - Golden images for visual regression
+### The batch gate
+
+A batch merges the cleared PRs with `--no-ff`, compiling after each merge
+(gate 0, no new warnings), then runs, in order:
+
+1. the headless engine suite, then every crate's suite
+2. the app crate three times, with no flake tolerance
+3. script guards and tool tests
+4. release, test-hooks and parity-capture builds
+5. the parity campaign (`scripts/parity_test.py` cases vs Chrome)
+6. the chrome board, both arms (develop and candidate)
+7. the 19-site A/B (develop vs candidate; movers are rerun with arms swapped)
+8. the WPT Tier-1 reftests (`scripts/wpt_tier1.py`)
+9. the real-site board
+10. two full real-window runs (`tools/real_window/driver.py`)
+
+Rules of the gate:
+
+- A red is read before it is rerun. Find the cause from the code and the
+  log; rerun only to count a suspected flake (alone 20x, on develop 5x).
+- A conflict between two PRs, or a test one PR invalidates in another, is
+  resolved in the batch and the resolution is carried onto the PR branch at
+  landing, so `develop` equals what was tested.
+- A number that looks too good is checked before it is reported.
+- The batch report says what was not verified.
+
+### Real-window runs
+
+The driver takes over the screen. Run it only while holding the real-window
+lock and with the machine idle (no keyboard or mouse input for 10 minutes),
+checked before every run. Any job that puts a headed browser in front takes
+the same lock. Kill only processes your own run started.
+
+## Hard rules
+
+- **Git:** no force-push. Never `git add -A`; stage paths by name. Retarget
+  stacked PRs before deleting their base branch. Do not delete a branch with
+  unmerged work without the lead's go-ahead.
+- **Security findings stay out of public text.** PR titles, bodies, review
+  comments and commit messages describe the hardening, never the exploit.
+  Details go to the lead privately.
+- **Live sites:** no live-site loads except through the existing board and
+  A/B tools and their site lists. Some sites are replay-only or excluded;
+  the lists say which. No challenge solving, no faked APIs.
+- **Privacy:** logs and reports carry shapes, not page content, passwords,
+  usernames or URLs with secrets. No personal data in commits.
+- **Honesty:** report what failed with its output, what was skipped, and
+  what you did not check. Never claim a run you did not make.
+- **No timeline promises.** Give order and dependencies, not dates.
 
 ## Pull requests labelled `no-check`
 
@@ -136,35 +263,20 @@ it back in the queue. Only the project lead adds or removes `no-check`; a worker
 does not park its own PR. A `no-check` PR's `r2-pass` label or earlier stamp is
 not a pass for its current head.
 
-## Commit Message Format
+## Commit messages
 
-Use conventional commits:
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `refactor:` - Code restructuring
-- `test:` - Adding tests
-- `docs:` - Documentation
-- `chore:` - Maintenance
+Conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`,
+`chore:`, `perf:`, `ci:`. Name the plan row when there is one
+(`fix(layout): ... (CH2.B17b)`). A large diff carries a `large-diff:` line in
+the PR body explaining why; write it yourself.
 
-## IPC Communication
+## Where things are
 
-Chrome/Shelf WebViews communicate with Rust via `window.ipc.postMessage()`. The Rust backend handles messages in `ipc/commands.rs` and sends responses via `evaluate_script()`.
-
-## Current Status and Plans
-
-Engine status (parity, WPT, known gaps) lives in `README.md` under "Engine
-Status". Current plans and design notes are in `docs/` (for example
-`docs/PARITY_FINISH_LINE_PLAN_2026-08-04.md` and `docs/HIWAVE_MCP_PLAN.md`);
-`trench/` holds run baselines and forensics. Superseded plans are kept in
-`docs/archive/` for history only; do not treat them as current.
-
-### Key Files for Parity Work
-
-| File | What it does |
-|------|--------------|
-| `crates/rustkit-css/src/lib.rs` | CSS parsing, Display enum, color parsing |
-| `crates/rustkit-engine/src/lib.rs` | Selector matching, style cascade |
-| `crates/rustkit-layout/src/lib.rs` | Block/flex/inline-block layout |
-| `crates/rustkit-renderer/src/lib.rs` | GPU rendering, gradients, backgrounds |
-| `scripts/parity_test.py` | Run parity tests (`--scope micro` for CSS micro-tests) |
-| `parity-baseline/diffs/` | Visual diff results and attribution JSON (generated, gitignored) |
+- `MISSION.md` - why this exists
+- `docs/GATES.md` - every gate, its threshold, and the code that decides it
+- `README.md` "Engine Status" - parity, WPT, known gaps
+- `docs/` - current plans and design notes; `docs/archive/` is history only
+- `docs/diagnostics/<date>/` - measurements and oracle outputs behind a fix
+- `trench/` - baselines, digests and forensics for each long-running effort
+- `fixtures/`, `websuite/` - test pages; `baselines/`, `goldens/` - reference frames
+- `third_party/wpt/` - the WPT projection; not checked in, built by `scripts/wpt_sync.sh`

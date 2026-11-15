@@ -1,0 +1,9 @@
+<!doctype html><!-- filter: color-matrix functions. PASS: no red anywhere; box 1 (and its inner square) green, 2 green, 3 grey, 4 brown, 5 mid grey, 6 white. FAIL: any red/magenta box. -->
+<style>body{margin:0}div{float:left;width:100px;height:100px;margin:20px 30px 0 0;background:red;position:relative}
+i{position:absolute;left:25px;top:25px;width:50px;height:50px;background:#f0f}</style>
+<div style="background:#f0f;filter:invert(1)"><i></i></div>
+<div style="filter:hue-rotate(120deg)"></div>
+<div style="filter:grayscale(1)"></div>
+<div style="filter:sepia(1)"></div>
+<div style="filter:saturate(0) contrast(0)"></div>
+<div style="filter:opacity(0)"></div>

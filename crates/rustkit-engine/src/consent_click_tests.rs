@@ -31,7 +31,8 @@ fn page(html: &str) -> Option<(Engine, EngineViewId)> {
     };
     let id = engine.create_headless_view(VIEW).expect("headless view");
     engine.load_html(id, html).expect("load_html");
-    engine.run_inline_scripts(id).expect("the page's script runs");
+    let log = engine.script_log(id).expect("view");
+    assert!(log.iter().all(|r| r.outcome == ScriptOutcome::Ran), "the page's script runs: {log:?}");
     Some((engine, id))
 }
 

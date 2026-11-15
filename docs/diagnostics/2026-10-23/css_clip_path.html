@@ -1,0 +1,11 @@
+<!doctype html><!-- clip-path basic shapes clip the box and its descendants. Pass: no red anywhere; centres green. -->
+<style>
+body{margin:0}
+.b{float:left;width:100px;height:100px;border:20px solid red;background:green;margin-right:10px}
+i{position:absolute;left:-20px;top:-20px;width:140px;height:20px;background:red}
+</style>
+<div class="b" style="clip-path:inset(20px)"></div>
+<div class="b" style="clip-path:circle(50px)"></div>
+<div class="b" style="clip-path:ellipse(50px 30px at 50% 50%)"></div>
+<div class="b" style="-webkit-clip-path:inset(20px round 10px);position:relative"><i></i></div>
+<div class="b" style="clip-path:circle(closest-side at 70px 70px) content-box"></div>

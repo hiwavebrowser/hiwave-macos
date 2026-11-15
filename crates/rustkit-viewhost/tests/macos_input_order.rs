@@ -172,8 +172,10 @@ fn main() {
                 PointerInput::Button => format!("{}({view})", if p.down { "press" } else { "release" }),
                 PointerInput::Move => format!("move({view})"),
                 PointerInput::Leave => format!("leave({view})"),
+                PointerInput::Secondary => format!("secondary({view})"),
             },
             InputKind::Key(k) => format!("key({view}, {:?})", k.text),
+            other => format!("{other:?}({view})"),
         }
     };
     let got: Vec<String> = first.iter().map(describe).collect();

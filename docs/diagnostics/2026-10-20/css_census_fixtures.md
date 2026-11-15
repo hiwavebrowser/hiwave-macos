@@ -14,6 +14,8 @@ Each page is 15 lines or fewer and paints 100x100 boxes (or a clamp box) at fixe
 | 4 | `css_container_query.html` | `@container` named and unnamed size queries on `container-type:inline-size` | `#k1`–`#k3` all rgb(0,128,0) at (60,60) (170,60) (280,60) | **FAIL** 2 of 3: `#k1` and `#k2` are red (the true `@container` blocks are skipped). `#k3` is green (its false block is also skipped) |
 | 5 | `css_color_mix_oklab.html` | `color-mix(in oklab, …)` direct and through `var()` | (60,60) = rgb(0,128,0); (170,60) and (280,60) = rgb(128,192,128) (computed `oklab(0.519749 -0.140274 0.107678 / 0.5)` over white) | **FAIL** 3 of 3: all three boxes are white (255,255,255), not mixed and not even the red fallback (see note) |
 
+Added later (display re-cut of `243374eb`): `css_display_contents.html`, a `display:contents` wrapper in a flex row (census: 68 of the top sites). Chrome 148.0.7778.216: (60,60) and (160,60) both rgb(0,128,0). RustKit develop `6e25ea3a`: **FAIL**, (160,60) is red (the wrapper kept a block box and stacked its children); green with the re-cut.
+
 Note on 5: in RustKit an unparseable value in the `background` **shorthand** wipes the earlier valid `background: red`, instead of the declaration being dropped. `background:red; background:frobnicate(1)` and `background:red; background:oklab(0.5 0 0)` also paint nothing. The longhand `background-color: red; background-color: color-mix(…)` keeps red. Real sites rely on this fallback pattern (`background: X; background: color-mix(…)`), so the shorthand drop is a separate bug from color-mix() support.
 
 Running a page: `parity-capture --html-file <page> --width 800 --height 600 --dump-frame out.ppm`, then read the probe pixels listed in the page's header comment.

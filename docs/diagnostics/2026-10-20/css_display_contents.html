@@ -1,0 +1,10 @@
+<!doctype html><!-- display:contents in a flex container (68 census sites): the wrapper's children are flex items.
+ PASS: both 100x100 boxes green at pixels (60,60) (160,60), side by side. FAIL: (160,60) red (the wrapper kept a box and stacked them). -->
+<html><head><style>
+body { margin: 0; }
+#f { display: flex; position: absolute; left: 10px; top: 10px; width: 200px; height: 100px; background: red; }
+#w { display: contents; }
+.k { width: 100px; height: 100px; background: green; flex: none; }
+</style></head><body>
+<div id="f"><div id="w"><div class="k" id="k1"></div><div class="k" id="k2"></div></div></div>
+</body></html>

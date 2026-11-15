@@ -32,12 +32,91 @@ pub mod security;
 
 pub use cache::{cache_eligibility, CacheConfig, CacheKey, CacheStats, CachedResponse, Ineligible, MemoryCache, parse_cache_control};
 pub use download::{Download, DownloadEvent, DownloadId, DownloadManager, DownloadState};
-pub use intercept::{InterceptAction, InterceptHandler, RequestInterceptor};
+pub use intercept::{BlockReason, InterceptAction, InterceptHandler, RequestInterceptor};
 pub use security::{
     check_mixed_content, ContentSecurityPolicy, CookieAttributes, CorsChecker, CorsResult,
     CspDirective, CspSource, HashAlgorithm, MixedContentResult, MixedContentType, Origin,
     ReferrerPolicy, SameSite, SandboxFlags, SecurityContext, SecurityError,
 };
+
+/// `url` for an info or warn line (CH3.A6/A6b): scheme, host and path — no
+/// userinfo, query or fragment (signed CDN URLs carry tokens there); a
+/// `data:` URL only up to its payload. The whole URL belongs on debug.
+pub fn url_for_log(url: &Url) -> String {
+    if url.scheme() == "data" {
+        let path = url.path();
+        return format!("data:{}", &path[..path.find(',').unwrap_or(path.len())]);
+    }
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+/// `url` as a SHIELD log line may carry it: scheme and host (and a non-default port) only. No path,
+/// query or fragment (signed URLs, ids, tokens) and no userinfo; a `data:` URL is just `data:`. For a
+/// line about a request the shield blocks, where the tracker's host is the shape worth keeping and
+/// the rest of the URL is not (the standing rule: logs carry shapes, never bodies).
+pub fn origin_for_log(url: &Url) -> String {
+    match url.host_str() {
+        Some(host) => match url.port() {
+            Some(port) => format!("{}://{host}:{port}", url.scheme()),
+            None => format!("{}://{host}", url.scheme()),
+        },
+        None => format!("{}:", url.scheme()),
+    }
+}
+
+/// [`url_for_log`] for text that may not parse as a URL (a relative
+/// reference, an `@font-face` `src` list): each `?…`/`#…` run is cut up
+/// to the next `)`, quote, comma or white space.
+pub fn str_url_for_log(text: &str) -> String {
+    if let Ok(url) = Url::parse(text) {
+        return url_for_log(&url);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut cutting = false;
+    for c in text.chars() {
+        if c == '?' || c == '#' {
+            cutting = true;
+        } else if cutting && (c == ')' || c == '"' || c == '\'' || c == ',' || c.is_whitespace()) {
+            cutting = false;
+        }
+        if !cutting {
+            out.push(c);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod url_for_log_tests {
+    use super::{str_url_for_log, url_for_log};
+    use url::Url;
+
+    #[test]
+    fn a_url_on_an_info_line_is_scheme_host_and_path() {
+        let s = "a6-secret";
+        let u = |t: &str| Url::parse(t).unwrap();
+        assert_eq!(url_for_log(&u(&format!("https://u:{s}@a.test:8080/p/q?t={s}#{s}"))), "https://a.test:8080/p/q");
+        assert_eq!(url_for_log(&u(&format!("data:text/html,<p>{s}</p>"))), "data:text/html");
+        assert_eq!(url_for_log(&u("about:blank")), "about:blank");
+    }
+
+    #[test]
+    fn text_that_is_not_a_url_loses_each_query_and_fragment_run() {
+        let s = "a6b-secret";
+        assert_eq!(str_url_for_log(&format!("https://u:{s}@a.test/p?t={s}#{s}")), "https://a.test/p");
+        assert_eq!(str_url_for_log(&format!("not a url?{s}")), "not a url");
+        assert_eq!(str_url_for_log(&format!("rel/p#{s}")), "rel/p");
+        assert_eq!(
+            str_url_for_log(&format!("url(/f.woff2?t={s}) format(\"woff2\"), url('/g.woff#{s}')")),
+            "url(/f.woff2) format(\"woff2\"), url('/g.woff')"
+        );
+    }
+}
 
 /// Errors that can occur in networking.
 #[derive(Error, Debug)]
@@ -54,8 +133,10 @@ pub enum NetError {
     #[error("Request cancelled")]
     Cancelled,
 
+    /// Refused by the interceptor (the shield), with its list and rule
+    /// when the handler gave them.
     #[error("Request blocked")]
-    Blocked,
+    Blocked(Option<BlockReason>),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -718,8 +799,12 @@ impl ResourceLoader {
             match action {
                 InterceptAction::Allow => {}
                 InterceptAction::Block => {
-                    warn!(url = %request.url, "Request blocked by interceptor");
-                    return Err(NetError::Blocked);
+                    warn!(url = %origin_for_log(&request.url), "Request blocked by interceptor");
+                    return Err(NetError::Blocked(None));
+                }
+                InterceptAction::BlockedBy(reason) => {
+                    warn!(url = %origin_for_log(&request.url), list = %reason.list, "Request blocked by interceptor");
+                    return Err(NetError::Blocked(Some(reason)));
                 }
                 InterceptAction::Redirect(new_url) => {
                     debug!(url = %request.url, new_url = %new_url, "Request redirected");
@@ -1036,7 +1121,7 @@ impl FetchTrace {
         self.finished = true;
         let (status, disposition) = match result {
             Ok(response) => (response.status.as_u16().to_string(), "response"),
-            Err(NetError::Blocked) => ("-".to_string(), "blocked"),
+            Err(NetError::Blocked(_)) => ("-".to_string(), "blocked"),
             Err(NetError::Timeout(_)) => ("-".to_string(), "timeout"),
             Err(NetError::Cancelled) => ("-".to_string(), "cancelled"),
             Err(_) => ("-".to_string(), "error"),
@@ -1345,3 +1430,70 @@ mod replay_proxy_tests {
     }
 }
 
+#[cfg(test)]
+mod blocked_request_log_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// Everything logged, at any level, while `f` runs on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Logs carry shapes, never bodies (the standing rule): a request the shield blocks is logged by
+    /// its scheme and host. Its path, query and fragment (signed URLs, ids, tokens) are not.
+    #[test]
+    fn a_blocked_request_is_logged_by_host_only() {
+        struct Refuse;
+        impl InterceptHandler for Refuse {
+            fn intercept(&self, _: &Request) -> InterceptAction {
+                InterceptAction::Block
+            }
+        }
+        let mut interceptor = RequestInterceptor::new();
+        interceptor.add_handler(Arc::new(Refuse));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let loader = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(interceptor)).unwrap();
+        let request = Request::get(Url::parse("https://tracker.example/pixel/u123abc?session=s3cr3t#frag9").unwrap());
+        let text = logged(|| {
+            let err = rt.block_on(loader.fetch(request)).err().expect("blocked");
+            assert!(matches!(err, NetError::Blocked(_)));
+        });
+        // Every captured line for this request, except the loader's general "Fetching resource" debug
+        // line, which keeps the whole URL by the existing convention (CH3.A6).
+        let text: String = text.lines().filter(|l| !l.contains("Fetching resource")).collect::<Vec<_>>().join("
+");
+        assert!(text.contains("Request blocked by interceptor"), "the block is still logged: {text}");
+        assert!(text.contains("tracker.example"), "by its host: {text}");
+        assert!(text.contains("Handler intercepted"), "the handler line is in the capture: {text}");
+        for secret in ["pixel", "u123abc", "session", "s3cr3t", "frag9"] {
+            assert!(!text.contains(secret), "{secret} reached the blocked-request line: {text}");
+        }
+    }
+}

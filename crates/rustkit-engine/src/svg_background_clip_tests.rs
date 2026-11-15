@@ -150,9 +150,9 @@ fn a_short_value_list_is_repeated_over_the_layers() {
          .wordmark { background-position: 0 -203px; background-size: 176px 811px }",
     )
     .expect("sheet");
-    let mut attributes = HashMap::new();
+    let mut attributes = rustkit_dom::AttrMap::new();
     attributes.insert("class".to_string(), "sprite wordmark".to_string());
-    let style = engine.compute_style_for_element(
+    let style = engine.lctx.compute_style_for_element(
         "span",
         &attributes,
         std::slice::from_ref(&sheet),

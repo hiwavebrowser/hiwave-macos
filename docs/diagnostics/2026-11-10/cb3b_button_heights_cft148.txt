@@ -1,0 +1,25 @@
+Chrome 148.0.7778.216  font-size:16px, text "Button", viewport 800x600
+
+== font-family default (UA)
+variant                                    height   width   padTB(computed)   borderTB(computed)  line-height(computed)  font
+default (UA only)                          24       62.265625 1px/1px           2px/2px             normal                 Arial
+line-height:1 only                         22       62.265625 1px/1px           2px/2px             16px                   Arial
+padding:0 only                             22       50.265625 0px/0px           2px/2px             normal                 Arial
+border:none only                           20       58.265625 1px/1px           0px/0px             normal                 Arial
+padding:0; border:none                     18       46.265625 0px/0px           0px/0px             normal                 Arial
+padding:0; border:none; line-height:1      16       46.265625 0px/0px           0px/0px             16px                   Arial
+line-height:1; padding:0                   20       50.265625 0px/0px           2px/2px             16px                   Arial
+line-height:1; border:none                 18       58.265625 1px/1px           0px/0px             16px                   Arial
+padding:4px 8px                            30       66.265625 4px/4px           2px/2px             normal                 Arial
+
+== font-family:Arial
+variant                                    height   width   padTB(computed)   borderTB(computed)  line-height(computed)  font
+default (UA only)                          24       62.265625 1px/1px           2px/2px             normal                 Arial
+line-height:1 only                         22       62.265625 1px/1px           2px/2px             16px                   Arial
+padding:0 only                             22       50.265625 0px/0px           2px/2px             normal                 Arial
+border:none only                           20       58.265625 1px/1px           0px/0px             normal                 Arial
+padding:0; border:none                     18       46.265625 0px/0px           0px/0px             normal                 Arial
+padding:0; border:none; line-height:1      16       46.265625 0px/0px           0px/0px             16px                   Arial
+line-height:1; padding:0                   20       50.265625 0px/0px           2px/2px             16px                   Arial
+line-height:1; border:none                 18       58.265625 1px/1px           0px/0px             16px                   Arial
+padding:4px 8px                            30       66.265625 4px/4px           2px/2px             normal                 Arial

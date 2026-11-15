@@ -680,7 +680,7 @@ pub(crate) fn typed_array_exotic_own_property_keys(
 ///  - [ECMAScript reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/sec-typedarraygetelement
-fn typed_array_get_element(obj: &JsObject, index: f64) -> JsResult<Option<JsValue>> {
+pub(crate) fn typed_array_get_element(obj: &JsObject, index: f64) -> JsResult<Option<JsValue>> {
     let inner = obj
         .downcast_ref::<TypedArray>()
         .js_expect("typed_array_get_element should only be called on TypedArray objects")?;

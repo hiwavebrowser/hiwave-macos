@@ -4,7 +4,8 @@
 //! members the bindings saw. Every function here returns at once when the
 //! view's Inspector has nobody listening, unless `HIWAVE_CONSOLE_LOG=1`
 //! (see `console_log`), which mirrors console output and those page errors
-//! into the tracing log.
+//! into the tracing log, or `HIWAVE_CONSOLE_LOG=<path>` (see
+//! `console_file`), which writes them, as text, to a file of their own.
 //!
 //! An error record is built from the runtime's report only, never from the
 //! script log's text: the report holds no text the page chose unless error
@@ -20,49 +21,103 @@ use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 /// Set up a document's new bindings for a listening Inspector: console
 /// calls with their positions, error reports, unsupported members' callers.
 /// Nothing is set up (and nothing costs anything) when nobody listens and
-/// `HIWAVE_CONSOLE_LOG` is unset.
-pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
-    let mirror = crate::console_log::enabled();
+/// `HIWAVE_CONSOLE_LOG` is unset. `view` is the engine's id for the view.
+pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>, view: u64) {
+    // The console file wants what the tracing mirror wants of the runtime:
+    // the text of console calls and of errors. `mirror` is either of them.
+    inspector.set_view_id(view);
+    let file = crate::console_file::enabled();
+    let mirror = crate::console_log::enabled() || file;
     let listening = inspector.is_active();
     if !listening && !mirror {
         return;
     }
     // Redaction is the Inspector's. The mirror logs the text the page wrote,
-    // so it is left off while the mirror is on.
+    // so while it is on the line stays text and the Inspector, unless it
+    // keeps console text, is handed each call's shape line instead.
     if listening && !mirror {
         bindings.set_console_redaction(!inspector.keeps_console_text());
     }
+    let shapes = mirror && !inspector.keeps_console_text();
     let sink = inspector.clone();
+    let page = file.then(|| crate::console_file::Page::new(view, &bindings.location().href));
     bindings.set_console_handler(Box::new(move |level, message, at, stack| {
-        crate::console_log::console_message(level, message, at);
-        if !sink.is_active() {
-            return;
+        crate::console_log::console_message(view, level, message, at);
+        if let Some(page) = &page {
+            let at = at.map(|at| (at.path.as_str(), at.line, method_column(level, at.column)));
+            crate::console_file::console(page, level, message, at);
         }
-        let level = match level {
-            rustkit_js::LogLevel::Log => ConsoleLevel::Log,
-            rustkit_js::LogLevel::Info => ConsoleLevel::Info,
-            rustkit_js::LogLevel::Warn => ConsoleLevel::Warn,
-            rustkit_js::LogLevel::Error => ConsoleLevel::Error,
-            rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
-        };
-        // Boa places a call at its `(`; a browser places it at the method's
-        // name (`console.log(` is `log`), which is the name's length before.
-        let method_len = match level {
-            ConsoleLevel::Log => 3,
-            ConsoleLevel::Info | ConsoleLevel::Warn => 4,
-            ConsoleLevel::Error | ConsoleLevel::Debug => 5,
-        };
-        let location = at.and_then(|at| {
-            let column = if at.column > method_len { at.column - method_len } else { at.column };
-            sink.frame_location(&at.path, at.line, column)
-        });
-        sink.console_with_stacks(level, message, location, stack);
+        if !shapes {
+            console_record(&sink, level, message, at, stack);
+        }
     }));
+    if shapes {
+        let sink = inspector.clone();
+        // Shapes only: a stack's function names are page text too.
+        bindings.set_console_shape_handler(Box::new(move |level, shape, at, stack| {
+            console_record(&sink, level, shape, at, &nameless(stack))
+        }));
+    }
+    // T6d: while somebody listens, each call reaches the Inspector as it is
+    // made, so a panel reads the console of a script still running (the
+    // devtools thread answers it; the page is never asked). Otherwise the
+    // calls wait for the flush at the script's end, as before. The console
+    // file is always handed them as they are made: a script that hangs, or
+    // that the budget stops, has no end to wait for, and its lines are the
+    // ones wanted. The runtime's cap on hand-overs a second bounds it.
+    let live = inspector.clone();
+    bindings.set_console_live(Some(Box::new(move || file || live.is_active())));
+    // Past the live cap calls are held for the flush; a script that hangs
+    // after a hot loop never flushes, so the count is readable meanwhile.
+    bindings.set_console_held_counter(Some(inspector.console_held_counter()));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
-    // The mirror quotes the source around a throw. The Inspector does not,
-    // so the text is kept only while the mirror is on.
-    bindings.capture_script_sources(mirror);
+    // The tracing mirror quotes the source around a throw. The Inspector
+    // and the console file do not, so the text is kept only while it is on.
+    bindings.capture_script_sources(crate::console_log::enabled());
+}
+
+/// Boa places a console call at its `(`; a browser places it at the
+/// method's name (`console.log(` is `log`), which is the name's length
+/// before.
+fn method_column(level: rustkit_js::LogLevel, column: u32) -> u32 {
+    let method_len = match level {
+        rustkit_js::LogLevel::Log => 3,
+        rustkit_js::LogLevel::Info | rustkit_js::LogLevel::Warn => 4,
+        rustkit_js::LogLevel::Error | rustkit_js::LogLevel::Debug => 5,
+    };
+    if column > method_len { column - method_len } else { column }
+}
+
+/// `stacks` with every function name dropped: frames keep their place.
+fn nameless(stacks: &rustkit_js::ConsoleStacks) -> rustkit_js::ConsoleStacks {
+    let strip = |frames: &[rustkit_js::ScriptFrame]| {
+        frames.iter().map(|f| rustkit_js::ScriptFrame { function: None, at: f.at.clone() }).collect()
+    };
+    rustkit_js::ConsoleStacks { caller: strip(&stacks.caller), error: strip(&stacks.error) }
+}
+
+/// One console call, as its line (text or shape) reached the handler, onto
+/// the Inspector, if anybody listens, with a `console.error`'s stacks.
+fn console_record(
+    sink: &Inspector,
+    level: rustkit_js::LogLevel,
+    message: &str,
+    at: Option<&rustkit_js::ScriptPosition>,
+    stacks: &rustkit_js::ConsoleStacks,
+) {
+    if !sink.is_active() {
+        return;
+    }
+    let location = at.and_then(|at| sink.frame_location(&at.path, at.line, method_column(level, at.column)));
+    let level = match level {
+        rustkit_js::LogLevel::Log => ConsoleLevel::Log,
+        rustkit_js::LogLevel::Info => ConsoleLevel::Info,
+        rustkit_js::LogLevel::Warn => ConsoleLevel::Warn,
+        rustkit_js::LogLevel::Error => ConsoleLevel::Error,
+        rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
+    };
+    sink.console_with_stacks(level, message, location, stacks);
 }
 
 /// Push `record` onto a script log. A page exception in it reaches the
@@ -71,11 +126,30 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
 /// which the engine marks where it raises them, are recorded from here,
 /// with a fixed message. What page script threw is never one of them,
 /// whatever its text.
+///
+/// A script the loop-iteration limit ended gets a log line of its own, as a
+/// budget stop does (`Script stopped at the script budget`): in the app a
+/// bare `while (true) {}` reaches the limit long before the budget, and
+/// until H19 nothing in the log said why it ended.
 pub(crate) fn log_script(log: &mut Vec<ScriptRecord>, inspector: &Inspector, record: ScriptRecord) {
-    if let ScriptOutcome::EngineFailed(failure) = &record.outcome {
-        engine_error(inspector, failure, &record.source);
+    match &record.outcome {
+        ScriptOutcome::EngineFailed(failure) => engine_error(inspector, failure, &record.source),
+        ScriptOutcome::Threw(message) if is_loop_limit(message) => {
+            tracing::warn!(
+                source = %record.source,
+                elapsed_ms = record.elapsed_ms,
+                "Script stopped at the loop-iteration limit"
+            );
+        }
+        _ => {}
     }
     log.push(record);
+}
+
+/// The error Boa raises at the loop-iteration limit, as the script log
+/// holds it.
+fn is_loop_limit(message: &str) -> bool {
+    message.contains("RuntimeLimitError: reached the maximum number of iteration loops")
 }
 
 /// The engine's own `failure` as a `script_error` with a fixed message.
@@ -115,8 +189,8 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
         let stack = inspector.stack_text(&named);
         InspectorEvent::ScriptError {
             name: report.name.unwrap_or("").to_string(),
-            // The runtime keeps text for the console mirror too; the
-            // Inspector keeps it only when its own setting asks.
+            // The runtime keeps the text while the mirror is on (`attach`);
+            // the Inspector keeps it only under its own rule (#791 R1).
             message: report
                 .message
                 .as_deref()
@@ -141,13 +215,22 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
 
 /// After `source` ran: the errors its listeners and timers reported go onto
 /// the log (as before), then, for a listening Inspector only, the page's
-/// error reports and unimplemented members.
-pub(crate) fn drain_reports(bindings: &DomBindings, inspector: &Inspector, log: &mut Vec<ScriptRecord>, source: &str) {
+/// error reports and unimplemented members. `elapsed_ms` is the wall time of the step that ran
+/// (its listeners or timer callbacks): the report does not say which callback threw, so each record
+/// carries the step's time, as the step's own record does (H19c). 0 only where the caller has no
+/// step timer.
+pub(crate) fn drain_reports(
+    bindings: &DomBindings,
+    inspector: &Inspector,
+    log: &mut Vec<ScriptRecord>,
+    source: &str,
+    elapsed_ms: u64,
+) {
     for message in bindings.take_reported_errors() {
         log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
-            elapsed_ms: 0,
+            elapsed_ms,
             outcome: ScriptOutcome::Threw(message),
         });
     }
@@ -178,7 +261,7 @@ fn drain_dynamic_imports(bindings: &DomBindings, mirror: bool) {
 }
 
 pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source: &str) {
-    let mirror = crate::console_log::enabled();
+    let mirror = crate::console_log::enabled() || crate::console_file::enabled();
     if !inspector.is_active() && !mirror {
         drain_dynamic_imports(bindings, false);
         return;
@@ -196,17 +279,22 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 /// The page's error reports since the last drain, under `source`.
 pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     let mirror = crate::console_log::enabled();
+    let file = crate::console_file::enabled();
     let listening = inspector.is_active();
     drain_dynamic_imports(bindings, mirror);
-    if !listening && !mirror {
+    if !listening && !mirror && !file {
         return;
     }
+    let page = file.then(|| crate::console_file::Page::new(inspector.view_id(), &bindings.location().href));
     for report in bindings.take_error_reports() {
+        if let Some(page) = &page {
+            crate::console_file::page_error(page, &report);
+        }
         if mirror {
             let window = report.frames.first().and_then(|frame| {
                 bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
             });
-            crate::console_log::page_error(&report, source, window);
+            crate::console_log::page_error(inspector.view_id(), &report, source, window);
         }
         if listening {
             script_error(inspector, &report, source);

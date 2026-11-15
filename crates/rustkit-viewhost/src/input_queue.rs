@@ -11,7 +11,7 @@
 
 use crate::ViewId;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// A content-view click, in VIEW-LOCAL TOP-LEFT coordinates: exactly the
 /// viewport space the engine's hit testing speaks, no chrome/sidebar math.
@@ -21,14 +21,21 @@ pub struct PendingClick {
     pub y: f64,
     pub down: bool,
     pub input: PointerInput,
+    /// A press or release: which click of a multi-click it is (AppKit's
+    /// `clickCount`, 1 for a single click). 1 for the rest.
+    pub clicks: u32,
+    /// Shift was held (a press extends the selection).
+    pub shift: bool,
 }
 
 /// What a [`PendingClick`] records: a press or release of the primary
-/// button (`down` says which), the pointer moving over the view, or the
-/// pointer leaving it.
+/// button (`down` says which), of the secondary button (the context
+/// menu, CH2.E4), the pointer moving over the view (with a button held or
+/// not: the page knows which), or the pointer leaving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
     Button,
+    Secondary,
     Move,
     Leave,
 }
@@ -62,6 +69,44 @@ pub struct PendingScroll {
     pub y: f64,
     pub dx: f64,
     pub dy: f64,
+    /// A step of a gesture (the platform gave the event a phase: a
+    /// trackpad's scroll and its inertia), not a wheel on its own (a
+    /// mouse's notch). Steps of a gesture stay on the scroller the gesture
+    /// began on; a wheel on its own goes to what is under the pointer.
+    pub gesture: bool,
+    /// The platform says a gesture begins here (AppKit's `Began` or
+    /// `MayBegin` phase): the first wheel of a new scroll sequence however
+    /// soon it follows the last one (WHL3, R1 on #1121).
+    pub began: bool,
+}
+
+/// What the platform's input method handed the content view through
+/// `NSTextInputClient` (CH2.E3): a dead key or an IME composing, and the
+/// text it commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeInput {
+    /// `setMarkedText:` — compose `text`; an empty string cancels.
+    SetMarked(String),
+    /// `insertText:` — commit `text`. With text marked it replaces the
+    /// marked text. With nothing marked, `replace` is the UTF-16 range
+    /// (start, length) of the value it replaces, as the press-and-hold
+    /// accent popover replaces the letter typed before it; `None` inserts
+    /// at the selection.
+    Insert { text: String, replace: Option<(usize, usize)> },
+    /// `unmarkText` — keep what is marked and end the composition.
+    Unmark,
+}
+
+/// An Edit menu item's action sent to the content view, the first
+/// responder (`copy:`, `cut:`, `paste:`, `undo:`, `redo:`, `selectAll:`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+    SelectAll,
 }
 
 /// One recorded input.
@@ -70,6 +115,50 @@ pub enum InputKind {
     Pointer(PendingClick),
     Key(PendingKey),
     Wheel(PendingScroll),
+    /// Marked or committed text from the input method (CH2.E3).
+    Ime(ImeInput),
+    /// An Edit menu item (CH2.E3).
+    Edit(EditAction),
+    /// A Cmd chord the view took in `performKeyEquivalent:` so the page
+    /// hears its keydown before the menu does (CH2.E3, Chromium's order).
+    /// The app hands `token` to `finish_key_equivalent`: a chord the page
+    /// did not claim goes on to the main menu.
+    KeyEquivalent { key: PendingKey, token: u64 },
+}
+
+/// A focused text field's state as the page last reported it, kept for the
+/// input method's synchronous questions (`selectedRange`, `markedRange`,
+/// `firstRectForCharacterRange:`), which AppKit asks inside its own event
+/// dispatch where the page cannot be asked. Offsets are UTF-16; the caret
+/// is view-local top-left points: x, y (top) and height.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TextInputMirror {
+    pub marked: Option<(usize, usize)>,
+    pub selected: (usize, usize),
+    pub caret: Option<(f64, f64, f64)>,
+}
+
+static TEXT_INPUT: Mutex<Vec<(ViewId, TextInputMirror)>> = Mutex::new(Vec::new());
+
+/// Record what the page reported for `view`'s focused text field; `None`
+/// when no text field has focus.
+pub fn set_text_input_state(view: ViewId, state: Option<TextInputMirror>) {
+    let mut all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(v, _)| *v != view);
+    if let Some(state) = state {
+        all.push((view, state));
+    } else {
+        drop(all);
+        // The field lost the focus: its marked text goes with it (#918 R1).
+        #[cfg(target_os = "macos")]
+        crate::macos::forget_marked(view);
+    }
+}
+
+/// The last state recorded for `view`.
+pub fn text_input_state(view: ViewId) -> Option<TextInputMirror> {
+    let all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.iter().find(|(v, _)| *v == view).map(|(_, s)| *s)
 }
 
 /// An input as the app drains it: `seq` is its place in arrival order
@@ -106,6 +195,14 @@ impl InputQueue {
     /// pointer leaving, a key, another view's event) keeps both sides apart,
     /// so a click after a burst stays after it.
     pub fn push(&mut self, view: ViewId, kind: InputKind) -> u64 {
+        self.push_at(view, kind, Instant::now())
+    }
+
+    /// [`InputQueue::push`] for an input the platform says the user made
+    /// at `made` (the native event's own time, LAT1c), not when its handler
+    /// ran: the time it waited in the window server's queue while the
+    /// window thread was busy belongs to its latency.
+    pub fn push_at(&mut self, view: ViewId, kind: InputKind, made: Instant) -> u64 {
         if let Some(at) = self.coalesces_into(view, &kind) {
             let queued = &mut self.events[at];
             match (&mut queued.kind, &kind) {
@@ -115,6 +212,11 @@ impl InputQueue {
                     prev.dy += next.dy;
                     prev.x = next.x;
                     prev.y = next.y;
+                    // Wheels summed in the queue are one scroll: a step of
+                    // a gesture when all of them were.
+                    prev.gesture = prev.gesture && next.gesture;
+                    // A sum holding a gesture's start starts a sequence.
+                    prev.began = prev.began || next.began;
                 }
                 _ => unreachable!("coalesces_into pairs like with like"),
             }
@@ -125,7 +227,7 @@ impl InputQueue {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.events.push(InputEvent { seq, at: Instant::now(), view, kind });
+        self.events.push(InputEvent { seq, at: made, view, kind });
         seq
     }
 
@@ -170,6 +272,16 @@ impl InputQueue {
         taken
     }
 
+    /// Take the recorded events of one view, in arrival order, leaving the
+    /// other views' events queued: the RustKit chrome's input is handled
+    /// while the page's waits for its load (CH3.A2 step 3b).
+    pub fn drain_view(&mut self, view: ViewId) -> Vec<InputEvent> {
+        let (taken, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.events).into_iter().partition(|e| e.view == view);
+        self.events = kept;
+        taken
+    }
+
     /// Drop what is queued for `view`: the view is gone, and an input
     /// recorded for it must not reach whatever view comes next.
     pub fn retire(&mut self, view: ViewId) {
@@ -192,6 +304,25 @@ pub fn push_input(view: ViewId, kind: InputKind) -> u64 {
     INPUT.lock().map(|mut q| q.push(view, kind)).unwrap_or(0)
 }
 
+/// [`push_input`] with the native event's own time (LAT1c).
+pub fn push_input_at(view: ViewId, kind: InputKind, made: Instant) -> u64 {
+    INPUT.lock().map(|mut q| q.push_at(view, kind, made)).unwrap_or(0)
+}
+
+/// The `Instant` of a native event stamped `event_s` seconds on the
+/// platform's uptime clock (`NSEvent.timestamp`), when that clock reads
+/// `now_s` at `now` (LAT1c). An event stamped in the future, more than a
+/// minute old, or not stamped at all is taken as made `now`: the stamp is
+/// a measurement aid and never moves an input earlier than is plausible.
+pub fn instant_of_native_event(event_s: f64, now_s: f64, now: Instant) -> Instant {
+    const OLDEST_S: f64 = 60.0;
+    let age = now_s - event_s;
+    if !(event_s > 0.0) || !age.is_finite() || !(age >= 0.0) || age > OLDEST_S {
+        return now;
+    }
+    now.checked_sub(Duration::from_secs_f64(age)).unwrap_or(now)
+}
+
 /// Everything recorded since the last drain, for the app's loop turn.
 pub fn drain_input() -> Vec<InputEvent> {
     INPUT.lock().map(|mut q| q.drain()).unwrap_or_default()
@@ -200,6 +331,11 @@ pub fn drain_input() -> Vec<InputEvent> {
 /// The recorded events of one kind, leaving the others queued.
 pub fn drain_input_kind(keep: impl Fn(&InputKind) -> bool) -> Vec<InputEvent> {
     INPUT.lock().map(|mut q| q.drain_kind(keep)).unwrap_or_default()
+}
+
+/// The recorded events of one view, leaving the other views' queued.
+pub fn drain_input_view(view: ViewId) -> Vec<InputEvent> {
+    INPUT.lock().map(|mut q| q.drain_view(view)).unwrap_or_default()
 }
 
 /// Drop what is queued for a view that no longer exists.
@@ -214,15 +350,15 @@ mod tests {
     use super::*;
 
     fn wheel(dy: f64) -> InputKind {
-        InputKind::Wheel(PendingScroll { x: 10.0, y: 10.0, dx: 0.0, dy })
+        InputKind::Wheel(PendingScroll { x: 10.0, y: 10.0, dx: 0.0, dy, gesture: true, began: false })
     }
 
     fn click(down: bool) -> InputKind {
-        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button })
+        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button, clicks: 1, shift: false })
     }
 
     fn mv(x: f64) -> InputKind {
-        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move })
+        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move, clicks: 1, shift: false })
     }
 
     fn key(text: &str) -> InputKind {
@@ -244,6 +380,7 @@ mod tests {
                 InputKind::Pointer(_) => "pointer",
                 InputKind::Wheel(_) => "wheel",
                 InputKind::Key(_) => "key",
+                _ => "other",
             })
             .collect()
     }
@@ -275,6 +412,24 @@ mod tests {
         q.push(view, click(false));
         q.push(view, key("b"));
         assert_eq!(kinds(&q.drain()), ["key", "pointer", "pointer", "key"]);
+    }
+
+    #[test]
+    fn draining_one_view_leaves_the_other_views_input_queued() {
+        let chrome = ViewId::new();
+        let page = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(page, click(true));
+        q.push(chrome, key("a"));
+        q.push(page, click(false));
+        q.push(chrome, key("b"));
+        let taken = q.drain_view(chrome);
+        assert_eq!(kinds(&taken), ["key", "key"], "the chrome's two keys");
+        assert!(taken.iter().all(|e| e.view == chrome));
+        assert!(taken[0].seq < taken[1].seq, "in arrival order");
+        let rest = q.drain();
+        assert_eq!(kinds(&rest), ["pointer", "pointer"], "the page's click is still queued");
+        assert!(rest.iter().all(|e| e.view == page));
     }
 
     #[test]
@@ -374,7 +529,7 @@ mod tests {
         let out = q.drain();
         assert_eq!(kinds(&out), ["wheel", "pointer", "wheel"], "another view's move keeps the sides apart");
         q.push(view, mv(1.0));
-        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave }));
+        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave, clicks: 1, shift: false }));
         q.push(view, mv(2.0));
         assert_eq!(q.drain().len(), 3, "the pointer leaving keeps the sides apart");
     }
@@ -415,5 +570,45 @@ mod tests {
         assert!(second > first);
         retire_view_input(view);
         assert!(drain_input().iter().all(|e| e.view != view));
+    }
+
+    /// LAT1c: an input is stamped with the native event's time, and a
+    /// burst coalesced into it keeps the first event's.
+    #[test]
+    fn an_input_keeps_its_native_time_through_coalescing() {
+        let now = Instant::now();
+        let made = instant_of_native_event(100.000, 100.250, now);
+        assert_eq!(now.duration_since(made), Duration::from_millis(250));
+        assert_eq!(instant_of_native_event(100.5, 100.25, now), now, "from the future");
+        assert_eq!(instant_of_native_event(0.0, 100.25, now), now, "unstamped");
+        assert_eq!(instant_of_native_event(10.0, 100.25, now), now, "older than a minute");
+        assert_eq!(instant_of_native_event(f64::NAN, 100.25, now), now);
+
+        let mut q = InputQueue::default();
+        let view = ViewId::new();
+        let wheel = |dy| InputKind::Wheel(PendingScroll { x: 0.0, y: 0.0, dx: 0.0, dy, gesture: true, began: false });
+        let first = q.push_at(view, wheel(1.0), made);
+        let second = q.push_at(view, wheel(2.0), now);
+        assert_eq!(first, second, "coalesced");
+        let drained = q.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].at, made, "the burst is timed from its first event");
+    }
+
+    /// LAT1c overhead: what reading the uptime clock costs per input (the
+    /// `NSEvent.timestamp` read is one more message send).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reading_the_native_clock_is_cheap() {
+        let n = 100_000u32;
+        let started = Instant::now();
+        let mut last = 0.0;
+        for _ in 0..n {
+            last = crate::macos::system_uptime().expect("uptime");
+        }
+        let per = started.elapsed().as_nanos() as f64 / f64::from(n);
+        eprintln!("LAT1c overhead: {per:.0} ns per uptime read");
+        assert!(last > 0.0);
+        assert!(per < 20_000.0, "{per} ns per read");
     }
 }

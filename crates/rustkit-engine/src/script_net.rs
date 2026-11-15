@@ -75,7 +75,7 @@ fn log_denial(method: &str, url: &str, denial: &rustkit_net::policy::Denial) {
     }
     use rustkit_net::policy::Denial;
     let (disposition, status) = match denial {
-        Denial::Shield | Denial::Csp => ("blocked", "-".to_string()),
+        Denial::Shield(_) | Denial::Csp => ("blocked", "-".to_string()),
         Denial::Timeout => ("timeout", "-".to_string()),
         Denial::Cancelled => ("cancelled", "-".to_string()),
         Denial::BadStatus(code) => ("response", code.to_string()),
@@ -128,7 +128,11 @@ pub(crate) struct Pump {
 /// work); `None` delivers only.
 ///
 /// Whatever is still waiting when the rounds or the deadline run out
-/// completes with a network error. `deadline` is a network cap: it does
+/// completes with a network error, unless `leave_waiting`: then a live loop
+/// follows this load (`EngineConfig::post_load_requests_live`) and what is
+/// still asked stays queued for it to take. (Failed here, the ninth link of
+/// a `fetch()` chain a load script started got `TypeError: Failed to fetch`
+/// while the page went on to the tenth.) `deadline` is a network cap: it does
 /// not arm the watchdog and it does not refuse a host call. A delivery
 /// whose JavaScript budget is already spent is parked for a later turn
 /// instead of being run or failed.
@@ -140,6 +144,7 @@ pub(crate) async fn pump(
     rounds: u32,
     timers: Option<(u64, u32)>,
     inspector: &Arc<Inspector>,
+    leave_waiting: bool,
 ) -> Pump {
     let mut out = Pump::default();
 
@@ -225,7 +230,11 @@ pub(crate) async fn pump(
         }
     }
 
-    // Out of rounds or time. Nothing may be left waiting forever.
+    // Out of rounds or time. Nothing may be left waiting forever: the
+    // live loop takes it, or it fails here.
+    if leave_waiting {
+        return out;
+    }
     if catch_unwind(AssertUnwindSafe(|| bindings.fail_pending_net_requests(NETWORK_ERROR))).is_err() {
         out.poisoned = true;
     }
@@ -239,19 +248,352 @@ pub(crate) type LiveFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 /// A script request that is out: its id and, in the end, its outcome.
 pub(crate) type LiveRequest = LiveFuture<(u64, NetDelivery)>;
 
-/// Start `request` for the live loop. Nothing runs until
-/// [`settle_live`] polls it; it fails as a network error at `deadline`.
+/// Whether live script requests run on the network runtime (T7). On
+/// unless `HIWAVE_NET_RUNTIME=0`, which selects the page-polled path of
+/// before, for bisects and the A/B.
+fn net_runtime_wanted() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| net_runtime_switch(std::env::var("HIWAVE_NET_RUNTIME").ok().as_deref()))
+}
+
+/// `HIWAVE_NET_RUNTIME`'s value read as the switch: off only for `0`,
+/// `off` or `false`; unset, empty and anything else are on.
+pub(crate) fn net_runtime_switch(value: Option<&str>) -> bool {
+    !matches!(value, Some("0" | "off" | "false"))
+}
+
+/// How many `rustkit-net` workers: `HIWAVE_NET_WORKERS`, 1 to 8, default 2.
+/// `1` is T7a's one current-thread runtime (D1), kept for the A/B.
+fn net_workers() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| net_workers_switch(std::env::var("HIWAVE_NET_WORKERS").ok().as_deref()))
+}
+
+/// `HIWAVE_NET_WORKERS`'s value read as a worker count: a number from 1 to
+/// 8; unset, empty or anything else is 2.
+pub(crate) fn net_workers_switch(value: Option<&str>) -> usize {
+    value.and_then(|v| v.trim().parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2)
+}
+
+/// The process's network runtime (T7): `rustkit-net` workers (two by
+/// default, [`net_workers`]) that run live script requests, so their bytes
+/// are read and their response and failure records written while the page
+/// thread is busy. Built on first use. `None` when it is switched off or
+/// could not be built; the page then polls its requests itself, as before.
+/// It is never shut down: requests still out at process exit end
+/// unrecorded, with the ring that would have held their records.
+///
+/// The worker count does not reorder requests (T8): the policy's per-origin
+/// slots are FIFO semaphores, and [`start_live`] takes each request's place
+/// in them on the page thread ([`FetchPolicy::reserve`]), in the order the
+/// page started them. Before that the place was taken at the task's first
+/// poll, which two workers raced (T2's combined fixture: `/hang/4` capped
+/// instead of `/hang/6`), so T7a ran one thread (D1). [`DiagContext`] is
+/// set per poll, which a work-stealing runtime needs. What runs here:
+/// socket waits, TLS handshakes, body decode, the base64 of [`delivery`],
+/// Shield matching and the Inspector records. Nothing runs a page script.
+fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
+    static NET: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
+    #[cfg(test)]
+    if PAGE_POLLED.with(std::cell::Cell::get) {
+        return None;
+    }
+    if !net_runtime_wanted() {
+        return None;
+    }
+    NET.get_or_init(|| {
+        let workers = net_workers();
+        let mut builder = if workers == 1 {
+            tokio::runtime::Builder::new_current_thread()
+        } else {
+            let mut b = tokio::runtime::Builder::new_multi_thread();
+            b.worker_threads(workers).thread_name("rustkit-net");
+            b
+        };
+        let runtime = builder
+            .enable_all()
+            .build()
+            .map_err(|e| tracing::warn!(error = %e, "network runtime not built; the page polls its requests"))
+            .ok()?;
+        let handle = runtime.handle().clone();
+        std::thread::Builder::new()
+            .name("rustkit-net".into())
+            .spawn(move || runtime.block_on(std::future::pending::<()>()))
+            .map_err(|e| tracing::warn!(error = %e, "network thread not started; the page polls its requests"))
+            .ok()?;
+        Some(handle)
+    })
+    .as_ref()
+}
+
+/// A task on the network runtime, aborted when its page side is dropped (a
+/// navigation cleared the live requests, or the view closed). Abort is
+/// cooperative: a task that already finished has written its record.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs `work` on the network runtime (LAT9: an image's fetch and decode),
+/// so it makes progress while the page thread is busy; the page side only
+/// takes the outcome. Aborted when the returned future is dropped; `None`
+/// from it when the task ended without an outcome (it panicked). Without
+/// the runtime, `work` comes back for the page to poll itself.
+pub(crate) fn spawn_on_net<T, F>(work: F) -> Result<LiveFuture<Option<T>>, F>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let Some(net) = net_runtime() else {
+        return Err(work);
+    };
+    let (deliver, outcome) = tokio::sync::oneshot::channel();
+    // The work logs under the caller's tracing subscriber, as it did when
+    // the page thread polled it: a subscriber scoped to that thread (a
+    // test's log capture, `resource_url_log_tests`) would otherwise never
+    // see an image's lines.
+    use tracing::instrument::WithSubscriber;
+    let task = AbortOnDrop(net.spawn(
+        DiagContext::new(async move {
+            let value = work.await;
+            if deliver.send(value).is_ok() {
+                poke_live_turn();
+            }
+        })
+        .with_current_subscriber(),
+    ));
+    Ok(Box::pin(async move {
+        let _task = task;
+        outcome.await.ok()
+    }))
+}
+
+/// Runs `inner` with the page's diagnostic nav id (and, in tests, the
+/// `HIWAVE_CONSOLE_LOG` switch and sink) set around every poll, restoring
+/// the thread's own after, also when the poll panics: the one `rustkit-net`
+/// thread runs every view's tasks, so between two polls of this task it
+/// polls other pages' (T7 B2). Taken on the page thread when the task is
+/// spawned. A task the runtime spawns on its own (the h2 connection driver)
+/// runs outside it and writes no mirror line.
+struct DiagContext<F> {
+    nav: u64,
+    #[cfg(test)]
+    hooks: crate::console_log::TestHooks,
+    inner: Pin<Box<F>>,
+}
+
+impl<F: Future> DiagContext<F> {
+    fn new(inner: F) -> Self {
+        DiagContext {
+            nav: rustkit_js::diag_nav(),
+            #[cfg(test)]
+            hooks: crate::console_log::test_hooks(),
+            inner: Box::pin(inner),
+        }
+    }
+}
+
+impl<F: Future> Future for DiagContext<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<F::Output> {
+        let _restore = Restore {
+            nav: rustkit_js::diag_nav(),
+            #[cfg(test)]
+            hooks: Some(crate::console_log::swap_test_hooks(self.hooks.clone())),
+        };
+        rustkit_js::set_diag_nav(self.nav);
+        self.inner.as_mut().poll(cx)
+    }
+}
+
+/// Puts the thread's own diagnostic context back when a [`DiagContext`]
+/// poll ends, by return or by unwind.
+struct Restore {
+    nav: u64,
+    #[cfg(test)]
+    hooks: Option<crate::console_log::TestHooks>,
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(hooks) = self.hooks.take() {
+            crate::console_log::swap_test_hooks(hooks);
+        }
+        rustkit_js::set_diag_nav(self.nav);
+    }
+}
+
+/// What the engine records when a request task panics: engine words, never
+/// the page's.
+const TASK_PANICKED: &str = "engine failure: request task panicked";
+
+#[cfg(test)]
+thread_local! {
+    /// `HIWAVE_NET_RUNTIME=0` for requests this thread starts (T7 test 9).
+    static PAGE_POLLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_page_polled_for_test(on: bool) {
+    PAGE_POLLED.with(|cell| cell.set(on));
+}
+
+/// A request to this path panics where the policy runs (T7 test 10, C3).
+#[cfg(test)]
+pub(crate) const TASK_PANIC_PATH: &str = "/__t7_task_panic";
+
+/// A request to this path fails, on the network runtime, with a reason that
+/// holds its full URL, query and all (T7 test 7: the scrub at record time).
+#[cfg(test)]
+pub(crate) const FAIL_NAMING_URL_PATH: &str = "/__t7_fail_naming_url";
+
+/// Most live script requests one view has out on the network runtime
+/// (T7 S2). In flight is capped by the policy (24 per page, 6 per origin),
+/// but a task parked behind those caps still holds its request; this bounds
+/// what one page can park in the process-wide runtime. Ten times the page
+/// cap, so a page within the policy's caps never meets it.
+pub(crate) const MAX_LIVE_NET_TASKS: usize = 240;
+
+/// The reason a request past [`MAX_LIVE_NET_TASKS`] is refused with, as the
+/// inserted-script queue says it.
+const TOO_MANY_REQUESTS: &str = "too many script requests";
+
+/// Why a leaving page's request was not sent (LAT17): nothing would poll it
+/// on the page-polled path.
+const NOT_SENT_PAGE_LEFT: &str = "not sent: the page left";
+
+/// Start `request` for the live loop; it fails as a network error at
+/// `deadline`. On the network runtime the request record is made here, on
+/// the page thread at request start (its document, the URL scrub), and the
+/// rest runs and is recorded on a `rustkit-net` worker; [`settle_live`]
+/// only takes the outcome. Without it, nothing runs until [`settle_live`]
+/// polls it. Which of the two is chosen before the request record, so it is
+/// never made twice (T7 C2). `out` is how many the view has out already:
+/// past [`MAX_LIVE_NET_TASKS`] nothing is spawned and the request fails at
+/// once, recorded on the page.
 pub(crate) fn start_live(
     policy: Arc<FetchPolicy>,
     loader: Arc<ResourceLoader>,
     request: NetRequest,
     deadline: tokio::time::Instant,
     inspector: Arc<Inspector>,
+    out: usize,
 ) -> LiveRequest {
+    let id = request.id;
+    let Some(net) = net_runtime() else {
+        return Box::pin(async move {
+            let outcome = execute(&policy, &loader, deadline, &request, &inspector, FailureStage::Timeout).await;
+            (id, outcome)
+        });
+    };
+    let started = match begin(&request, &inspector, deadline) {
+        Ok(started) => started,
+        Err(refused) => return Box::pin(std::future::ready((id, refused))),
+    };
+    if out >= MAX_LIVE_NET_TASKS {
+        debug!(id, out, "Script request over the view's task cap");
+        log_request(&started.method, &started.url, "-", "error");
+        if let Some(guard) = started.guard {
+            guard.fail(FailureStage::Policy, TOO_MANY_REQUESTS);
+        }
+        return Box::pin(std::future::ready((id, NetDelivery::Error(NETWORK_ERROR.into()))));
+    }
+    // The slot ticket (T8): the budget, the shape check and the place in the
+    // origin's slot queue are taken here, on the page thread, in the order
+    // the page started its requests, so the net runtime's worker count does
+    // not reorder them. A refusal is recorded here, as the task would have.
+    let mut started = started;
+    let wait = started.guard.as_ref().and_then(|g| g.slot()).cloned();
+    match policy.reserve(&started.script_request, wait.as_ref()) {
+        Ok(reservation) => started.reservation = Some(reservation),
+        Err(denial) => {
+            let Started { id, guard, method, url, .. } = started;
+            return Box::pin(std::future::ready((id, denied(id, &method, &url, guard, &denial))));
+        }
+    }
+    let (deliver, outcome) = tokio::sync::oneshot::channel();
+    let task = net.spawn(DiagContext::new(async move {
+        let outcome = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
+        // The page side reads the channel, so the outcome is there before
+        // the poke: the page's next live turn takes it now, not at its next
+        // scheduled turn (T7 S1), and never finds it still pending.
+        if deliver.send(outcome).is_ok() {
+            poke_live_turn();
+        }
+    }));
+    let task = AbortOnDrop(task);
     Box::pin(async move {
-        let outcome = execute(&policy, &loader, deadline, &request, &inspector, FailureStage::Timeout).await;
-        (request.id, outcome)
+        let _task = task;
+        match outcome.await {
+            Ok(outcome) => (id, outcome),
+            // The task ended without sending: a panic is answered in the
+            // task, so this is the belt. An unexpected cancel (the runtime
+            // is never shut down) is the same network error (T7 C2).
+            Err(_) => {
+                tracing::warn!(id, "live request task ended without an outcome");
+                (id, NetDelivery::Error(NETWORK_ERROR.into()))
+            }
+        }
     })
+}
+
+/// Send the requests a page that is leaving made before it left (LAT17).
+/// As in Chromium, a `fetch` the page started before it asked to navigate
+/// reaches the network even though its answer goes nowhere: the old
+/// document's promises never settle, because the document is gone. Each
+/// request still passes the policy (shield, budgets, slots) and is
+/// recorded; it fails at `deadline`. Only on the network runtime: on the
+/// page-polled path (`HIWAVE_NET_RUNTIME=0`) nothing would poll it, so
+/// nothing is sent; that request, and one past [`MAX_LIVE_NET_TASKS`], is
+/// recorded as failed. Returns how many went out.
+pub(crate) fn send_for_leaving_page(
+    policy: &Arc<FetchPolicy>,
+    loader: &Arc<ResourceLoader>,
+    requests: Vec<NetRequest>,
+    deadline: tokio::time::Instant,
+    inspector: &Arc<Inspector>,
+) -> usize {
+    let net = net_runtime();
+    let mut sent = 0;
+    for (at, request) in requests.iter().enumerate() {
+        let Ok(mut started) = begin(request, inspector, deadline) else {
+            continue;
+        };
+        // Not sent, and still recorded: one terminal record each.
+        let unsent = match net {
+            None => Some(NOT_SENT_PAGE_LEFT),
+            Some(_) if at >= MAX_LIVE_NET_TASKS => Some(TOO_MANY_REQUESTS),
+            Some(_) => None,
+        };
+        let (Some(net), None) = (net, unsent) else {
+            log_request(&started.method, &started.url, "-", "error");
+            if let Some(guard) = started.guard.take() {
+                guard.fail(FailureStage::Policy, unsent.unwrap_or(NOT_SENT_PAGE_LEFT));
+            }
+            continue;
+        };
+        let wait = started.guard.as_ref().and_then(|g| g.slot()).cloned();
+        match policy.reserve(&started.script_request, wait.as_ref()) {
+            Ok(reservation) => started.reservation = Some(reservation),
+            Err(denial) => {
+                let Started { id, guard, method, url, .. } = started;
+                let _ = denied(id, &method, &url, guard, &denial);
+                continue;
+            }
+        }
+        let (policy, loader) = (policy.clone(), loader.clone());
+        // Detached: the task outlives the document, as the request does.
+        drop(net.spawn(DiagContext::new(async move {
+            let _ = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
+        })));
+        sent += 1;
+    }
+    sent
 }
 
 /// Let what is out make progress for at most `slice`, and take the results
@@ -299,26 +641,98 @@ async fn execute(
     inspector: &Arc<Inspector>,
     on_deadline: FailureStage,
 ) -> NetDelivery {
+    match begin(request, inspector, deadline) {
+        Ok(started) => finish(policy, loader, deadline, started, on_deadline).await,
+        Err(refused) => refused,
+    }
+}
+
+/// A script request whose request record is made, not yet sent.
+struct Started {
+    id: u64,
+    script_request: ScriptRequest,
+    guard: Option<inspector::RequestGuard>,
+    /// For the `HIWAVE_CONSOLE_LOG` lines; empty when that is off.
+    method: String,
+    url: String,
+    /// Its place in the policy's slot queues, when taken where it started
+    /// (T8); otherwise [`finish`] takes it when the request first runs.
+    reservation: Option<rustkit_net::policy::Reservation>,
+}
+
+/// The start of [`execute`], on the page thread: refuse what is malformed,
+/// and make the request record (its document, the URL scrub).
+fn begin(request: &NetRequest, inspector: &Arc<Inspector>, deadline: tokio::time::Instant) -> Result<Started, NetDelivery> {
     let script_request = match script_request(request) {
         Ok(r) => r,
         Err(reason) => {
             debug!(id = request.id, %reason, "Script request refused before the policy");
             log_request(&request.method, &request.url, "-", "error");
-            return NetDelivery::Error(NETWORK_ERROR.into());
+            return Err(NetDelivery::Error(NETWORK_ERROR.into()));
         }
     };
     let log_net = crate::console_log::enabled();
     let method = if log_net { script_request.method.to_string() } else { String::new() };
     let url = if log_net { script_request.url.to_string() } else { String::new() };
-    let resource_type = match script_request.destination {
-        RequestDestination::Xhr => ResourceType::Xhr,
-        RequestDestination::Fetch => ResourceType::Fetch,
-        _ => ResourceType::Other,
+    let (resource_type, initiator) = match script_request.destination {
+        RequestDestination::Xhr => (ResourceType::Xhr, "xhr"),
+        RequestDestination::Fetch => (ResourceType::Fetch, "fetch"),
+        _ => (ResourceType::Other, "script"),
     };
     let guard = inspector
-        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
-        .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
+        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some(initiator))
+        .map(|g| {
+            g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)")
+                .waits_on(&rustkit_net::policy::SlotWait::new())
+                .deadline(deadline)
+        });
+    Ok(Started { id: request.id, script_request, guard, method, url, reservation: None })
+}
+
+/// The rest of [`execute`]: send, and record the response or failure where
+/// it runs. A panic in the policy is a failure in engine words, never
+/// "abandoned": the guard is held outside the unwind (T7 B3a). A panic in
+/// `guard.response`/`guard.fail` themselves is outside it (T7 C3).
+async fn finish(
+    policy: &FetchPolicy,
+    loader: &ResourceLoader,
+    deadline: tokio::time::Instant,
+    started: Started,
+    on_deadline: FailureStage,
+) -> NetDelivery {
+    use futures::FutureExt as _;
+    let Started { id, script_request, guard, method, url, reservation } = started;
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    #[cfg(test)]
+    if script_request.url.path() == FAIL_NAMING_URL_PATH {
+        if let Some(guard) = guard {
+            guard.fail(FailureStage::Policy, &format!("refused {}", script_request.url));
+        }
+        return NetDelivery::Error(NETWORK_ERROR.into());
+    }
+    let sent = AssertUnwindSafe(async {
+        #[cfg(test)]
+        if script_request.url.path() == TASK_PANIC_PATH {
+            panic!("injected request task panic");
+        }
+        match reservation {
+            Some(reservation) => {
+                let sent = policy.execute_reserved(loader, script_request, reservation, wait.as_ref());
+                tokio::time::timeout_at(deadline, sent).await
+            }
+            None => tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await,
+        }
+    })
+    .catch_unwind()
+    .await;
+    let Ok(sent) = sent else {
+        tracing::warn!(id, "{TASK_PANICKED}");
+        if let Some(guard) = guard {
+            guard.fail(FailureStage::Policy, TASK_PANICKED);
+        }
+        return NetDelivery::Error(NETWORK_ERROR.into());
+    };
+    match sent {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -326,17 +740,9 @@ async fn execute(
             }
             delivery(response)
         }
-        Ok(Err(denial)) => {
-            debug!(id = request.id, ?denial, "Script request denied");
-            log_denial(&method, &url, &denial);
-            if let Some(guard) = guard {
-                let (stage, reason) = inspector::denial_stage(&denial);
-                guard.fail(stage, reason);
-            }
-            NetDelivery::Error(NETWORK_ERROR.into())
-        }
+        Ok(Err(denial)) => denied(id, &method, &url, guard, &denial),
         Err(_) => {
-            debug!(id = request.id, "Script request hit its network cap");
+            debug!(id, "Script request hit its network cap");
             log_request(&method, &url, "-", "timeout");
             if let Some(guard) = guard {
                 let reason = match on_deadline {
@@ -348,6 +754,23 @@ async fn execute(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
     }
+}
+
+/// A request the policy refused, logged and recorded where it was refused.
+fn denied(
+    id: u64,
+    method: &str,
+    url: &str,
+    guard: Option<inspector::RequestGuard>,
+    denial: &rustkit_net::policy::Denial,
+) -> NetDelivery {
+    debug!(id, ?denial, "Script request denied");
+    log_denial(method, url, denial);
+    if let Some(guard) = guard {
+        let (stage, reason) = inspector::denial_stage(denial);
+        guard.blocked_by(inspector::denial_block_reason(denial)).fail(stage, reason);
+    }
+    NetDelivery::Error(NETWORK_ERROR.into())
 }
 
 /// The bridge's plain data as the policy's request type. Anything malformed
@@ -389,6 +812,9 @@ fn script_request(request: &NetRequest) -> Result<ScriptRequest, String> {
     let destination = match request.destination.as_str() {
         "xhr" => RequestDestination::Xhr,
         "fetch" => RequestDestination::Fetch,
+        // A dedicated worker's script and the scripts it imports: script requests to the policy, which
+        // checks them as it checks a module script (the page side checks the importScripts MIME type).
+        "worker" | "script" => RequestDestination::Script,
         _ => return Err("bad destination".into()),
     };
 
@@ -451,6 +877,7 @@ pub(crate) async fn pump_modules(
     document: &Url,
     fetched: &mut usize,
     inspector: &Arc<Inspector>,
+    prefetched: Option<&crate::module_prefetch::ModulePrefetch>,
 ) -> Pump {
     let mut out = Pump::default();
     for _ in 0..MAX_MODULE_ROUNDS {
@@ -471,6 +898,17 @@ pub(crate) async fn pump_modules(
             if i >= room {
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
+            // Fetched when the module script was discovered (S15): the
+            // same fetch's answer, without another round trip.
+            // Still out, it is awaited here: the one request, not a second.
+            // A prefetch that ran out of its own (earlier) deadline is
+            // fetched again under this one.
+            if let Some(module) = prefetched.and_then(|p| p.take(url)) {
+                let answer = module.await;
+                if !crate::module_prefetch::is_deadline_error(&answer) {
+                    return answer;
+                }
+            }
             fetch_module(policy, loader, url, document, deadline, inspector).await
         }))
         .await;
@@ -490,7 +928,7 @@ pub(crate) async fn pump_modules(
 
 /// One module through the policy's module entry point, as the page gets
 /// it: its source, or why there is none.
-async fn fetch_module(
+pub(crate) async fn fetch_module(
     policy: &FetchPolicy,
     loader: &ResourceLoader,
     url: &str,
@@ -499,8 +937,12 @@ async fn fetch_module(
     inspector: &Arc<Inspector>,
 ) -> Result<rustkit_bindings::FetchedModule, String> {
     let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-    let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+    let guard = inspector
+        .begin_request(&parsed, "GET", ResourceType::Module, Some("script"))
+        .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()).deadline(deadline));
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    let fetched =
+        tokio::time::timeout_at(deadline, policy.fetch_module_waited(loader, &parsed, document, wait.as_ref())).await;
     inspector::answer_module(guard, &fetched);
     match fetched {
         Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
@@ -511,9 +953,12 @@ async fn fetch_module(
             debug!(%url, ?denial, "Module fetch denied");
             Err(NETWORK_ERROR.to_string())
         }
-        Err(_) => Err("timed out".to_string()),
+        Err(_) => Err(MODULE_FETCH_TIMED_OUT.to_string()),
     }
 }
+
+/// Why a module fetch failed when its deadline passed.
+pub(crate) const MODULE_FETCH_TIMED_OUT: &str = "timed out";
 
 /// A module a dynamic `import()` asked for that is out: the URL as asked
 /// for and, in the end, its source or why there is none.
@@ -571,6 +1016,7 @@ pub(crate) async fn pump_all(
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
     requests: bool,
+    leave_waiting: bool,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
@@ -578,12 +1024,12 @@ pub(crate) async fn pump_all(
         // Without `requests` the page's fetches stay queued for the live
         // loop (`pump_live` takes them), and nothing here fails them.
         let net = match requests {
-            true => pump(bindings, policy, loader, deadline, rounds, timers, inspector).await,
+            true => pump(bindings, policy, loader, deadline, rounds, timers, inspector, leave_waiting).await,
             false => Pump::default(),
         };
         let modules = match document {
             Some(document) => {
-                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await
+                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector, None).await
             }
             None => Pump::default(),
         };
@@ -683,6 +1129,14 @@ struct InsertedJob {
     /// Tripped on navigation or a cancelled load. The in-flight fetch
     /// selects on it and drops the socket.
     cancel: Arc<FetchCancel>,
+    /// From the page inserting it to the engine taking it from the queue.
+    queued: std::time::Duration,
+    /// When the engine took it (its request started then), and when its
+    /// body or failure was stored.
+    requested_at: std::time::Instant,
+    arrived_at: Option<std::time::Instant>,
+    /// Records its `cancelled` end when the job is dropped unrun.
+    inspector: Arc<Inspector>,
 }
 
 /// How many inserted-script fetches may be on the wire at once. Script
@@ -735,6 +1189,7 @@ fn cancelled_fetch() -> FetchedInserted {
         stage: FailureStage::Cancelled,
         inspector_reason: "abandoned (navigation or view closed)",
         detail: "cancelled".into(),
+        blocked_by: None,
     }
 }
 
@@ -744,6 +1199,7 @@ fn cancel_inserted_jobs(board: &mut InsertedBoard) {
         if let Some(guard) = job.guard {
             guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
         }
+        job.inspector.script_cancelled(&job.url, "inserted", Some(job.queued));
     }
     board.owed.clear();
     board.notify.notify_waiters();
@@ -759,9 +1215,9 @@ enum FetchedInserted {
         stage: FailureStage,
         inspector_reason: &'static str,
         detail: String,
+        /// The shield's list and rule, when it refused the fetch and said.
+        blocked_by: Option<rustkit_net::BlockReason>,
     },
-    /// Not fetched (`unparseable src`). No load or error event.
-    Skipped(&'static str),
 }
 
 struct InsertedSource {
@@ -786,6 +1242,9 @@ struct FetchJob {
     job_id: u64,
     nav_id: u64,
     cancel: Arc<FetchCancel>,
+    /// Stamped when it gets one of the process's in-flight permits, when
+    /// the Inspector is recording it.
+    wait: Option<rustkit_net::policy::SlotWait>,
 }
 
 impl InsertedScripts {
@@ -866,11 +1325,11 @@ fn lock_board(board: &Mutex<InsertedBoard>) -> std::sync::MutexGuard<'_, Inserte
 }
 
 /// A finished fetch that must not hold the queue: the element hears `error`
-/// (or, for an unparseable URL, nothing) and later scripts do not wait for it.
+/// and later scripts do not wait for it.
 fn does_not_block(body: &FetchedInserted) -> bool {
     match body {
         FetchedInserted::Source(_) => false,
-        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } | FetchedInserted::Skipped(_) => true,
+        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } => true,
     }
 }
 
@@ -1050,9 +1509,26 @@ fn enqueue_inserted(
         return true;
     }
     let mut started = Vec::new();
+    let mut blobs = Vec::new();
+    let taken_at = std::time::Instant::now();
+    // A blob URL is the page's own bytes: answered from the bindings' store
+    // now, on this thread, and never sent anywhere. Asked before the board
+    // is locked: the lookup enters the script runtime, and nothing that
+    // does may run under the lock the fetch thread also takes.
+    let blob_texts: Vec<Option<Option<String>>> = queued
+        .iter()
+        .map(|script| {
+            script.url.starts_with("blob:").then(|| {
+                catch_unwind(AssertUnwindSafe(|| bindings.blob_url_text(&script.url))).ok().flatten()
+            })
+        })
+        .collect();
     {
         let mut board = lock_board(&scripts.board);
-        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by } in queued {
+        let mut blob_texts = blob_texts.into_iter();
+        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by, inserted_at } in queued {
+            let blob = blob_texts.next().flatten();
+            let queued = taken_at.saturating_duration_since(inserted_at);
             if let Some(at) = inserted_by {
                 // The name `run_inserted` evaluates it under.
                 inspector.note_inserted(&format!("inserted#{node}"), &at.path, at.line, at.column);
@@ -1060,48 +1536,70 @@ fn enqueue_inserted(
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
-                    let cancel = FetchCancel::new();
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq: 0,
-                        body: None,
-                        guard,
-                        cancel: Arc::clone(&cancel),
-                    });
-                    started.push(FetchJob {
-                        loader: Arc::clone(loader),
-                        request,
-                        board: Arc::clone(&scripts.board),
-                        job_id: id,
-                        nav_id,
-                        cancel,
-                    });
-                }
-                Err(_) => {
-                    board.ready_seq = board.ready_seq.wrapping_add(1);
-                    let ready_seq = board.ready_seq;
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq,
-                        body: Some(FetchedInserted::Skipped("unparseable src")),
-                        guard: None,
-                        cancel: FetchCancel::new(),
-                    });
-                }
+            // `web_scripts.js` queues only an `href` from the `url` crate's
+            // parser and fires `error` for a `src` it cannot resolve, so this
+            // always parses (`an_unparseable_inserted_src_never_reaches_the_engine_queue`).
+            let Ok(parsed) = Url::parse(&url) else {
+                tracing::warn!("inserted script #{node}: queued URL does not parse; skipped");
+                debug_assert!(false, "inserted script URL does not parse");
+                continue;
+            };
+            let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
+            let guard = inspector
+                .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
+                .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+            let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+            if let Some(w) = &wait {
+                w.queued();
             }
+            let cancel = FetchCancel::new();
+            board.jobs.push(InsertedJob {
+                id,
+                node,
+                url,
+                nav_id,
+                in_order,
+                ready_seq: 0,
+                body: None,
+                guard,
+                cancel: Arc::clone(&cancel),
+                queued,
+                requested_at: taken_at,
+                arrived_at: None,
+                inspector: Arc::clone(inspector),
+            });
+            if let Some(text) = blob {
+                blobs.push((id, nav_id, text));
+                continue;
+            }
+            started.push(FetchJob {
+                loader: Arc::clone(loader),
+                request,
+                board: Arc::clone(&scripts.board),
+                job_id: id,
+                nav_id,
+                cancel,
+                wait,
+            });
         }
+    }
+    for (id, nav_id, text) in blobs {
+        let fetched = match text {
+            Some(text) => FetchedInserted::Source(InsertedSource {
+                text,
+                status: 200,
+                mime: None,
+                encoded_size: None,
+                from_cache: false,
+            }),
+            None => FetchedInserted::Transport {
+                stage: FailureStage::Connect,
+                inspector_reason: "no blob behind this URL",
+                detail: "no blob behind this URL".into(),
+                blocked_by: None,
+            },
+        };
+        store_inserted_result(&scripts.board, id, nav_id, fetched);
     }
     for job in started {
         spawn_inserted_fetch(job);
@@ -1123,6 +1621,7 @@ fn spawn_inserted_fetch(job: FetchJob) {
             stage: FailureStage::Policy,
             inspector_reason: "too many script requests",
             detail: "inserted-script fetch queue is full".into(),
+            blocked_by: None,
         };
         if store_inserted_result(&board, job_id, nav_id, failed) {
             poke_live_turn();
@@ -1157,6 +1656,9 @@ fn fetch_sender() -> &'static tokio::sync::mpsc::Sender<FetchJob> {
                         };
                         if job.cancel.is_cancelled() {
                             continue;
+                        }
+                        if let Some(w) = &job.wait {
+                            w.granted();
                         }
                         tokio::task::spawn_local(async move {
                             let _permit = permit;
@@ -1199,6 +1701,7 @@ fn store_inserted_result(board: &Mutex<InsertedBoard>, job_id: u64, nav_id: u64,
         let job = &mut board.jobs[index];
         job.ready_seq = ready_seq;
         job.body = Some(fetched);
+        job.arrived_at = Some(std::time::Instant::now());
     }
     let notify = Arc::clone(&board.notify);
     drop(board);
@@ -1225,13 +1728,15 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             let (stage, reason) = inspector::net_error_stage(&e);
-            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string() };
+            let blocked_by = inspector::net_block_reason(&e).cloned();
+            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string(), blocked_by };
         }
         Err(_) => {
             return FetchedInserted::Transport {
                 stage: FailureStage::Timeout,
                 inspector_reason: "timed out",
                 detail: "timed out".into(),
+                blocked_by: None,
             };
         }
     };
@@ -1266,11 +1771,13 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
             stage: FailureStage::Decode,
             inspector_reason: "body is not UTF-8",
             detail: e.to_string(),
+            blocked_by: None,
         },
         Err(_) => FetchedInserted::Transport {
             stage: FailureStage::Timeout,
             inspector_reason: "timed out",
             detail: "timed out".into(),
+            blocked_by: None,
         },
     }
 }
@@ -1314,6 +1821,10 @@ fn run_inserted(
         return false;
     };
     finish_inserted_guard(job.guard.take(), &fetched);
+    let taken_at = std::time::Instant::now();
+    let fetched_in = job.arrived_at.map(|at| at.saturating_duration_since(job.requested_at));
+    let waited = job.arrived_at.map(|at| taken_at.saturating_duration_since(at));
+    let mut began = false;
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
         FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
@@ -1323,13 +1834,12 @@ fn run_inserted(
         FetchedInserted::Source(source) => Ok(source.text),
         FetchedInserted::Http(http) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(http.status))),
         FetchedInserted::Transport { detail, .. } => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(detail))),
-        FetchedInserted::Skipped(reason) => Err(ScriptOutcome::Skipped(reason)),
     };
     let event = match text {
         Err(outcome) => {
             // Too large is not a network failure, but `error` is still the
             // one event that element gets: a loader waiting on it hears that
-            // it will not run. An unparseable `src` was never a request.
+            // it will not run.
             let event = match outcome {
                 ScriptOutcome::FetchFailed(_) => Some("error"),
                 ScriptOutcome::Skipped(reason) if reason.starts_with("too large") => Some("error"),
@@ -1344,7 +1854,8 @@ fn run_inserted(
             // (which would become its imports' base).
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
-            crate::console_log::alias(&name, &record.source);
+            crate::console_log::alias(inspector.view_id(), &name, &record.source);
+            began = true;
             let started = std::time::Instant::now();
             let (ran, stopped) = super::with_script_js(bindings, || {
                 let _ = bindings.set_current_script(Some(job.node));
@@ -1384,18 +1895,35 @@ fn run_inserted(
     let index = out.records.len();
     out.records.push(record);
     out.requests += 1;
+    if !poisoned {
+        if let Some(event) = event {
+            // A spent budget (the script itself may have spent it) owes the
+            // event to the next turn that has some, ahead of any other script.
+            if super::script_js_exhausted() {
+                scripts.owe(OwedEvent { node: job.node, event, source, record: None });
+            } else {
+                fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
+            }
+        }
+    }
+    // After its event: a listener the budget stopped is this script's stop.
+    if let Some(record) = out.records.get(index) {
+        inspector.script_ended(crate::inspector::ScriptEnd {
+            source: &record.source,
+            kind: "inserted",
+            outcome: &record.outcome,
+            started: began,
+            bytes: record.bytes,
+            queued: Some(job.queued),
+            fetch: fetched_in,
+            waited,
+            ran_ms: record.elapsed_ms,
+            event,
+        });
+    }
     if poisoned {
         out.poisoned = true;
         return true;
-    }
-    if let Some(event) = event {
-        // A spent budget (the script itself may have spent it) owes the
-        // event to the next turn that has some, ahead of any other script.
-        if super::script_js_exhausted() {
-            scripts.owe(OwedEvent { node: job.node, event, source, record: None });
-        } else {
-            fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
-        }
     }
     false
 }
@@ -1443,7 +1971,8 @@ fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched:
         FetchedInserted::Http(http) => {
             guard.response(http.status, http.mime.as_deref(), http.encoded_size, None, http.from_cache);
         }
-        FetchedInserted::Transport { stage, inspector_reason, .. } => guard.fail(*stage, inspector_reason),
-        FetchedInserted::Skipped(_) => drop(guard),
+        FetchedInserted::Transport { stage, inspector_reason, blocked_by, .. } => {
+            guard.blocked_by(blocked_by.as_ref()).fail(*stage, inspector_reason)
+        }
     }
 }

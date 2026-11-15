@@ -71,7 +71,7 @@ fn a_view_is_drawn_again_only_when_its_frame_would_differ() {
 
     // An image the frame was drawn without arrives in the cache.
     let late = Url::parse(&format!("http://127.0.0.1:{}/late.png", server.port)).unwrap();
-    engine.image_manager.insert_fetched(&late, Some("image/png"), PNG).expect("png");
+    engine.lctx.image_manager.insert_fetched(&late, Some("image/png"), PNG).expect("png");
     assert_eq!(engine.render_changed_views(), 1, "an image the last frame lacked is here");
     assert_eq!(engine.render_changed_views(), 0);
 

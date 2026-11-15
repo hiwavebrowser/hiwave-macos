@@ -18,6 +18,7 @@ struct Gpu {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     adapter: String,
+    device_type: wgpu::DeviceType,
 }
 
 /// One device per test (the renderer's tests share no GPU state).
@@ -31,7 +32,8 @@ fn gpu() -> Option<Gpu> {
         compatible_surface: None,
         force_fallback_adapter: false,
     }))?;
-    let name = adapter.get_info().name;
+    let info = adapter.get_info();
+    let (name, device_type) = (info.name, info.device_type);
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("scroll cost test device"),
@@ -46,6 +48,7 @@ fn gpu() -> Option<Gpu> {
         device: Arc::new(device),
         queue: Arc::new(queue),
         adapter: name,
+        device_type,
     })
 }
 
@@ -70,6 +73,8 @@ fn text(s: &str, x: f32, y: f32, color: Color) -> DisplayCommand {
         advances: Some(vec![7.0; s.chars().count()]),
         ascent: Some(13.0),
         run: None,
+        faces: None,
+        undilated: false,
     }
 }
 
@@ -685,6 +690,76 @@ fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_scree
     }
 }
 
+/// The buffer-limit frame for an adapter: how many commands of text page,
+/// and the buffer and batch limits to set (`None` keeps the renderer's own:
+/// the device's buffer limit, at most 256 MB, and 64 MB batches).
+#[derive(Debug, PartialEq)]
+struct BufferLimitCase {
+    commands: usize,
+    max_buffer_bytes: Option<u64>,
+    max_batch_bytes: Option<u64>,
+}
+
+/// Real GPUs draw the 80,000-command frame past the device's 256 MB limit. A
+/// CPU adapter (WARP, llvmpipe, SwiftShader) cannot: its queue times out on
+/// 3.4M glyph quads and panics in `Queue::drop`, which aborts the whole test
+/// binary. It draws 2,000 commands past a 64 KiB buffer limit and a 16 KiB
+/// batch limit instead (the same 4:1 ratio), so the flush and split paths
+/// still run there.
+fn buffer_limit_case(device_type: wgpu::DeviceType) -> BufferLimitCase {
+    match device_type {
+        wgpu::DeviceType::Cpu => BufferLimitCase {
+            commands: 2_000,
+            max_buffer_bytes: Some(64 * 1024),
+            max_batch_bytes: Some(16 * 1024),
+        },
+        _ => BufferLimitCase {
+            commands: 80_000,
+            max_buffer_bytes: None,
+            max_batch_bytes: None,
+        },
+    }
+}
+
+#[test]
+fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
+    let full = BufferLimitCase {
+        commands: 80_000,
+        max_buffer_bytes: None,
+        max_batch_bytes: None,
+    };
+    for hw in [
+        wgpu::DeviceType::DiscreteGpu,
+        wgpu::DeviceType::IntegratedGpu,
+        wgpu::DeviceType::VirtualGpu,
+        wgpu::DeviceType::Other,
+    ] {
+        assert_eq!(buffer_limit_case(hw), full, "{hw:?}");
+    }
+    // On a CPU adapter (WARP, llvmpipe, SwiftShader) 3.4M glyph quads time
+    // out the queue and panic in `Queue::drop`, aborting the test binary.
+    let soft = buffer_limit_case(wgpu::DeviceType::Cpu);
+    let cap = soft
+        .max_buffer_bytes
+        .expect("a small limit on a CPU adapter");
+    let batch = soft
+        .max_batch_bytes
+        .expect("a small batch on a CPU adapter");
+    assert!(batch < cap, "{soft:?}");
+    assert!(soft.commands <= 2_000, "{soft:?}");
+    // Still past the limit: the frame's glyph vertices need several buffers.
+    let glyphs: usize = page(Mix::Text, soft.commands)
+        .iter()
+        .map(|c| match c {
+            DisplayCommand::Text { text, .. } => text.chars().count(),
+            _ => 0,
+        })
+        .sum();
+    let glyph_bytes = glyphs * 4 * std::mem::size_of::<TextureVertex>();
+    assert!(glyph_bytes as u64 > 4 * cap, "{glyph_bytes} vs {cap}");
+    assert!(glyph_bytes as u64 > 2 * batch, "{glyph_bytes} vs {batch}");
+}
+
 #[test]
 fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
     let Some(gpu) = gpu() else {
@@ -693,10 +768,24 @@ fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
     };
     // 80,000 rows of text drawn without culling: about 3.4M glyph quads,
     // past wgpu's 256 MB buffer limit in one batch. This panicked in
-    // `flush_to` (Texture Vertex Buffer).
-    let list = page(Mix::Text, 80_000);
+    // `flush_to` (Texture Vertex Buffer). A CPU adapter draws a small frame
+    // past a small limit (`buffer_limit_case`).
+    let case = buffer_limit_case(gpu.device_type);
+    if case.max_buffer_bytes.is_some() {
+        eprintln!(
+            "software adapter {} ({:?}): {case:?}",
+            gpu.adapter, gpu.device_type
+        );
+    }
+    let list = page(Mix::Text, case.commands);
     let mut r = renderer(&gpu);
     r.reference = true;
+    if let Some(cap) = case.max_buffer_bytes {
+        r.max_buffer_bytes = cap;
+    }
+    if let Some(batch) = case.max_batch_bytes {
+        r.max_batch_bytes = batch;
+    }
     let (_t, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
     r.execute(&list, &view).expect("the frame draws");
     let s = r.last_frame_stats();
@@ -929,13 +1018,14 @@ fn culling_never_changes_coverage_or_order_of_decorations_negative_sizes_or_wide
         return;
     };
     let hazards = cull_hazards();
-    // The same list through the blur path, whose only flushes besides the
-    // blur are the size cap's.
+    // The same list with a backdrop blur, drawn into a frame texture that
+    // the blur reads.
     let mut blurred = hazards.clone();
     blurred.push(DisplayCommand::BackdropFilter {
         rect: Rect::new(900.0, 700.0, 100.0, 60.0),
         border_radius: rustkit_layout::BorderRadius::default(),
-        filter: rustkit_css::BackdropFilter::Blur(4.0),
+        steps: vec![rustkit_layout::FilterStep::Blur(4.0)],
+        own_groups: 0,
     });
     let cases: [(&str, &[DisplayCommand], u64); 4] = [
         ("fast", &hazards, MAX_BATCH_BYTES),
@@ -1212,6 +1302,8 @@ fn fuzz_case(seed: u64) -> FuzzCase {
                     advances: Some(vec![advance; len]),
                     ascent: Some(size * 0.9),
                     run: None,
+                    faces: None,
+                    undilated: false,
                 });
                 for _ in 0..rng.u(4) {
                     let width = advance * len as f32 * if rng.chance(0.8) { 1.0 } else { -1.0 };
@@ -1291,7 +1383,8 @@ fn fuzz_case(seed: u64) -> FuzzCase {
             15 if blur => list.push(DisplayCommand::BackdropFilter {
                 rect: Rect::new(x, y, rng.pos(50.0, 500.0), rng.pos(50.0, 300.0)),
                 border_radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 20.0)),
-                filter: rustkit_css::BackdropFilter::Blur(rng.f(1.0, 12.0)),
+                steps: vec![rustkit_layout::FilterStep::Blur(rng.f(1.0, 12.0))],
+                own_groups: 0,
             }),
             15 if gpu_gradients => {
                 let stops = (0..2 + rng.u(3))

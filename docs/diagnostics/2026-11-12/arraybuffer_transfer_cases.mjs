@@ -1,0 +1,38 @@
+// ArrayBuffer.prototype.transfer / transferToFixedLength / detached in the pinned Chrome (CfT 148).
+// Usage: node arraybuffer_transfer_cases.mjs <chrome.exe> <cases.json> <results.json>
+import puppeteer from "puppeteer-core";
+import fs from "fs";
+const [exe, casesOut, resultsOut] = process.argv.slice(2);
+const cases = {
+  shapes: "return [typeof ArrayBuffer.prototype.transfer, typeof ArrayBuffer.prototype.transferToFixedLength, typeof Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get, ArrayBuffer.prototype.transfer.length, ArrayBuffer.prototype.transferToFixedLength.length].join();",
+  transfer_same_length: "var b = new Uint8Array([1,2,3,4]).buffer; var c = b.transfer(); return [b.byteLength, b.detached, c.byteLength, c.detached, Array.from(new Uint8Array(c)).join(), b === c].join();",
+  transfer_grow: "var b = new Uint8Array([1,2]).buffer; var c = b.transfer(5); return [c.byteLength, Array.from(new Uint8Array(c)).join()].join();",
+  transfer_shrink: "var b = new Uint8Array([1,2,3,4]).buffer; var c = b.transfer(2); return [c.byteLength, Array.from(new Uint8Array(c)).join()].join();",
+  transfer_zero: "var b = new ArrayBuffer(4); var c = b.transfer(0); return [b.detached, c.byteLength, c.detached].join();",
+  view_after_transfer: "var b = new ArrayBuffer(8); var u = new Uint8Array(b, 2, 4); b.transfer(); return [u.length, u.byteLength, u.byteOffset, u.buffer === b, u.buffer.detached].join();",
+  detached_twice: "var b = new ArrayBuffer(4); b.transfer(); try { b.transfer(); return 'no throw'; } catch (e) { return e.name; }",
+  slice_detached: "var b = new ArrayBuffer(4); b.transfer(); try { b.slice(0); return 'no throw'; } catch (e) { return e.name; }",
+  new_view_on_detached: "var b = new ArrayBuffer(4); b.transfer(); try { new Uint8Array(b); return 'no throw'; } catch (e) { return e.name; }",
+  byteLength_detached: "var b = new ArrayBuffer(4); b.transfer(); return [b.byteLength, b.maxByteLength, b.resizable].join();",
+  resizable_transfer: "var b = new ArrayBuffer(4, { maxByteLength: 16 }); var c = b.transfer(); return [c.resizable, c.maxByteLength, c.byteLength, b.detached].join();",
+  resizable_to_fixed: "var b = new ArrayBuffer(4, { maxByteLength: 16 }); var c = b.transferToFixedLength(); return [c.resizable, c.maxByteLength, c.byteLength].join();",
+  fixed_to_fixed: "var b = new ArrayBuffer(4); var c = b.transferToFixedLength(6); return [c.resizable, c.byteLength].join();",
+  non_buffer_this: "try { ArrayBuffer.prototype.transfer.call({}); return 'no throw'; } catch (e) { return e.name; }",
+  bad_length: "var b = new ArrayBuffer(4); try { b.transfer(-1); return 'no throw'; } catch (e) { return e.name; }",
+  dataview_after: "var b = new ArrayBuffer(8); var d = new DataView(b, 1, 2); b.transfer(); try { d.getUint8(0); return 'no throw'; } catch (e) { return e.name; }",
+  dataview_props_after: "var b = new ArrayBuffer(8); var d = new DataView(b, 1, 2); b.transfer(); try { return d.byteLength; } catch (e) { return e.name; }",
+  structured_detached_flag: "var b = new ArrayBuffer(4); var u = new Uint8Array(b); b.transfer(); return [u.length, u[0]].join();",
+};
+fs.writeFileSync(casesOut, JSON.stringify(cases, null, 1));
+const b = await puppeteer.launch({ executablePath: exe, headless: true, args: ["--no-sandbox", "--disable-gpu"] });
+const p = await b.newPage();
+const res = await p.evaluate((cases) => {
+  const out = {};
+  for (const [k, src] of Object.entries(cases)) {
+    try { out[k] = String((new Function(src))()); } catch (e) { out[k] = "THROWN:" + e.name; }
+  }
+  return out;
+}, cases);
+fs.writeFileSync(resultsOut, JSON.stringify(res, null, 1));
+console.log(await b.version());
+await b.close();

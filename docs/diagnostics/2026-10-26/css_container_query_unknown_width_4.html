@@ -1,0 +1,17 @@
+<!DOCTYPE html><!-- #782 HOLD 5 (R1 review 5651507176, q1-q7): @container is false after a float inside an inline span with overflow or container-type, or a display:contents box with overflow (none starts a formatting context); after a floated ::before, ::after or ::first-letter; and for an absolute border-box container with % padding (of the 800px viewport, not the 600px row). Rows 1-2 are controls (a plain 600px container asked for 400px and 590px). Bars are absolutely placed so only the query decides colour. Text is transparent. Pass: 9 green bars at (10,5+35n). FAIL: any red. -->
+<style>body{margin:0;color:transparent} .r{position:relative;width:600px;height:35px;overflow:hidden} .s{position:static} .fl{float:left;width:300px;height:50px}
+.pb::before{content:"";float:left;width:300px;height:50px} .pa::after{content:"";float:left;width:300px;height:50px}
+.fx{height:20px;font:16px/20px sans-serif} .fx::first-letter{float:left;font-size:60px;line-height:60px}
+i{position:absolute;left:10px;top:5px;width:20px;height:20px;background:green} .c i{background:red}
+@container (min-width:400px){.a i{background:red} .c.a i{background:green}}
+@container (min-width:590px){.b i{background:red} .c.b i{background:green}}
+@container (min-width:430px){.q7 i{background:red}}</style>
+<div class="r c a"><div style="container-type:inline-size"><i></i></div></div>
+<div class="r c b"><div style="container-type:inline-size"><i></i></div></div>
+<div class="r a"><span style="overflow:hidden"><b class="fl"></b></span><div style="container-type:inline-size"><i></i></div></div>
+<div class="r a"><span style="container-type:inline-size"><b class="fl"></b></span><div style="container-type:inline-size"><i></i></div></div>
+<div class="r a"><div style="display:contents;overflow:hidden"><div class="fl"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r a"><div class="pb"><div style="container-type:inline-size"><i></i></div></div></div>
+<div class="r a"><div class="pa"></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r b"><div class="fx">Hello</div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r s q7"><div style="position:absolute;box-sizing:border-box;width:500px;padding-left:10%;container-type:inline-size"><i></i></div></div>

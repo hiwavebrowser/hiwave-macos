@@ -1,0 +1,15 @@
+<!doctype html><!-- CB2 (was CH2.E10b report x6: #activityChart/#protectionChart 0x0 vs Chrome 143 910x300). Each canvas is sized from one
+  query of its 40px-high relative parent, the way Chart.js 4.4 getMaximumSize does: p = getBoundingClientRect at parse time,
+  a = getBoundingClientRect / b = clientWidth/Height / g = getComputedStyle in a microtask after DOMContentLoaded.
+  Reduced page 2026-11-10 03:05 ET, bd10a85d vs Chrome 143.0.7499.4, 800x600: p/a/b/g all 800x40 in both (diff 0.000%), does not go 0x0. CB2 load/rAF/t+1s dumps pending. -->
+<style>body{margin:0}.c{position:relative;height:40px;margin-bottom:4px}canvas{display:block;background:#08f}</style>
+<div class="c"><canvas id="p"></canvas></div><div class="c"><canvas id="a"></canvas></div>
+<div class="c"><canvas id="b"></canvas></div><div class="c"><canvas id="g"></canvas></div>
+<script>
+function size(id,f){var c=document.getElementById(id),w=f(c.parentNode);c.style.width=w[0]+'px';c.style.height=w[1]+'px';c.width=w[0];c.height=w[1];}
+function rect(p){var r=p.getBoundingClientRect();return[r.width,r.height];}
+function dump(t){['p','a','b','g'].forEach(function(id){var c=document.getElementById(id),p=c.parentNode,r=c.getBoundingClientRect();console.log('E10B '+JSON.stringify([t,id,c.width,c.height,[r.x,r.y,r.width,r.height],p.clientWidth,p.clientHeight]));});}
+size('p',rect);
+document.addEventListener('DOMContentLoaded',function(){Promise.resolve().then(function(){size('a',rect);size('b',function(p){return[p.clientWidth,p.clientHeight];});size('g',function(p){var s=getComputedStyle(p);return[parseFloat(s.width),parseFloat(s.height)];});});});
+addEventListener('load',function(){dump('load');requestAnimationFrame(function(){requestAnimationFrame(function(){dump('raf2')})});setTimeout(function(){dump('t1s')},1000)});
+</script>

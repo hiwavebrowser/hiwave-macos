@@ -232,7 +232,8 @@ fn author_css_beats_presentational_attributes() {
     );
     assert_eq!(tables(&root)[0].style.width, rustkit_css::Length::Px(200.0));
     let c = &cells(&root)[0].style;
-    assert_eq!(c.padding_top, rustkit_css::Length::Zero);
+    // An authored `0` is `0px` (CH2.B14), not the unset `Zero`.
+    assert_eq!(c.padding_top, rustkit_css::Length::Px(0.0));
     assert_eq!(c.background_color, rustkit_css::Color::from_rgb(0, 0, 255));
 }
 
@@ -333,7 +334,7 @@ fn html_attribute_parsers() {
     assert_eq!(html_legacy_color("ffcc00"), "#ffcc00");
     assert_eq!(html_legacy_color("red"), "red");
     assert_eq!(html_legacy_color("#abc"), "#abc");
-    let mut attrs = HashMap::new();
+    let mut attrs = rustkit_dom::AttrMap::new();
     attrs.insert("border".to_string(), String::new());
     assert_eq!(table_border_attribute(&attrs), Some(1), "<table border>");
     attrs.insert("border".to_string(), "0".to_string());

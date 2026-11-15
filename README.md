@@ -67,8 +67,9 @@ same Chrome.
 - **HiWave Inspector.** An Elements and Console panel for RustKit pages, with
   JavaScript error stacks (frames, script URL, line, column, and which script
   inserted the failing one). It shows only the *shape* of page data
-  (`<string len=13>`, `<text len=N>`, URLs without query or fragment), never
-  the page's own text.
+  (`<string len=13>`, `<text len=N>`, URLs without query or fragment), not
+  the page's own text, by default. Known gap: with `HIWAVE_CONSOLE_LOG=1`,
+  console text still reaches the Inspector until #791 lands.
 - **CSS:** `:has()`, `@supports` conditions, `color-mix()`,
   `-webkit-line-clamp`, shadow DOM styles (`:host`, `::slotted`, `:defined`),
   `font-size: 0`, `box-sizing: inherit`, percentage `auto-fit` tracks, and an
@@ -104,6 +105,12 @@ into `develop`, and [CHANGELOG.md](CHANGELOG.md).
   runs on a dedicated Mac.
 - **Animations are parsed, not executed.**
 - **Text metrics** remain the largest single source of parity diff vs Chrome.
+- **Two WPT cases render blank** (`empty-span-scroll`,
+  `align-items-baseline-overflow-non-visible`) — recorded as render refusals
+  rather than scored.
+- **No build/tests feed to the umbrella yet** — this repo's `metrics-history`
+  branch carries parity data only, so the umbrella's macOS *build* badge
+  reads "unknown".
 
 ### How these numbers are produced
 
@@ -373,6 +380,8 @@ This means:
 - ⚠️ Changes to HiWave's files must be shared under MPL-2.0
  
 For commercial licensing options, see COMMERCIAL-LICENSE.md.
+
+**Third-party notices:** the app also contains third-party works (Rust crates, the vendored Boa engine, Chart.js, Unicode CLDR data) under their own licences. Their copyright notices and licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

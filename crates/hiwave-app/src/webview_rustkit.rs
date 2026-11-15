@@ -43,6 +43,25 @@ const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 /// # Thread Safety
 ///
 /// This type is NOT Send or Sync. All operations must be performed on the main thread.
+/// What the browser chrome has not been told yet about the page on
+/// screen (CH2.E9): the committed URL (after any redirect), the title, and
+/// load start and end. Taken by [`RustKitView::take_chrome_updates`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ChromeUpdates {
+    /// The URL the page committed, when it changed. Only web and file
+    /// URLs: a document the app loads itself (New Tab, about) keeps the
+    /// address the app gave it.
+    pub url: Option<String>,
+    /// The document title, when it changed.
+    pub title: Option<String>,
+    /// A load started since the last take.
+    pub started: bool,
+    /// The load state now, when it changed: `Some(false)` once it ended.
+    pub loading: Option<bool>,
+    /// The URL of a load that completed since the last take (history).
+    pub finished: Option<String>,
+}
+
 pub struct RustKitView {
     /// Commands in, events out. Applied by [`Self::submit`] on this thread.
     /// `None` when the page runs on the content thread.
@@ -63,16 +82,34 @@ pub struct RustKitView {
     /// Navigation the window has asked for. Older events are dropped.
     accepted_nav: Cell<u64>,
     /// A navigation the page decided on, harvested from events:
-    /// url, replace, and whether the user activated it.
-    script_nav: RefCell<Option<(String, bool, bool)>>,
+    /// url, replace, whether the user activated it, and the document's
+    /// navigation id. `take_script_navigation` drops a copy whose id is
+    /// older than [`Self::accepted_nav`]: harvest pulls the event out of
+    /// the queue, so [`stale`] never sees it again.
+    script_nav: RefCell<Option<(String, bool, bool, u64)>>,
     /// Newest commit whose navigation is still the one on screen.
     latest_commit: RefCell<Option<FrameCommit>>,
+    /// The view's region when it is stacked over another view (CH3.A3b,
+    /// the RustKit chrome over the page): `None` for every other view.
+    region: RefCell<Option<rustkit_viewhost::FrameRegion>>,
+    /// Drawn as a transparent surface (CH3.A3c): its region is a hit
+    /// region only, so a frame with an open drop-down can make the whole
+    /// view hit without covering the page (CH2.E6b).
+    transparent: Cell<bool>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
     current_url: RefCell<Option<String>>,
     /// Current title (cached).
     current_title: RefCell<Option<String>>,
+    /// What the chrome has not been told yet (CH2.E9).
+    chrome_updates: RefCell<ChromeUpdates>,
+    /// What the page posted on `window.ipc`, in order (CH2.E9).
+    ipc_inbox: RefCell<Vec<String>>,
+    /// CH3.A7: the app owns this view (its chrome, a panel), so the
+    /// documents it loads with `load_html_internal` get the app bridge.
+    /// A content view never does.
+    app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -83,6 +120,10 @@ pub struct RustKitView {
     /// reported it (`PageEvent::Focused`). With the page on its own thread,
     /// the window cannot ask and wait for the answer.
     page_focused: std::cell::Cell<bool>,
+    /// Whether that focused element is a text field, from the page's last
+    /// `PageEvent::TextFocused` (the editing chords go to the page only
+    /// then).
+    page_text_focused: std::cell::Cell<bool>,
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
@@ -108,11 +149,23 @@ pub struct RustKitView {
     host_view: isize,
     /// Set once Close has been asked. Later commands are dropped.
     closed: Cell<bool>,
+    /// Where the page let a right press through (CH2.E4,
+    /// `PageEvent::ContextMenu`): the browser's menu goes there. Taken by
+    /// [`RustKitView::take_context_menu`].
+    context_menu: Cell<Option<(f32, f32)>>,
     /// The load in progress, polled a slice at a time by the event loop
     /// ([`RustKitView::step_load`]).
     pending_load: RefCell<Option<PendingLoad>>,
     /// Bounds set while a load held the engine, applied when it ends.
     pending_bounds: Cell<Option<Bounds>>,
+    /// A panel attached or detached while a load held the engine, asked
+    /// again when it ends (#803 review (2)): the page never heard it, so
+    /// it recorded nothing and nothing watched it.
+    pending_attach: Cell<Option<bool>>,
+    /// The view's Inspector and devtools counters, taken once at build:
+    /// both live as long as the view, so a console read needs no borrow of
+    /// the endpoint a load is holding.
+    devtools_page: Option<(Arc<rustkit_engine::Inspector>, Arc<rustkit_engine::DevtoolsCounters>)>,
     /// Events the flag-off page published, kept for the tests.
     #[cfg(test)]
     seen_events: RefCell<Vec<PageEvent>>,
@@ -191,6 +244,8 @@ fn content_engine_builder() -> EngineBuilder {
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
         .follows_script_navigation(true)
+        // Copy, cut and paste use the system clipboard (CH2.E3).
+        .system_clipboard(!cfg!(test))
         // What a page asks of the network after its `load` event (beacons,
         // pixels, metrics fetches that may never stop) is the live loop's:
         // it neither holds the window thread inside the load nor delays
@@ -306,7 +361,7 @@ impl RustKitView {
     /// A content view on the content thread, with no window (tests). There
     /// is no surface, so nothing is presented.
     #[cfg(test)]
-    fn headless_content(bounds: Bounds) -> Self {
+    pub(crate) fn headless_content(bounds: Bounds) -> Self {
         let thread = ContentThread::spawn(content_engine_builder(), bounds).expect("content thread");
         Self::from_parts(None, None, Some(thread), None, None, None, 0)
     }
@@ -320,7 +375,12 @@ impl RustKitView {
         counter_clone: Option<Arc<AtomicU64>>,
         host_view: isize,
     ) -> Self {
+        let devtools_page = endpoint.as_ref().and_then(|endpoint| {
+            let endpoint = endpoint.borrow();
+            Some((endpoint.inspector()?, endpoint.devtools_counters()))
+        });
         Self {
+            devtools_page,
             handle,
             endpoint,
             content,
@@ -328,13 +388,19 @@ impl RustKitView {
             accepted_nav: Cell::new(0),
             script_nav: RefCell::new(None),
             latest_commit: RefCell::new(None),
+            region: RefCell::new(None),
+            transparent: Cell::new(false),
             view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
+            chrome_updates: RefCell::new(ChromeUpdates::default()),
+            ipc_inbox: RefCell::new(Vec::new()),
+            app_owned: Cell::new(false),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
             page_focused: std::cell::Cell::new(false),
+            page_text_focused: std::cell::Cell::new(false),
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
@@ -348,8 +414,10 @@ impl RustKitView {
                 .ok(),
             host_view,
             closed: Cell::new(false),
+            context_menu: Cell::new(None),
             pending_load: RefCell::new(None),
             pending_bounds: Cell::new(None),
+            pending_attach: Cell::new(None),
             #[cfg(test)]
             seen_events: RefCell::new(Vec::new()),
         }
@@ -393,6 +461,13 @@ impl RustKitView {
     fn drop_events(&self) {
         let Some(handle) = self.handle.as_ref() else { return };
         let events = handle.drain_events();
+        for event in &events {
+            // A Cmd chord the page did not claim goes on to the menu (CH2.E3).
+            if let PageEvent::KeyEquivalentDone { token, claimed } = event {
+                rustkit_viewhost::finish_key_equivalent(*token, *claimed);
+            }
+            self.pointer_event(event);
+        }
         #[cfg(test)]
         self.seen_events.borrow_mut().extend(events);
         #[cfg(not(test))]
@@ -531,11 +606,15 @@ impl RustKitView {
         }
     }
 
-    /// An input event for this view arrived at the queue at `at` with
-    /// sequence number `seq` (W-gate: input-to-present latency). Called
-    /// before the event is delivered.
-    pub fn note_input(&self, at: Instant, seq: u64) {
-        self.submit(PageCmd::NoteInput { at, seq });
+    /// The user made `event` on this view (LAT1c: input-to-present
+    /// latency, from the native event's time). Called before the event
+    /// is delivered.
+    pub fn note_input(&self, event: &rustkit_viewhost::InputEvent) {
+        self.submit(PageCmd::NoteInput {
+            at: event.at,
+            seq: event.seq,
+            kind: rustkit_engine::InputClass::of(&event.kind),
+        });
     }
 
     /// Route OS keyboard delivery to the content view (first responder).
@@ -587,6 +666,30 @@ impl RustKitView {
     }
 
     /// A key was released: the page hears `keyup`.
+    /// A macOS Cmd chord (CH2.E3): the page hears its keydown first. The
+    /// page answers whether it claimed `token`; one it did not goes on to
+    /// the main menu (`rustkit_viewhost::finish_key_equivalent`), when the
+    /// answer arrives.
+    pub fn handle_command_key(&self, key_code: u32, key: &str, shift: bool, alt: bool, token: u64) {
+        self.submit(PageCmd::Input(PageInput::CommandKey {
+            key_code,
+            key: key.to_string(),
+            shift,
+            alt,
+            token,
+        }));
+    }
+
+    /// The input method's marked or committed text (CH2.E3).
+    pub fn ime_input(&self, input: rustkit_viewhost::ImeInput) {
+        self.submit(PageCmd::Input(PageInput::Ime(input)));
+    }
+
+    /// An Edit menu item in the focused text field (CH2.E3).
+    pub fn edit_command(&self, command: rustkit_engine::EditCommand) {
+        self.submit(PageCmd::Input(PageInput::Edit(command)));
+    }
+
     pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
         self.submit(PageCmd::Input(PageInput::KeyUp {
             key_code,
@@ -611,6 +714,51 @@ impl RustKitView {
             .flatten()
     }
 
+    /// What the chrome must be told since the last call (CH2.E9).
+    /// Filled from the content thread's events, so only with the page on
+    /// its own thread (the default); flag off the events are dropped.
+    pub fn take_chrome_updates(&self) -> ChromeUpdates {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.chrome_updates.borrow_mut())
+    }
+
+    /// The viewhost id the input of this view's NSView is tagged with.
+    /// Content thread only (the flag-off engine owns its host view).
+    pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
+        self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
+    }
+
+    /// CH3.A7: make this an app-owned view (the chrome, the shelf, the
+    /// Inspector, the settings page): the documents the app loads into it
+    /// from now on get `window.ipc` and `window.hiwaveChrome`. Call it
+    /// before the first load. A web content view is never marked.
+    pub fn set_app_owned(&self) {
+        self.app_owned.set(true);
+        if let Some(thread) = &self.content {
+            thread.set_app_owned(true);
+        } else {
+            self.submit(PageCmd::SetAppOwned { owned: true });
+        }
+    }
+
+    /// Whether [`Self::set_app_owned`] made this an app-owned view.
+    pub fn is_app_owned(&self) -> bool {
+        self.app_owned.get()
+    }
+
+    /// The messages the page posted with `window.ipc.postMessage` since
+    /// the last call, oldest first (CH2.E9). Content thread only. The app
+    /// must hand these to its command handler only for a view showing the
+    /// app's own documents (chrome, shelf): a web page can post here too.
+    pub fn take_ipc_messages(&self) -> Vec<String> {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.ipc_inbox.borrow_mut())
+    }
+
     /// Where the page's own script asked to go since the last call
     /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
     /// from a timer). The caller navigates.
@@ -621,9 +769,15 @@ impl RustKitView {
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
-            let taken = self.script_nav.borrow_mut().take()?;
-            self.replace_next.set(taken.1);
-            return Some((taken.0, taken.2));
+            let (url, replace, from_user, nav_id) = self.script_nav.borrow_mut().take()?;
+            // The event loop harvests before it takes (`process_events`,
+            // `render`). A URL-bar load or New Tab can start in between and
+            // only then is this copy older than the navigation on screen.
+            if stale_nav(self.accepted_nav.get(), nav_id) {
+                return None;
+            }
+            self.replace_next.set(replace);
+            return Some((url, from_user));
         }
         let (url, replace) =
             self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
@@ -643,6 +797,21 @@ impl RustKitView {
             return self.page_focused.get();
         }
         self.ask(|reply| PageCmd::Input(PageInput::HasFocus { reply }))
+            .unwrap_or(false)
+    }
+
+    /// Whether the focused content element is a text field: a text
+    /// input, a textarea or editable content. Not a link, a button or a
+    /// `<select>`, whose Cmd chords stay menu shortcuts.
+    pub fn has_focused_text_control(&self) -> bool {
+        if self.content.is_some() {
+            // As has_focused_element: the page's last report, and ask again.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::HasTextFocus { reply }));
+            self.harvest();
+            return self.page_focused.get() && self.page_text_focused.get();
+        }
+        self.ask(|reply| PageCmd::Input(PageInput::HasTextFocus { reply }))
             .unwrap_or(false)
     }
 
@@ -669,7 +838,25 @@ impl RustKitView {
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        self.submit(PageCmd::Input(PageInput::MouseDown { x, y }));
+        self.mouse_down_with(x, y, 1, false);
+    }
+
+    /// A press that is the `clicks`-th of a multi-click (AppKit's
+    /// `clickCount`: 2 selects a word and fires `dblclick` on release),
+    /// with Shift held or not (CH2.E4).
+    pub fn mouse_down_with(&self, x: f32, y: f32, clicks: u32, shift: bool) {
+        self.submit(PageCmd::Input(PageInput::MouseDown { x, y, clicks, shift }));
+    }
+
+    /// A secondary-button press: the page's `contextmenu`. A press the page
+    /// lets through comes back from [`Self::take_context_menu`] (CH2.E4).
+    pub fn secondary_down(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryDown { x, y }));
+    }
+
+    /// The secondary button's release (the menu did not take it).
+    pub fn secondary_up(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryUp { x, y }));
     }
 
     /// Deliver a pointer move to viewport coordinates to the page (the
@@ -734,6 +921,19 @@ impl RustKitView {
         .unwrap_or(false)
     }
 
+    /// A wheel over a point of the content view: the box under it may take it.
+    /// Like `scroll_by` on the page thread: true, and the commit shows it.
+    /// `gesture`: a step of a gesture (a trackpad's scroll), which stays on
+    /// what the gesture began on; a wheel on its own does not. `began`: the
+    /// platform says a gesture begins here (a new scroll sequence).
+    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32, gesture: bool, began: bool) -> bool {
+        if self.content.is_some() {
+            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y, gesture, began }));
+            return true;
+        }
+        self.scroll_by(delta_x, delta_y)
+    }
+
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
         self.cancel_load();
@@ -741,9 +941,13 @@ impl RustKitView {
             let _rx = thread.load_html(html);
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
+            // Drop one harvest already copied out of the queue; `stale`
+            // only filters what is still queued.
             self.accepted_nav.set(thread.last_nav_id());
+            let _ = self.script_nav.borrow_mut().take();
             // The new document has nothing focused until it says otherwise.
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             self.live_clock.set(Instant::now());
             return Ok(());
         }
@@ -871,6 +1075,12 @@ impl RustKitView {
             .map_err(|e| format!("Failed to set bounds: {}", e))
     }
 
+    /// The host `NSView`'s pointer (0 when there is none): for stacking
+    /// and the chrome's region (CH3.A3).
+    pub fn host_view_raw(&self) -> isize {
+        self.host_view
+    }
+
     /// Get the view ID.
     pub fn view_id(&self) -> Option<EngineViewId> {
         self.view_id
@@ -894,7 +1104,11 @@ impl RustKitView {
             // Signal cancel and the interrupt before the command is queued.
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
+            // Same as New Tab: a script navigation already harvested from
+            // the page being replaced must not be taken on the next turn.
+            let _ = self.script_nav.borrow_mut().take();
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             *self.loading.borrow_mut() = true;
             self.live_clock.set(Instant::now());
             return;
@@ -1035,6 +1249,9 @@ impl RustKitView {
         }
         self.drop_events();
         self.live_clock.set(Instant::now());
+        if let Some(on) = self.pending_attach.take() {
+            let _ = self.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(on));
+        }
     }
 
     /// Execute JavaScript synchronously on the flag-off path. The content
@@ -1059,22 +1276,64 @@ impl RustKitView {
 
     // The developer tools (`devtools_panel`): on-demand, bounded questions
     // about the page's last committed DOM and layout, answered on the
-    // page's own thread. Nothing here waits for the answer.
+    // page's own thread, and console reads, answered by the devtools thread
+    // from the view's Inspector without the page (T6a). Nothing here waits
+    // for the answer.
 
-    /// Ask the page a developer-tools question. The answer arrives on the
-    /// receiver: before this returns on the same-thread path, after the
-    /// page's current turn on the content thread. A closed receiver means
-    /// no answer (a closed view, or a load holding the same-thread page).
+    /// Ask a developer-tools question. The answer arrives on the receiver:
+    /// from the devtools thread for a console read; otherwise before this
+    /// returns on the same-thread path, after the page's current turn on
+    /// the content thread. A closed receiver means no answer (a closed
+    /// view, or a load holding the same-thread page).
     pub fn devtools_ask(&self, query: rustkit_engine::DevtoolsQuery) -> oneshot::Receiver<rustkit_engine::DevtoolsAnswer> {
+        if let Some(thread) = self.content.as_ref().filter(|_| self.is_open()) {
+            return thread.devtools_ask(query);
+        }
+        let page = self
+            .endpoint
+            .as_ref()
+            .filter(|_| self.is_open())
+            .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| Some((e.inspector()?, e.devtools_counters()))));
+        // Not `page`: a load holding the endpoint must not drop the read.
+        let held = self.devtools_page.as_ref().filter(|_| self.is_open());
+        if let (rustkit_engine::DevtoolsQuery::Console { since }, Some((inspector, counters))) = (&query, held) {
+            // The answer arrives on the devtools thread, after this returns:
+            // the window is woken for it as on the content thread (#803
+            // review (1)), or an idle page's line waits for an unrelated wake.
+            return rustkit_engine::devtools_ask_console(Arc::clone(inspector), *since, Some(Arc::clone(counters)));
+        }
+        // An open panel is woken when the view records (T6b). A load holding
+        // the endpoint drops the command, so it is asked again at the end.
+        if let rustkit_engine::DevtoolsQuery::Attach(on) = query {
+            match &page {
+                Some((inspector, counters)) => rustkit_engine::devtools_watch(inspector, counters, on),
+                None if self.endpoint.is_some() && self.is_open() => self.pending_attach.set(Some(on)),
+                None => {}
+            }
+        }
         let (reply, rx) = oneshot::channel();
         self.submit(PageCmd::Devtools { query, reply });
         rx
     }
 
-    /// Run the console's `code` in the page: the value, or the error.
-    pub fn devtools_eval(&self, code: &str) -> oneshot::Receiver<Result<String, String>> {
+    /// The view's Inspector, for reads that need not ask the page. Only
+    /// its atomic [`watermark`](rustkit_engine::Inspector::watermark) is
+    /// read on the window thread: sinks run under its lock.
+    pub fn devtools_inspector(&self) -> Option<std::sync::Arc<rustkit_engine::Inspector>> {
+        if !self.is_open() {
+            return None;
+        }
+        if let Some(thread) = self.content.as_ref() {
+            return thread.devtools_inspector();
+        }
+        self.devtools_page.as_ref().map(|(inspector, _)| Arc::clone(inspector))
+    }
+
+    /// Run the console's `code` in the page: the value, or the error. A
+    /// page that reaches it at or past `deadline` cancels it (T6c).
+    pub fn devtools_eval(&self, code: &str, deadline: std::time::Instant) -> oneshot::Receiver<Result<String, String>> {
         let (reply, rx) = oneshot::channel();
-        self.submit(PageCmd::Eval { script: code.to_string(), reply });
+        self.submit(PageCmd::DevtoolsEval { script: code.to_string(), deadline, reply });
         rx
     }
 }
@@ -1115,30 +1374,103 @@ impl RustKitView {
                 continue;
             }
             match event {
-                PageEvent::Commit(commit) => {
-                    *self.latest_commit.borrow_mut() = Some(commit);
+                PageEvent::Commit(mut commit) => {
+                    // A commit the window has not drawn yet hands its
+                    // inputs on to this one (LAT1c).
+                    let mut latest = self.latest_commit.borrow_mut();
+                    if let Some(older) = latest.as_mut() {
+                        commit.absorb_undrawn(older);
+                    }
+                    *latest = Some(commit);
                 }
                 PageEvent::Title { text, .. } => {
+                    self.chrome_updates.borrow_mut().title = Some(text.clone());
                     *self.current_title.borrow_mut() = Some(text);
                 }
                 PageEvent::Url { url, .. } => {
+                    if shown_in_address_bar(&url) {
+                        self.chrome_updates.borrow_mut().url = Some(url.to_string());
+                    }
                     *self.current_url.borrow_mut() = Some(url.to_string());
                 }
                 PageEvent::LoadState { state, .. } => {
+                    let mut updates = self.chrome_updates.borrow_mut();
+                    match &state {
+                        LoadState::Started => {
+                            updates.started = true;
+                            updates.loading = Some(true);
+                        }
+                        LoadState::Complete => {
+                            updates.loading = Some(false);
+                            let url = self.current_url.borrow().clone();
+                            if let Some(url) = url.filter(|u| Url::parse(u).is_ok_and(|u| shown_in_address_bar(&u))) {
+                                updates.finished = Some(url);
+                            }
+                        }
+                        LoadState::Failed { .. } => updates.loading = Some(false),
+                    }
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
                 PageEvent::NavigateRequested {
                     url,
                     replace,
                     from_user,
-                    ..
+                    nav_id,
                 } => {
-                    *self.script_nav.borrow_mut() = Some((url, replace, from_user));
+                    *self.script_nav.borrow_mut() = Some((url, replace, from_user, nav_id));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
-                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
+                PageEvent::TextFocused(text) => self.page_text_focused.set(text),
+                PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::KeyEquivalentDone { token, claimed } => {
+                    rustkit_viewhost::finish_key_equivalent(token, claimed);
+                }
+                PageEvent::TextInput(state) => self.mirror_text_input(state),
+                PageEvent::Cursor(_) | PageEvent::Tooltip(_) | PageEvent::ContextMenu { .. } => {
+                    self.pointer_event(&event)
+                }
+                PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
+    }
+
+    /// Keep the page's text-input state where the content view's input
+    /// method can read it synchronously (CH2.E3).
+    fn mirror_text_input(&self, state: Option<rustkit_engine::TextInputState>) {
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        let mirror = state.map(|s| rustkit_viewhost::TextInputMirror {
+            marked: s.marked,
+            selected: s.selected,
+            caret: s.caret.map(|c| (c.x as f64, c.y as f64, c.height as f64)),
+        });
+        rustkit_viewhost::set_text_input_state(surface.borrow().viewhost_id(), mirror);
+    }
+
+    /// What the pointer is over (CH2.E4): the cursor and the tooltip go to
+    /// the content view at once; a context menu waits for the event loop.
+    fn pointer_event(&self, event: &PageEvent) {
+        match event {
+            #[cfg(target_os = "macos")]
+            PageEvent::Cursor(css) => rustkit_viewhost::set_view_cursor(self.host_view, css),
+            #[cfg(target_os = "macos")]
+            PageEvent::Tooltip(title) => rustkit_viewhost::set_view_tooltip(self.host_view, title.as_deref()),
+            PageEvent::ContextMenu { x, y } => self.context_menu.set(Some((*x, *y))),
+            _ => {}
+        }
+    }
+
+    /// Where the page let a right press through since the last call: the
+    /// browser shows its context menu there (CH2.E4).
+    pub fn take_context_menu(&self) -> Option<(f32, f32)> {
+        self.harvest();
+        self.context_menu.take()
+    }
+
+    /// The content `NSView`, for a native menu shown over it.
+    pub fn host_view(&self) -> isize {
+        self.host_view
     }
 
     fn present_latest(&self) {
@@ -1154,10 +1486,114 @@ impl RustKitView {
         let Some(surface) = &self.surface else {
             return;
         };
-        if let Err(error) = surface.borrow_mut().present_commit(&commit, &images) {
+        let presented = surface.borrow_mut().present_commit(&commit, &images);
+        // Measured (or counted `no_frame`) by that call: a redraw of this
+        // commit (a resize) must not measure its inputs again (LAT1c).
+        if let Some(latest) = self.latest_commit.borrow_mut().as_mut() {
+            latest.take_inputs();
+        }
+        if let Err(error) = presented {
             warn!(%error, "content frame was not presented");
+            return;
+        }
+        // The region follows the frame just presented, on this same turn.
+        self.apply_region(&commit);
+    }
+
+    /// Stack this view over the views below it as a *region* (CH3.A3b,
+    /// `trench/chrome/A3-composition.md`): the view is shown and hit only
+    /// in the `width` x `height` window less `hole`, plus the boxes its own
+    /// frames paint over the hole. Called on every layout; the region is
+    /// applied at once against the frame on screen.
+    pub fn compose_region(&self, width: f64, height: f64, hole: rustkit_viewhost::RegionRect) {
+        self.region
+            .borrow_mut()
+            .get_or_insert_with(rustkit_viewhost::FrameRegion::default)
+            .lay_out(width, height, Some(hole));
+        let commit = self.latest_commit.borrow().clone();
+        match commit {
+            Some(commit) => self.apply_region(&commit),
+            // Before the first frame: the window less the hole.
+            None => self.set_region(rustkit_viewhost::compose_region(width, height, Some(hole), &[])),
         }
     }
+
+    /// Draw this view as a transparent surface (CH3.A3c, the alpha route):
+    /// its layer is not opaque, its frames clear to (0, 0, 0, 0) with
+    /// premultiplied colour, and its region (`compose_region`) is its hit
+    /// region only, not a mask, so its pixels decide what covers the view
+    /// below. The frame on screen is drawn again at once.
+    pub fn set_transparent(&self, transparent: bool) {
+        self.transparent.set(transparent);
+        if let Some(surface) = &self.surface {
+            if let Err(error) = surface.borrow_mut().set_transparent(transparent) {
+                warn!(%error, "transparent surface not cleared");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        rustkit_viewhost::set_raw_view_transparent(self.host_view, transparent);
+        self.present_latest();
+    }
+
+    /// Whether this view's frame on screen paints anything over its hole
+    /// (an open chrome popup over the page).
+    pub fn region_has_overlays(&self) -> bool {
+        self.region.borrow().as_ref().is_some_and(|r| !r.overlays().is_empty())
+    }
+
+    /// Derive the region from `commit`, the frame on screen, and apply it,
+    /// when the view has a region and the frame (or the layout) is new.
+    fn apply_region(&self, commit: &FrameCommit) {
+        let mut slot = self.region.borrow_mut();
+        let Some(region) = slot.as_mut() else {
+            return;
+        };
+        let before = region.overlays().to_vec();
+        let frame = commit.generation ^ (commit.nav_generation << 40);
+        // An open `<select>` drop-down takes every press (CH2.E6b): the
+        // whole view is hit while it is open. Only on the alpha route, where
+        // the region is not a mask: an opaque chrome masked to the whole
+        // window would hide the page.
+        let modal = commit.modal_popup && self.transparent.get();
+        let next = region.present(frame, modal, |hole| {
+            let Some(list) = commit.list.as_deref() else {
+                return Vec::new();
+            };
+            let within = rustkit_engine::PaintRect::new(hole.x as f32, hole.y as f32, hole.width as f32, hole.height as f32);
+            rustkit_engine::painted_boxes(list, commit.scroll_offset, within)
+                .into_iter()
+                .map(|r| {
+                    // Whole points, outward: a fringe pixel is the box's.
+                    let (x0, y0) = (r.x.floor() as f64, r.y.floor() as f64);
+                    let (x1, y1) = ((r.x + r.width).ceil() as f64, (r.y + r.height).ceil() as f64);
+                    rustkit_viewhost::RegionRect::new(x0, y0, x1 - x0, y1 - y0)
+                })
+                .collect()
+        });
+        let Some(next) = next else {
+            return;
+        };
+        if region.overlays() != before.as_slice() {
+            let rects = region.overlays().to_vec();
+            info!(count = rects.len(), ?rects, "RustKit chrome overlays");
+        }
+        drop(slot);
+        self.set_region(next);
+    }
+
+    fn set_region(&self, region: Vec<rustkit_viewhost::RegionRect>) {
+        #[cfg(target_os = "macos")]
+        rustkit_viewhost::set_raw_view_region(self.host_view, Some(region));
+        #[cfg(not(target_os = "macos"))]
+        let _ = region;
+    }
+}
+
+/// A URL the address bar and the tab model take from the page. Documents
+/// the app loads itself (New Tab, about, report) commit as `about:` or
+/// `data:` URLs, and their tab keeps the address the app gave it.
+fn shown_in_address_bar(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
 }
 
 fn stale(accepted: u64, event: &PageEvent) -> bool {
@@ -1165,13 +1601,25 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Title { nav_id, .. }
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
-        | PageEvent::NavigateRequested { nav_id, .. } => *nav_id,
+        | PageEvent::NavigateRequested { nav_id, .. }
+        | PageEvent::Ipc { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
+        | PageEvent::TextFocused(_)
+        | PageEvent::KeyEquivalentDone { .. }
+        | PageEvent::TextInput(_)
         | PageEvent::Cursor(_)
+        | PageEvent::Tooltip(_)
+        | PageEvent::ContextMenu { .. }
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
     };
+    stale_nav(accepted, nav_id)
+}
+
+/// A navigation id of 0 is not tied to a document (focus, cursor). Any
+/// other id older than the one the window has accepted is a late result.
+fn stale_nav(accepted: u64, nav_id: u64) -> bool {
     nav_id != 0 && nav_id < accepted
 }
 
@@ -1382,6 +1830,145 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_attached_during_a_load_is_watched_once_it_ends() {
+        // #803 review (2): the load holds the endpoint, so the attach could
+        // neither watch the view nor reach the page. An idle page then never
+        // woke the panel for its console.
+        let url = slow_server(Duration::from_millis(600), "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        assert_eq!(view.pending_attach.get(), Some(true), "the load did not hold the engine");
+        while view.step_load() {}
+        assert_eq!(view.pending_attach.get(), None);
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        // What the page recorded before: the panel reads it.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        std::thread::sleep(Duration::from_millis(300));
+        let from = counters.read().window_wakes;
+        let _ = view.execute_script_sync("console.log('after the load'); 1");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while counters.read().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(counters.read().window_wakes > from, "a console line after the load never woke the panel");
+    }
+
+    #[test]
+    fn a_console_read_during_a_same_thread_load_is_answered() {
+        // #803 R1 (Prometheus, non-blocking): the load holds the endpoint, so
+        // the read could not reach the Inspector and fell through to a page
+        // command, which a load drops. The panel's console went quiet for the
+        // whole load.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let _ = view.execute_script_sync("console.log('before the load'); 1");
+        let url = slow_server(Duration::from_millis(1_000), "<p>y</p>");
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let mut rx = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let answer = loop {
+            match rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(oneshot::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("no console answer during the load: {e:?}"),
+            }
+        };
+        assert!(view.is_loading(), "answered only after the load");
+        let rustkit_engine::DevtoolsAnswer::Console(console) = answer else { panic!("{answer:?}") };
+        assert!(!console.entries.is_empty(), "the line from before the load is missing");
+        while view.step_load() {}
+    }
+
+    #[test]
+    fn a_console_read_on_the_same_thread_path_wakes_the_window() {
+        // #803 review (1): the answer arrives on the devtools thread after
+        // the ask returns; with no wake an idle page's line waited for an
+        // unrelated one.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let _ = view.execute_script_sync("console.log('one'); 1");
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        // The watch's own wake for the unread line comes first.
+        std::thread::sleep(Duration::from_millis(300));
+        let from = counters.read().window_wakes;
+        let mut rx = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let answer = loop {
+            match rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => panic!("no console answer: {e:?}"),
+            }
+        };
+        let rustkit_engine::DevtoolsAnswer::Console(console) = answer else { panic!("{answer:?}") };
+        assert!(!console.entries.is_empty(), "the line is missing");
+        // The wake is posted just after the answer is sent.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while counters.read().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(counters.read().window_wakes - from, 1, "the answer posted no window wake");
+    }
+
+    #[test]
+    fn a_hung_scripts_held_console_lines_reach_the_panel_while_it_runs() {
+        // #810 review: a hot loop past the live cap, then a hang. The calls
+        // over the cap waited for the script's end and the panel showed
+        // nothing. The panel's line comes from `console_held` (what `pump`
+        // reads) and the devtools thread wakes the window for it.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let inspector = view.devtools_inspector().expect("no inspector");
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        std::thread::sleep(Duration::from_millis(300));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                // The panel's line and the window wakes, from the moment a
+                // held count is first seen while the script still runs.
+                let mut seen: Option<(Option<String>, u64)> = None;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let held = inspector.console_held();
+                    if held > 0 {
+                        let line = rustkit_engine::devtools_held_text(held);
+                        let wakes = counters.read().window_wakes;
+                        match &mut seen {
+                            None => seen = Some((line, wakes)),
+                            Some((_, first)) if wakes > *first => return Some(line),
+                            Some(_) => {}
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None
+            })
+        };
+        // Two bursts in the same cap second: the second changes the held
+        // count well after the reader has seen the first, so the wake it
+        // waits for cannot have been posted before it looked.
+        let _ = view.execute_script_sync(
+            "for (let i = 0; i < 300; i++) console.log(i); \
+             let t = Date.now(); while (Date.now() - t < 300) {} \
+             for (let i = 0; i < 50; i++) console.log('b' + i); \
+             t = Date.now(); while (Date.now() - t < 2000) {} 1",
+        );
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let line = reader.join().unwrap().expect("no window wake while the script held console lines");
+        let line = line.expect("no line");
+        assert!(line.ends_with(" console lines held by a running script"), "{line}");
+    }
+
+    #[test]
     fn stop_cancels_a_slow_load_without_waiting_for_it() {
         let url = slow_server(Duration::from_secs(10), "<p>never</p>");
         let view = view();
@@ -1482,6 +2069,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// The event loop asks for a turn twice per wake (before and after the
     /// input it drains), so a page whose interval spins ran two turns back
     /// to back and the window took no event between them.
+    /// The 200 ms hold spins in `spin()` calls: Boa's loop limit (row JS1) counts per call frame, so a bare loop's length depended on Boa's speed.
+    /// The hold is `< 202`: Date.now() has 1 ms granularity, so the hold needs a margin above the 200 ms bound.
     #[test]
     fn a_slow_live_turn_is_not_followed_at_once_by_another() {
         let url = slow_server(Duration::ZERO, "<p>x</p>");
@@ -1489,7 +2078,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 200) {} }, 100);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 202) { spin(); } }, 100);",
         );
         std::thread::sleep(Duration::from_millis(105));
         let first = Instant::now();
@@ -1513,6 +2102,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// #727 Atlas hold, item 3: a click that comes after a live turn the
     /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
     /// listener.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     #[test]
     fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
         let url = slow_server(
@@ -1523,8 +2113,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         view.wry_load_url(&url).unwrap();
         while view.step_load() {}
         view.execute_script_sync(
-            "window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
-             setTimeout(function () { while (true) {} }, 1);",
+            "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
+             setTimeout(function () { while (true) { spin(); } }, 1);",
         );
         std::thread::sleep(Duration::from_millis(5));
         let turn = Instant::now();
@@ -1548,6 +2138,224 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(started.elapsed() < Duration::from_secs(5));
         let title = view.execute_script_sync("document.title").unwrap_or_default();
         assert!(title.contains("new"), "document.title = {title:?}");
+    }
+
+    /// `/start` redirects (302) to `/final`, which has a title.
+    fn redirect_server() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    if path == "/start" {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        return;
+                    }
+                    let body = "<title>final</title><p>here</p>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// CH2.E9: on macOS nothing read the page's URL, title or load events,
+    /// so the address bar kept the typed URL after a redirect and the tab
+    /// never learned its title or that the load had ended.
+    #[test]
+    fn content_thread_the_chrome_is_told_the_committed_url_title_and_load_end() {
+        let view = content_view();
+        let base = redirect_server();
+        load_and_settle(&view, &format!("{base}start"));
+        let updates = view.take_chrome_updates();
+        let committed = format!("{base}final");
+        assert_eq!(updates.url.as_deref(), Some(committed.as_str()), "{updates:?}");
+        assert_eq!(updates.title.as_deref(), Some("final"), "{updates:?}");
+        assert!(updates.started, "{updates:?}");
+        assert_eq!(updates.loading, Some(false), "{updates:?}");
+        assert_eq!(updates.finished.as_deref(), Some(committed.as_str()), "{updates:?}");
+        assert_eq!(view.take_chrome_updates(), ChromeUpdates::default(), "reported twice");
+    }
+
+    /// CH2.E9: the chrome's `window.ipc.postMessage` reaches the window.
+    #[test]
+    fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
+        let view = content_view();
+        // The chrome's view is app-owned (CH3.A7).
+        view.set_app_owned();
+        view.load_html_internal(
+            "<p>chrome</p><script>window.ipc.postMessage(JSON.stringify({cmd: 'navigate', url: 'https://example.com/'}));\
+             window.ipc.postMessage({cmd: 'get_version'});</script>",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < 2 {
+            assert!(Instant::now() < deadline, "the window got {got:?}");
+            wake(&view);
+            got.extend(view.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            got,
+            vec![
+                r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string(),
+                r#"{"cmd":"get_version"}"#.to_string(),
+            ]
+        );
+    }
+
+    /// CH3.A9: a chrome command (`set_tabs` here, `sendIpc('create_tab')`
+    /// for Cmd+T) is a script for the chrome's own content thread, and
+    /// what the chrome's script posts back is what the window acts on. The
+    /// round trip must not wait on anything else: not on the page's
+    /// thread, held here by a script that does not yield (i0a_spin's
+    /// shape), and not on the chrome thread's idle wait for its next
+    /// timer (up to 50 ms on develop, so Cmd+T took 2-47 ms longer than
+    /// on the WebKit chrome, more on a loaded Mac).
+    #[test]
+    fn content_thread_a_chrome_eval_round_trips_within_50_ms_while_the_page_is_held() {
+        fn committed(view: &RustKitView) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while view.latest_commit.borrow().is_none() {
+                assert!(Instant::now() < deadline, "the document never committed");
+                wake(view);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let page = content_view();
+        page.load_html_internal("<p>page</p>").unwrap();
+        committed(&page);
+        let chrome = content_view();
+        chrome.set_app_owned();
+        chrome
+            .load_html_internal(
+                "<div id=tabs></div><script>window.setTabs = function (n) { \
+                 document.getElementById('tabs').textContent = 'tabs ' + n; \
+                 window.ipc.postMessage('set_tabs ' + n); };</script>",
+            )
+            .unwrap();
+        committed(&chrome);
+        let _ = chrome.take_ipc_messages();
+        // The page's thread is held for 3 s by a script that never yields.
+        let _held = page.content.as_ref().unwrap().eval("var t = Date.now(); while (Date.now() - t < 3000) {}");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let mut took = Vec::new();
+        // Each command right after the last answer: the moment the chrome
+        // thread has just gone idle.
+        for n in 0..10 {
+            let sent = Instant::now();
+            let _ = chrome.execute_script_sync(&format!("setTabs({n})"));
+            let want = format!("set_tabs {n}");
+            loop {
+                if chrome.take_ipc_messages().contains(&want) {
+                    break;
+                }
+                assert!(sent.elapsed() < Duration::from_secs(2), "the chrome never answered {want}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            took.push(sent.elapsed().as_millis());
+        }
+        assert!(started.elapsed() < Duration::from_millis(2_500), "the page was no longer held");
+        let worst = *took.iter().max().unwrap();
+        println!("chrome round trips (ms) while the page is held: {took:?}");
+        assert!(worst < 50, "chrome round trips (ms) while the page is held: {took:?}");
+    }
+
+    /// CH3.A7: a page is not told about the app bridge. Its own script
+    /// reads `typeof window.ipc` and `typeof window.hiwaveChrome` while it
+    /// loads; Chromium 143 answers `undefined,undefined`.
+    const BRIDGE_PROBE: &str = "<script>document.title = \
+        typeof window.ipc + ',' + typeof window.hiwaveChrome;</script>";
+
+    #[test]
+    fn content_thread_a_web_document_sees_no_app_bridge() {
+        let view = content_view();
+        assert!(!view.is_app_owned(), "a content view is not app-owned");
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.latest_commit.borrow().is_none() {
+            assert!(Instant::now() < deadline, "the document never committed");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut rx = view.devtools_eval("document.title", Instant::now() + Duration::from_secs(10));
+        let title = loop {
+            assert!(Instant::now() < deadline, "the page never answered");
+            if let Ok(answer) = rx.try_recv() {
+                break answer;
+            }
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            title.as_deref().is_ok_and(|t| t.contains("undefined,undefined")),
+            "{title:?}"
+        );
+        assert!(view.take_ipc_messages().is_empty());
+    }
+
+    #[test]
+    fn a_flag_off_web_document_sees_no_app_bridge() {
+        let view = view();
+        assert!(!view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("undefined,undefined")"#)
+        );
+    }
+
+    #[test]
+    fn a_flag_off_app_owned_view_keeps_the_bridge() {
+        let view = view();
+        view.set_app_owned();
+        assert!(view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("object,object")"#)
+        );
+    }
+
+    /// A document the app loads itself keeps the address the app gave it.
+    #[test]
+    fn content_thread_an_app_document_reports_no_url() {
+        let view = content_view();
+        view.load_html_internal("<title>New Tab</title><p>x</p>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.latest_commit.borrow().is_none() {
+            assert!(Instant::now() < deadline, "the document never committed");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let updates = view.take_chrome_updates();
+        assert_eq!(updates.url, None, "{updates:?}");
+        assert_eq!(updates.title.as_deref(), Some("New Tab"), "{updates:?}");
     }
 
     /// Answers every request with `body` at once and logs its path and
@@ -1673,10 +2481,11 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// M4 acceptance: with a page script spinning, a click is taken by the
     /// window within 100 ms, and the page hears it once the spin is
     /// stopped: queued, never dropped.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
     fn a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(view: RustKitView) {
         let (base, _log) = logging_server(SPIN_PAGE);
         load_and_settle(&view, &base);
-        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let _ = read(&view, "function spin(){var x=0;for(var i=0;i<20000;i++){x+=i;}return x;} setTimeout(function () { while (true) { spin(); } }, 30); 'armed'");
         let at = Instant::now() + Duration::from_millis(250);
         let late = wake_until(&view, at);
         view.mouse_down_at_point(10.0, 10.0);
@@ -1829,6 +2638,74 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         }
     }
 
+    /// `MainEventsCleared` harvests in `process_events` and `render`, then
+    /// takes on the next wake. A URL-bar load or New Tab in that gap used
+    /// to leave the copy in `script_nav`, and the next take followed the
+    /// page the user had just left.
+    fn harvest_script_navigation(view: &RustKitView, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            view.process_events();
+            let buffered = view.script_nav.borrow().clone();
+            if let Some((url, _, _, _)) = buffered.as_ref() {
+                assert!(url.contains(needle), "harvested {url}, wanted {needle}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "the page never asked to navigate");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_is_taken_while_that_page_is_current() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.as_ref().is_some_and(|(url, from_user)| url.contains("elsewhere") && !*from_user),
+            "the page's own navigation was dropped: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_new_tab() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_html_internal("<body><p>new tab</p></body>").unwrap();
+        assert!(
+            view.take_script_navigation().is_none(),
+            "a script navigation harvested before New Tab pulled the new tab away"
+        );
+    }
+
+    #[test]
+    fn content_thread_a_harvested_script_navigation_does_not_override_a_url_bar_load() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = read(&view, &format!("location.href = '{base}elsewhere'; 'sent'"));
+        harvest_script_navigation(&view, "elsewhere");
+        view.load_url_blocking(&format!("{base}typed"));
+        let taken = view.take_script_navigation();
+        assert!(
+            taken.is_none(),
+            "a script navigation harvested before the URL bar overrode it: {taken:?}"
+        );
+    }
+
+    #[test]
+    fn a_buffered_navigation_is_stale_once_a_newer_id_is_accepted() {
+        assert!(!stale_nav(4, 4), "the document on screen is still current");
+        assert!(!stale_nav(4, 0), "an id of 0 is not a document");
+        assert!(stale_nav(4, 3), "an older document's request is stale");
+    }
+
     fn content_view() -> RustKitView {
         RustKitView::headless_content(Bounds::new(0, 0, 400, 300))
     }
@@ -1838,5 +2715,290 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(content_engine_builder().config().interrupt_scripts_at_budget);
         // The engine's default (parity-capture, the board) lets it run on.
         assert!(!rustkit_engine::EngineConfig::default().interrupt_scripts_at_budget);
+    }
+
+    // ── H19: the script budget stops a runaway script, and the page recovers ──
+    //
+    // Real window, batch 44 (develop 28c79bff): `h19_spin` and `i0a_script`
+    // read as "a script that never ends is never stopped, and the page never
+    // comes back". These run the production content view (the content
+    // thread and `content_engine_builder`, the path Pete runs) and keep the
+    // two claims apart: first the watchdog (the budget is armed, a spin is
+    // stopped, and the log says why), then recovery after the stop.
+
+    /// The app's log lines, as the app's own subscriber would write them,
+    /// each with the thread that wrote it. One subscriber for the test
+    /// binary, and the crate's tests run in parallel: every content view's
+    /// page logs on its own thread, so a test reads only its view's lines
+    /// (batch 46: counted unscoped, a sibling's `source=timers` stops were
+    /// read as this view's).
+    fn captured_log() -> &'static CapturedLog {
+        static LOG: std::sync::OnceLock<&'static CapturedLog> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| {
+            let log: &'static CapturedLog = Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+            struct Line(&'static CapturedLog);
+            impl std::io::Write for Line {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    let text = String::from_utf8_lossy(buf).into_owned();
+                    self.0.lock().unwrap().push((std::thread::current().id(), text));
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || Line(log))
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            log
+        })
+    }
+
+    type CapturedLog = std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>;
+
+    /// Where the captured log ends now.
+    fn log_mark() -> usize {
+        captured_log().lock().unwrap().len()
+    }
+
+    /// The thread `view`'s page runs on, once the content thread has built it.
+    fn page_thread(view: &RustKitView) -> std::thread::ThreadId {
+        let thread = view.content.as_ref().expect("a content view");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(id) = thread.page_thread() {
+                return id;
+            }
+            assert!(Instant::now() < deadline, "the content thread never built its page");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// What `view`'s page logged from `mark` on, and nothing another view's did.
+    fn view_log(view: &RustKitView, mark: usize) -> String {
+        let page = page_thread(view);
+        let log = captured_log().lock().unwrap();
+        log.get(mark..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(thread, _)| *thread == page)
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    /// Wake the view until `done` holds or `limit` passes; how long it took.
+    fn wake_while(view: &RustKitView, limit: Duration, mut done: impl FnMut(&RustKitView) -> bool) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            wake(view);
+            if done(view) {
+                return Some(started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    fn loading(view: &RustKitView) -> bool {
+        *view.loading.borrow()
+    }
+
+    /// h19_spin.html's script: nested `forEach` callbacks (no loop
+    /// statement, so the loop-iteration limit never counts it) with a host
+    /// call every 4096.
+    const H19_PAGE: &str = "<body style='margin:0;background:#fff'><p id=p>spin</p>\
+<div style='width:200px;height:100px;background:#00ff00'></div>\
+<script>var spun = 0; var row = new Array(100000).fill(0);\
+row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); });</script>\
+<script>window.after = true;</script></body>";
+
+    /// The bare loop: no host call, no callback, one loop statement.
+    const PURE_SPIN_PAGE: &str = "<body style='margin:0'><p id=p>spin</p>\
+<script>window.first = true; while (true) {}</script>\
+<script>window.after = true;</script></body>";
+
+    /// The same shape with no host call at all: pure JavaScript, and still
+    /// no loop statement. Only the watchdog's interrupt word can stop it.
+    const PURE_CALLBACK_SPIN_PAGE: &str = "<body style='margin:0'><p id=p>spin</p>\
+<script>var spun = 0; var row = new Array(100000).fill(0);\
+row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
+<script>window.after = true;</script></body>";
+
+    /// Load `page` on a production content view and wake it until the load
+    /// has ended. Returns the view, how long the load took and the log it
+    /// wrote.
+    fn load_spin(page: &'static str) -> (RustKitView, Duration, String) {
+        let _ = captured_log();
+        let mark = log_mark();
+        let view = content_view();
+        let (base, _log) = logging_server(page);
+        let started = Instant::now();
+        view.wry_load_url(&base).unwrap();
+        // `loading` is set by the thread's first event; give it a moment.
+        let _ = wake_while(&view, Duration::from_millis(300), |_| false);
+        let ended = wake_while(&view, Duration::from_secs(40), |v| !loading(v));
+        assert!(ended.is_some(), "the load never ended: {}", view_log(&view, mark));
+        let log = view_log(&view, mark);
+        (view, started.elapsed(), log)
+    }
+
+    /// `Script stopped at the script budget source=… elapsed_ms=…`: the
+    /// line the real-window driver reads.
+    fn budget_stops(log: &str) -> Vec<(String, u64)> {
+        log.lines()
+            .filter(|line| line.contains("Script stopped at the script budget"))
+            .map(|line| {
+                let field = |name: &str| {
+                    line.split_whitespace()
+                        .find_map(|word| word.strip_prefix(name))
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                (field("source="), field("elapsed_ms=").parse().unwrap_or(0))
+            })
+            .collect()
+    }
+
+    /// Stage 1 (watchdog): h19_spin.html's script, during the load, on the
+    /// content thread with the app's builder. Stopped at the 15 s load
+    /// budget, and the log names it and how long it ran.
+    #[test]
+    fn content_thread_a_load_script_that_never_ends_is_stopped_at_the_15_s_budget_and_logged() {
+        let (_view, took, log) = load_spin(H19_PAGE);
+        let stops = budget_stops(&log);
+        assert_eq!(stops.len(), 1, "{log}");
+        assert_eq!(stops[0].0, "inline#1", "{log}");
+        assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+    }
+
+    /// Stage 1: pure JavaScript, no host call and no loop statement (so
+    /// neither the deadline's host-call check nor the loop limit can end
+    /// it): the watchdog stops it at the 15 s budget.
+    #[test]
+    fn content_thread_a_pure_js_spin_with_no_host_call_is_stopped_at_the_15_s_budget() {
+        let (view, took, log) = load_spin(PURE_CALLBACK_SPIN_PAGE);
+        let stops = budget_stops(&log);
+        assert_eq!(stops.len(), 1, "{log}");
+        assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+        // The page still runs script once the load is over.
+        assert_eq!(read(&view, "String(typeof window.spun)"), r#"String("number")"#);
+    }
+
+    /// Stage 1: a bare `while (true) {}`. The 10M loop-iteration count that
+    /// used to end it first is gone (JS1: the limit is now a 1G backstop), so
+    /// the load-script budget (about 15 s) ends it, and the log says so
+    /// (until H19 nothing in the log said why the load just took longer).
+    #[test]
+    fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
+        let (view, took, log) = load_spin(PURE_SPIN_PAGE);
+        assert!(took < Duration::from_secs(25), "the load took {took:?}");
+        let why: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("Script stopped at the script budget"))
+            .collect();
+        assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
+        assert!(why[0].contains("source=inline#1"), "{}", why[0]);
+        assert_eq!(read(&view, "String(window.first)"), r#"String("true")"#);
+    }
+
+    /// Stage 1, after the load: a timer's bare `while (true) {}` is ended,
+    /// and the log says why.
+    #[test]
+    fn content_thread_a_bare_while_true_in_a_timer_is_stopped_and_the_log_says_why() {
+        let (view, _took, _log) = load_spin(SPIN_PAGE);
+        let mark = log_mark();
+        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let said = wake_while(&view, Duration::from_secs(20), |v| {
+            let log = view_log(v, mark);
+            log.contains("Script stopped at the loop-iteration limit") || log.contains("Script stopped at the script budget")
+        });
+        assert!(said.is_some(), "no line says why the timer ended:\n{}", view_log(&view, mark));
+    }
+
+    /// i0a_spin.html on the content thread, without the driver's Cmd+T (the
+    /// new tab is loaded into the same content view, so the page it was
+    /// measuring is gone). The page ticks; a timer then starts a spin the
+    /// live turn budget (5 s) stops, and a timer due in the same turn asks
+    /// for `/asked`.
+    const RECOVERY_PAGE: &str = "<body style='margin:0;background:#fff'><p id=p>alive</p>\
+<div style='width:200px;height:100px;background:#00ff00'></div>\
+<script>\
+window.ticks = 0; window.answered = 0; window.stopped_at = -1;\
+setInterval(function () { window.ticks++; }, 50);\
+window.go = function () {\
+  setTimeout(function () { var x = new XMLHttpRequest(); x.open('GET', '/asked');\
+    x.onload = function () { document.getElementById('p'); window.answered++; }; x.send(); }, 300);\
+  setTimeout(function () { var spun = 0; var row = new Array(100000).fill(0);\
+    row.forEach(function () { row.forEach(function () { spun++; if (spun % 4096 === 0) { document.getElementById('p'); } }); }); }, 300);\
+};\
+</script></body>";
+
+    /// Loads [`RECOVERY_PAGE`], starts the spin and wakes the view until the
+    /// live turn budget has stopped it. Returns the view, the log mark at the
+    /// stop and the green frame it showed before.
+    fn spin_and_stop() -> (RustKitView, Arc<std::sync::Mutex<Vec<(String, Instant)>>>, usize) {
+        let _ = captured_log();
+        let mark = log_mark();
+        let view = content_view();
+        let (base, requests) = logging_server(RECOVERY_PAGE);
+        load_and_settle(&view, &base);
+        let ticking = wake_while(&view, Duration::from_secs(5), |v| read(v, "String(window.ticks > 3)").contains("true"));
+        assert!(ticking.is_some(), "the loaded page never ticked");
+        assert!(green_frame(&view), "the page's frame is not green before the spin");
+        let _ = read(&view, "window.go(); 'armed'");
+        let stopped = wake_while(&view, Duration::from_secs(20), |v| {
+            budget_stops(&view_log(v, mark)).iter().any(|(source, _)| source == "timers")
+        });
+        assert!(stopped.is_some(), "the spin was never stopped:\n{}", view_log(&view, mark));
+        // One stop, one reason: the error that unwinds a budget stop reads
+        // as the loop limit's and must not be logged as one.
+        let _ = wake_while(&view, Duration::from_millis(300), |_| false);
+        let log = view_log(&view, mark);
+        assert!(!log.contains("Script stopped at the loop-iteration limit"), "{log}");
+        (view, requests, log_mark())
+    }
+
+    /// The latest frame the window holds draws the page's green box.
+    fn green_frame(view: &RustKitView) -> bool {
+        let commit = view.latest_commit.borrow().clone();
+        let Some(list) = commit.and_then(|commit| commit.list) else {
+            return false;
+        };
+        format!("{:?}", list.commands).contains("r: 0, g: 255, b: 0")
+    }
+
+    /// Stage 2 (recovery): after the stop, the page's interval runs again.
+    #[test]
+    fn content_thread_after_a_budget_stop_a_fresh_timer_callback_runs() {
+        let (view, _requests, _mark) = spin_and_stop();
+        let before: u64 = read(&view, "String(window.ticks)").trim_start_matches("String(\"").trim_end_matches("\")").parse().unwrap();
+        let ticked = wake_while(&view, Duration::from_secs(3), |v| {
+            let now: u64 = read(v, "String(window.ticks)").trim_start_matches("String(\"").trim_end_matches("\")").parse().unwrap_or(0);
+            now >= before + 3
+        });
+        assert!(ticked.is_some(), "the page never ticked again after the stop (ticks {before})");
+    }
+
+    /// Stage 2: the request asked in the stopped turn is answered to the page.
+    #[test]
+    fn content_thread_after_a_budget_stop_the_request_made_in_the_stopped_turn_completes() {
+        let (view, requests, mark) = spin_and_stop();
+        let answered = wake_while(&view, Duration::from_secs(5), |v| read(v, "String(window.answered)").contains("1"));
+        let asked = requests.lock().unwrap().iter().filter(|(path, _)| path == "/asked").count();
+        assert!(answered.is_some(), "asked {asked}, onload never ran:\n{}", view_log(&view, mark));
+    }
+
+    /// Stage 2: the window keeps the last good frame (the green box); no
+    /// blank commit replaces it after the stop.
+    #[test]
+    fn content_thread_after_a_budget_stop_the_last_good_frame_stays_visible() {
+        let (view, _requests, _mark) = spin_and_stop();
+        let _ = wake_while(&view, Duration::from_secs(1), |_| false);
+        assert!(green_frame(&view), "the frame after the stop does not draw the page");
     }
 }

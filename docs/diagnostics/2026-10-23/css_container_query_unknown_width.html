@@ -1,0 +1,11 @@
+<!DOCTYPE html><!-- #782 HOLD 2 (Atlas #843): @container is false where only layout knows the width. Pass: 8 green bars (probes x=10, row 2 x=310; y=5+30n). Row 2 is overflow:hidden so its float stays in that row: since #782 HOLD 4 a float makes every later container in its formatting context unknown (false), which would otherwise turn the rows 5-6 controls red. -->
+<style>body{margin:0} .w{width:600px;height:30px} i{display:block;height:20px;background:green} .c i{background:red}
+@container (min-width:400px){i{background:red} .c i{background:green}}</style>
+<div class="w"><span style="container-type:inline-size"><i style="display:inline-block;width:20px"></i></span></div>
+<div class="w" style="overflow:hidden"><div style="float:left;width:300px;height:1px"></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="w" style="columns:2;column-gap:0"><div style="container-type:inline-size"><i></i></div></div>
+<div class="w"><div style="display:contents;container-type:inline-size"><i></i></div></div>
+<div class="w c"><div style="container-type:inline-size"><i></i></div></div>
+<div class="w c"><ul style="margin:0;padding:0"><li style="container-type:inline-size"><i></i></li></ul></div>
+<div class="w"><div style="width:fit-content;container-type:inline-size"><i style="width:20px"></i></div></div>
+<div class="w"><div style="width:max-content;container-type:inline-size"><i style="width:20px"></i></div></div>

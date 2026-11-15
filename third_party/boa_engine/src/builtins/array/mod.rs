@@ -37,6 +37,18 @@ use std::cmp::{Ordering, min};
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
 mod array_iterator;
+mod v8_timsort;
+
+/// Which of V8's two sort algorithms `SortIndexedProperties` follows (HIWAVE PATCH (sort-v8)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SortAlgorithm {
+    /// `Array.prototype.sort`: TimSort, with plain binary insertion below 8 elements.
+    Array,
+    /// `Array.prototype.toSorted`: the same TimSort without the short-array shortcut.
+    ArrayToSorted,
+    /// `%TypedArray%.prototype.sort` and `toSorted` with a comparator: a top-down merge sort.
+    TypedArray,
+}
 use crate::value::JsVariant;
 pub(crate) use array_iterator::ArrayIterator;
 
@@ -287,6 +299,36 @@ impl BuiltInConstructor for Array {
             // f. Return array.
             Ok(array.into())
         }
+    }
+}
+
+// HIWAVE PATCH (cyclic to-primitive): the arrays `join`/`toLocaleString` are running on, so one
+// reached again through its own elements contributes "" as in V8.
+thread_local! {
+    static JOINING: std::cell::RefCell<Vec<JsObject>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct JoinGuard;
+
+impl JoinGuard {
+    /// `None` when `object` is already being joined.
+    fn enter(object: &JsObject) -> Option<Self> {
+        JOINING.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.iter().any(|o| JsObject::equals(o, object)) {
+                return None;
+            }
+            stack.push(object.clone());
+            Some(Self)
+        })
+    }
+}
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        JOINING.with(|stack| {
+            stack.borrow_mut().pop();
+        });
     }
 }
 
@@ -990,6 +1032,11 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        // HIWAVE PATCH (cyclic to-primitive): V8's join stack. An array already being joined
+        // contributes "" (`a=[1]; a[1]=a; String(a)` is "1,"), whatever path reached it.
+        let Some(_joining) = JoinGuard::enter(&o) else {
+            return Ok(js_string!().into());
+        };
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. If separator is undefined, let sep be the single-element String ",".
@@ -1012,8 +1059,10 @@ impl Array {
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
             let element = o.get(k, context)?;
-            // c. If element is undefined, null or the array itself, let next be the empty String; otherwise, let next be ? ToString(element).
-            let next = if element.is_null_or_undefined() || &element == this {
+            // c. If element is undefined or null, let next be the empty String; otherwise, let next be ? ToString(element).
+            // (HIWAVE PATCH (cyclic to-primitive): not "or the array itself": the join stack
+            // above ends a cycle, and a plain object that is the receiver prints as itself.)
+            let next = if element.is_null_or_undefined() {
                 js_string!()
             } else {
                 element.to_string(context)?
@@ -1860,6 +1909,7 @@ impl Array {
         this_arg: &JsValue,
         context: &mut Context,
     ) -> JsResult<u64> {
+        crate::native_stack::check(context.vm.runtime_limits.native_stack_budget())?; // HIWAVE PATCH (native recursion)
         // 1. Assert target is Object
         // 2. Assert source is Object
 
@@ -2164,41 +2214,19 @@ impl Array {
         // 1. Let array be ? ToObject(this value).
         let array = this.to_object(context)?;
         // 2. Let len be ? ToLength(? Get(array, "length")).
+        // HIWAVE PATCH (cyclic to-primitive): the same join stack as `join`.
+        let Some(_joining) = JoinGuard::enter(&array) else {
+            return Ok(js_string!().into());
+        };
         let len = array.length_of_array_like(context)?;
 
         let locales = args.get_or_undefined(0);
         let options = args.get_or_undefined(1);
 
         // 3. Let separator be the implementation-defined list-separator String value appropriate for the host environment's current locale (such as ", ").
-        let separator = {
-            #[cfg(feature = "intl")]
-            {
-                use crate::builtins::intl::locale::default_locale;
-                use icu_list::{
-                    ListFormatter, ListFormatterPreferences, options::ListFormatterOptions,
-                };
-
-                let locale = default_locale(context.intl_provider().locale_canonicalizer()?);
-                let preferences = ListFormatterPreferences::from(&locale);
-                let formatter = ListFormatter::try_new_unit_with_buffer_provider(
-                    context.intl_provider().erased_provider(),
-                    preferences,
-                    ListFormatterOptions::default(),
-                )
-                .map_err(|e| JsNativeError::typ().with_message(e.to_string()))?;
-
-                // Ask ICU for the list pattern literal by formatting two empty elements.
-                // For many locales this yields ", ", but it may differ.
-                js_string!(
-                    formatter.format_to_string(std::iter::once("").chain(std::iter::once("")))
-                )
-            }
-
-            #[cfg(not(feature = "intl"))]
-            {
-                js_string!(", ")
-            }
-        };
+        // HIWAVE PATCH (cyclic to-primitive): V8 joins with "," in every locale; the ICU unit list
+        // pattern (", ") made `[1, 2].toLocaleString()` differ from Chrome's "1,2".
+        let separator = js_string!(",");
 
         // 4. Let R be the empty String.
         let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
@@ -2633,6 +2661,7 @@ impl Array {
         len: u64,
         sort_compare: F,
         skip_holes: bool,
+        algorithm: SortAlgorithm,
         context: &mut Context,
     ) -> JsResult<Vec<JsValue>>
     where
@@ -2667,18 +2696,28 @@ impl Array {
             // e. Set k to k + 1.
         }
         // 4. Sort items using an implementation-defined sequence of calls to SortCompare. If any such call returns an abrupt completion, stop before performing any further calls to SortCompare and return that Completion Record.
-        let mut sort_err = Ok(());
-        items.sort_by(|x, y| {
-            if sort_err.is_ok() {
-                sort_compare(x, y, context).unwrap_or_else(|err| {
-                    sort_err = Err(err);
-                    Ordering::Equal
-                })
-            } else {
-                Ordering::Equal
+        // HIWAVE PATCH (sort): `Vec::sort_by` panics when the comparator is not a total order
+        // (Rust 1.81+), and a page's comparator can be anything (`a > b`, `Math.random() - 0.5`).
+        // This merge sort calls the comparator the same way for any answers, never panics, and
+        // stops at the first abrupt completion.
+        // HIWAVE PATCH (sort-v8): V8's algorithm, so an inconsistent comparator gives V8's order.
+        // `undefined`s are never passed to the comparator and go last, in their original count.
+        let (mut defined, undefined): (Vec<JsValue>, Vec<JsValue>) =
+            items.into_iter().partition(|v| !v.is_undefined());
+        match algorithm {
+            SortAlgorithm::Array | SortAlgorithm::ArrayToSorted => {
+                v8_timsort::v8_timsort(
+                    &mut defined,
+                    &mut |x, y| sort_compare(x, y, context),
+                    algorithm == SortAlgorithm::Array,
+                )?;
             }
-        });
-        sort_err?;
+            SortAlgorithm::TypedArray => {
+                v8_timsort::v8_typed_merge_sort(&mut defined, &mut |x, y| sort_compare(x, y, context))?;
+            }
+        }
+        let mut items = defined;
+        items.extend(undefined);
 
         // 5. Return items.
         Ok(items)
@@ -2726,7 +2765,7 @@ impl Array {
             };
 
         // 5. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, skip-holes).
-        let sorted = Self::sort_indexed_properties(&obj, len, sort_compare, true, context)?;
+        let sorted = Self::sort_indexed_properties(&obj, len, sort_compare, true, SortAlgorithm::Array, context)?;
 
         let sorted_len = sorted.len() as u64;
 
@@ -2792,7 +2831,7 @@ impl Array {
             };
 
         // 6. Let sortedList be ? SortIndexedProperties(O, len, SortCompare, read-through-holes).
-        let sorted = Self::sort_indexed_properties(&o, len, sort_compare, false, context)?;
+        let sorted = Self::sort_indexed_properties(&o, len, sort_compare, false, SortAlgorithm::ArrayToSorted, context)?;
 
         // 7. Let j be 0.
         // 8. Repeat, while j < len,
@@ -3453,8 +3492,14 @@ fn array_exotic_define_own_property(
         // 2. If P is "length", then
         PropertyKey::String(s) if s == &StaticJsStrings::LENGTH => {
             // a. Return ? ArraySetLength(A, Desc).
-
-            array_set_length(obj, desc, context)
+            let result = array_set_length(obj, desc, context);
+            // HIWAVE PATCH (array-length-ic): `length` lives in an ordinary shape slot, so the
+            // write found it and `SetPropertyByName` would cache it, and the next `a.length = n`
+            // from the same site would store `n` straight into the slot: no truncation (old
+            // elements stay readable and later index writes miss `length`), no ToUint32 and no
+            // RangeError. A write to an array's `length` always goes through ArraySetLength.
+            context.slot().attributes |= crate::object::shape::slot::SlotAttributes::NOT_CACHEABLE;
+            result
         }
         // 3. Else if P is an array index, then
         PropertyKey::Index(index) => {

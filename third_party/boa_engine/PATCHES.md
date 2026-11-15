@@ -1,4 +1,4 @@
-# Vendored boa_engine 0.22.0, with one patch
+# Vendored boa_engine 0.22.0 (and boa_parser, boa_ast), with HiWave's patches
 
 Source: crates.io `boa_engine` 0.22.0 (upstream `boa-dev/boa` at `337a3668`,
 `core/engine`), the version `Cargo.lock` pins. The first commit that added this
@@ -437,3 +437,337 @@ an async function), `watchdog_turns::try_catch_around_the_spin_cannot_swallow_th
 (now: the `finally` runs once, the `catch` never), and in `rustkit-engine`
 `live_timer_slice_tests` (a MessageChannel scheduler that re-arms in
 `finally` runs its next task after a stop; a spinning `finally` is stopped).
+
+## Patch, continued: sort with a comparator that is not a total order (JS2)
+
+**Why.** `SortIndexedProperties` passed the page's comparator to `Vec::sort_by`,
+which since Rust 1.81 panics ("user-provided comparison function does not
+correctly implement a total order") once it notices an inconsistent answer. A
+page's comparator can be anything (`Math.random() - 0.5`, a boolean `a > b`);
+ECMA-262 makes the result implementation-defined, not fatal. walmart.com
+panicked the page thread on 17 of 17 loads.
+
+**What.** `src/builtins/array/mod.rs`: `sort_indexed_properties` calls
+`merge_sort_fallible`, a stable merge sort that never panics for any comparator
+and stops at the first abrupt completion (marked `HIWAVE PATCH (sort)`; replaced by the V8 port below). It
+serves `Array.prototype.sort`/`toSorted` and the typed-array `sort`/`toSorted`.
+Pinned in `crates/rustkit-engine/src/sort_comparator_tests.rs`.
+
+## Patch: `boa_parser` binding list across a newline (STR-5)
+
+`third_party/boa_parser` is crates.io `boa_parser` 0.22.0 exactly as published (first commit), wired
+through `[patch.crates-io]`. One change, marked `HIWAVE PATCH (STR-5)` in
+`src/parser/statement/declaration/lexical.rs`: after a `const`/`let` binding the list continues on a
+comma even when a line terminator precedes it. Upstream asked `peek_semicolon` first, which answers
+"found" for any token after a newline, so `const a = 1` then a line starting `, b = 2` threw
+`unexpected token ','` (Speedometer 3's Lit bundles are written that way). Pin:
+`crates/rustkit-js/tests/const_comma_newline.rs`.
+The vendored crate's own parser tests are not run by the workspace, and `cargo test --manifest-path`
+on it fails from inside the tree ("believes it's in a workspace"). To run them, copy the directory out
+of the repository and run `cargo +<the version in rust-toolchain.toml> test --lib` there (312 pass,
+1 ignored, with the STR-5 patch).
+
+## Patch: a native-stack budget for built-ins that recurse in Rust (native recursion)
+
+A page could kill the process: `var a=[]; for (...) a=[a]; JSON.stringify(a)` recursed in Rust until the
+real stack overflowed (so did `flat(Infinity)`, `join`/`toString`/`==` through nested arrays, Proxy and
+prototype chains, deeply nested source in the parser). Chrome throws a catchable `RangeError`.
+
+`src/native_stack.rs`: the stack address where the outermost engine entry on a thread began
+(`Context::run`, `JsObject::call`, `Script::parse`, `Module::parse`), and `check(budget)`, which throws `RangeError:
+Maximum call stack size exceeded` once more than the budget has been used since. Checked in
+`CallValue::resolve` (every call, native or JS), `[[Get]]`/`[[Set]]`/`[[HasProperty]]`/`try_get` (Proxy
+and prototype chains), `JSON.stringify`'s `serialize_json_property` and `flatten_into_array`.
+`RuntimeLimits::set_native_stack_budget` (default 1 MiB, which fits any 2 MiB thread); `rustkit-js`'s
+`set_thread_native_stack_budget` sets it from the stack size a thread was spawned with (the content
+thread and `spawn_script_thread` use half of it). A thread that never sets it gets 1 MiB: in a debug
+build the parser needs several KiB per nesting level, so roughly 100 levels of `[[[...]]]` fit.
+
+`third_party/boa_parser` (marked `HIWAVE PATCH (native recursion)`): `Cursor::check_depth` at
+`AssignmentExpression`, `UnaryExpression`, `Statement` and `StatementListItem`, using the engine's probe
+(`set_stack_probe`) or the parse's own start when there is none; and `MAX_CHAIN` (8192) on the loops that
+build a left-nested chain (`1+1+...`, `a.b.c...`, `f()()()...`), because the finished tree is dropped,
+analysed and compiled recursively and a 30 000-link chain overflowed a 2 MiB thread. The error is
+`Error::is_stack_overflow`; `From<ParseError> for JsNativeError` and the `Function` constructor turn it into
+a `RangeError`.
+
+Pin: `crates/rustkit-js/tests/native_recursion.rs` (each case in a child process, since an overflow
+aborts; 40 cases, expected values from Chrome for Testing 148.0.7778.216). Where Chrome answers and this
+engine throws a RangeError instead, or where `JSON.parse` keeps its old SyntaxError ceiling, the test names
+the case and the answer it accepts.
+
+Follow-up (#1099 R1 MED): `Module::parse` is an entry too, and the probe answers `None` (no origin) on a
+thread with no outermost entry, so such a parse is measured from its own start. The probe is process-wide
+and was installed by the first entry and never cleared; it answered "not over" without an entry, so a parse
+outside one (a module parse) was never measured and a deeply nested module source overflowed the thread.
+Pin: `crates/rustkit-js/tests/module_parse_depth.rs` (5 nestings at 200 000 levels and a shallow control,
+Chrome for Testing 148.0.7778.216: `RangeError`, and the page runs on).
+
+## Patch: a catchable stack overflow (STR-10)
+
+Opt in with `RuntimeLimits::set_catchable_stack_overflow(true)` (off by default, so upstream's tests
+keep their uncatchable `RuntimeLimitError::Recursion`; the page runtime, `JsRuntime::new`, turns it
+on). Running out of call frames or operand-stack slots then throws a `RangeError` ("Maximum call
+stack size exceeded") that `try`/`catch` sees. Host re-entry (`host_recursion`) stays uncatchable.
+Second change, in `handle_throw` (always on): when a caller's `catch` takes an exception from a
+callee, the unwound callee's stack values are dropped, as its return would; they stayed until the
+caller returned, so a caught overflow left ~64K slots behind and the next call hit the slot limit.
+Pin: `crates/rustkit-js/tests/stack_overflow_catchable.rs`. The vendored crate's own `vm::tests`
+are not in the workspace and were not run here.
+
+## Patch: `boa_ast` `this` through nested arrow functions (arrow this)
+
+`third_party/boa_ast` is crates.io `boa_ast` 0.22.0 exactly as published (first commit of its PR), wired
+through `[patch.crates-io]`. Two small changes, marked `HIWAVE PATCH (arrow this)`: `Scope` gets an `arrow`
+flag (`scope.rs`, set from `visit_function_like` in `scope_analyzer.rs`), and
+`escape_this_in_enclosing_function_scope` keeps climbing past an arrow's scope instead of stopping at the
+first enclosing function scope. Upstream stopped at the outer *arrow*, so in
+`m() { return () => () => this.name; }` the method was never told its `this` is used, kept it out of its
+function environment, and the inner arrow read the wrong one (strict and sloppy; breaks TipTap). It only
+showed when the outer arrow did not use `this` itself. Pin: `crates/rustkit-js/tests/arrow_this_capture.rs`
+(35 function bodies, expected values from Chrome for Testing 148.0.7778.216). The vendored crate's own
+unit tests run on a copy outside the tree (`cargo +<rust-toolchain.toml version> test --lib`): 38 pass.
+
+## Patch: interpreter statistics (`vm-stats`, JS-PERF2 item 4)
+
+**Why.** To say where the interpreter's property lookups go slow on a real page (CodeMirror's first
+parse) without guessing: which opcodes run how often, and which property accesses miss their inline
+cache, on what kind of receiver, for which name.
+
+**What.** `src/vm/stats.rs` (new). Off unless `RUSTKIT_VM_STATS=1` is in the environment (read once
+per process): `Context::run` picks `run_impl::<true>`, a copy of the loop that counts every opcode,
+only then, and the miss hooks in `get_by_name`, `set_by_name` and `GetNameGlobal` (all on the path
+that already missed) are one branch on that flag. `rustkit_js::vm_stats_report()` returns the text:
+the top 40 opcodes with counts and shares, the misses per site split into cacheable (cold, or the
+shape changed) and not cacheable (misses every time, e.g. a store that adds a property), and the top
+40 (site, receiver kind, name) misses. Hits are the opcode's count minus its misses.
+`RUSTKIT_VM_STATS_FILE=<path>` also rewrites the report to `<path>.t<thread number>` every 1M opcodes and when the
+thread ends, for a probe that exits without calling the function. Pin:
+`crates/rustkit-js/tests/vm_stats.rs` (red first, against a stub report). Privacy: the report carries shapes, not data; property names are recorded only when identifier-like
+and at most 48 characters (anything else is one bucket), and computed keys are never recorded.
+Cost with the flag off,
+measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
+reads, a script call and arithmetic loops.
+## Patch: whole-number double keys without a string (`js-perf1`)
+
+**Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset
+arithmetic) converted the number to a string and parsed it back to an array index
+(`ToPropertyKey`'s Float64 arm: `JsString::from(float).into()`), an allocation and a parse per
+read. CodeMirror's first parse spent about 7% of 3,404 engine-thread samples there.
+
+**What.** `PropertyKey::from_f64_key` in `src/property/mod.rs`, used by `Value::to_property_key`
+(`src/value/mod.rs`, marked `HIWAVE PATCH (js-perf1)`): a whole number from 0 to 2^32 - 2 (`-0`
+included, whose string is "0") is that index; every other Number keeps `Number::toString`'s
+string (`NaN`, `1.5`, `-1`, `4294967295`, `2^32`, `1e+21`, `Infinity`). Pins:
+`crates/rustkit-js/tests/float_index_keys.rs` (correctness for those cases, which passed before
+the change too) and `float_index_keys_allocs.rs` (allocations per read: a float key 1.14 before,
+0.14 after, an integer key 0.12; red before). Measured (release, Linux): 2M reads of `a[x]` with a
+double `x`, 435 ms to 291 ms; an integer key is unchanged at 224 ms.
+
+## Patch: `a[i]` and `a[i] = v` without the general path (`js-perf2`, item 2)
+
+**Why.** `get_by_value` cloned the key and the base, then converted the key, and only then reached
+its dense-array path; typed arrays and strings read through `__get__`; `SetPropertyByValue` cloned
+four registers before its dense-array store, and typed arrays had no shortcut at all. A parser's
+inner loops are mostly `table[i]` on a typed array or array.
+
+**What.** Marked `HIWAVE PATCH (js-perf2)`: `fast_index` and `fast_get_by_index` in
+`src/vm/opcode/get/property.rs` take a whole-number key (int32 or whole double, `0..=2^32-2`) on an
+array's dense element, a typed array's element or a string's code unit straight off the registers;
+`SetPropertyByValue` in `src/vm/opcode/set/property.rs` does the same for an extensible array's
+dense element and for a typed array when the receiver is the base itself. Anything else (holes,
+sparse arrays, accessors, a proxy, `arguments`, another receiver) takes the general path as before.
+`typed_array_get_element` and `typed_array_set_element` are `pub(crate)` for it. Pins:
+`crates/rustkit-js/tests/index_fast_paths.rs` (30 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/index_fast_path_cases.json`, which pass before the change too, and a speed pin
+that does not). Measured (release, Linux, cost of the operation relative to an empty loop
+iteration, median of 7): array read 0.87 to 0.67, array write 0.77 to 0.50, Uint16Array read 1.38
+to 1.01, Uint16Array write 1.86 to 0.93.
+
+`js-perf2` follow-up (R1 on #1112): an index past the end of a string primitive is answered by
+`String.prototype` (`String.prototype[5] = 'P'; 'abc'[5]` is 'P'), and a dense-array store only
+happens when the receiver is the array itself (`super[i] = v` on an array home object and
+`Reflect.set(arr, i, v, other)` define the element on the receiver). Both holes were in the general
+path before this patch too (its string shortcut answered `undefined` past the end, its array store
+ignored the receiver); fixed in both paths, with the five cases added to the Chrome-148 set.
+
+## Patch: global lexical scope across scripts
+
+**Why.** ES2024 GlobalDeclarationInstantiation: every classic script of a realm shares one global
+declarative environment, so a function compiled in an earlier script sees a top-level
+`const`/`let`/`class` a LATER script declares. Boa resolves a name no enclosing scope declares to the
+global OBJECT at compile time, so the earlier function threw `ReferenceError` for it forever
+(Speedometer 3's Perf-Dashboard: a function from one `<script>` reads `RemoteAPI`, a class declared by
+the next).
+
+**What.** Marked `HIWAVE PATCH (global-lexical-scope)`:
+`src/environments/runtime/mod.rs` (`find_runtime_binding` re-points a global-object locator at the
+realm's lexical binding of that name, in `resolve_late_global_lexical`), `src/realm.rs`
+(`late_global_lexical`, a per-realm name cache that is dropped when the global scope gains bindings, so
+a read of `Math` or `document` costs one hash lookup), and `src/vm/opcode/set/name.rs`
+(`verify_initialized` throws TypeError when such a late-resolved binding is a `const`, which the
+compiler could not know). Pins: `crates/rustkit-js/tests/global_lexical_scope.rs` (runtime) and
+`crates/rustkit-engine/src/script_global_lexical_tests.rs` (page scripts). Cost: one cached hash lookup
+per global-object name read once any script has a top-level lexical declaration; a 1M-iteration loop
+of three global reads with 300 top-level consts went 1.41 s to 1.6 s (release, Linux).
+
+`GetNameOrUndefined` (`src/vm/opcode/get/name.rs`) takes its "undeclared global, so `undefined`" decision
+after the locator has been re-pointed, so `typeof` of a later script's binding before its declaration
+has run is a ReferenceError as in Chrome, not `"undefined"` (#1101 follow-up).
+
+## Patch: sort in V8's order (`sort-v8`)
+
+**Why.** With a comparator that is not a consistent total order (`(a, b) => a > b`, a NaN or
+`undefined` result, `-1` always, `Math.random() - 0.5`) ECMA-262 leaves the order unspecified, and
+pages see V8's. observable-plot keeps a different top-N when ours differs. The merge sort above never
+panics but orders such input differently, and calls the comparator in a different sequence.
+
+**What.** `src/builtins/array/v8_timsort.rs` (new) ports V8's `array-sort.tq` (TimSort: run
+detection, binary insertion under the minimum run, galloping merges) and its
+`typed-array-sort.tq` top-down merge sort. `sort_indexed_properties` partitions off the `undefined`s
+(V8 never passes one to the comparator) and puts them last. Chrome 148.0.7778.216 measured two
+facts the Torque source does not show: `Array.prototype.sort` on fewer than 8 elements goes straight
+to binary insertion, and `toSorted` does not. Also fixed in the typed-array comparator: a result of
+`0`, `-0` or `false` was taken as "greater" (`is_sign_positive`). `merge_sort_fallible` is gone.
+Pins: `crates/rustkit-js/tests/sort_v8_order.rs` compares 180 cases (sizes 2 to 500, ten comparator
+shapes, plus typed arrays) with Chrome's sorted result AND its comparator call log, call for call
+(`tools/parity_oracle/sort_nan_cases.json`, regenerated by `sort_cases_log.mjs --write`), and fuzzes
+stability and totality with a seeded generator. Not pinned: comparators with side effects other
+than logging, arrays over ~500 elements, and proxies or array-likes with getters (the algorithm does
+not depend on them, but they were not measured).
+
+## Patch: a left operand is read before the right one can assign (`eval-order`)
+
+**Why.** Boa's `compile_binary` used a local variable's own register as the left operand of
+`lhs op rhs` (no copy into a temporary), so the operator read it AFTER the right operand had run.
+`a + --a` and `a < (a = 5)` used the new value; ECMA-262 reads the left operand first. The same in the
+fused comparison branch of a loop or `if` condition (`while (a < (a = a + 2))`). Chrome 148 gives the
+old value in all of them.
+
+**What.** `ByteCompiler::compile_expr_operand_before(lhs, rhs, ...)` (`src/bytecompiler/mod.rs`,
+marked `HIWAVE PATCH (eval-order)`): the register is used directly only when `rhs` contains no
+assignment or update expression (`may_assign`, a conservative AST visitor); otherwise the left operand
+is copied into a temporary first. Used by `compile_binary` (arithmetic, bitwise, relational) and
+`try_fused_comparison_branch`. Pins: `crates/rustkit-js/tests/eval_order.rs` (800 generated programs,
+3 of which differ from Chrome without the fix, and 34 hand-written cases, 3 of which differ, all from
+Chrome 148.0.7778.216).
+
+## Patch: assigning a `let` or `const` in its temporal dead zone (`tdz-assign`)
+
+**Why.** `z = 1` compiled before `let z` in the same function (or block) succeeded silently: the
+compiler's `access_set` called `insert_binding`, which gave the not-yet-declared local a fresh
+register of its own, and the declaration later took another. Chrome 148 throws ReferenceError, after
+evaluating the right side, for a `const` too. A read, a compound assignment and `++` already threw
+(they read first).
+
+**What.** `access_set` in `src/bytecompiler/mod.rs` (marked `HIWAVE PATCH (tdz-assign)`): a lexical
+local with no register yet is in its dead zone at that point of the source; the assignment emits the
+same "uninitialized binding" ReferenceError a read of it does, before the constness check. Pin:
+`crates/rustkit-js/tests/tdz_assign.rs` (10 cases from Chrome 148.0.7778.216 in
+`tools/parity_oracle/tdz_assign_cases.json`; 6 differed before). Not covered: a `let` declared in one
+`switch` case and assigned in a later one (compiled after the declaration, so no error; unchanged).
+
+## Patch: cyclic ToPrimitive and Array join (cyclic to-primitive)
+
+`JsObject::ordinary_to_primitive` carried upstream's `RecursionLimiter`: an object already being
+converted answered the hint's default (`0` / `""`). So a user `toString() { return String(o); }` returned
+`""` after one level where Chrome recurses to a `RangeError`. The limiter is removed. What it was
+protecting, cyclic arrays, is V8's join stack now: `Array.prototype.join` and `toLocaleString` keep a
+thread-local list of the arrays they are running on, and one reached again contributes `""` (`a=[1];
+a[1]=a; String(a)` is `"1,"`). `join` no longer treats "the receiver itself as an element" as empty (a
+plain object that is its own element prints `[object Object]`, as in Chrome). `toLocaleString` joins
+with `","` as V8 does, not ICU's unit-list `", "`. Pin: `crates/rustkit-js/tests/cyclic_to_primitive.rs`
+(19 cases, Chrome for Testing 148.0.7778.216). A runaway user recursion ends in the host re-entry
+cap's uncatchable `RuntimeLimitError`, not Chrome's catchable `RangeError`: the test names that.
+
+## Patch: fewer register copies in the bytecode compiler (`js-perf2`, item 6)
+
+**Why.** The compiler copied a local variable into a fresh temporary (`Move`) before almost every
+use as an operand, updated a `var` local through three copies, and wrote `x = rhs`, `var x = init`
+and `x op= rhs` through a temporary and a copy back. On CodeMirror's first parse `Move`,
+`PushFromRegister` and `This` were about 32% of the opcodes executed (the `vm-stats` counters).
+
+**What.** Marked `HIWAVE PATCH (js-perf2 item 6)` in `src/bytecompiler/mod.rs` and
+`expression/update.rs`, each only where nothing evaluated in between can assign the local
+(`may_assign`, shared with `eval-order`):
+- member access reads the object and key from a local's own register (`access_get`,
+  `emit_get_property_by_name_from`);
+- `x++`/`x--` on a mutable non-lexical local (`var`, a parameter) is one in-place `Inc`/`Dec`;
+- a statement `x op= rhs` on a mutable register local is one instruction on its register
+  (`compile_local_compound_assign`);
+- a statement `x = rhs` and `var x = init` compile straight into the local's register when the right
+  side writes its destination only with its last instruction (`writes_dst_last`: literals,
+  identifiers, arithmetic/bitwise/relational operators, simple member reads, calls, `new`);
+- a statement `obj.p = v` / `obj[k] = v` reads object, key and value from locals directly
+  (`compile_member_assign_direct`).
+Pins: `crates/rustkit-js/tests/compiled_moves.rs` (opcodes executed by a parser-shaped loop, from
+the `vm-stats` counters: `Move`s 1460 -> 7, all opcodes 3790 -> 2337) and `eval_order.rs` (1,200
+generated programs and 56 hand cases from Chrome 148.0.7778.216).
+## Patch: `++`/`--` convert their operand, and a throwing conversion keeps it (`update-conversion`)
+
+**Why.** Two bugs found by an independent R1 on #1149, confirmed against Chrome 148. (1) The in-place
+fast path for a register local emitted `Move(dst, local); Inc(local, local)` for a postfix used as a
+value, so the value was the old value UNconverted: `let s = '5'; s++` gave `'5'` (Chrome 5),
+`let u; u++` gave `undefined` (NaN), `n--` on `'5'` then `+ 1` gave `'51'` (6). (2) `Inc`/`Dec` take
+their source register before ToNumeric and did not put it back when the conversion threw, so
+`x++` with a throwing `valueOf` (or a Symbol) left `x` as `undefined`.
+
+**What.** `expression/update.rs` (marked `HIWAVE PATCH (update-conversion)`): the postfix value form is
+`Move(dst, local); Inc(local, dst)`, so `Inc` writes the converted old value to dst and the new value
+to the local, which is untouched if the conversion throws. `vm/opcode/unary_ops/increment.rs` and
+`decrement.rs`: on a conversion error the taken value is put back before the error propagates. Pin:
+`crates/rustkit-js/tests/update_conversion.rs` (29 cases from Chrome 148.0.7778.216 for `let`, `var`,
+a parameter, a global and a member; 12 differed before).
+## Patch: a write to an array's `length` is never inline-cached (`array-length-ic`)
+
+**Why.** Unmodified Boa 0.22 bug, reported by Atlas from engine-side JS on develop e8ed58da (a
+request queue emptied with `queue.length = 0` lost elements after the second reset). An array's
+`length` is an ordinary shape slot, so the first `a.length = n` at a site found it and
+`SetPropertyByName` cached the slot; every later write from that site stored `n` straight into the
+slot and skipped ArraySetLength. So nothing was truncated (old elements stayed readable: `q[0]` after
+`q.length = 0`), later `q[i] = v` writes did not grow `length`, and `q.length = '2'` stored a string.
+
+**What.** `builtins/array/mod.rs` `array_exotic_define_own_property` (marked
+`HIWAVE PATCH (array-length-ic)`): after ArraySetLength, the slot is marked `NOT_CACHEABLE`, so a
+`length` write always takes the exotic path. Reads of `length` are still cached. Pin:
+`crates/rustkit-js/tests/array_length_reset.rs` (30 cases from Chrome 148.0.7778.216: push, shift,
+pop, unshift, index writes, holes, closures, a queue pump, string and growing lengths, a frozen
+array; 6 differed before).
+
+## Patch: a dead zone for `let`/`const`/`class` declared in a `switch` case (`switch-tdz`)
+
+**Why.** A binding declared in one `switch` case is reached by jumps that skip its declaration
+(`case 0: let z = 1; break; case 1: z`). Boa kept it in a register, and registers have no run-time
+dead zone: compilation follows source order, so the later case's access compiled as initialised and
+read whatever the reused register last held (another local's value, the switch value), where Chrome
+throws ReferenceError. A non-local `const` there had the same hole through `const_binding_cache`.
+
+**What.** In vendored `boa_ast` (`src/scope_analyzer.rs`, `visit_switch_mut` of the escape analysis,
+marked `HIWAVE PATCH (switch-tdz)`): a switch scope's bindings always escape, so they live in a
+declarative environment (as they already did under direct `eval`), whose uninitialised binding throws.
+In `src/bytecompiler/mod.rs` and `statement/switch.rs`: a `const` of a switch scope is not cached in a
+register (`switch_scope_ids`). The cost is limited to `switch` statements that declare a lexical
+binding in a case. Pin: `crates/rustkit-js/tests/switch_tdz.rs` (14 cases from Chrome 148.0.7778.216,
+including fallthrough, same-case access, hoisted functions, closures and a fresh binding per loop
+iteration; 9 differed before).
+
+## Patch: ArrayBuffer transfer without `experimental` (arraybuffer transfer)
+
+`ArrayBuffer.prototype.transfer`, `transferToFixedLength` and the `detached` getter were behind Boa's
+`experimental` feature, so no page saw them. The four `#[cfg(feature = "experimental")]` gates in
+`src/builtins/array_buffer/mod.rs` are removed (the rest of `experimental` stays off). A structured-clone
+transfer detaches the sender's buffer through them. Pin: `crates/rustkit-js/tests/arraybuffer_transfer.rs`
+(18 cases, Chrome for Testing 148.0.7778.216).
+
+**Follow-up (R1 on #1157).** The write cache could still be filled by an ordinary object that has an
+array's shape (an Array subclass instance is shaped like `Object.create(Q.prototype)` given a writable
+own `length`), and a later hit wrote a real array's `length` directly. `vm/opcode/set/property.rs`
+`set_by_name`: a cache hit writes the slot only when the object's [[DefineOwnProperty]] is the ordinary
+one, or the object is an array and the name is not `length` (so other named writes on arrays stay
+cached). `object/operations.rs` `length_of_array_like`: an array's length is read and the borrow
+released before it is converted. With the cache guard in place every array's `length` slot holds a
+number, so this second change has no failing case of its own; it is defensive. Pin:
+`crates/rustkit-js/tests/array_length_shapes.rs` (15 cases from Chrome 148.0.7778.216: subclass,
+`Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
+non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
+2 differed at #1157's head).

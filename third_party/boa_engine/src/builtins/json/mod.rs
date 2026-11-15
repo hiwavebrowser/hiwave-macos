@@ -771,6 +771,7 @@ impl Json {
         holder: &JsObject,
         context: &mut Context,
     ) -> JsResult<Option<JsString>> {
+        crate::native_stack::check(context.vm.runtime_limits.native_stack_budget())?; // HIWAVE PATCH (native recursion)
         // 1. Let value be ? Get(holder, key).
         let mut value = holder.get(key.clone(), context)?;
 

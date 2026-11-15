@@ -672,8 +672,8 @@ pub(crate) fn layout_table_contents(t: &mut LayoutBox) {
     }
     let style = t.style.clone();
     let d = &t.dimensions;
-    let pb_h = d.border.left + d.border.right + d.padding.left + d.padding.right;
-    let pb_v = d.border.top + d.border.bottom + d.padding.top + d.padding.bottom;
+    let pb_h = d.border.left + d.border_with_gutter().right + d.padding.left + d.padding.right;
+    let pb_v = d.border.top + d.border_with_gutter().bottom + d.padding.top + d.padding.bottom;
 
     // Column widths (§17.5.2.2, CSS Tables 3 §3.9.3). The used width came in
     // from the block code: max-content clamped to the room there is, or the
@@ -894,7 +894,7 @@ fn layout_cell(cell: &mut LayoutBox, x: f32, y: f32, width: f32) -> f32 {
         style.margin_left,
     ) = saved;
     let d = &cell.dimensions;
-    let pb_v = d.padding.vertical() + d.border.vertical();
+    let pb_v = d.padding.vertical() + d.border_with_gutter().vertical();
     let content = d.border_box().height;
     let specified = absolute_px(&cell.style.height, cell).map(|h| match cell.style.box_sizing {
         BoxSizing::BorderBox => h,
@@ -909,7 +909,7 @@ fn layout_cell(cell: &mut LayoutBox, x: f32, y: f32, width: f32) -> f32 {
 /// this slice does not align across cells) leaves it at the top.
 fn stretch_cell(cell: &mut LayoutBox, height: f32) {
     let d = &cell.dimensions;
-    let inner = (height - d.padding.vertical() - d.border.vertical()).max(0.0);
+    let inner = (height - d.padding.vertical() - d.border_with_gutter().vertical()).max(0.0);
     let free = inner - d.content.height;
     let shift = match cell.style.vertical_align {
         VerticalAlign::Middle => free / 2.0,
