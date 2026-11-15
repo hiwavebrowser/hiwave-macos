@@ -807,3 +807,34 @@ prototype for many receivers and for a primitive base, a primitive base over a p
 property, `Reflect.set` with another receiver, a plain write over a prototype data property, a proxy
 and a typed array (`Infinity`, `NaN`) after an ordinary object filled a prototype-setter entry; 5
 differed on develop, and the 3 exotic-base cases differed at 179eb717).
+
+## Patch: a name-read cache hit only where it is what [[Get]] would do (`ic-exotic-get`)
+
+**What.** The property inline cache is keyed on shape, and an exotic object can share an ordinary
+object's shape: a Proxy made from `{}` has the empty shape with `Object.prototype`, and a typed array
+has the empty shape with its prototype, as does an object created from that prototype. A
+`GetPropertyByName` site warmed on ordinary objects then answered a Proxy from the prototype's slot
+(its `get` trap never ran) and a typed array reading a canonical numeric name such as `Infinity` or
+`NaN` from the prototype (a typed array's [[Get]] reads its elements for those names and never the
+prototype). The write side has had the same guard since `super-set-receiver`. Marked
+`HIWAVE PATCH (ic-exotic-get)`:
+
+- `vm/inline_cache/mod.rs`: `InlineCache::numeric_name`, whether the site's name is a canonical
+  numeric string, worked out once when the cache is made; `InlineCache::hit_is_get(object)`: an
+  ordinary [[Get]] always hits; a typed array's or an arguments object's hits for a name that is not
+  numeric (they differ from the ordinary one only for numeric names, so `ta.byteLength` and
+  `arguments.length` keep their hits); a Proxy's and a module namespace's never do.
+- `vm/opcode/get/property.rs`: the hit is taken only when `hit_is_get` holds; otherwise the full
+  [[Get]] runs.
+- `builtins/typed_array/object.rs`: `canonical_numeric_index_string` is `pub(crate)`.
+
+`GetNameGlobal` is unchanged: its receiver is the realm's global object, whose [[Get]] is the
+ordinary one.
+
+**Cost.** One function-pointer comparison per hit on an ordinary object.
+
+Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (7 cases from Chrome for Testing 148.0.7778.216:
+a Proxy sharing `Object.prototype`'s empty shape, a Proxy over an object with a prototype getter,
+a typed array reading `Infinity` through a prototype getter and `NaN` through a prototype data
+property, and three that already matched: a typed array reading a non-numeric name, an
+object with a null prototype, and ordinary hits; 3 differ on develop be8eb272).
