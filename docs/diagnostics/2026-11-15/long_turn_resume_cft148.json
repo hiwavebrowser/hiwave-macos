@@ -1,0 +1,38 @@
+[
+ {
+  "quietFrames": 61,
+  "quietTimers": 95,
+  "longMs": 2000,
+  "firstFrameAfterMs": 1,
+  "firstTimerAfterMs": 1,
+  "tsJumpMs": 2000,
+  "afterFrames": 61,
+  "afterTimers": 94,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "quietFrames": 61,
+  "quietTimers": 95,
+  "longMs": 2000,
+  "firstFrameAfterMs": 0,
+  "firstTimerAfterMs": 0,
+  "tsJumpMs": 2000,
+  "afterFrames": 60,
+  "afterTimers": 94,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "quietFrames": 61,
+  "quietTimers": 94,
+  "longMs": 2000,
+  "firstFrameAfterMs": 0,
+  "firstTimerAfterMs": 0,
+  "tsJumpMs": 2000,
+  "afterFrames": 61,
+  "afterTimers": 93,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ }
+]
