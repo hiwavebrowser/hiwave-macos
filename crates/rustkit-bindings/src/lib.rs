@@ -589,6 +589,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
+        // The grid time of the frame whose callbacks run (its timestamp's time, below).
+        Q.frameDue = 0;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -765,12 +767,21 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
         return schedule(function () {
-            if (Q.frameTsAt !== Q.now) {
-                Q.frameTsAt = Q.now;
-                Q.frameTs = treeNow();
-                if (Q.prevFrameTs >= 0 && Q.frameTs < Q.prevFrameTs + (Q.now - Q.prevFrameAt)) Q.frameTs = Q.prevFrameTs + (Q.now - Q.prevFrameAt);
+            // The frame's time, as Chrome's callbacks get their frame's: the clock read now, less
+            // how late the turn ran it past its grid time (`Q.frameDue`), and never closer to
+            // the last frame's stamp than the clock moved between them. A late frame's callbacks
+            // get the time it was due, and the frames after it are again a grid step apart
+            // (Chrome: 16.6-16.8 ms after a 24 ms frame); stamped with the turn's time the gaps
+            // went 41, 0 and 9 ms. A frame owed for two frames or more (a long task, an idle
+            // page) is the frame it runs in, stamped now: its grid time is long past.
+            var due = Q.frameDue, at = Q.now - due < 34 ? due : Q.now;
+            if (Q.frameTsAt !== due) {
+                Q.frameTsAt = due;
+                var ts = treeNow() - (Q.now - at);
+                if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
+                Q.frameTs = ts;
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
-                Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = Q.now;
+                Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
             }
             cb(Q.frameTs - base);
         }, 0, rest(arguments, 1), false, true);
@@ -820,7 +831,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             }
             else removeAt(best);
             ran++;
-            if (timer.frame) runFrame(timer);
+            if (timer.frame) { Q.frameDue = timer.due; runFrame(timer); }
             else timer.run(timer);
         }
         return ran;
@@ -830,10 +841,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the turn (`ran` so far). The round is a table of the engine's own,
     // as the timers are. Returns the new count.
     function frameRound(ran, max) {
-        var round = objCreate(null), due = 0;
+        var round = objCreate(null), due = 0, latest = -1;
         for (var i = 0; i < Q.count; i++) {
-            if (timers[i].frame && timers[i].due <= Q.now) round[due++] = timers[i];
+            if (timers[i].frame && timers[i].due <= Q.now) {
+                round[due++] = timers[i];
+                if (timers[i].due > latest) latest = timers[i].due;
+            }
         }
+        // One frame: its time is the latest grid point among its callbacks.
+        if (latest >= 0) Q.frameDue = latest;
         for (var j = 0; j < due && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
             var at = slotOf(round[j]);
