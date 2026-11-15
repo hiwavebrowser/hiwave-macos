@@ -771,3 +771,41 @@ number, so this second change has no failing case of its own; it is defensive. P
 `Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
 non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
 2 differed at #1157's head).
+
+## Patch: an inline cache entry is valid only while its slot is (`ic-holder`)
+
+**What.** Upstream keys a property inline-cache entry on the receiver's shape alone. For a property
+found on the receiver's prototype, that shape does not change when the prototype's property is
+deleted or redefined, so a site kept reading or writing a slot of the prototype that had moved or
+gone (another property's value or accessor, or past the end of storage). And a unique (dictionary
+mode) shape is changed in place, without a new shape, by an attribute change that keeps the slot's
+width (`Object.freeze`, `writable: false`, an accessor's getter or setter replaced) and by an own
+property added to it, so a site keyed on it kept writing a property that had become read-only, or
+kept answering from the prototype after an own property shadowed it. Four changes, each marked
+`HIWAVE PATCH (ic-holder)`:
+
+- `vm/inline_cache/mod.rs`: an entry for a prototype slot also holds the prototype's shape when
+  it was made (strongly, so its address is not reused while the entry exists); `get` hits only
+  while the prototype still has that shape and drops the entry otherwise. Prototype slots are not
+  cached for a receiver whose shape is unique.
+- `object/shape/unique_shape.rs` `change_attributes_transition`: the same-width case makes a new
+  unique shape, as the width-changing case already did (upstream's "TODO: invalidate the pointer").
+- `vm/opcode/get/property.rs`, `get/name.rs`, `set/property.rs`: cached indexes are read with
+  `get`; a slot that is not there falls through to the full [[Get]]/[[Set]], and so does a cached
+  accessor write whose setter is no longer callable (a setter replaced by `undefined` keeps the
+  slot's bits, so the shape does not change; the full path is what throws in strict code).
+
+**Cost.** Inline-cache misses are unchanged to within 0.05% on richards, delta-blue, raytrace,
+splay, hash-map, navier-stokes and Babylon (vm-stats). Wall time, median of three runs of 8
+iterations each, alternated with develop (Linux x86-64, release): richards +3.3%, delta-blue +4.1%,
+raytrace +3.3%, Babylon +1.1%, hash-map -1.1% (noise; run-to-run spread is 1-3%). A weakly held
+holder (an upgrade on every prototype hit) cost about 1 point more on richards and delta-blue.
+The cost is one prototype borrow and one address comparison on each prototype hit; folding the
+check into the three hit paths, which already borrow the prototype, would remove the second
+borrow, at the price of every hit path having to remember it.
+
+Pin: `crates/rustkit-js/tests/ic_holder.rs` (25 cases from Chrome for Testing 148.0.7778.216, each
+warming a site twice before the change: prototype property deleted, accessor to data, data to
+accessor, read-only, getter or setter swapped, on reads and writes; dictionary-mode objects frozen,
+made read-only, shadowed; a built-in prototype; strict code with no setter; `arguments` objects;
+global names. 16 differed on develop 55547c08).

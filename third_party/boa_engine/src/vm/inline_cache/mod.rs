@@ -7,7 +7,10 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot},
+    object::shape::{
+        Shape, WeakShape,
+        slot::{Slot, SlotAttributes},
+    },
 };
 
 #[cfg(test)]
@@ -20,6 +23,14 @@ pub(crate) const PIC_CAPACITY: usize = 4;
 pub(crate) struct CacheEntry {
     /// A weak reference is kept to the shape to avoid the shape preventing deallocation.
     pub(crate) shape: WeakShape,
+    // HIWAVE PATCH (ic-holder): for a slot found on the receiver's prototype, the prototype's
+    // shape when the entry was made. The entry is keyed on the receiver's shape alone, which does
+    // not change when the prototype's properties do; a hit also requires the prototype's shape now
+    // to be this one, so a deleted or redefined prototype property (which gives the prototype a
+    // new shape) misses instead of indexing a slot that has moved or gone. Held strongly, so its
+    // address cannot be reused by another shape while the entry exists, and the check on a hit
+    // is one address comparison; a stale entry is dropped on its next lookup.
+    pub(crate) holder: Option<Shape>,
     #[unsafe_ignore_trace]
     pub(crate) slot: Slot,
 }
@@ -67,12 +78,30 @@ impl InlineCache {
             return;
         }
 
+        // HIWAVE PATCH (ic-holder): a prototype slot is cached with the prototype's shape (see
+        // `CacheEntry::holder`). Not on a receiver in dictionary mode: a unique shape takes a new
+        // own property in place, without a new shape, so an entry keyed on it would keep answering
+        // from the prototype after the receiver gains an own property that shadows it.
+        let holder = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+            if shape.is_unique() {
+                return;
+            }
+            let Some(prototype) = shape.prototype() else {
+                return;
+            };
+            let prototype = prototype.borrow();
+            Some(prototype.shape().clone())
+        } else {
+            None
+        };
+
         let mut entries = self.entries.borrow_mut();
 
         // Add a new entry if there's space.
         if entries
             .try_push(CacheEntry {
                 shape: shape.into(),
+                holder,
                 slot,
             })
             .is_err()
@@ -99,6 +128,18 @@ impl InlineCache {
         while i < entries.len() {
             if let Some(upgraded) = entries[i].shape.upgrade() {
                 if upgraded.to_addr_usize() == shape_addr {
+                    // HIWAVE PATCH (ic-holder): a prototype entry hits only while the prototype
+                    // still has the shape it had when the entry was made; otherwise the entry is
+                    // stale for good and goes.
+                    if let Some(holder) = &entries[i].holder {
+                        let fresh = upgraded.prototype().is_some_and(|prototype| {
+                            holder.to_addr_usize() == prototype.borrow().shape().to_addr_usize()
+                        });
+                        if !fresh {
+                            entries.swap_remove(i);
+                            break;
+                        }
+                    }
                     result = Some((upgraded, entries[i].slot));
                     break;
                 }
