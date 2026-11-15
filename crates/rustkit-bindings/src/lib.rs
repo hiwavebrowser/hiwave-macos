@@ -141,6 +141,8 @@ mod frame_clock_tests;
 #[cfg(test)]
 mod frame_grid_tests;
 #[cfg(test)]
+mod timeline_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;

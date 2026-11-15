@@ -14,10 +14,18 @@
 //   finished   a 50 ms animation 200 ms later: [currentTime, playState, finished promise settled,
 //              startTime !== null]
 //   inFrame    in 4 frames of a running animation: a.currentTime === t - a.startTime
+//   idle       5 times: after 300 ms with no frame asked for, in a timer task: [performance.now(),
+//              timeline.currentTime, the same 5 ms of work later, then in the frame the task asks
+//              for: t, timeline.currentTime]: does an idle timeline stay at the last frame's time?
+//   stalled    5 times: a frame whose own callback works W = 40 or 100 ms asks for the next frame:
+//              [W, the next frame's t - this t, perf in it - this t]
+//   held       5 times: a frame asks for the next and posts a task that works 100 ms; in the late
+//              frame: [t - T0, timeline.currentTime - T0, a running animation's currentTime -
+//              (t - its startTime)], and the frame its own callback asks for: [t2 - T0]
 // When done it sets rec.done and logs REC <json>.
 // Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
 // harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
-window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], done: false };
+window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], idle: [], stalled: [], held: [], done: false };
 var box = document.getElementById('box');
 function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
 function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
@@ -88,9 +96,50 @@ function inFramePart(next) {
     });
   })();
 }
+function idlePart(n, next) {
+  if (n >= 5) { next(); return; }
+  setTimeout(function () {
+    var p = performance.now(), a = document.timeline.currentTime; spin(5); var b = document.timeline.currentTime;
+    requestAnimationFrame(function (t) {
+      rec.idle.push([r2(p), r2(a), r2(b), r2(t), r2(document.timeline.currentTime)]);
+      idlePart(n + 1, next);
+    });
+  }, 300);
+}
+function stalledPart(n, next) {
+  if (n >= 5) { next(); return; }
+  var W = n % 2 ? 100 : 40;
+  requestAnimationFrame(function (t) {
+    spin(W);
+    requestAnimationFrame(function (t2) {
+      rec.stalled.push([W, r2(t2 - t), r2(performance.now() - t)]);
+      setTimeout(function () { stalledPart(n + 1, next); }, 50);
+    });
+  });
+}
+function heldPart(n, next) {
+  if (n >= 5) { next(); return; }
+  var a = box.animate({ opacity: [0, 1] }, { duration: 5000 });
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function (T0) {
+      requestAnimationFrame(function (t) {
+        var row = [r2(t - T0), r2(document.timeline.currentTime - T0), r2(a.currentTime - (t - a.startTime))];
+        requestAnimationFrame(function (t2) {
+          row.push(r2(t2 - T0));
+          rec.held.push(row);
+          a.cancel();
+          setTimeout(function () { heldPart(n + 1, next); }, 50);
+        });
+      });
+      setTimeout(function () { spin(100); }, 0);
+    });
+  });
+}
 function go() {
   framesPart(function () { taskPart(function () { startFromPart(function () { pausedPart(function () {
-    finishedPart(function () { inFramePart(function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); }); });
+    finishedPart(function () { inFramePart(function () { idlePart(0, function () { stalledPart(0, function () {
+      heldPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+    }); }); }); });
   }); }); }); });
 }
 if (location.hash !== '#manual') addEventListener('load', go);

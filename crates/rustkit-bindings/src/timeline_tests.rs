@@ -1,0 +1,226 @@
+//! TIMELINE1: `document.timeline` and Web Animations on the page clock, as Chrome's. Pinned on
+//! Chrome for Testing 148.0.7778.216, headless, five runs of
+//! `docs/diagnostics/2026-11-15/timeline_probe.html` (`timeline_probe_cft148.json`):
+//!
+//! - In every frame callback `document.timeline.currentTime === t` ("frames", "inFrame").
+//! - In a task right after a frame it is that frame's `t`, the same twice 5 ms apart ("task",
+//!   "twoTasks"); in a task after 300 ms with no frame, a grid point 0.6-16.1 ms before
+//!   `performance.now()`, the same 5 ms later ("idle").
+//! - `a.startTime = timeline.currentTime` in a task: `a.currentTime` 0 at once, then exactly
+//!   `t - a.startTime` in each frame ("startFrom").
+//! - `pause()` at ~100 ms: `currentTime` 100 and "paused" at once, 116.6-116.7 three frames on,
+//!   `startTime` null ("paused"): the hold time is taken at the next frame.
+//! - A 50 ms animation 200 ms on: 50, "finished", promise settled, `startTime` kept ("finished").
+//! - A frame a long task held up: the timeline is its `t` and an animation's `currentTime` is
+//!   `t - startTime` ("held").
+//!
+//! The tests turn the clock by hand on the deterministic page clock (no wall clock).
+
+use super::*;
+
+fn page() -> DomBindings {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><body><div id=box></div></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.set_deterministic_clock(true);
+    b
+}
+
+fn read(b: &DomBindings, v: &str) -> String {
+    match b.evaluate(&format!("String({v})")).unwrap() {
+        JsValue::String(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn num(b: &DomBindings, v: &str) -> f64 {
+    let s = read(b, v);
+    s.parse().unwrap_or_else(|_| panic!("{v} = {s:?}"))
+}
+
+fn turn(b: &DomBindings, ms: u64) {
+    b.advance_timers_for_frame(ms, 1000, 0).unwrap();
+}
+
+/// Inside a frame callback the timeline is the callback's timestamp, also when the turn ran the
+/// frame late: due at 17, run at 20, both 17 (Chrome: equal in every frame). It read the turn's
+/// time, 20, before (#1191's `known_divergence_timeline_current_time_is_not_the_frame_stamp_yet`).
+#[test]
+fn the_timeline_is_the_frame_stamp_inside_a_frame() {
+    let b = page();
+    b.evaluate("var got = ''; requestAnimationFrame(function (t) { got = t + ',' + document.timeline.currentTime; });")
+        .unwrap();
+    turn(&b, 20);
+    assert_eq!(read(&b, "got"), "17,17");
+}
+
+/// A task after a frame reads that frame's time, the same however much the page clock moves in the
+/// task (Chrome "task" and "twoTasks": the frame's `t`, twice). It read the turn's time.
+#[test]
+fn a_task_after_a_frame_reads_that_frames_time() {
+    let b = page();
+    b.evaluate(
+        "var T = -1, got = ''; requestAnimationFrame(function (t) { T = t; setTimeout(function () { \
+           var a = document.timeline.currentTime; performance.now(); performance.now(); \
+           got = [a, document.timeline.currentTime].join(); }, 3); });",
+    )
+    .unwrap();
+    turn(&b, 17);
+    turn(&b, 3);
+    let t = read(&b, "T");
+    assert_eq!(read(&b, "got"), format!("{t},{t}"));
+}
+
+/// A task after a long idle reads the grid point at or before its time, not the last frame's
+/// (Chrome "idle": 0.6-16.1 ms before `performance.now()` after 300 ms with no frame), the same
+/// twice; and the frame it then asks for, the frame of that grid point, is stamped with it. Here a
+/// frame at 17, then a timer at 1005: the grid point 1000.
+#[test]
+fn an_idle_task_reads_the_grid_point_before_it() {
+    let b = page();
+    b.evaluate(
+        "var got = '', inFrame = ''; requestAnimationFrame(function () {}); setTimeout(function () { \
+           var p = performance.now(), a = document.timeline.currentTime; performance.now(); \
+           got = [p - a < 17 && a <= p, a, document.timeline.currentTime].join(); \
+           requestAnimationFrame(function (t) { inFrame = [t, document.timeline.currentTime].join(); }); }, 1005);",
+    )
+    .unwrap();
+    turn(&b, 17);
+    turn(&b, 988);
+    let got = read(&b, "got");
+    let parts: Vec<&str> = got.split(',').collect();
+    assert_eq!(parts[0], "true", "{got}");
+    assert_eq!(parts[1], parts[2], "{got}");
+    assert_eq!(parts[1].parse::<f64>().unwrap().floor(), 1000.0, "{got}");
+    assert_eq!(read(&b, "inFrame"), format!("{0},{0}", parts[1]));
+}
+
+/// `startTime` set from the timeline in a task: `currentTime` is 0 at once and then exactly
+/// `t - startTime` in each frame (Chrome "startFrom": 0, then 16.57-16.67, 33.27-33.37, ...,
+/// equal to `t - startTime` to 0.01).
+#[test]
+fn a_start_time_from_the_timeline_has_no_jump() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), once = '', rows = []; requestAnimationFrame(function () {}); \
+         setTimeout(function () { var a = box.animate({ opacity: [0, 1] }, { duration: 1000 }); \
+           a.startTime = document.timeline.currentTime; \
+           once = [a.currentTime, a.startTime - document.timeline.currentTime].join(); \
+           (function f() { requestAnimationFrame(function (t) { \
+             rows.push(Math.abs(a.currentTime - (t - a.startTime)) < 0.01 && a.currentTime > 0); \
+             if (rows.length < 4) f(); }); })(); }, 30);",
+    )
+    .unwrap();
+    for ms in [17, 13, 4, 17, 16, 17, 17] {
+        turn(&b, ms);
+    }
+    assert_eq!(read(&b, "once"), "0,0");
+    assert_eq!(read(&b, "rows.join()"), "true,true,true,true");
+}
+
+/// `pause()` reads the current time at once and is "paused" at once, but the hold time is taken at
+/// the next frame (Chrome "paused": 100 at the pause, 116.6-116.7 three frames on, `startTime`
+/// null). It held the time read at the pause.
+#[test]
+fn a_pause_takes_its_hold_time_at_the_next_frame() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), a = box.animate({ opacity: [0, 1] }, { duration: 1000 }), \
+           at = '', later = '', S = -1, next = -1, n = 0; \
+         setTimeout(function () { S = a.startTime; a.pause(); at = [a.currentTime, a.playState].join(); \
+           (function f() { requestAnimationFrame(function (t) { if (next < 0) next = t; \
+             if (++n < 3) f(); else later = [a.currentTime, a.playState, String(a.startTime)].join(); }); })(); }, 105);",
+    )
+    .unwrap();
+    for _ in 0..12 {
+        turn(&b, b.next_timer_delay().unwrap_or(17).max(1));
+    }
+    let at = read(&b, "at");
+    let (s, next) = (num(&b, "S"), num(&b, "next"));
+    assert!(at.ends_with(",paused"), "{at}");
+    assert!(at.split(',').next().unwrap().parse::<f64>().unwrap() < next - s, "{at}");
+    assert_eq!(read(&b, "later"), format!("{},paused,null", next - s));
+}
+
+/// A finished animation's reads (Chrome "finished": 50, "finished", the promise settled, the start
+/// time kept). A guard: this already held.
+#[test]
+fn a_finished_animation_reads_its_end() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), a = box.animate({ opacity: [0, 1] }, { duration: 50 }), \
+           settled = false, got = ''; a.finished.then(function () { settled = true; }); \
+         setTimeout(function () { got = [a.currentTime, a.playState, settled, a.startTime !== null].join(); }, 200);",
+    )
+    .unwrap();
+    for _ in 0..20 {
+        match b.next_timer_delay() {
+            Some(d) => turn(&b, d.max(1)),
+            None => break,
+        }
+    }
+    assert_eq!(read(&b, "got"), "50,finished,true,true");
+}
+
+/// A frame a long task held up: the timeline is its timestamp and a running animation's
+/// `currentTime` is `t - startTime` (Chrome "held": T0 + 16.6-16.7 for both, difference 0), and
+/// the frame its own callback asks for is the frame of the time it runs at, the latest grid point
+/// at or before it (Chrome: T0 + 99.9-100.1 when the frame ran ~101 ms after T0). Here the frame
+/// at 17 (T0); the next, due 34, run by a turn at 120: stamped T0 + 17; its own request gets
+/// grid point 117 (T0 + 100). It got the next grid point after the turn, 134 (T0 + 117).
+#[test]
+fn a_frame_held_up_by_a_long_task_reads_its_stamp_and_asks_for_the_frame_of_its_time() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), a = box.animate({ opacity: [0, 1] }, { duration: 5000 }), \
+           T0 = -1, row = ''; \
+         requestAnimationFrame(function (t0) { T0 = t0; requestAnimationFrame(function (t) { \
+           row = [t - T0, document.timeline.currentTime - T0, a.currentTime - (t - a.startTime)].join(); \
+           requestAnimationFrame(function (t2) { row += ',' + (t2 - T0); }); }); });",
+    )
+    .unwrap();
+    turn(&b, 17);
+    turn(&b, 103);
+    if read(&b, "row").split(',').count() < 4 {
+        let d = b.next_timer_delay().expect("the next frame is asked for");
+        turn(&b, d);
+    }
+    let row: Vec<i64> = read(&b, "row")
+        .split(',')
+        .map(|s| s.parse::<f64>().unwrap().round() as i64)
+        .collect();
+    assert_eq!(row, vec![17, 17, 0, 100], "Chrome: 16.7, 16.7, 0, 100");
+}
+
+/// KNOWN DIVERGENCE, not modelled: a frame callback that works 40 or 100 ms and then asks for a
+/// frame gets, in Chrome, the latest grid point at or before the request (`timeline_probe`
+/// "stalled": t + 33.3, sometimes 50, after 40 ms; t + 100 after 100 ms), run at once. A turn's
+/// clock does not move while its callbacks run, so here the request is the frame after this one
+/// (t + 17), run late on the next turn, and its own request then catches up.
+#[test]
+fn known_divergence_a_request_after_a_long_callback_is_the_next_frame() {
+    let b = page();
+    b.evaluate(
+        "var T = -1, got = -1; requestAnimationFrame(function (t) { T = t; \
+           var s = performance.now(); while (performance.now() - s < 40) {} \
+           requestAnimationFrame(function (t2) { got = t2 - T; }); });",
+    )
+    .unwrap();
+    turn(&b, 17);
+    turn(&b, 40);
+    assert_eq!(num(&b, "got").round() as i64, 17, "Chrome: 33.3");
+}
+
+/// The first frame a page asks for, from a task at 20 ms: the frame of that time, grid point 17,
+/// run at once (Chrome: a task's frame is stamped up to 16.7 ms before it, `frame_stamp_probe`
+/// "idle" and "sweep"). #1191 R1 follow-up: the case on its own.
+#[test]
+fn a_first_request_at_20_is_the_frame_at_17_run_at_once() {
+    let b = page();
+    b.evaluate("var got = -1; setTimeout(function () { requestAnimationFrame(function (t) { got = t; }); }, 20);")
+        .unwrap();
+    turn(&b, 20);
+    assert_eq!(read(&b, "got"), "17");
+}
