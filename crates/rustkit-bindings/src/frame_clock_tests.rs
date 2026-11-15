@@ -100,8 +100,11 @@ fn one_documents_capture_clock_reads_what_it_did() {
     assert_eq!(got, ONE_DOCUMENT_CAPTURE);
 }
 
-/// Recorded with this test's script on the merged-in tree (batch 83, 470f0ae4), one document.
-const ONE_DOCUMENT_CAPTURE: &str = "[0.1,0.2,5.4,16,16.1,16,16.2,32,32.1,40,40.1,48,48.1,64,64.1,80,96]";
+/// Recorded with this test's script on the merged-in tree (batch 83, 470f0ae4), one document, then
+/// with the animation frames on the 60 Hz grid: the frames at 16, 32, 48, 64 are at 17, 34, 50,
+/// 67, and the frame asked for at 83 runs at the end of the 16 ms step, 99 (it is due at 84).
+/// The timer's readings (5.4, 40) do not move.
+const ONE_DOCUMENT_CAPTURE: &str = "[0.1,0.2,5.4,17,17.1,17,17.2,34,34.1,40,40.1,50,50.1,67,67.1,83,99]";
 
 /// The page's clock read before and after one reading of the frame's, all in one script: the
 /// frame's reading plus the distance between the two documents' origins lies between the two page
@@ -211,8 +214,10 @@ fn one_frames_callbacks_get_each_documents_reading_of_one_time() {
             )
             .unwrap();
         if live {
-            std::thread::sleep(std::time::Duration::from_millis(16));
-            parent.advance_timers(16, 100).unwrap();
+            // To the next point of the 60 Hz frame grid: at most 17 ms on (300 is a grid point;
+            // the frame is due at 317).
+            std::thread::sleep(std::time::Duration::from_millis(17));
+            parent.advance_timers(17, 100).unwrap();
         } else {
             parent.run_timers(1000, 100).unwrap();
         }

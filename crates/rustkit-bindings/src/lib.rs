@@ -586,6 +586,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // from nothing.
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
+        // The last animation frame run, as its number on the tree's frame grid (below).
+        Q.frameK = 0;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -706,12 +708,34 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         target.dispatchEvent(event);
     };
 
+    // Animation frames are on a 60 Hz grid from the clock's zero: frame `k` is due at 1000/60 ms
+    // times `k`, rounded up to the clock's whole milliseconds (17, 34, 50, 67, ...), as Chrome's
+    // frames are on the display's (CfT 148: timestamps 16.6-16.7 ms apart, 180-181 frames in
+    // 3000 ms, `frame_grid_probe_cft148.json`). A frame asked for is the one after the last that
+    // ran: when a turn came late, that one is due already and runs on the next turn, and the
+    // frames after it are on the grid again, as Chrome catches up a 24 ms frame without dropping
+    // one. More than a frame behind (the page was idle, or every frame overruns), it is the next
+    // grid point after now: never now itself, so one asked for in a round that ran on a grid point
+    // waits for the next frame. Until this, a frame was due 16 ms after the turn that ran the last
+    // one, so a late turn moved every later frame (173 of Chrome's 180-181 on the app's loop,
+    // PACE2).
+    function frameAt(k) { return Math.floor((k * 50 + 2) / 3); }
+    function nextFrame() {
+        var k = Q.frameK + 1;
+        if (frameAt(k) + 17 <= Q.now) {
+            k = Math.floor(Q.now * 3 / 50);
+            while (frameAt(k) <= Q.now) k++;
+        }
+        return k;
+    }
+    function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
     function schedule(cb, ms, args, repeat, frame) {
         var delay = toNumber(ms) || 0;
         if (delay < 0) delay = 0;
         var id = Q.nextId++;
         var timer = objCreate(null);
         timer.id = id; timer.seq = id; timer.due = Q.now + delay; timer.cb = cb; timer.args = args;
+        if (frame) { timer.k = nextFrame(); timer.due = frameAt(timer.k); }
         timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
         // The document that set it, and that document's own way to run it.
         timer.win = win; timer.run = call;
@@ -741,7 +765,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = Q.now;
             }
             cb(Q.frameTs - base);
-        }, 16, rest(arguments, 1), false, true);
+        }, 0, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -757,8 +781,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     }
     // Run due timers in (due, scheduling) order until the virtual clock
     // would pass `horizon` ms or `max` callbacks have run. The load's clock
-    // has no frames, so an animation frame there is a 16 ms timer; the live
-    // loop keeps them for its one round a turn (`timersOnly`).
+    // has no frames, so an animation frame there is a timer due at its grid
+    // point; the live loop keeps them for its one round a turn (`timersOnly`).
     //
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
@@ -787,6 +811,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 timer.seq = Q.nextId++;
             }
             else removeAt(best);
+            if (timer.frame) ranFrame(timer);
             ran++;
             timer.run(timer);
         }
@@ -806,6 +831,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var at = slotOf(round[j]);
             if (at < 0) continue;
             removeAt(at);
+            ranFrame(round[j]);
             ran++;
             round[j].run(round[j]);
         }
@@ -4333,12 +4359,13 @@ mod tests {
         // virtual time (600 here) plus the real time since the virtual clock moved.
         assert_eq!(read("String(stamps.length)"), "1");
         assert_eq!(read("String(stamps[0] >= 600 && stamps[0] < 700)"), "true");
-        // The loop asked for the frame after this one.
-        assert_eq!(bindings.next_timer_delay(), Some(16));
+        // The loop asked for the frame after this one: the 60 Hz grid's next point after 600 (617;
+        // 600 is a grid point, and the frame that ran there is not run again).
+        assert_eq!(bindings.next_timer_delay(), Some(17));
         assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
-        assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
+        assert_eq!(bindings.advance_timers(7, 1000).unwrap(), 1);
         assert_eq!(read("String(stamps.length)"), "2");
-        assert_eq!(read("String(stamps[1] >= 616 && stamps[1] < 716)"), "true");
+        assert_eq!(read("String(stamps[1] >= 617 && stamps[1] < 717)"), "true");
 
         // The turn's timers all run, and before its frame; a frame one of
         // them asks for is in the turn's round.
@@ -4369,19 +4396,22 @@ mod tests {
             .unwrap();
         bindings.advance_timers(1000, 1000).unwrap();
         assert_eq!(read("log.join(',')"), "a");
-        bindings.advance_timers(16, 1000).unwrap();
+        // The next grid point is at most 17 ms on.
+        bindings.advance_timers(17, 1000).unwrap();
         assert_eq!(read("log.join(',')"), "a,c");
     }
 
     /// The load's clock is virtual and has no frames of its own: a
-    /// `requestAnimationFrame` loop there is a 16 ms timer, as before.
+    /// `requestAnimationFrame` loop there is a timer due at each point of the
+    /// 60 Hz frame grid (17, 34, 50, ... 150: nine in 160 ms; ten when it was
+    /// a 16 ms timer).
     #[test]
-    fn the_load_clock_still_runs_animation_frames_as_16ms_timers() {
+    fn the_load_clock_runs_animation_frames_as_timers_on_the_frame_grid() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         bindings
             .evaluate("var n = 0; function loop() { n++; requestAnimationFrame(loop); } requestAnimationFrame(loop);")
             .unwrap();
-        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 10);
+        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 9);
     }
 
     #[test]
