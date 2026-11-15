@@ -355,6 +355,8 @@ impl RegExp {
         let full_unicode =
             flags.contains(RegExpFlags::UNICODE) || flags.contains(RegExpFlags::UNICODE_SETS);
 
+        // HIWAVE PATCH (regex-literal-cache): counted, so a test can see how often a pattern compiles.
+        crate::vm::stats::count_regexp_compile();
         let matcher = if full_unicode {
             // Unicode mode (u/v flag) OR pattern has named groups:
             // compile as full Unicode codepoints.
