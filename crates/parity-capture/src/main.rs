@@ -98,11 +98,13 @@ struct Args {
     script_budget_ms: Option<u64>,
 
     /// The live turn's watchdog, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): how long
-    /// one turn's JavaScript may run before it is stopped, with `--interrupt-scripts`. For stress-suite
-    /// runs only (tools/stress, `HIWAVE_STRESS_TURN_BUDGET_MS`): MotionMark's end-of-test analysis runs
-    /// longer than the default and the stop ends the suite. A capture taken with it is not comparable with
-    /// the board or the app: it says so on stderr, and tools/stress records the budget in the run.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    /// one callback's JavaScript may run before it is stopped, and also the turn's whole allowance of
+    /// script time, so a raised value paces frames differently even when no single callback is long.
+    /// Needs `--interrupt-scripts`; 1 to 3600000 (an hour). For stress-suite runs only (tools/stress,
+    /// `HIWAVE_STRESS_TURN_BUDGET_MS`): MotionMark's end-of-test analysis runs longer than the default and
+    /// the stop ends the suite. A capture taken with it is not comparable with the board or the app: it says
+    /// so on stderr, and tools/stress records the budget in the run.
+    #[arg(long, requires = "interrupt_scripts", value_parser = clap::value_parser!(u64).range(1..=MAX_LIVE_TURN_BUDGET_MS))]
     live_turn_budget_ms: Option<u64>,
 
     /// Stop a script that is still running when the script budget is spent, as the
@@ -547,6 +549,10 @@ struct LayoutStats {
     sizing_rate: f32,
     positioning_rate: f32,
 }
+
+/// The most `--live-turn-budget-ms` takes: an hour, far below what the engine's deadline arithmetic
+/// (`Instant + Duration`) can hold.
+const MAX_LIVE_TURN_BUDGET_MS: u64 = 3_600_000;
 
 fn main() {
     let args = Args::parse();

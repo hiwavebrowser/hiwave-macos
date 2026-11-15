@@ -1,9 +1,9 @@
 {
  "chrome": "Chrome/148.0.7778.216",
- "frames": 244,
- "framesAfterLong": 234,
+ "page": "long_turn_engine.html",
+ "frames": 603,
+ "framesAfterLong": 362,
  "longFrameMs": 6000,
  "timerLongMs": 6000,
- "timersAfter": 5,
- "error": null
+ "timersAfter": 5
 }
