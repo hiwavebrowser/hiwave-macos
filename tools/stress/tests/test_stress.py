@@ -399,3 +399,23 @@ def test_a_run_is_unobserved_without_its_request_log_or_on_the_webkit_chrome(mon
     # End to end: an engine whose request log says nothing is not an offline run.
     code, rec = run_with_fake_engine(monkeypatch, tmp_path / "quiet", "", request_log=False)
     assert code == 1 and rec["status"] == "invalid" and rec["score"] is None and "unobserved" in rec["off_machine"], rec
+
+
+def test_the_turn_budget_is_raised_only_when_its_variable_is_set(monkeypatch, tmp_path):
+    # A stress run may raise the engine's live-turn watchdog so a long computation (MotionMark's end-of-test
+    # analysis) finishes and the next blocker shows. Without the variable the engine keeps its own default.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    assert run.turn_budget_ms() is None
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, None)
+    assert "--live-turn-budget-ms" not in argv and "--interrupt-scripts" in argv
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "600000")
+    assert run.turn_budget_ms() == 600000
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, 600000)
+    assert argv[argv.index("--live-turn-budget-ms") + 1] == "600000"
+    for bad in ("", "abc", "0", "-5"):
+        monkeypatch.setenv(run.TURN_BUDGET_ENV, bad)
+        try:
+            run.turn_budget_ms()
+            raise AssertionError("accepted %r" % bad)
+        except SystemExit:
+            pass

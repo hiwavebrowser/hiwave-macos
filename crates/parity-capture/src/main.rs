@@ -2217,6 +2217,17 @@ mod tests {
         assert_eq!(parsed(&["--prelude-live-ms", "250"]).prelude_live_ms, Some(250));
     }
 
+    /// A stress-suite run may raise the live turn's watchdog (`--live-turn-budget-ms`) so a long computation
+    /// finishes and the next blocker shows; without the flag the engine's default stands.
+    #[test]
+    fn the_live_turn_budget_is_raised_only_with_the_flag() {
+        let default = EngineConfig::for_parity_testing().live_turn_budget_ms;
+        assert_eq!(capture_config(&parsed(&["--interrupt-scripts"]), None).live_turn_budget_ms, default);
+        let raised = capture_config(&parsed(&["--interrupt-scripts", "--live-turn-budget-ms", "600000"]), None);
+        assert_eq!(raised.live_turn_budget_ms, 600_000);
+        assert!(raised.interrupt_scripts_at_budget);
+    }
+
     #[test]
     fn a_running_script_is_stopped_at_the_budget_only_with_the_flag() {
         assert!(!capture_config(&parsed(&[]), None).interrupt_scripts_at_budget);
