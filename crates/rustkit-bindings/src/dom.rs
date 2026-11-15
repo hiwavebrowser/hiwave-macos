@@ -4568,7 +4568,8 @@ const WRAPPERS_JS: &str = r#"
     // the Rust copy of this rule; both run declaration_list_cases.json.
     function splitDecls(text) {
         var out = [], cur = '', closers = [], quote = null, openUrl = false, i = 0, c, j;
-        var pairs = { '(': ')', '[': ']', '{': '}' };
+        var pairs = objCreate(null);
+        pairs['('] = ')'; pairs['['] = ']'; pairs['{'] = '}';
         while (i < text.length) {
             c = text.charAt(i++);
             if (c === '\\') { cur += c + text.charAt(i++); continue; }
@@ -4646,12 +4647,16 @@ const WRAPPERS_JS: &str = r#"
     __rk.inlineStyleParses = function () { return inlineStyleParses; };
     // Each element's declarations as last parsed, with the attribute text they were parsed from: a read
     // of unchanged text needs no parse. Keyed by the text itself, so a script's setAttribute (or anything
-    // else that changes the attribute) is read afresh. Callers get copies; the kept list is never handed out.
+    // else that changes the attribute) is read afresh. Readers see the kept declarations' fields; writers
+    // work on copies, and a write keeps its own copy.
     //
-    // This state outlives a call, so nothing on its paths is looked up when it runs: the built-ins below are
-    // taken now, and the list work is plain loops. A parse (the older code below, which reads built-ins as
-    // it goes) is kept only while those built-ins are still the ones this script started with.
-    var parsedStyles = new WeakMap();
+    // This state outlives a call, so it is made only of what page script cannot reach or change: lists and
+    // declarations inherit from nothing, are filled by assignment with an explicit count, and hold only
+    // strings and booleans; the built-ins on these paths are taken now. A parse (the older code below, which
+    // reads built-ins as it goes) is kept only while those built-ins are still the ones this script
+    // started with, and only when it produced plain strings. A parse that page script disturbed in a way
+    // that check does not see still yields plain strings, kept until the text changes.
+    var parsedStyles = new WeakMap(), mapDelete = uncurry(WeakMap.prototype.delete);
     var ownKey = uncurry(Object.prototype.hasOwnProperty), strCode = uncurry(String.prototype.charCodeAt);
     var strLower = uncurry(String.prototype.toLowerCase), fromCode = String.fromCharCode;
     var ownDescriptor = Object.getOwnPropertyDescriptor;
@@ -4665,44 +4670,82 @@ const WRAPPERS_JS: &str = r#"
     for (var pb = 0; pb < PARSER_BUILTINS.length; pb++) {
         PARSER_ORIGINALS[pb] = ownDescriptor(PARSER_BUILTINS[pb][0], PARSER_BUILTINS[pb][1]).value;
     }
-    // Whether the parser's built-ins are as they were: a descriptor read runs no page code.
+    // Whether the parser's built-ins are as they were: an own data property holding the original. A
+    // descriptor read runs no page code.
     function parserPristine() {
         for (var i = 0; i < PARSER_BUILTINS.length; i++) {
             var d = ownDescriptor(PARSER_BUILTINS[i][0], PARSER_BUILTINS[i][1]);
-            if (!d || d.value !== PARSER_ORIGINALS[i]) return false;
+            if (!d || !ownKey(d, 'value') || d.value !== PARSER_ORIGINALS[i]) return false;
         }
         return true;
     }
-    function copyDecls(list) {
-        var out = [];
-        for (var i = 0; i < list.length; i++) {
-            var d = list[i];
-            out[i] = { name: d.name, value: d.value, important: d.important };
-        }
-        return out;
+    function newList() {
+        var l = objCreate(null);
+        l.n = 0;
+        return l;
     }
-    function allRoundTrip(list) {
-        for (var i = 0; i < list.length; i++) {
-            if (!nameRoundTrips(list[i].name) || !roundTrips(list[i].value)) return false;
+    function newDecl(name, value, important) {
+        var d = objCreate(null);
+        d.name = name; d.value = value; d.important = important;
+        return d;
+    }
+    function listAdd(l, d) {
+        l[l.n] = d;
+        l.n = l.n + 1;
+    }
+    // The parser's output as a private list. `clean` is false when an entry was not plain strings and a
+    // boolean (the parse is then not kept).
+    function fromParse(out) {
+        var l = newList(), n = out.length, clean = typeof n === 'number';
+        for (var i = 0; clean && i < n; i++) {
+            var x = out[i];
+            if (x !== null && typeof x === 'object' && typeof x.name === 'string' && typeof x.value === 'string' &&
+                typeof x.important === 'boolean') {
+                listAdd(l, newDecl(x.name, x.value, x.important));
+            } else {
+                clean = false;
+            }
+        }
+        l.clean = clean;
+        return l;
+    }
+    function copyList(src) {
+        var l = newList();
+        for (var i = 0; i < src.n; i++) listAdd(l, newDecl(src[i].name, src[i].value, src[i].important));
+        return l;
+    }
+    function exactOf(l) {
+        for (var i = 0; i < l.n; i++) {
+            if (!nameRoundTrips(l[i].name) || !roundTrips(l[i].value)) return false;
         }
         return true;
+    }
+    function keep(el, text, list, exact) {
+        var e = objCreate(null);
+        e.text = text; e.list = list; e.exact = exact;
+        mapSet(parsedStyles, el, e);
     }
     // The kept declarations, for reading only.
     function keptDecls(st) {
-        var el = st[OWNER], text = el.getAttribute('style') || '';
+        var el = st[OWNER], raw = el.getAttribute('style'), text = raw == null ? '' : raw;
+        // An attribute read that answers something other than a string (page script's own getAttribute) is
+        // parsed as its text and nothing is kept.
+        var keepable = typeof text === 'string';
+        if (!keepable) text = '' + text;
         var kept = mapGet(parsedStyles, el);
-        if (kept && kept.text === text) return kept.list;
-        var list = parseDecls(text);
-        if (parserPristine()) mapSet(parsedStyles, el, { text: text, list: list, exact: allRoundTrip(list) });
+        if (keepable && kept && kept.text === text) return kept.list;
+        var list = fromParse(parseDecls(text));
+        if (keepable && list.clean && parserPristine()) keep(el, text, list, exactOf(list));
+        else mapDelete(parsedStyles, el);
         return list;
     }
     // A copy, for a caller that changes it.
     function decls(st) {
-        return copyDecls(keptDecls(st));
+        return copyList(keptDecls(st));
     }
     function declNamed(st, name) {
         var list = keptDecls(st);
-        for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+        for (var i = 0; i < list.n; i++) if (list[i].name === name) return list[i];
         return null;
     }
     function parseDecls(text) {
@@ -4763,23 +4806,21 @@ const WRAPPERS_JS: &str = r#"
     }
     function serializeDecls(ds) {
         var text = '';
-        for (var i = 0; i < ds.length; i++) {
+        for (var i = 0; i < ds.n; i++) {
             var d = ds[i];
             text += (i ? ' ' : '') + d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
         }
         return text;
     }
-    // `ds` is the kept list with at most one declaration changed (`changed`, null for a removal). When the
-    // kept list read back exactly (`exact`) and the changed declaration does too, what is written is what a
-    // parse of it gives: keep it under the text written, so the next read of that text needs no parse. If
-    // the write itself changes the attribute again (a custom element's attributeChangedCallback), the text
-    // no longer matches and the next read parses. Only the changed declaration is checked.
-    function storeDecls(st, ds, changed) {
-        var el = st[OWNER], before = mapGet(parsedStyles, el), text = serializeDecls(ds);
-        var exact = !!(before && before.exact && (!changed || (nameRoundTrips(changed.name) && roundTrips(changed.value))));
+    // `ds` is a private list the caller made and drops: it is written, and kept under the text written when
+    // every declaration in it reads back as itself, so the next read of that text needs no parse. If the
+    // write itself changes the attribute again (a custom element's attributeChangedCallback), the text no
+    // longer matches and the next read parses.
+    function storeDecls(st, ds) {
+        var el = st[OWNER], text = serializeDecls(ds), exact = exactOf(ds);
         el.setAttribute('style', text);
-        // `ds` is the caller's own copy, written and then dropped: kept as it is.
-        if (exact) mapSet(parsedStyles, el, { text: text, list: ds, exact: true });
+        if (exact) keep(el, text, ds, true);
+        else mapDelete(parsedStyles, el);
     }
     // `backgroundColor` -> `background-color`, each name converted once (a null-prototype table: no
     // inherited key answers, and page script cannot reach it). The conversion reads character codes.
@@ -4820,6 +4861,9 @@ const WRAPPERS_JS: &str = r#"
         setProperty: function (name, value, priority) {
             name = String(name).trim().toLowerCase();
             value = value == null ? '' : String(value).trim();
+            // Plain strings from here on: what is serialised is what is kept and checked.
+            if (typeof name !== 'string') name = '' + name;
+            if (typeof value !== 'string') value = '' + value;
             if (value === '') { this.removeProperty(name); return; }
             // An invalid value changes nothing (the attribute is not rewritten).
             if (hasBadUrl(value)) return;
@@ -4830,26 +4874,25 @@ const WRAPPERS_JS: &str = r#"
             var same = declNamed(this, name);
             if (same && same.value === value && same.important === important) return;
             var ds = decls(this), d = null;
-            for (var i = 0; i < ds.length; i++) if (ds[i].name === name) { d = ds[i]; break; }
+            for (var i = 0; i < ds.n; i++) if (ds[i].name === name) { d = ds[i]; break; }
             if (d) { d.value = value; d.important = important; }
-            else ds[ds.length] = { name: name, value: value, important: important };
-            storeDecls(this, ds, { name: name, value: value });
+            else listAdd(ds, newDecl(name, value, important));
+            storeDecls(this, ds);
         },
         removeProperty: function (name) {
             name = String(name).trim().toLowerCase();
-            var ds = decls(this), old = this.getPropertyValue(name), kept = [];
-            for (var i = 0; i < ds.length; i++) if (ds[i].name !== name) kept[kept.length] = ds[i];
-            if (kept.length !== ds.length) storeDecls(this, kept, null);
+            if (typeof name !== 'string') name = '' + name;
+            var ds = decls(this), old = this.getPropertyValue(name), kept = newList();
+            for (var i = 0; i < ds.n; i++) if (ds[i].name !== name) listAdd(kept, ds[i]);
+            if (kept.n !== ds.n) storeDecls(this, kept);
             return old;
         },
-        item: function (i) { var ds = keptDecls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
+        item: function (i) { var ds = keptDecls(this); i = i >>> 0; return i < ds.n ? ds[i].name : ''; }
     };
     Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
-    getter(CSSStyleDeclaration.prototype, 'length', function () { return keptDecls(this).length; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () { return keptDecls(this).n; });
     accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
-        return this[OWNER].getAttribute('style') ? decls(this).map(function (d) {
-            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
-        }).join(' ') : '';
+        return this[OWNER].getAttribute('style') ? serializeDecls(keptDecls(this)) : '';
     }, function (v) { this[OWNER].setAttribute('style', v == null ? '' : String(v)); });
     // Property names (el.style.backgroundColor) go through a Proxy, so any
     // CSS property reads and writes without a per-property table.
