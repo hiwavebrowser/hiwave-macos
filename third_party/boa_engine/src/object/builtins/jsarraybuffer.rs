@@ -34,7 +34,6 @@ impl From<JsObject<ArrayBuffer>> for JsArrayBuffer {
     }
 }
 
-// TODO: Add constructors that also take the `detach_key` as argument.
 impl JsArrayBuffer {
     /// Create a new array buffer with byte length.
     ///
@@ -130,6 +129,18 @@ impl JsArrayBuffer {
         );
 
         Ok(Self { inner: obj })
+    }
+
+    /// Create a new array buffer over `byte_block`, with `detach_key` as its `[[ArrayBufferDetachKey]]`.
+    ///
+    /// STUB (red commit): ignores the key.
+    pub fn from_byte_block_with_detach_key(
+        byte_block: AlignedVec<u8>,
+        detach_key: JsValue,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let _ = detach_key;
+        Self::from_byte_block(byte_block, context)
     }
 
     /// Set a maximum length for the underlying array buffer.
