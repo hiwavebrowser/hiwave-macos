@@ -1,0 +1,97 @@
+<!doctype html><title>timeline probe</title><div id=box style="width:10px;height:10px;background:#08f"></div><script>
+// TIMELINE1: document.timeline and Web Animations on the page clock. Pinned on Chrome for Testing
+// 148.0.7778.216, HEADLESS (timeline_probe_chrome.mjs); not checked against a headed run (row
+// FRAMEPIN-HEADED). Records (all times ms, 0.01):
+//   frames     5 frames: [t, timeline.currentTime inside, performance.now() inside]
+//   task       a task right after a frame: [that frame's t, timeline.currentTime in the task,
+//              performance.now() in the task]: is the timeline live or the last frame's time?
+//   twoTasks   two reads of timeline.currentTime in one task, 5 ms of work apart: [first, second]
+//   startFrom  in a task: a = animate(1000 ms); a.startTime = timeline.currentTime; then
+//              [a.currentTime at once, a.startTime - timeline.currentTime] and, for 4 frames,
+//              [t, a.currentTime, t - a.startTime]: no jump, and progress counted from the frame
+//   paused     a 1000 ms animation paused after ~100 ms: [currentTime at pause, playState,
+//              currentTime 3 frames later, playState, startTime]
+//   finished   a 50 ms animation 200 ms later: [currentTime, playState, finished promise settled,
+//              startTime !== null]
+//   inFrame    in 4 frames of a running animation: a.currentTime === t - a.startTime
+// When done it sets rec.done and logs REC <json>.
+// Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
+// harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
+window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], done: false };
+var box = document.getElementById('box');
+function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
+function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
+function framesPart(next) {
+  (function f() {
+    requestAnimationFrame(function (t) {
+      rec.frames.push([r2(t), r2(document.timeline.currentTime), r2(performance.now())]);
+      if (rec.frames.length < 5) f(); else next();
+    });
+  })();
+}
+function taskPart(next) {
+  requestAnimationFrame(function (t) {
+    setTimeout(function () {
+      rec.task = [r2(t), r2(document.timeline.currentTime), r2(performance.now())];
+      var a = document.timeline.currentTime; spin(5); var b = document.timeline.currentTime;
+      rec.twoTasks = [r2(a), r2(b)];
+      next();
+    }, 0);
+  });
+}
+function startFromPart(next) {
+  setTimeout(function () {
+    var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+    a.startTime = document.timeline.currentTime;
+    var s = { atOnce: [r2(a.currentTime), r2(a.startTime - document.timeline.currentTime)], frames: [] };
+    (function f() {
+      requestAnimationFrame(function (t) {
+        s.frames.push([r2(t), r2(a.currentTime), r2(t - a.startTime)]);
+        if (s.frames.length < 4) f(); else { a.cancel(); rec.startFrom = s; next(); }
+      });
+    })();
+  }, 30);
+}
+function pausedPart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+  setTimeout(function () {
+    a.pause();
+    var at = [r2(a.currentTime), a.playState];
+    var n = 0;
+    (function f() {
+      requestAnimationFrame(function () {
+        if (++n < 3) { f(); return; }
+        rec.paused = at.concat([r2(a.currentTime), a.playState, a.startTime]);
+        a.cancel();
+        next();
+      });
+    })();
+  }, 100);
+}
+function finishedPart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 50 });
+  var settled = false;
+  a.finished.then(function () { settled = true; });
+  setTimeout(function () {
+    rec.finished = [r2(a.currentTime), a.playState, settled, a.startTime !== null];
+    a.cancel();
+    next();
+  }, 200);
+}
+function inFramePart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+  var n = 0;
+  (function f() {
+    requestAnimationFrame(function (t) {
+      if (a.startTime !== null) rec.inFrame.push(Math.abs(a.currentTime - (t - a.startTime)) < 0.01);
+      if (++n < 6) f(); else { a.cancel(); next(); }
+    });
+  })();
+}
+function go() {
+  framesPart(function () { taskPart(function () { startFromPart(function () { pausedPart(function () {
+    finishedPart(function () { inFramePart(function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); }); });
+  }); }); }); });
+}
+if (location.hash !== '#manual') addEventListener('load', go);
+</script>
