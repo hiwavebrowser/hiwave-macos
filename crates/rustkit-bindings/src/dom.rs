@@ -4651,14 +4651,25 @@ const WRAPPERS_JS: &str = r#"
     function copyDecls(list) {
         return list.map(function (d) { return { name: d.name, value: d.value, important: d.important }; });
     }
-    function decls(st) {
+    // The kept declarations, for reading only.
+    function keptDecls(st) {
         var el = st[OWNER], text = el.getAttribute('style') || '';
         var kept = parsedStyles.get(el);
         if (!kept || kept.text !== text) {
-            kept = { text: text, list: parseDecls(text) };
+            var list = parseDecls(text);
+            kept = { text: text, list: list, exact: list.every(function (d) { return nameRoundTrips(d.name) && roundTrips(d.value); }) };
             parsedStyles.set(el, kept);
         }
-        return copyDecls(kept.list);
+        return kept.list;
+    }
+    // A copy, for a caller that changes it.
+    function decls(st) {
+        return copyDecls(keptDecls(st));
+    }
+    function declNamed(st, name) {
+        var list = keptDecls(st);
+        for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+        return null;
     }
     function parseDecls(text) {
         var out = [];
@@ -4676,30 +4687,49 @@ const WRAPPERS_JS: &str = r#"
         });
         return out;
     }
-    // A value whose serialization reads back as itself: no quote, escape, `;` or `!`, and its parentheses
-    // and brackets balanced (`rotate(9deg)`, `hsla(…)`). Anything else is parsed again on the next read.
+    // A declaration whose serialization reads back as itself: a plain property name (an identifier or a
+    // custom property), and a value with no quote, escape, `;`, `!`, brace, comment or control character
+    // whose parentheses and brackets nest and close in order (`rotate(9deg)`, `hsla(…)`). Anything else
+    // is parsed again on the next read, which is always right.
+    function nameRoundTrips(name) {
+        return /^(--[a-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(name);
+    }
     function roundTrips(value) {
-        if (/["'\\;!{}]/.test(value)) return false;
-        var depth = 0;
+        if (/["'\\;!{}\x00-\x1f\x7f]/.test(value) || value.indexOf('/*') >= 0 || value.indexOf('*/') >= 0) return false;
+        if (value.indexOf('(') < 0 && value.indexOf(')') < 0 && value.indexOf('[') < 0 && value.indexOf(']') < 0) return true;
+        var open = [];
         for (var i = 0; i < value.length; i++) {
             var c = value.charAt(i);
-            if (c === '(' || c === '[') depth++;
-            else if (c === ')' || c === ']') { if (--depth < 0) return false; }
+            if (c === '(') open.push(')');
+            else if (c === '[') open.push(']');
+            else if ((c === ')' || c === ']') && open.pop() !== c) return false;
         }
-        return depth === 0;
+        return open.length === 0;
     }
-    function storeDecls(st, ds) {
-        var el = st[OWNER];
+    // `ds` is the kept list with at most one declaration changed (`changed`, null for a removal). When the
+    // kept list read back exactly (`exact`) and the changed declaration does too, what was just written is
+    // what a parse of it gives: keep it under the attribute's text as it now stands, so the next read needs
+    // no parse. Only the changed declaration is checked; the rest were checked when the list was kept.
+    function storeDecls(st, ds, changed) {
+        var el = st[OWNER], before = parsedStyles.get(el);
         el.setAttribute('style', ds.map(function (d) {
             return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
         }).join(' '));
-        // What was just written is what a parse of it gives, when every value reads back as itself: keep it
-        // under the attribute's text as it now stands, so the next read needs no parse.
-        if (ds.every(function (d) { return roundTrips(d.value); })) {
-            parsedStyles.set(el, { text: el.getAttribute('style') || '', list: copyDecls(ds) });
+        if (before && before.exact && (!changed || (nameRoundTrips(changed.name) && roundTrips(changed.value)))) {
+            // `ds` is the caller's own copy, written and then dropped: kept as it is.
+            parsedStyles.set(el, { text: el.getAttribute('style') || '', list: ds, exact: true });
         }
     }
+    // `backgroundColor` -> `background-color`, each name converted once (a null-prototype table: no
+    // inherited key answers, and page script cannot reach it).
+    var cssNames = objCreate(null), cssNameCount = 0;
     function cssName(prop) {
+        if (hasOwn(cssNames, prop)) return cssNames[prop];
+        var name = cssNameOf(prop);
+        if (cssNameCount < 4096) { cssNames[prop] = name; cssNameCount++; }
+        return name;
+    }
+    function cssNameOf(prop) {
         if (prop === 'cssFloat') return 'float';
         if (prop.indexOf('-') >= 0) return prop.toLowerCase();
         return prop.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); })
@@ -4707,13 +4737,11 @@ const WRAPPERS_JS: &str = r#"
     }
     var styleMethods = {
         getPropertyValue: function (name) {
-            name = String(name).trim().toLowerCase();
-            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            var d = declNamed(this, String(name).trim().toLowerCase());
             return d ? d.value : '';
         },
         getPropertyPriority: function (name) {
-            name = String(name).trim().toLowerCase();
-            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            var d = declNamed(this, String(name).trim().toLowerCase());
             return d && d.important ? 'important' : '';
         },
         setProperty: function (name, value, priority) {
@@ -4722,27 +4750,28 @@ const WRAPPERS_JS: &str = r#"
             if (value === '') { this.removeProperty(name); return; }
             // An invalid value changes nothing (the attribute is not rewritten).
             if (hasBadUrl(value)) return;
-            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             var important = String(priority || '').toLowerCase() === 'important';
             // The same declaration again changes nothing: the attribute is
             // not rewritten (Blink's set-property returns "did not change"),
             // so a geometry read after it lays nothing out (LAT7).
-            if (d && d.value === value && d.important === important) return;
+            var same = declNamed(this, name);
+            if (same && same.value === value && same.important === important) return;
+            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             if (d) { d.value = value; d.important = important; }
             else ds.push({ name: name, value: value, important: important });
-            storeDecls(this, ds);
+            storeDecls(this, ds, { name: name, value: value });
         },
         removeProperty: function (name) {
             name = String(name).trim().toLowerCase();
             var ds = decls(this), old = this.getPropertyValue(name);
             var kept = ds.filter(function (x) { return x.name !== name; });
-            if (kept.length !== ds.length) storeDecls(this, kept);
+            if (kept.length !== ds.length) storeDecls(this, kept, null);
             return old;
         },
-        item: function (i) { var ds = decls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
+        item: function (i) { var ds = keptDecls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
     };
     Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
-    getter(CSSStyleDeclaration.prototype, 'length', function () { return decls(this).length; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () { return keptDecls(this).length; });
     accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
         return this[OWNER].getAttribute('style') ? decls(this).map(function (d) {
             return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
