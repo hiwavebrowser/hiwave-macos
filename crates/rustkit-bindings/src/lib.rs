@@ -568,7 +568,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // numbers made with the `Number` of install time. The built-ins used
     // around it are taken now, in the realm that uses them.
     var objCreate = Object.create, setProto = Object.setPrototypeOf, toNumber = Number, toText = String,
-        evalNow = eval, applyTo = Reflect.apply, win = window;
+        evalNow = eval, applyTo = Reflect.apply, win = window, floorOf = Math.floor;
     // Real time, for the live turn's slice and the page clock. Taken now,
     // before page script can replace `Date.now`.
     var realNow = Date.now;
@@ -820,7 +820,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 timer.due += timer.every;
                 var from = liveNow();
                 if (timer.due <= from) {
-                    if (Q.liveAt >= 0) timer.due += timer.every * (Math.floor((from - timer.due) / timer.every) + 1);
+                    if (Q.liveAt >= 0) timer.due += timer.every * (floorOf((from - timer.due) / timer.every) + 1);
                     else timer.due = from + timer.every;
                 }
                 timer.seq = Q.nextId++;
@@ -857,13 +857,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
     __rk.runTimersFramed = function (horizon, max, frameMs) {
-        var start = Date.now();
+        var start = realNow();
         var ran = 0;
         while (ran < max) {
             var n = runTimers(horizon, 1, false);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+            if (frameMs > 0 && (realNow() - start) >= frameMs) return -ran;
         }
         return ran;
     };
@@ -917,7 +917,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
     __rk.advanceTimersFramed = function (delta, max, frameMs, real) {
         var target = Q.now + delta;
-        var start = Date.now();
+        var start = realNow();
         var ran = 0;
         var yielded = false;
         if (real) { Q.liveAt = target; Q.liveReal = realMs(); }
@@ -926,7 +926,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 var n = runTimers(target, 1, true);
                 if (n === 0) break;
                 ran += n;
-                if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+                if (frameMs > 0 && (realNow() - start) >= frameMs) {
                     yielded = true;
                     break;
                 }
