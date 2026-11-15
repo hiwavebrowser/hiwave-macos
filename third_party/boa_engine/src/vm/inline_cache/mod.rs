@@ -109,6 +109,12 @@ impl InlineCache {
         }) {
             return;
         }
+        // HIWAVE PATCH (ic-holder): and for a prototype slot, the receiver must still lack the
+        // name. A prototype accessor that defines it on the receiver (a memoising getter) gives the
+        // receiver a new shape that has it; an entry keyed on that shape would skip the own property.
+        if holder.is_some() && shape.lookup(&key).is_some() {
+            return;
+        }
 
         let mut entries = self.entries.borrow_mut();
 
