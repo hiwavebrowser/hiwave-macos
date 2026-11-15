@@ -159,6 +159,22 @@ blocks a suite. MotionMark measures frames reaching the screen, so its score
 of record is the real window's. Do not mix engines in one comparison:
 `report.py` keeps them apart.
 
+## Raising the live-turn watchdog (blocker hunts only)
+
+The engine stops one turn's JavaScript after 5000 ms (`EngineConfig::live_turn_budget_ms`). Chrome has
+no such stop, and a suite with a long computation in one turn dies at it: MotionMark 1.3.2's end-of-test
+analysis (2500 bootstrap iterations) takes 3-8 s on a Windows release build, and the stop ends the
+animation loop and every later test. To list everything that stops a suite in one run:
+
+    HIWAVE_STRESS_TURN_BUDGET_MS=60000 python3 tools/stress/run.py --suite motionmark --engine hiwave-headless --binary <parity-capture>
+
+- For `hiwave-headless` only (it passes `--live-turn-budget-ms` to parity-capture); refused for the other
+  engines.
+- Off unless set; the engine's default does not change.
+- Said loudly at the start (run.py and parity-capture both print it), and recorded as
+  `live_turn_budget_ms` in the run record (`null` for a normal run). Such a run finds blockers; its score is
+  not a default-engine score and does not go into a comparison of default runs.
+
 ## Landing rule (proposed)
 
 `report.py --compare BASE CAND`: the candidate regresses when its median is

@@ -627,17 +627,44 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     return Handle
 
 
-def start_headless(binary, url, work, limit_s, extra_env):
+# A stress run may raise the engine's live-turn watchdog (5000 ms by default) so a long computation, such
+# as MotionMark's end-of-test analysis, finishes and the next blocker shows. Only when this is set; the run
+# says so loudly and records it, and its score is not a default-engine score.
+TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
+
+
+def turn_budget_ms():
+    """The raised live-turn budget from the environment, or None when it is not set."""
+    raw = os.environ.get(TURN_BUDGET_ENV)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise SystemExit("%s must be a positive number of milliseconds, not %r" % (TURN_BUDGET_ENV, raw))
+    return value
+
+
+def headless_argv(launcher, url, work, limit_s, turn_budget):
+    argv = [str(launcher), "--url", url, "--width", "1280", "--height", "800",
+            "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
+            "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
+            "--event-log", str(work / "events.jsonl"), "--event-summary",
+            "--event-log-error-text", "--event-log-console-text"]
+    if turn_budget is not None:
+        argv += ["--live-turn-budget-ms", str(turn_budget)]
+    return argv
+
+
+def start_headless(binary, url, work, limit_s, extra_env, turn_budget=None):
     forced, dropped = engine_env(extra_env)
     env = dict(os.environ)
     for name in dropped:
         env.pop(name, None)
     env.update(forced)
-    argv = [str(sandboxed(binary, work)), "--url", url, "--width", "1280", "--height", "800",
-            "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
-            "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
-            "--event-log", str(work / "events.jsonl"), "--event-summary",
-            "--event-log-error-text", "--event-log-console-text"]
+    argv = headless_argv(sandboxed(binary, work), url, work, limit_s, turn_budget)
     return Proc(argv, work / "app.log", env=env, cwd=str(work))
 
 
@@ -779,6 +806,14 @@ def main():
     args = ap.parse_args()
 
     extra_env = dict(kv.split("=", 1) for kv in args.env)
+    turn_budget = turn_budget_ms()
+    if turn_budget is not None:
+        if args.engine != "hiwave-headless":
+            sys.exit("%s is for the hiwave-headless engine only (the app does not read it; Chrome has no such "
+                     "watchdog)" % TURN_BUDGET_ENV)
+        print("TURN BUDGET RAISED: the live turn's script watchdog is %d ms, not the engine's 5000 (%s): "
+              "this run finds blockers; its score is not a default-engine score" % (turn_budget, TURN_BUDGET_ENV),
+              file=sys.stderr)
     binary = pathlib.Path(args.binary).resolve()
     if not binary.is_file():
         sys.exit("no binary at %s" % binary)
@@ -855,7 +890,7 @@ def main():
                         sys.exit(2)
                     record.t0 = record.last = started = time.time()
                 elif args.engine == "hiwave-headless":
-                    handle = start_headless(binary, url, work, limit, extra_env)
+                    handle = start_headless(binary, url, work, limit, extra_env, turn_budget)
                     watch.add(handle.proc.pid)
                 else:
                     handle = start_chrome(binary, url, work, args.headed, sink)
@@ -952,6 +987,8 @@ def main():
         "log_findings": findings,
         "off_machine": left,
         "discarded_score": discarded_score,
+        # Set only when the run raised the live-turn watchdog (HIWAVE_STRESS_TURN_BUDGET_MS).
+        "live_turn_budget_ms": turn_budget,
         "offline_checks": (["sink_proxy"] if sink is not None else
                            ["loopback-only sandbox",
                             "sockets (%d samples, %d failed)" % ((watch.samples, watch.failed) if watch else (0, 0)),
