@@ -340,8 +340,8 @@ mod transparent_frame_tests;
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
-    connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
-    PageHandle, PageInput, EVAL_CANCELLED,
+    connect, content_turn_wait, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
+    PageEvent, PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
 /// Tell script runtimes made on the calling thread how much native stack they may use before a

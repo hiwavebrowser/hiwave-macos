@@ -112,6 +112,15 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Pace `--live-ms` as the app's window thread does with the content thread off
+    /// (`HIWAVE_CONTENT_THREAD=0`, `hiwave-app` `process_events`): every wait for a timer or a request
+    /// at least as long as the last turn took, so after one long turn the next frame waits as long
+    /// again. Without it the loop paces as the app's default loop, the content thread's
+    /// (`rustkit_engine::content_turn_wait`): until the next timer, 2 to 50 ms, whatever the last turn
+    /// took. Recorded in `live_stats.pacing`.
+    #[arg(long)]
+    window_thread_pacing: bool,
+
     /// Load as the app does: what the page asks of the network after its
     /// `load` event is the live loop's (`--live-ms`), not the load's
     /// (`EngineConfig::post_load_requests_live`).
@@ -437,6 +446,11 @@ struct LiveStats {
     relayouts: u32,
     /// The page had no timer set and nothing in flight when the loop ended.
     idle_at_end: bool,
+    /// Which app loop the turns were paced as: "content-thread" (the app's default) or
+    /// "window-thread" (`--window-thread-pacing`). Empty in a record from before PACE1, which paced
+    /// as the window thread.
+    #[serde(default)]
+    pacing: String,
 }
 
 /// Wakes the live loop's sleep when work arrives off the page thread, as the
@@ -479,24 +493,52 @@ impl LiveWake {
     }
 }
 
-/// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due, a request is out or the engine wakes the loop. Timer and
-/// request waits are never shorter than the last turn took (nor
-/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
-/// once, as the app's poke does, so a page that keeps waking the loop gets
-/// back-to-back turns.
+/// Which of the app's live loops `run_live` paces as.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LivePacing {
+    /// The content thread's loop (`page_protocol` `PageHalf::run`), the app's default: after a turn,
+    /// wait for the next timer, 2 to 50 ms (`rustkit_engine::content_turn_wait`), however long the
+    /// turn took.
+    ContentThread,
+    /// The window thread's loop with the content thread off (`hiwave-app` `process_events`): a turn
+    /// when the next timer is due, a request is out or the engine wakes the loop. Timer and request
+    /// waits are never shorter than the last turn took (nor `MIN_LIVE_TURN`), so the page holds the
+    /// window's thread at most half the time. The engine's wake skips that floor and ends the wait at
+    /// once, as the app's poke does, so a page that keeps waking the loop gets back-to-back turns.
+    WindowThread,
+}
+
+impl LivePacing {
+    fn of(args: &Args) -> Self {
+        if args.window_thread_pacing {
+            LivePacing::WindowThread
+        } else {
+            LivePacing::ContentThread
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            LivePacing::ContentThread => "content-thread",
+            LivePacing::WindowThread => "window-thread",
+        }
+    }
+}
+
+/// Turn the live loop for `live_ms` of real time, paced as one of the app's loops (`LivePacing`).
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
     live_ms: u64,
+    pacing: LivePacing,
 ) -> LiveStats {
     const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
     const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
     let limit = Duration::from_millis(live_ms);
     let began = Instant::now();
     let mut clock = began;
-    let mut stats = LiveStats::default();
+    let mut stats = LiveStats { pacing: pacing.name().to_string(), ..LiveStats::default() };
     let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
@@ -520,10 +562,19 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input, or the
-        // engine's wake, ends the wait.
-        let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        wake.sleep(wait.min(left));
+        match pacing {
+            // The content thread turns again when the next timer is due, at most 50 ms on, and
+            // nothing but a command (none here) ends its wait early.
+            LivePacing::ContentThread => {
+                std::thread::sleep(rustkit_engine::content_turn_wait(turn.next_timer_ms).min(left))
+            }
+            // An idle page still gets its time: in the app only input, or the
+            // engine's wake, ends the wait.
+            LivePacing::WindowThread => {
+                let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
+                wake.sleep(wait.min(left));
+            }
+        }
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -775,7 +826,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             if let Err(e) = rt.block_on(engine.load_url(view_id, prelude)) {
                 return result.failed("error", format!("Failed to load prelude URL: {:?}", e));
             }
-            run_live(&rt, &mut engine, view_id, args.prelude_live_ms.unwrap_or(500));
+            run_live(&rt, &mut engine, view_id, args.prelude_live_ms.unwrap_or(500), LivePacing::of(args));
         }
         let load_began = Instant::now();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
@@ -804,7 +855,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             }
         }
         if let Some(live_ms) = args.live_ms {
-            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms, LivePacing::of(args)));
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
@@ -836,7 +887,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 Ok(rt) => rt,
                 Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
             };
-            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms, LivePacing::of(args)));
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     }
@@ -2157,7 +2208,9 @@ mod tests {
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let pick = |lo: i64| heights.iter().find(|h| (lo..lo + 10_000).contains(*h)).map(|h| h - lo);
         let first = pick(10_000).unwrap_or_else(|| panic!("the page did not finish: heights {heights:?}"));
-        (first, pick(20_000).expect("frames after"))
+        let frames = pick(20_000).expect("frames after");
+        eprintln!("PACE1 {name}: first frame after {first} ms, {frames} frames after, {:?}", result.live_stats.map(|l| l.pacing));
+        (first, frames)
     }
 
     #[test]
