@@ -493,7 +493,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -588,6 +588,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // from nothing.
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
+        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -663,7 +664,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // value (the never-backwards rule would pin it there).
             var real = hostClock ? hostClock() : realNow() - Q.startedAt;
             t = real + Q.skew;
-            if (t < Q.now) { Q.skew += Q.now - t; t = Q.now; }
+            // The timers' clock is ahead of real time at this reading (a load ran them ahead):
+            // marked, so a frame of this time is stamped with its exact grid time.
+            if (t < Q.now) { Q.skew += Q.now - t; t = Q.now; Q.aheadAt = Q.now; }
             if (t < Q.lastPerf) { Q.skew += Q.lastPerf - t; t = Q.lastPerf; }
         }
         Q.lastPerf = t;
@@ -729,18 +732,19 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // request). Until this, a frame was due 16 ms after the turn that ran the last one, so a late
     // turn moved every later frame (173 of Chrome's 180-181 on the app's loop, PACE2).
     function frameAt(k) { return floorOf((k * 50 + 2) / 3); }
+    // The latest grid point at or before the clock.
+    function gridAtOrBefore(now) {
+        var c = floorOf(now * 3 / 50);
+        while (frameAt(c + 1) <= now) c++;
+        while (c > 0 && frameAt(c) > now) c--;
+        return c;
+    }
+    // One rule from a frame's callbacks and from a task: the frame of the time asked at, never
+    // before the frame after the last. From a frame on time that is the next frame; from a frame a
+    // turn ran late, the frame of the turn's time, run at once (Chrome, `timeline_probe` "held": a
+    // frame ~85 ms late asks for T0 + 100, the grid point at or before it, not the one after).
     function nextFrame() {
-        var k = Q.frameK + 1;
-        if (Q.inFrame) {
-            if (frameAt(k) + 17 <= Q.now) {
-                k = floorOf(Q.now * 3 / 50);
-                while (frameAt(k) <= Q.now) k++;
-            }
-            return k;
-        }
-        var c = floorOf(Q.now * 3 / 50);
-        while (frameAt(c + 1) <= Q.now) c++;
-        while (c > 0 && frameAt(c) > Q.now) c--;
+        var k = Q.frameK + 1, c = gridAtOrBefore(Q.now);
         return c > k ? c : k;
     }
     function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
@@ -791,6 +795,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (Q.frameTsAt !== at) {
                 Q.frameTsAt = at;
                 var ts = treeNow() - (Q.now - at);
+                // TIMELINE1: when the timers' clock ran ahead of real time at this time (a load, a
+                // stepped capture), the stamp is the grid time itself, with no real time in it, so
+                // a capture that steps the clock reads the same stamps and the same animation
+                // times every run. And a frame a task already read the timeline of (its grid
+                // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
+                // the task equals the frame's `t`.
+                if (!Q.det && Q.aheadAt === Q.now) ts = at;
+                if (Q.tlAt === at) ts = Q.tlTs;
                 if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
                 if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
                 Q.frameTs = ts;
@@ -963,6 +975,27 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
     __rk.now = function () { return Q.now; };
+    // `document.timeline.currentTime` (TIMELINE1, as Chrome's, `timeline_probe_cft148.json`): in a
+    // frame its callbacks' stamp; in a task the stamp of the frame of the task's time, the latest
+    // grid point at or before it, carried on the grid from the last frame's stamp (no clock read,
+    // so a task reads one value however long it runs, and a capture reproduces it); never below
+    // the last frame's stamp. The frame of that grid point is then stamped with the same value.
+    // From this document's origin, never before it.
+    __rk.timelineNow = function () {
+        var ts = Q.frameTs;
+        if (!Q.inFrame) {
+            var g = frameAt(gridAtOrBefore(Q.now));
+            if (g > Q.prevFrameAt || Q.prevFrameTs < 0) {
+                if (Q.tlAt !== g) {
+                    Q.tlAt = g;
+                    Q.tlTs = (Q.prevFrameTs < 0 ? 0 : Q.prevFrameTs) + (g - Q.prevFrameAt);
+                }
+                ts = Q.tlTs;
+            }
+        }
+        var t = ts - base;
+        return t < 0 ? 0 : t;
+    };
     // The animation-frame round of a frame tree's turn that stopped for
     // its time with timers still due (`Engine::pump_live`): the frame
     // callbacks due now run once, as a turn's round does.
@@ -4404,13 +4437,14 @@ mod tests {
         // +0.7 ms from the request. It was stamped 600 here, the turn's time.
         assert_eq!(read("String(stamps.length)"), "1");
         assert_eq!(read("String(stamps[0] >= 17 && stamps[0] < 100)"), "true");
-        // The loop asked for the frame after this one: the 60 Hz grid's next point after 600 (617;
-        // 600 is a grid point, and the frame that ran there is not run again).
-        assert_eq!(bindings.next_timer_delay(), Some(17));
-        assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
-        assert_eq!(bindings.advance_timers(7, 1000).unwrap(), 1);
+        // The loop asked, from that frame 35 frames late, for the frame of the turn's time: grid
+        // point 600, due already, so it runs on the next turn (TIMELINE1, Chrome
+        // `timeline_probe_cft148.json` "held": a frame run ~85 ms late asks for the grid point at
+        // or before its time, T0 + 100, not the one after). It was the next point after 600, 617.
+        assert_eq!(bindings.next_timer_delay(), Some(0));
+        assert_eq!(bindings.advance_timers(17, 1000).unwrap(), 1);
         assert_eq!(read("String(stamps.length)"), "2");
-        assert_eq!(read("String(stamps[1] >= 617 && stamps[1] < 717)"), "true");
+        assert_eq!(read("String(stamps[1] >= 600 && stamps[1] < 700)"), "true");
 
         // The turn's timers all run, and before its frame; a frame one of
         // them asks for is in the turn's round.

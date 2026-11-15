@@ -403,16 +403,21 @@
     };
 
     // ------------------------------------------------------------- timeline
-    var timeNow = 0;          // the last frame's time
+    var timeNow = 0;          // the engine's clock at the last frame: CSS animations' and transitions' time
     var all = [];             // script animations, oldest first (composite order)
     var frameQueued = false;
     var timeline = {};
-    // The engine's virtual clock as it stands (Chrome's timeline is live, not only at a frame): the
-    // time the animations compute from.
-    Object.defineProperty(timeline, 'currentTime', { get: function () {
-        var v = typeof __rk.now === 'function' ? __rk.now() : timeNow;
-        return v > timeNow ? v : timeNow;
-    }, enumerable: true });
+    // The document timeline is the page clock's frame time, as Chrome's (TIMELINE1,
+    // `timeline_probe_cft148.json`): in a frame its callbacks' timestamp; in a task the time of the
+    // frame of the task's time, the same for the whole task (`__rk.timelineNow`, the timer block).
+    // Script animations compute from it, so `a.currentTime === t - a.startTime` in every frame and
+    // a start time set from the timeline reads 0 at once. CSS animations and transitions keep the
+    // engine's clock (`timeNow`), which their start times come from.
+    function tnow() {
+        if (typeof __rk.timelineNow === 'function') return __rk.timelineNow();
+        return timeNow;
+    }
+    Object.defineProperty(timeline, 'currentTime', { get: tnow, enumerable: true });
     function AnimationTimeline() { throw new TypeError('Illegal constructor'); }
     function DocumentTimeline() { return timeline; }
     DocumentTimeline.prototype = Object.create(AnimationTimeline.prototype);
@@ -430,16 +435,21 @@
         // steps the clock reproduces.
         var vt = typeof __rk.now === 'function' ? __rk.now() : ts;
         if (typeof vt === 'number' && vt > timeNow) timeNow = vt;
+        var ft = tnow();
         var list = all.slice();
         var more = false;
         for (var i = 0; i < list.length; i++) {
             var a = list[i];
             if (a._pending === 'play') {
-                a._startTime = a._rate === 0 ? timeNow : timeNow - (a._holdTime || 0) / a._rate;
+                a._startTime = a._rate === 0 ? ft : ft - (a._holdTime || 0) / a._rate;
                 if (a._rate !== 0) a._holdTime = null;
                 a._pending = null;
                 a._resolveReady();
             } else if (a._pending === 'pause') {
+                // The hold time is the current time at this frame, the pause's ready time (Chrome:
+                // paused at 100, held at 116.7, the next frame's).
+                if (a._startTime != null && a._holdTime == null) a._holdTime = (ft - a._startTime) * a._rate;
+                a._startTime = null;
                 a._pending = null;
                 a._resolveReady();
             }
@@ -583,7 +593,7 @@
         this._rate = rate;
         if (ct != null && this._holdTime == null && this._startTime != null && this._pending !== 'pause') {
             if (rate === 0) this._holdTime = ct;
-            else this._startTime = timeNow - ct / rate;
+            else this._startTime = tnow() - ct / rate;
         }
     };
     Object.defineProperty(Animation.prototype, 'playbackRate', {
@@ -602,14 +612,14 @@
             if (this._idle) return null;
             if (this._holdTime != null) return this._holdTime;
             if (this._startTime == null) return null;
-            return (timeNow - this._startTime) * this._rate;
+            return (tnow() - this._startTime) * this._rate;
         },
         set: function (v) {
             if (v == null) throw new TypeError("Failed to set the 'currentTime' property on 'Animation': currentTime may not be changed from resolved to unresolved");
             v = Number(v);
             this._idle = false;
             if (this._holdTime != null || this._startTime == null || this._pending === 'pause' || this._rate === 0) this._holdTime = v;
-            else this._startTime = timeNow - v / this._rate;
+            else this._startTime = tnow() - v / this._rate;
             if (all.indexOf(this) < 0) all.push(this);
             this._updateFinished(true);
             touch(this._effect);
@@ -634,7 +644,7 @@
             if (ct != null && this._rate > 0 && ct >= end) this._holdTime = didSeek ? ct : end;
             else if (ct != null && this._rate < 0 && ct <= 0) this._holdTime = didSeek ? ct : 0;
             else if (didSeek && this._holdTime != null && this._rate !== 0) {
-                this._startTime = timeNow - this._holdTime / this._rate;
+                this._startTime = tnow() - this._holdTime / this._rate;
                 this._holdTime = null;
             }
         }
@@ -659,7 +669,7 @@
         Object.defineProperty(ev, 'target', { value: this, enumerable: true, configurable: true });
         Object.defineProperty(ev, 'currentTarget', { value: this, enumerable: true, configurable: true });
         ev.currentTime = type === 'cancel' ? null : this.currentTime;
-        ev.timelineTime = timeNow; ev.timeStamp = timeNow; ev.isTrusted = true;
+        ev.timelineTime = tnow(); ev.timeStamp = tnow(); ev.isTrusted = true;
         var h = this['on' + type];
         var list = (this._listeners[type] || []).slice();
         if (typeof h === 'function') { try { h.call(this, ev); } catch (e) { report(e); } }
@@ -711,8 +721,9 @@
         var ct = this.currentTime;
         if (this._idle || ct == null) ct = this._rate < 0 ? this._end() : 0;
         this._idle = false;
-        this._holdTime = ct;
-        this._startTime = null;
+        // A running animation keeps its start time until the pause's frame takes the hold time
+        // there (`frame`); until then it reads the timeline, which a task does not move.
+        if (this._startTime == null || this._pending === 'play') { this._holdTime = ct; this._startTime = null; }
         if (this._pending == null) this._newReady(false);
         this._pending = 'pause';
         if (all.indexOf(this) < 0) all.push(this);
@@ -728,8 +739,8 @@
         this._idle = false;
         if (all.indexOf(this) < 0) all.push(this);
         if (this._holdTime != null || this._startTime == null || this._rate === 0) this._holdTime = limit;
-        else this._startTime = timeNow - limit / this._rate;
-        if (this._startTime == null) this._startTime = this._rate === 0 ? timeNow : timeNow - limit / this._rate;
+        else this._startTime = tnow() - limit / this._rate;
+        if (this._startTime == null) this._startTime = this._rate === 0 ? tnow() : tnow() - limit / this._rate;
         if (this._pending === 'pause') this._holdTime = null;
         if (this._pending) { this._pending = null; this._resolveReady(); }
         this._updateFinished(true);
