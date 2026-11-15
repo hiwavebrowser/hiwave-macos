@@ -586,8 +586,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // from nothing.
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
-        // The last animation frame run, as its number on the tree's frame grid (below).
-        Q.frameK = 0;
+        // The last animation frame run, as its number on the tree's frame grid (below), and
+        // whether a frame's callbacks are running now.
+        Q.frameK = 0; Q.inFrame = false;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -712,23 +713,30 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // times `k`, rounded up to the clock's whole milliseconds (17, 34, 50, 67, ...), as Chrome's
     // frames are on the display's (CfT 148: timestamps 16.6-16.7 ms apart, 180-181 frames in
     // 3000 ms, `frame_grid_probe_cft148.json`). A frame asked for is the one after the last that
-    // ran: when a turn came late, that one is due already and runs on the next turn, and the
-    // frames after it are on the grid again, as Chrome catches up a 24 ms frame without dropping
-    // one. More than a frame behind (the page was idle, or every frame overruns), it is the next
-    // grid point after now: never now itself, so one asked for in a round that ran on a grid point
-    // waits for the next frame. Until this, a frame was due 16 ms after the turn that ran the last
-    // one, so a late turn moved every later frame (173 of Chrome's 180-181 on the app's loop,
-    // PACE2).
+    // ran. One a frame's own callbacks ask for when that frame ran late is due already and runs
+    // on the next turn, and the frames after it are on the grid again, as Chrome catches up a
+    // 24 ms frame without dropping one; more than a frame behind (every frame overruns), it is
+    // the next grid point after now. One a task asks for (a timer, an event) when that point is
+    // past waits for the next grid point after now, as Chrome's waits for the next vsync: never
+    // at once, and never now itself from a frame's callbacks, so one asked for in a round that ran
+    // on a grid point waits for the next frame. Until this, a frame was due 16 ms after the turn
+    // that ran the last one, so a late turn moved every later frame (173 of Chrome's 180-181 on
+    // the app's loop, PACE2).
     function frameAt(k) { return floorOf((k * 50 + 2) / 3); }
     function nextFrame() {
         var k = Q.frameK + 1;
-        if (frameAt(k) + 17 <= Q.now) {
+        if (Q.inFrame ? frameAt(k) + 17 <= Q.now : frameAt(k) < Q.now) {
             k = floorOf(Q.now * 3 / 50);
-            while (frameAt(k) <= Q.now) k++;
+            while (Q.inFrame ? frameAt(k) <= Q.now : frameAt(k) < Q.now) k++;
         }
         return k;
     }
     function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
+    function runFrame(timer) {
+        ranFrame(timer);
+        Q.inFrame = true;
+        try { timer.run(timer); } finally { Q.inFrame = false; }
+    }
     function schedule(cb, ms, args, repeat, frame) {
         var delay = toNumber(ms) || 0;
         if (delay < 0) delay = 0;
@@ -811,9 +819,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 timer.seq = Q.nextId++;
             }
             else removeAt(best);
-            if (timer.frame) ranFrame(timer);
             ran++;
-            timer.run(timer);
+            if (timer.frame) runFrame(timer);
+            else timer.run(timer);
         }
         return ran;
     }
@@ -831,9 +839,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var at = slotOf(round[j]);
             if (at < 0) continue;
             removeAt(at);
-            ranFrame(round[j]);
             ran++;
-            round[j].run(round[j]);
+            runFrame(round[j]);
         }
         return ran;
     }
