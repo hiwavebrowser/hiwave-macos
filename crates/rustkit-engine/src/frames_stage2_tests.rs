@@ -593,3 +593,54 @@ function shape(k) {
     assert_eq!(js(&mut engine, "shape('ct.png')"), r#"String("ct.png | <img style=\"display: block;-webkit-user-select: none;\" src=\"http://127.0.0.1:PORT/ct.png\">")"#);
     assert_eq!(js(&mut engine, "String(loads['ct.bin'] || 0)"), r#"String("0")"#, "a download is no document and no load");
 }
+
+/// How many documents of the page's frame tree have their workers asked
+/// in the tree's timer turn (one entry a document).
+fn documents_asked_for_workers(page: &Page) -> String {
+    let bindings = page.engine.views.get(&page.view).and_then(|v| v.doc.bindings.as_ref()).expect("bindings");
+    format!("{:?}", bindings.host_turn("return __rk.shared.timerQueue.pumpCount;", &[]).unwrap())
+}
+
+/// A dedicated worker started by a frame's document is heard through the
+/// live loop: the frame's own turn takes no timers, and its worker's
+/// message arrives in the tree's turn all the same (as in Chrome, where
+/// a frame's worker is a worker like any other).
+#[test]
+fn a_frames_worker_is_heard_through_the_live_loop() {
+    let page = "<!doctype html><body><iframe id=f src=/child.html></iframe><script>
+window.loaded = false;
+var f = document.getElementById('f');
+f.addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.loaded", Duration::from_secs(5));
+    // The frame's own `Worker`: the worker is its document's.
+    page.js(
+        "var w = f.contentWindow; w.got = []; \
+         w.worker = new w.Worker('data:text/javascript,postMessage(7)'); \
+         w.worker.onmessage = function (e) { w.got.push(e.data); };",
+    );
+    page.turns_until("f.contentWindow.got.length > 0", Duration::from_secs(5));
+    assert_eq!(page.js("f.contentWindow.got.join()"), r#"String("7")"#, "what the frame's worker sent");
+}
+
+/// A frame's document is asked for its workers while it is in the tree,
+/// and no longer once the frame is removed.
+#[test]
+fn a_removed_frames_workers_are_no_longer_asked() {
+    let page = "<!doctype html><body><iframe id=f src=/child.html></iframe><script>
+window.loaded = false;
+var f = document.getElementById('f');
+f.addEventListener('load', function () { loaded = true; });
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.loaded", Duration::from_secs(5));
+    assert_eq!(documents_asked_for_workers(&page), "Number(2.0)", "the page and its frame");
+    page.js("f.parentNode.removeChild(f);");
+    page.turns_until("false", Duration::from_millis(100));
+    assert_eq!(documents_asked_for_workers(&page), "Number(1.0)", "the page alone, its frame gone");
+    // The page's own timers still run.
+    page.js("window.ticked = false; setTimeout(function () { ticked = true; }, 0);");
+    page.turns_until("window.ticked", Duration::from_secs(2));
+    assert_eq!(page.js("String(window.ticked)"), r#"String("true")"#);
+}
