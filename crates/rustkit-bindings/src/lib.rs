@@ -108,6 +108,8 @@ mod raw_text_inner_html_tests;
 #[cfg(test)]
 mod svg_name_case_tests;
 #[cfg(test)]
+mod svg_transform_dom_tests;
+#[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
 mod event_target_ctor_tests;
