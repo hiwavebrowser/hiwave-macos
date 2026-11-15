@@ -2625,6 +2625,10 @@ mod tests {
         assert!(!capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
         assert!(capture_config(&parsed(&["--deterministic-clock"]), None).deterministic_page_clock);
         assert!(!capture_config(&parsed(&["--deterministic-clock", "--live-ms", "1000"]), None).deterministic_page_clock);
+        // Grid frame stamps in every load-only capture (script animations reproduce), never in a
+        // live-ms run (TIMELINE1).
+        assert!(capture_config(&parsed(&[]), None).grid_frame_stamps);
+        assert!(!capture_config(&parsed(&["--live-ms", "1000"]), None).grid_frame_stamps);
     }
 
     /// LAT14: the prelude page and how long it runs live before the

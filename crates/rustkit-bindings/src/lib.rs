@@ -492,7 +492,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
-    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setSelection",
+    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
     "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
@@ -588,7 +588,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // from nothing.
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
-        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0;
+        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.gridStamps = false;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -692,6 +692,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // The capture switch is the tree's: thrown from any document, it is every document's, and a
     // frame made later finds it set.
     __rk.setDetClock = function (on) { Q.det = !!on; Q.reads = 0; };
+    // Grid frame stamps (a load-only capture, `EngineConfig::grid_frame_stamps`): every frame is
+    // stamped with its exact grid time, with no real time in it, so script animations, which compute
+    // from the stamps, read the same times every run however slow the capture's turns are. The
+    // page clock itself still flows.
+    __rk.setGridStamps = function (on) { Q.gridStamps = !!on; };
     if (window.performance) window.performance.now = function now() { return perfNow(); };
     // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
     // taken when the first callback at a virtual time runs (the clock has moved to it by then), so
@@ -3430,6 +3435,15 @@ impl DomBindings {
     }
     /// Capture mode: the page clock is the virtual clock plus a fixed small step per read, with
     /// no real time in it, so a capture that steps the timers reproduces every `t`-driven frame.
+    /// Stamp every animation frame with its exact grid time (a load-only capture): script
+    /// animations then read the same times every run. The page clock still flows.
+    pub fn set_grid_frame_stamps(&self, on: bool) {
+        let _ = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setGridStamps({on});"));
+    }
+
     pub fn set_deterministic_clock(&self, on: bool) {
         let _ = self
             .runtime

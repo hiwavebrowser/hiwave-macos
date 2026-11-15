@@ -246,3 +246,67 @@ fn a_frame_run_ahead_of_real_time_is_stamped_with_its_exact_grid_time() {
     turn(&b, 5000);
     assert_eq!(read(&b, "got"), "5000,5000");
 }
+
+/// While a frame is overdue the timeline does not move on in a task: a task that runs before the
+/// late frame reads the last frame's time, and the frame then reads its own (Chrome `timeline_probe`
+/// "overdue", five runs: a task run before a frame a 100 ms task held up reads T0 + 0, the frame
+/// T0 + 16.6-16.8; a task run after it reads T0 + 99.9-100). The page never sees the timeline go
+/// back. Here the frame at 17 (T0) asks for the next (due 34) and sets a timer due at 50, after
+/// the frame's time; the turn comes at 140 and runs the timer first: it reads T0 + 0, the frame
+/// T0 + 17. The timer read the grid point at or before its time, then the frame 17.
+#[test]
+fn a_task_before_an_overdue_frame_reads_the_last_frames_time() {
+    let b = page();
+    b.evaluate(
+        "var T0 = -1, rows = []; requestAnimationFrame(function (t0) { T0 = t0; \
+           requestAnimationFrame(function (t) { rows.push('f:' + (t - T0) + ':' + (document.timeline.currentTime - T0)); }); \
+           setTimeout(function () { rows.push('t:' + (document.timeline.currentTime - T0)); }, 33); });",
+    )
+    .unwrap();
+    turn(&b, 17);
+    turn(&b, 123);
+    assert_eq!(read(&b, "rows.join()"), "t:0,f:17:17");
+}
+
+/// `pause()` then a playback rate change in the same task keeps the current time and holds it
+/// (Chrome `timeline_probe` "pauseRate", three runs of five: the time at the pause, the same after
+/// `playbackRate = 2`, the same three frames on, "paused", rate 2). It went from 100 to 200.
+#[test]
+fn a_rate_change_after_pause_keeps_the_current_time() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), a = box.animate({ opacity: [0, 1] }, { duration: 1000 }), \
+           got = '', later = '', n = 0; \
+         setTimeout(function () { a.pause(); var p = a.currentTime; a.playbackRate = 2; \
+           got = [p, a.currentTime].join(); \
+           (function f() { requestAnimationFrame(function () { if (++n < 3) f(); \
+             else later = [a.currentTime, a.playState, a.playbackRate].join(); }); })(); }, 105);",
+    )
+    .unwrap();
+    for _ in 0..14 {
+        turn(&b, b.next_timer_delay().unwrap_or(17).max(1));
+    }
+    let got = read(&b, "got");
+    let p = got.split(',').next().unwrap().to_string();
+    assert_eq!(got, format!("{p},{p}"));
+    assert_eq!(read(&b, "later"), format!("{p},paused,2"));
+}
+
+/// Grid frame stamps (a load-only capture): with real time ahead of the timers' clock (a slow
+/// capture turn), a frame is still stamped with its exact grid time, so a script animation reads
+/// the same time every run. Here 40 ms of real time pass before the turn to 17: stamped 17. On the
+/// flowing clock alone it was stamped with the real time, about 40.
+#[test]
+fn grid_frame_stamps_carry_no_real_time() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><body></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.set_grid_frame_stamps(true);
+    b.evaluate("var got = ''; requestAnimationFrame(function (t) { got = [t, document.timeline.currentTime].join(); });")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    turn(&b, 17);
+    assert_eq!(read(&b, "got"), "17,17");
+}
