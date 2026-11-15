@@ -4640,8 +4640,13 @@ const WRAPPERS_JS: &str = r#"
         }
         return false;
     }
+    // How many times an inline style attribute's text has been parsed (`__rk.inlineStyleParses`): the
+    // measure behind MotionMark's Multiply, which reads and writes thousands of inline properties a frame.
+    var inlineStyleParses = 0;
+    __rk.inlineStyleParses = function () { return inlineStyleParses; };
     function decls(st) {
         var out = [];
+        inlineStyleParses++;
         splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
