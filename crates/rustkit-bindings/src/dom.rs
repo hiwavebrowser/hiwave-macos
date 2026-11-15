@@ -4307,7 +4307,7 @@ const WRAPPERS_JS: &str = r#"
         'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
         'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
     };
-    var hasOwn = function (o, n) { return Object.prototype.hasOwnProperty.call(o, n); };
+    // `hasOwn` here is the install-time helper declared above, with the event records.
     // Names a read answers but an enumeration leaves out, as Chromium does:
     // shorthands (still readable by name).
     var COMPUTED_SHORTHANDS = {};
