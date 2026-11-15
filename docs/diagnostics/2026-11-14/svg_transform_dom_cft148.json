@@ -21,5 +21,11 @@
  "insert_before": "translate(4 0) scale(3 3)",
  "get_item_out_of_range": "IndexSizeError",
  "identity": "true|true|false|[object SVGAnimatedTransformList]|[object SVGTransformList]",
- "append_moves_item": "1|1|scale(3 3)|scale(3)"
+ "append_moves_item": "1|1|scale(3 3)|scale(3)",
+ "replace_with_same_list_item": "2|scale(3 3) scale(3 3)|false|3",
+ "append_same_list_item": "3|scale(5 5) translate(1 1) scale(3 3)|false",
+ "insert_same_list_item": "3|translate(1 1) scale(3 3) translate(1 1)",
+ "initialize_with_own_item": "1|translate(1 1)",
+ "initialize_reused_transform": "1|rotate(7)",
+ "suits_cloned_gradient": "rotate(10)|rotate(25)|rotate(40)|1||2"
 }
