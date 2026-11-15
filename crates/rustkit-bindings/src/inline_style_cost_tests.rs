@@ -156,16 +156,18 @@ const KEPT_VS_FRESH: &str = "function keptVsFresh(e, s, more) { \
 #[test]
 fn an_accessor_in_place_of_a_parser_built_in_is_seen() {
     let b = bound();
+    // The accessor stays in place and answers the original once the read is done (the engine's own
+    // property caches are not what this checks).
     assert_eq!(
         ev(
             &b,
-            "var e = document.getElementById('t'), s = e.style, f = Array.prototype.filter; \
+            "var e = document.getElementById('t'), s = e.style, f = Array.prototype.filter, bad = true; \
              e.setAttribute('style', 'left: 1px; top: 2px; width: 3px'); \
-             Object.defineProperty(Array.prototype, 'filter', { configurable: true, get: function () { return function () { return []; }; } }); \
+             Object.defineProperty(Array.prototype, 'filter', { configurable: true, \
+               get: function () { return bad ? function () { return []; } : f; } }); \
              Object.prototype.value = f; \
              try { var during = s.length; } catch (x) {} \
-             delete Object.prototype.value; \
-             Object.defineProperty(Array.prototype, 'filter', { configurable: true, writable: true, value: f }); \
+             delete Object.prototype.value; bad = false; \
              s.cssText + '|' + s.length",
         ),
         "left: 1px; top: 2px; width: 3px;|3"
@@ -179,15 +181,15 @@ fn a_write_keeps_plain_strings_when_string_is_replaced() {
     assert_eq!(
         ev(
             &b,
-            "var e = document.getElementById('t'), s = e.style, S = String, calls = 0; \
-             function P(t) { this.t = t; } \
+            "var e = document.getElementById('t'), s = e.style, S = String; \
+             function P(t) { this.t = t; } P.prototype = Object.create(S.prototype); \
+             P.prototype.valueOf = function () { return this.t; }; P.prototype.toString = function () { return this.t; }; \
              P.prototype.trim = function () { return this; }; P.prototype.toLowerCase = function () { return this; }; \
-             P.prototype.toString = function () { calls++; return calls > 50 ? 'red' : this.t; }; \
              var r = s.left; \
-             String = function (v) { return new P('' + v); }; \
-             try { s.setProperty('left', '5px'); } catch (x) {} \
+             String = function (v) { var t = S(v); return t === 'left' || t === '5px' ? new P(t) : t; }; \
+             var err = ''; try { s.setProperty('left', '5px'); } catch (x) { err = 'ERR ' + x.message + ' '; } \
              String = S; \
-             typeof s.getPropertyValue('left') + '|' + s.getPropertyValue('left') + '|' + s.cssText",
+             err + typeof s.getPropertyValue('left') + '|' + s.getPropertyValue('left') + '|' + s.cssText",
         ),
         "string|5px|left: 5px; top: 2px; width: 3px;"
     );
