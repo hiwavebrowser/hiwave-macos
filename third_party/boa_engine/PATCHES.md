@@ -771,3 +771,39 @@ number, so this second change has no failing case of its own; it is defensive. P
 `Object.create([])`, `Object.create(Array.prototype)`, `++`, `+=`, sloppy frozen and sealed,
 non-writable `length` sloppy and strict, a non-configurable element, `length` given as an object;
 2 differed at #1157's head).
+
+## Patch: a name-write cache hit writes a data slot only for the receiver's own property (`super-set-receiver`)
+
+**Why.** Unmodified Boa 0.22 bug, flagged by Atlas in the R1 on #1157 and confirmed against Chrome 148.
+`SetPropertyByName`'s cache hit checked only the object's shape and ignored the receiver. `super.x = v`
+uses the home object's prototype as the object and `this` as the receiver. A site whose first call had
+`this` equal to that prototype filled the cache, and later calls wrote `x` on the prototype instead of
+defining it on `this` (`B.prototype.m.call(A.prototype, 5); b.m(7)` left `A.prototype.x` at 7 and `b`
+with no own `x`). The cache also wrote a data slot found on the prototype (`PROTOTYPE`) in place, where
+[[Set]] defines the property on the receiver (R1 on #1163: a grandparent's `x`).
+
+**What.** `vm/opcode/set/property.rs` `set_by_name` (marked `HIWAVE PATCH (super-set-receiver)`):
+- a hit on an accessor slot calls the setter with the receiver, so it is used for any receiver, but
+  only on an object whose [[Set]] is the ordinary one. A proxy and a typed array can share an
+  ordinary object's shape (`Object.create(proto)` and `new Proxy({}, h)` / `new T(2)` all start from
+  the empty shape for their prototype), and a cached prototype setter would skip the proxy's `set`
+  trap, or be called for a typed array's canonical numeric key (`Infinity`, `NaN`) that Chrome never
+  sends to the prototype (R1 on #1163 at 179eb717). A String wrapper keeps the ordinary [[Set]], so
+  writes to a `String.prototype` setter from a string base still hit;
+- a hit on a data slot is used only when the slot is the object's own (not `PROTOTYPE`), the receiver
+  is the object, and `array-length-ic`'s define-own condition holds. `SetPropertyByName` passes one
+  value as both, so the receiver test is a pointer comparison; a primitive base (`(5).x = v`,
+  `'s'.x = v`) is never its wrapper object, so its data writes give up the cache. Upstream's branch
+  that wrote a prototype's data slot in place is unreachable and replaced by a `debug_assert!`;
+- the cache is filled from a data write only when the receiver is the object. No case here fails
+  without this; it is defensive.
+
+Checked with the vm-stats counters: 4,000 writes to an object, an array, a function and a class
+instance, 1,000 `super.x = v` onto a prototype setter with a new `this` each time, and 1,000 writes
+to a `String.prototype` setter from a string base give 6 cold misses in all. Pin:
+`crates/rustkit-js/tests/super_set.rs` (20 cases from Chrome for Testing 148.0.7778.216: class and
+object-literal `super` with fresh, shared and grandparent receivers in both orders, setters on the
+prototype for many receivers and for a primitive base, a primitive base over a prototype data
+property, `Reflect.set` with another receiver, a plain write over a prototype data property, a proxy
+and a typed array (`Infinity`, `NaN`) after an ordinary object filled a prototype-setter entry; 5
+differed on develop, and the 3 exotic-base cases differed at 179eb717).
