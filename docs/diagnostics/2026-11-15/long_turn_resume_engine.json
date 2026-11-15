@@ -1,0 +1,88 @@
+{
+ "head": "e96d4d44eb5239734ed02e9fc60146658038dfd6",
+ "host": {
+  "system": "Windows",
+  "machine": "AMD64"
+ },
+ "runs_per_arm": 3,
+ "results": [
+  {
+   "arm": "app-content-thread",
+   "rec": {
+    "afterFrames": 36,
+    "afterTimers": 295,
+    "done": true,
+    "firstFrameAfterMs": 3,
+    "firstTimerAfterMs": 1,
+    "longMs": 2000,
+    "quietFrames": 37,
+    "quietTimers": 99,
+    "tsJumpMs": 2001
+   }
+  },
+  {
+   "arm": "app-content-thread",
+   "rec": {
+    "afterFrames": 35,
+    "afterTimers": 295,
+    "done": true,
+    "firstFrameAfterMs": 3,
+    "firstTimerAfterMs": 1,
+    "longMs": 2000,
+    "quietFrames": 38,
+    "quietTimers": 99,
+    "tsJumpMs": 2000
+   }
+  },
+  {
+   "arm": "app-content-thread",
+   "rec": {
+    "afterFrames": 37,
+    "afterTimers": 296,
+    "done": true,
+    "firstFrameAfterMs": 3,
+    "firstTimerAfterMs": 1,
+    "longMs": 2000,
+    "quietFrames": 37,
+    "quietTimers": 99,
+    "tsJumpMs": 2001
+   }
+  },
+  {
+   "afterFrames": 59,
+   "arm": "pace1-content",
+   "firstFrameAfterMs": 15,
+   "pacing": "content-thread"
+  },
+  {
+   "afterFrames": 0,
+   "arm": "pace1-window",
+   "firstFrameAfterMs": 2016,
+   "pacing": "window-thread"
+  },
+  {
+   "afterFrames": 59,
+   "arm": "pace1-content",
+   "firstFrameAfterMs": 11,
+   "pacing": "content-thread"
+  },
+  {
+   "afterFrames": 0,
+   "arm": "pace1-window",
+   "firstFrameAfterMs": 2011,
+   "pacing": "window-thread"
+  },
+  {
+   "afterFrames": 59,
+   "arm": "pace1-content",
+   "firstFrameAfterMs": 10,
+   "pacing": "content-thread"
+  },
+  {
+   "afterFrames": 0,
+   "arm": "pace1-window",
+   "firstFrameAfterMs": 2014,
+   "pacing": "window-thread"
+  }
+ ]
+}

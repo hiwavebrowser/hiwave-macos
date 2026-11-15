@@ -122,6 +122,19 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Pace `--live-ms` as the app's window thread does with the content thread off
+    /// (`HIWAVE_CONTENT_THREAD=0`, `hiwave-app` `process_events`): every wait for a timer or a request
+    /// at least as long as the last turn took, so after one long turn the next frame waits as long
+    /// again. Without it the loop waits as the app's default loop, the content thread's, waits
+    /// (`rustkit_engine::content_turn_wait`): until the next timer, 2 to 50 ms, whatever the last turn
+    /// took. Only the wait is the app's: the capture's turn is not the content thread's turn (that loop
+    /// also drops each turn's sub-millisecond remainder and publishes frames), so a headless live
+    /// measurement approximates the app's pacing; it does not copy it. The content thread's wait does
+    /// not wake when a fetch arrives, so with no timer set a response is handled up to 50 ms later than
+    /// with this flag. Recorded in `live_stats.pacing`.
+    #[arg(long)]
+    window_thread_pacing: bool,
+
     /// Load as the app does: what the page asks of the network after its
     /// `load` event is the live loop's (`--live-ms`), not the load's
     /// (`EngineConfig::post_load_requests_live`).
@@ -464,6 +477,11 @@ struct LiveStats {
     relayouts: u32,
     /// The page had no timer set and nothing in flight when the loop ended.
     idle_at_end: bool,
+    /// Whose wait the loop used between turns: "content-thread" (the content thread's wait, the
+    /// app's default) or "window-thread" (`--window-thread-pacing`). Empty in a record from before PACE1, which paced
+    /// as the window thread.
+    #[serde(default)]
+    pacing: String,
 }
 
 /// Wakes the live loop's sleep when work arrives off the page thread, as the
@@ -503,6 +521,38 @@ impl LiveWake {
             .wait_timeout_while(woken, limit, |woken| !*woken)
             .unwrap_or_else(|e| e.into_inner());
         *woken = false;
+    }
+}
+
+/// Which of the app's live loops `run_live` takes its wait between turns from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LivePacing {
+    /// The content thread's wait (`page_protocol` `PageHalf::run`, the app's default loop): after a
+    /// turn, wait for the next timer, 2 to 50 ms (`rustkit_engine::content_turn_wait`), however long
+    /// the turn took. The engine's wake is not consulted, as in that loop.
+    ContentThread,
+    /// The window thread's loop with the content thread off (`hiwave-app` `process_events`): a turn
+    /// when the next timer is due, a request is out or the engine wakes the loop. Timer and request
+    /// waits are never shorter than the last turn took (nor `MIN_LIVE_TURN`), so the page holds the
+    /// window's thread at most half the time. The engine's wake skips that floor and ends the wait at
+    /// once, as the app's poke does, so a page that keeps waking the loop gets back-to-back turns.
+    WindowThread,
+}
+
+impl LivePacing {
+    fn of(args: &Args) -> Self {
+        if args.window_thread_pacing {
+            LivePacing::WindowThread
+        } else {
+            LivePacing::ContentThread
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            LivePacing::ContentThread => "content-thread",
+            LivePacing::WindowThread => "window-thread",
+        }
     }
 }
 
@@ -691,24 +741,23 @@ fn settle_stepped(
     stats
 }
 
-/// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due, a request is out or the engine wakes the loop. Timer and
-/// request waits are never shorter than the last turn took (nor
-/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
-/// once, as the app's poke does, so a page that keeps waking the loop gets
-/// back-to-back turns.
+/// Turn the live loop for `live_ms` of real time, paced as one of the app's loops (`LivePacing`).
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
     live_ms: u64,
+    pacing: LivePacing,
 ) -> LiveStats {
     const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
     const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
     let limit = Duration::from_millis(live_ms);
     let began = Instant::now();
     let mut clock = began;
-    let mut stats = LiveStats::default();
+    let mut stats = LiveStats {
+        pacing: pacing.name().to_string(),
+        ..LiveStats::default()
+    };
     let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
@@ -732,10 +781,19 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input, or the
-        // engine's wake, ends the wait.
-        let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        wake.sleep(wait.min(left));
+        match pacing {
+            // The content thread turns again when the next timer is due, at most 50 ms on, and
+            // nothing but a command (none here) ends its wait early.
+            LivePacing::ContentThread => {
+                std::thread::sleep(rustkit_engine::content_turn_wait(turn.next_timer_ms).min(left))
+            }
+            // An idle page still gets its time: in the app only input, or the
+            // engine's wake, ends the wait.
+            LivePacing::WindowThread => {
+                let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
+                wake.sleep(wait.min(left));
+            }
+        }
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -1001,7 +1059,13 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             if let Err(e) = rt.block_on(engine.load_url(view_id, prelude)) {
                 return result.failed("error", format!("Failed to load prelude URL: {:?}", e));
             }
-            run_live(&rt, &mut engine, view_id, args.prelude_live_ms.unwrap_or(500));
+            run_live(
+                &rt,
+                &mut engine,
+                view_id,
+                args.prelude_live_ms.unwrap_or(500),
+                LivePacing::of(args),
+            );
         }
         let load_began = Instant::now();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
@@ -1032,7 +1096,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             if args.animations {
                 // The real clock: live loop turns for the same span, in real time, within the same budget.
                 if !budget.is_zero() {
-                    run_live(&rt, &mut engine, view_id, budget.as_millis() as u64);
+                    run_live(&rt, &mut engine, view_id, budget.as_millis() as u64, LivePacing::of(args));
                 }
             } else {
                 // Actions and a resize define the state after the settle on purpose: nothing to fall back to.
@@ -1058,7 +1122,13 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             }
         }
         if let Some(live_ms) = args.live_ms {
-            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.live_stats = Some(run_live(
+                &rt,
+                &mut engine,
+                view_id,
+                live_ms,
+                LivePacing::of(args),
+            ));
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     } else if let Some(html) = html_content {
@@ -1090,7 +1160,13 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                 Ok(rt) => rt,
                 Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
             };
-            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
+            result.live_stats = Some(run_live(
+                &rt,
+                &mut engine,
+                view_id,
+                live_ms,
+                LivePacing::of(args),
+            ));
             result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
         }
     }
@@ -2374,12 +2450,16 @@ mod tests {
         </script></body></html>";
 
     fn capture_file_page(name: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
+        capture_html(name, LATE_CALLBACK_PAGE, extra)
+    }
+
+    fn capture_html(name: &str, html: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
         let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("parity-capture-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let (page, layout) = (dir.join("page.html"), dir.join("layout.json"));
-        fs::write(&page, LATE_CALLBACK_PAGE).unwrap();
+        fs::write(&page, html).unwrap();
         let mut argv = vec![
             "parity-capture",
             "--html-file",
@@ -2404,6 +2484,66 @@ mod tests {
         let live = result.live_stats.as_ref().expect("a file capture with --live-ms reports live_stats");
         assert!(live.timer_callbacks >= 2, "timer + frame callbacks: {}", live.timer_callbacks);
         assert!(result.capture_ms.is_some_and(|ms| ms > 0.0), "{:?}", result.capture_ms);
+    }
+
+    /// PACE1: one frame runs 2000 ms (`docs/diagnostics/2026-11-15/long_turn_resume.html`), then the
+    /// page records how long the next frame took to come (the box of height 10000 + ms) and how many
+    /// came in the second after (20000 + count). By default the live loop paces as the app's content
+    /// thread does (`rustkit_engine::content_turn_wait`, the app's default loop): the next frame is
+    /// due at once, as in Chrome for Testing 148 (0-1 ms, 60-61 frames; `long_turn_resume_cft148.json`).
+    /// `--window-thread-pacing` keeps the wait of the app's window thread with the content thread off:
+    /// at least as long as the last turn took, so about 2000 ms. The bounds are wall-clock bounds with
+    /// wide margins on either side of the two behaviours (measured 5-15 ms and 2010-2017 ms;
+    /// `long_turn_resume_engine.json`): a 2 to 50 ms wait would have to run 450 ms late to fail the
+    /// first, and no load makes a 2000 ms wait shorter.
+    const LONG_TURN_PAGE: &str =
+        include_str!("../../../docs/diagnostics/2026-11-15/long_turn_resume.html");
+
+    fn after_long_turn(name: &str, extra: &[&str]) -> (i64, i64, String) {
+        let mut argv = vec!["--live-ms", "7000"];
+        argv.extend_from_slice(extra);
+        let (result, heights) = capture_html(name, LONG_TURN_PAGE, &argv);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let pick = |lo: i64| {
+            heights
+                .iter()
+                .find(|h| (lo..lo + 10_000).contains(*h))
+                .map(|h| h - lo)
+        };
+        let first =
+            pick(10_000).unwrap_or_else(|| panic!("the page did not finish: heights {heights:?}"));
+        let frames = pick(20_000).expect("frames after");
+        let pacing = result.live_stats.map(|l| l.pacing).unwrap_or_default();
+        // One line per run for `long_turn_resume_engine.py`.
+        eprintln!(
+            "PACE1-RESULT {}",
+            serde_json::json!({ "arm": name, "firstFrameAfterMs": first, "afterFrames": frames, "pacing": pacing })
+        );
+        (first, frames, pacing)
+    }
+
+    #[test]
+    fn after_a_long_frame_the_live_loop_runs_the_next_frame_when_it_is_due() {
+        let (first, frames, pacing) = after_long_turn("pace1-content", &[]);
+        assert_eq!(pacing, "content-thread");
+        assert!(
+            first < 500,
+            "the next frame came {first} ms after a 2000 ms frame ({frames} frames after)"
+        );
+        assert!(
+            frames >= 10,
+            "{frames} frames in the second after the long frame (first after {first} ms)"
+        );
+    }
+
+    #[test]
+    fn window_thread_pacing_waits_as_long_as_the_long_frame() {
+        let (first, _, pacing) = after_long_turn("pace1-window", &["--window-thread-pacing"]);
+        assert_eq!(pacing, "window-thread");
+        assert!(
+            first >= 1500,
+            "the next frame came {first} ms after a 2000 ms frame"
+        );
     }
 
     /// `--live-ms` turns script on by itself. A file whose inline script
@@ -2575,9 +2715,20 @@ mod tests {
 
     /// A page whose only pending work is an inserted script's fetch (no
     /// timer set, nothing `in_flight`) still runs the script when its fetch
-    /// arrives, not on the live window's last turn.
+    /// arrives, not on the live window's last turn. With the window thread's
+    /// wait only the engine's wake (`LiveWake`) ends the sleep; the content
+    /// thread's wait turns at least every 50 ms and never consults it.
     #[test]
     fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        inserted_script_runs_when_its_fetch_arrives(&[]);
+    }
+
+    #[test]
+    fn with_window_thread_pacing_the_engines_wake_runs_an_inserted_script_when_its_fetch_arrives() {
+        inserted_script_runs_when_its_fetch_arrives(&["--window-thread-pacing"]);
+    }
+
+    fn inserted_script_runs_when_its_fetch_arrives(extra: &[&str]) {
         let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
@@ -2611,23 +2762,18 @@ mod tests {
                 });
             }
         });
-        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}-{}", extra.len(), std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let log = dir.join("events.jsonl");
         let url = format!("http://127.0.0.1:{port}/");
-        let args = Args::try_parse_from([
-            "parity-capture",
-            "--url",
-            url.as_str(),
-            "--live-ms",
-            "6000",
-            "--event-log",
-            log.to_str().unwrap(),
-        ])
-        .unwrap();
-        let result = run_capture(&args);
+        let mut argv = vec!["parity-capture", "--url", url.as_str(), "--live-ms", "6000", "--event-log", log.to_str().unwrap()];
+        argv.extend_from_slice(extra);
+        let result = run_capture(&Args::try_parse_from(argv).unwrap());
         assert_eq!(result.status, "ok", "{:?}", result.error);
+        let pacing = result.live_stats.as_ref().map(|l| l.pacing.as_str());
+        let expected = if extra.is_empty() { "content-thread" } else { "window-thread" };
+        assert_eq!(pacing, Some(expected));
         let records: Vec<serde_json::Value> = fs::read_to_string(&log)
             .unwrap()
             .lines()
@@ -3382,6 +3528,11 @@ Connection: close
     /// stops between turns once its real-time budget (the reference's 5 s, less if the capture's timeout
     /// has less left) is spent, and says how far virtual time got. Here every turn costs about 150 ms,
     /// so 100 turns would take 15 s.
+    ///
+    /// The bound is on the settle's own figures, not on the whole capture's wall time (FLK7: at load
+    /// 7 to 12.5 the capture took 9.5 s against a 9 s limit, the settle itself having stopped at
+    /// 4828 ms as designed): the settle stops between turns, so it ends past its budget by at most
+    /// its slowest turn, however slow the machine makes the turns.
     #[test]
     fn a_settle_whose_turns_are_slow_stops_at_its_real_time_budget() {
         let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -3413,14 +3564,16 @@ Connection: close
         });
         let url = format!("http://127.0.0.1:{port}/");
         let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
-        let began = Instant::now();
         let result = run_capture(&args);
-        let took = began.elapsed();
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
         assert!(stats.cut_short, "the settle was not cut short: {stats:?}");
         assert!(stats.virtual_ms > 0 && stats.virtual_ms < STEPPED_SETTLE_MS, "virtual time reached: {stats:?}");
-        assert!(took < Duration::from_millis(9_000), "the settle ran past its budget: the capture took {took:?} ({stats:?})");
+        let budget = SETTLE_REAL_BUDGET.as_millis() as u64;
+        assert!(
+            stats.wall_ms <= budget + stats.max_turn_ms,
+            "the settle ran past its budget by more than its slowest turn: {stats:?}"
+        );
     }
 
     /// The settle does not start a turn that would likely end past its budget: it stops when the time spent
