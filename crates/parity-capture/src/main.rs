@@ -2104,12 +2104,16 @@ mod tests {
         </script></body></html>";
 
     fn capture_file_page(name: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
+        capture_html(name, LATE_CALLBACK_PAGE, extra)
+    }
+
+    fn capture_html(name: &str, html: &str, extra: &[&str]) -> (CaptureResult, Vec<i64>) {
         let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("parity-capture-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let (page, layout) = (dir.join("page.html"), dir.join("layout.json"));
-        fs::write(&page, LATE_CALLBACK_PAGE).unwrap();
+        fs::write(&page, html).unwrap();
         let mut argv = vec![
             "parity-capture",
             "--html-file",
@@ -2134,6 +2138,39 @@ mod tests {
         let live = result.live_stats.as_ref().expect("a file capture with --live-ms reports live_stats");
         assert!(live.timer_callbacks >= 2, "timer + frame callbacks: {}", live.timer_callbacks);
         assert!(result.capture_ms.is_some_and(|ms| ms > 0.0), "{:?}", result.capture_ms);
+    }
+
+    /// PACE1: one frame runs 2000 ms (`docs/diagnostics/2026-11-15/long_turn_resume.html`), then the
+    /// page records how long the next frame took to come (the box of height 10000 + ms) and how many
+    /// came in the second after (20000 + count). By default the live loop paces as the app's content
+    /// thread does (`rustkit_engine::content_turn_wait`, the app's default loop): the next frame is
+    /// due at once, as in Chrome for Testing 148 (0-1 ms, 60-61 frames; `long_turn_resume_cft148.json`).
+    /// `--window-thread-pacing` keeps the wait of the app's window thread with the content thread off:
+    /// at least as long as the last turn took, so about 2000 ms. Each bound is a relation against the
+    /// long frame's own 2000 ms, so a slow machine does not change the verdict.
+    const LONG_TURN_PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-15/long_turn_resume.html");
+
+    fn after_long_turn(name: &str, extra: &[&str]) -> (i64, i64) {
+        let mut argv = vec!["--live-ms", "7000"];
+        argv.extend_from_slice(extra);
+        let (result, heights) = capture_html(name, LONG_TURN_PAGE, &argv);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let pick = |lo: i64| heights.iter().find(|h| (lo..lo + 10_000).contains(*h)).map(|h| h - lo);
+        let first = pick(10_000).unwrap_or_else(|| panic!("the page did not finish: heights {heights:?}"));
+        (first, pick(20_000).expect("frames after"))
+    }
+
+    #[test]
+    fn after_a_long_frame_the_live_loop_runs_the_next_frame_when_it_is_due() {
+        let (first, frames) = after_long_turn("pace1-content", &[]);
+        assert!(first < 500, "the next frame came {first} ms after a 2000 ms frame ({frames} frames after)");
+        assert!(frames >= 10, "{frames} frames in the second after the long frame (first after {first} ms)");
+    }
+
+    #[test]
+    fn window_thread_pacing_waits_as_long_as_the_long_frame() {
+        let (first, _) = after_long_turn("pace1-window", &["--window-thread-pacing"]);
+        assert!(first >= 1500, "the next frame came {first} ms after a 2000 ms frame");
     }
 
     /// `--live-ms` turns script on by itself. A file whose inline script
