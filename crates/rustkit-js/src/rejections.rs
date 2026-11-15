@@ -22,8 +22,9 @@
 //!
 //! With either on, a rejection costs a walk of the engine-owned promises
 //! (the modules loaded, at most [`MAX_IGNORED`]) and of the ones pending,
-//! and a handler added to a rejected promise a walk of the pending and the
-//! announced ones (at most [`MAX_PENDING`] and [`MAX_OUTSTANDING`]).
+//! and a handler added to a rejected promise a walk of the pending ones (a
+//! turn's own, at most [`MAX_PENDING`]) and of the announced ones (at most
+//! [`MAX_OUTSTANDING`]).
 //!
 //! The engine's own promises (a module's load and evaluation) are not the
 //! page's: their rejections are reported as the module's error, so they are
@@ -40,10 +41,11 @@ use boa_engine::object::builtins::JsPromise;
 use boa_engine::realm::Realm;
 use boa_engine::{Context, JsObject, JsValue};
 
-/// Most rejections held at once; past it the oldest is dropped (reported
-/// nowhere: a page rejecting this many promises per evaluation is already
-/// named by the ones that were kept).
-const MAX_PENDING: usize = 256;
+/// Most rejections held at once. With events on, everything pending is
+/// announced at the end of the turn, so this bounds one turn's rejections;
+/// with events off it bounds what waits for the next report. Past it the
+/// oldest is dropped, and the first drop is said once in the log.
+const MAX_PENDING: usize = 10_000;
 /// Engine-owned promises remembered; past it the oldest is forgotten.
 const MAX_IGNORED: usize = 1024;
 /// Promises announced as unhandled and remembered in case a handler comes
@@ -74,6 +76,8 @@ pub(crate) struct RejectionHooks {
     handled: RefCell<VecDeque<Rejected>>,
     /// Reasons of announced rejections nobody canceled, for the reports.
     reported: RefCell<VecDeque<JsValue>>,
+    /// A pending rejection was dropped for the bound, and the log says so.
+    drop_logged: Cell<bool>,
 }
 
 fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, max: usize) {
@@ -99,7 +103,15 @@ impl HostHooks for RejectionHooks {
         }
         match operation {
             OperationType::Reject => {
-                push_bounded(&mut self.pending.borrow_mut(), (promise, context.realm().clone()), MAX_PENDING);
+                let mut pending = self.pending.borrow_mut();
+                if pending.len() >= MAX_PENDING && !self.drop_logged.replace(true) {
+                    tracing::warn!(
+                        max = MAX_PENDING,
+                        "more unhandled promise rejections are pending than are kept: the oldest are dropped \
+                         (no event, no report); said once"
+                    );
+                }
+                push_bounded(&mut pending, (promise, context.realm().clone()), MAX_PENDING);
             }
             OperationType::Handle => {
                 {
@@ -159,6 +171,11 @@ impl RejectionHooks {
     /// Whether there is anything to announce.
     pub(crate) fn has_news(&self) -> bool {
         !self.pending.borrow().is_empty() || !self.handled.borrow().is_empty()
+    }
+
+    /// How many rejections are not announced yet.
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.borrow().len()
     }
 
     /// The oldest promise that is owed a `rejectionhandled`.

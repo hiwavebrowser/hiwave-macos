@@ -494,7 +494,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setSelection",
     "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit",
-    "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
     // The frame tree's shared state, which the runtime puts there itself.
@@ -912,6 +912,18 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             for (Q.pumpCount--; p < Q.pumpCount; p++) pumps[p] = pumps[p + 1];
             delete pumps[Q.pumpCount];
         }
+    };
+    // The runtime asks for another turn at once (rejections it has still
+    // to announce, `JsRuntime::set_rejection_events`): a timer of the
+    // engine's own that is due now and does nothing, so the live loop's
+    // next-timer read says "now" and the turn that runs it ends as any
+    // turn does. One is enough: a second ask while one waits adds none.
+    var wake = null;
+    function woke() { wake = null; }
+    __rk.wakeSoon = function () {
+        if (wake !== null && slotOf(wake) >= 0) return;
+        schedule(woke, 0, rest(arguments, 0), false);
+        wake = timers[Q.count - 1];
     };
     __rk.nextTimer = function () {
         // Only a number is a time; compared and subtracted here, with no

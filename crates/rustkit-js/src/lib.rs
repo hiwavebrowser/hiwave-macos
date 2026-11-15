@@ -435,10 +435,11 @@ struct PendingTimer {
     repeat: bool,
 }
 
-/// Most rejection events (`unhandledrejection`, `rejectionhandled`) one
-/// turn's end announces ([`JsRuntime::set_rejection_events`]).
+/// Most rounds of rejection events one turn's end announces: the first is
+/// everything the turn left pending, each later one what the listeners of
+/// the one before rejected ([`JsRuntime::set_rejection_events`]).
 #[cfg(feature = "boa")]
-const MAX_REJECTION_EVENTS: usize = 64;
+const MAX_REJECTION_ROUNDS: usize = 16;
 
 /// Default maximum number of loop iterations/pumps per `run_jobs` call.
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
@@ -974,6 +975,8 @@ impl JsRuntime {
     /// over once more, as `("rejectionhandled", promise, reason)`, at the
     /// end of the turn the handler was added in. A realm with no
     /// `fireRejection` has no events: its rejections are reported as before.
+    /// When a turn's end leaves rejections unannounced, the host object's
+    /// `wakeSoon` is called (no arguments) to ask for another turn.
     pub fn set_rejection_events(&mut self, on: bool) {
         #[cfg(feature = "boa")]
         self.rejections.events.set(on);
@@ -982,12 +985,19 @@ impl JsRuntime {
     }
 
     /// HTML "notify about rejected promises", at the end of a turn's
-    /// microtasks: the `rejectionhandled` owed first (a browser queues
-    /// those when the handler is added), then the rejections left
-    /// unhandled. At most [`MAX_REJECTION_EVENTS`] a turn: a listener that
-    /// rejects another promise each time is announced again and again, and
-    /// the rest wait for the next turn. Nothing is announced after a turn
-    /// the watchdog stopped.
+    /// microtasks. Everything pending at that point is announced, oldest
+    /// first, however many: that is one round. What the listeners rejected
+    /// meanwhile is the next round, and so on; a browser runs each round as
+    /// a task of its own, here they follow in the same turn, up to
+    /// [`MAX_REJECTION_ROUNDS`] of them. A `rejectionhandled` that is owed
+    /// goes ahead of the next event.
+    ///
+    /// When the rounds run out (a listener that rejects again every time),
+    /// or the watchdog stops the turn in a listener, the rest stay pending
+    /// and the embedder's scripts are asked for another turn at once (the
+    /// host object's `wakeSoon`), so they are announced promptly and none is
+    /// dropped. Nothing is announced after a turn the watchdog had already
+    /// stopped: those wait for the next turn's end.
     #[cfg(feature = "boa")]
     fn notify_rejections(&mut self) {
         if !self.rejections.events.get() || self.announcing_rejections || !self.rejections.has_news() {
@@ -997,16 +1007,29 @@ impl JsRuntime {
             return;
         }
         self.announcing_rejections = true;
-        for _ in 0..MAX_REJECTION_EVENTS {
+        let mut left_in_round = self.rejections.pending_len();
+        let mut rounds = 1;
+        loop {
+            if self.deadline.hit.get() {
+                break;
+            }
             if let Some((promise, realm)) = self.rejections.next_handled() {
                 if let Some(reason) = rejections::reason_of(&promise) {
                     self.fire_rejection("rejectionhandled", &promise, &reason, &realm);
                 }
                 continue;
             }
+            if left_in_round == 0 {
+                left_in_round = self.rejections.pending_len();
+                if left_in_round == 0 || rounds >= MAX_REJECTION_ROUNDS {
+                    break;
+                }
+                rounds += 1;
+            }
             let Some((promise, realm)) = self.rejections.next_pending() else {
                 break;
             };
+            left_in_round -= 1;
             // Settled otherwise since (not a promise any more, in theory): nothing to say.
             let Some(reason) = rejections::reason_of(&promise) else {
                 continue;
@@ -1015,7 +1038,22 @@ impl JsRuntime {
             let canceled = self.fire_rejection("unhandledrejection", &promise, &reason, &realm);
             self.rejections.end_dispatch((promise, realm), reason, canceled);
         }
+        if self.rejections.has_news() {
+            self.wake_soon();
+        }
         self.announcing_rejections = false;
+    }
+
+    /// Ask the embedder's scripts for another turn at once: the entered
+    /// realm's `wakeSoon`, when it has one. Runs no page code.
+    #[cfg(feature = "boa")]
+    fn wake_soon(&mut self) {
+        use boa_engine::{js_string, JsValue as BoaValue};
+        let host = self.entered_host();
+        let wake = host.get(js_string!("wakeSoon"), &mut self.context).ok();
+        if let Some(wake) = wake.as_ref().and_then(|f| f.as_callable()) {
+            let _ = wake.call(&BoaValue::undefined(), &[], &mut self.context);
+        }
     }
 
     /// Hand one rejection to `realm`'s `fireRejection` and run the

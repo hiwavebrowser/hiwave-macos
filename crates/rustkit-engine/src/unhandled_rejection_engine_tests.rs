@@ -82,3 +82,37 @@ fn rejections_of_a_loaded_page_reach_its_window_listener_after_each_tasks_microt
     let log = read(&mut engine, view, "window.__log.join(' ')");
     assert!(log.ends_with("late-catch handled(in-script)"), "{log}");
 }
+
+/// A page whose listener rejects again each time, with no timer of its own: what one turn's end
+/// leaves unannounced keeps the live loop turning (its next timer is due now) until every one
+/// has been announced, and then the loop may sleep.
+#[test]
+fn rejections_a_turn_left_unannounced_keep_the_live_loop_turning_until_all_are_announced() {
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    engine
+        .load_html(
+            view,
+            "<!doctype html><html><body><script>window.__n = 0; \
+             window.addEventListener('unhandledrejection', function (e) { e.preventDefault(); if (++__n < 200) Promise.reject(__n); });\
+             </script></body></html>",
+        )
+        .expect("load_html");
+    engine.execute_script(view, "Promise.reject(0)").unwrap();
+    let first: u32 = read(&mut engine, view, "window.__n").parse().unwrap();
+    assert!((1..200).contains(&first), "{first} announced in the first turn");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut turns = 0;
+    loop {
+        let out = rt.block_on(engine.pump_live(view, 0));
+        let n: u32 = read(&mut engine, view, "window.__n").parse().unwrap();
+        if n == 200 {
+            break;
+        }
+        turns += 1;
+        assert!(turns <= 200, "{n} of 200 after {turns} live turns");
+        assert_eq!(out.next_timer_ms, Some(0), "{n} of 200 announced and the loop was not asked to turn again");
+    }
+    let rest = rt.block_on(engine.pump_live(view, 0));
+    assert_eq!(rest.next_timer_ms, None, "all announced: nothing is due");
+    assert_eq!(read(&mut engine, view, "window.__n"), "200");
+}
