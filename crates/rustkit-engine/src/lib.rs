@@ -541,6 +541,8 @@ mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
+mod named_collections_engine_tests;
+#[cfg(all(test, feature = "headless"))]
 mod style_media_disabled_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sheet_reuse_tests;
