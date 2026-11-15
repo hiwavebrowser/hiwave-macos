@@ -14,8 +14,10 @@
 //! the next frame comes about 2000 ms later. That wait belongs to the
 //! window's thread only; the content thread's loop is the app's default
 //! (`HIWAVE_CONTENT_THREAD=1`, set by `hiwave-app` at startup) and has no
-//! such wait. The assertions are relations against the long frame's own
-//! length, not wall-clock limits, so a loaded machine does not fail them.
+//! such wait. The bounds are wall-clock bounds with wide margins: the next
+//! frame and timer within a quarter of the long frame (500 ms; measured
+//! 1-3 ms, `long_turn_resume_engine.json`), and at least 10 frames and
+//! timers in the second after (measured 35-39 and 295-297).
 
 use std::time::{Duration, Instant};
 
@@ -25,7 +27,9 @@ pub(crate) const LONG_TURN_PAGE: &str =
     include_str!("../../../docs/diagnostics/2026-11-15/long_turn_resume.html");
 
 fn field(rec: &serde_json::Value, name: &str) -> i64 {
-    rec[name].as_i64().unwrap_or_else(|| panic!("{name} missing: {rec}"))
+    rec[name]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{name} missing: {rec}"))
 }
 
 #[test]
@@ -35,7 +39,10 @@ fn after_a_long_frame_the_content_thread_runs_the_next_frame_when_it_is_due() {
     load.wait_complete();
     let deadline = Instant::now() + Duration::from_secs(30);
     let rec = loop {
-        let (answer, _) = load.eval("window.rec && rec.done ? JSON.stringify(rec) : ''", Duration::from_secs(10));
+        let (answer, _) = load.eval(
+            "window.rec && rec.done ? JSON.stringify(rec) : ''",
+            Duration::from_secs(10),
+        );
         let answer = answer.unwrap_or_default();
         let text = answer
             .strip_prefix("String(\"")
@@ -43,17 +50,28 @@ fn after_a_long_frame_the_content_thread_runs_the_next_frame_when_it_is_due() {
             .unwrap_or_default()
             .replace("\\\"", "\"");
         if !text.is_empty() {
-            break serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+            break serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap_or_else(|e| panic!("{e}: {text}"));
         }
         assert!(Instant::now() < deadline, "the page did not finish");
         std::thread::sleep(Duration::from_millis(200));
     };
-    eprintln!("PACE1 content thread: {rec}");
+    // One line per run for `long_turn_resume_engine.py`.
+    eprintln!(
+        "PACE1-RESULT {}",
+        serde_json::json!({ "arm": "app-content-thread", "rec": rec })
+    );
     let long = field(&rec, "longMs");
     assert!(long >= 2000, "{rec}");
     // Chrome: 0-1 ms. The window thread's loop would wait about `long`.
-    assert!(field(&rec, "firstFrameAfterMs") * 4 < long, "the next frame waited on the long one: {rec}");
-    assert!(field(&rec, "firstTimerAfterMs") * 4 < long, "the next timer waited on the long one: {rec}");
+    assert!(
+        field(&rec, "firstFrameAfterMs") * 4 < long,
+        "the next frame waited on the long one: {rec}"
+    );
+    assert!(
+        field(&rec, "firstTimerAfterMs") * 4 < long,
+        "the next timer waited on the long one: {rec}"
+    );
     // Chrome: 60-61 frames and 93-94 timers in the second after.
     assert!(field(&rec, "afterFrames") >= 10, "{rec}");
     assert!(field(&rec, "afterTimers") >= 10, "{rec}");

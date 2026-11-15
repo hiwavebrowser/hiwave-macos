@@ -223,6 +223,23 @@ def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
     assert run.off_machine("hiwave", None, [], [], {"non_loopback_origins": []}) == {}
 
 
+def test_the_record_says_whose_wait_the_headless_live_loop_uses(monkeypatch):
+    class Done:
+        def __init__(self, out):
+            self.stdout = out
+    helps = {"new": b"  --live-ms <LIVE_MS>\n  --window-thread-pacing\n", "old": b"  --live-ms <LIVE_MS>\n",
+             "other": b"usage: something else\n"}
+    monkeypatch.setattr(run.subprocess, "run", lambda argv, **kw: Done(helps[argv[0]]))
+    assert run.headless_pacing("new") == "content-thread"
+    assert run.headless_pacing("old") == "window-thread"
+    assert run.headless_pacing("other") is None
+
+    def missing(argv, **kw):
+        raise OSError("no such file")
+    monkeypatch.setattr(run.subprocess, "run", missing)
+    assert run.headless_pacing("gone") is None
+
+
 FAKE_ENGINE = '''#!/usr/bin/env python3
 import sys, json, time, urllib.request
 url = sys.argv[sys.argv.index("--url") + 1]
