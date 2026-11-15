@@ -278,62 +278,116 @@
     // SVGTransformList and SVGAnimatedTransformList behind `transform`, `gradientTransform` and
     // `patternTransform`. A transform is a record (type, angle, matrix, rotation centre) that wrappers
     // share: a list item made from a free transform shares its record, so changing either writes the
-    // attribute back, as Chrome does; one already in a list is copied. A list reads its attribute again
-    // whenever the text changed under it, and writes it back after each change.
+    // attribute back, as Chrome does; one already in a list (this one or another) is copied, and the
+    // original stays where it was. A list reads its attribute again whenever the text changed under it,
+    // and writes it back after each change.
+    //
+    // Records, lists and the per-element table outlive a call, so they inherit from nothing and hold their
+    // items under explicit counts; every built-in these paths use, and the element's getAttribute and
+    // setAttribute, are taken here, before any page script runs.
+    var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    var objCreate = Object.create, defineProp = Object.defineProperty;
+    var getAttr = uncurry(g.Element.prototype.getAttribute), setAttr = uncurry(g.Element.prototype.setAttribute);
+    var NewWeakMap = WeakMap, mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set);
+    var reExec = uncurry(RegExp.prototype.exec), strCode = uncurry(String.prototype.charCodeAt);
+    var strSlice = uncurry(String.prototype.slice);
+    var toNumber = Number, finite = isFinite, cos = Math.cos, sin = Math.sin, tan = Math.tan, minOf = Math.min;
+    var PI = Math.PI, TypeErr = TypeError, DOMExc = g.DOMException;
+    function desc(value, enumerable) {
+        var d = objCreate(null);
+        d.value = value; d.enumerable = !!enumerable;
+        return d;
+    }
     var T = { UNKNOWN: 0, MATRIX: 1, TRANSLATE: 2, SCALE: 3, ROTATE: 4, SKEWX: 5, SKEWY: 6 };
     function SVGTransform() { illegal(); }
     Object.defineProperty(SVGTransform.prototype, Symbol.toStringTag, { value: 'SVGTransform' });
     if (g.SVGTransform === undefined) Object.defineProperty(g, 'SVGTransform', { value: SVGTransform, writable: true, configurable: true });
     Object.keys(T).forEach(function (k) {
-        var desc = { value: T[k], enumerable: true };
-        Object.defineProperty(SVGTransform, 'SVG_TRANSFORM_' + k, desc);
-        Object.defineProperty(SVGTransform.prototype, 'SVG_TRANSFORM_' + k, desc);
+        var d = { value: T[k], enumerable: true };
+        Object.defineProperty(SVGTransform, 'SVG_TRANSFORM_' + k, d);
+        Object.defineProperty(SVGTransform.prototype, 'SVG_TRANSFORM_' + k, d);
     });
-    var RECORD = new WeakMap();
+    var T_MATRIX = T.MATRIX, T_TRANSLATE = T.TRANSLATE, T_SCALE = T.SCALE, T_ROTATE = T.ROTATE, T_SKEWX = T.SKEWX, T_SKEWY = T.SKEWY;
+    var TRANSFORM_PROTO = SVGTransform.prototype, MATRIX_PROTO = SVGMatrix.prototype;
+    var RECORD = new NewWeakMap();
+    function six(a, b, c, d, e, f) {
+        var m = objCreate(null);
+        m[0] = a; m[1] = b; m[2] = c; m[3] = d; m[4] = e; m[5] = f;
+        return m;
+    }
+    function times(m, n) {
+        return six(m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+                   m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+                   m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]);
+    }
+    function copySix(m) { return six(m[0], m[1], m[2], m[3], m[4], m[5]); }
     function record(type, angle, m, cx, cy) {
-        return { type: type, angle: angle, m: m, cx: cx || 0, cy: cy || 0, list: null, wrapper: null };
+        var r = objCreate(null);
+        r.type = type; r.angle = angle; r.m = m; r.cx = cx || 0; r.cy = cy || 0; r.list = null; r.wrapper = null;
+        return r;
     }
-    function wrapperOf(rec) {
-        if (!rec.wrapper) {
-            rec.wrapper = Object.create(SVGTransform.prototype);
-            RECORD.set(rec.wrapper, rec);
-        }
-        return rec.wrapper;
-    }
+    function copyRecord(r) { return record(r.type, r.angle, copySix(r.m), r.cx, r.cy); }
     function freshWrapper(rec) {
-        var w = Object.create(SVGTransform.prototype);
-        RECORD.set(w, rec);
+        var w = objCreate(TRANSFORM_PROTO);
+        mapSet(RECORD, w, rec);
         return w;
     }
+    function wrapperOf(rec) {
+        if (!rec.wrapper) rec.wrapper = freshWrapper(rec);
+        return rec.wrapper;
+    }
     function recordOf(t, where) {
-        var rec = t !== null && typeof t === 'object' ? RECORD.get(t) : undefined;
-        if (!rec) throw new TypeError("Failed to execute '" + where + "' on 'SVGTransformList': parameter 1 is not of type 'SVGTransform'.");
+        var rec = t !== null && typeof t === 'object' ? mapGet(RECORD, t) : undefined;
+        if (!rec) throw new TypeErr("Failed to execute '" + where + "' on 'SVGTransformList': parameter 1 is not of type 'SVGTransform'.");
         return rec;
     }
     function transformRecord(t) {
-        var rec = t !== null && typeof t === 'object' ? RECORD.get(t) : undefined;
-        if (!rec) throw new TypeError('Illegal invocation');
+        var rec = t !== null && typeof t === 'object' ? mapGet(RECORD, t) : undefined;
+        if (!rec) throw new TypeErr('Illegal invocation');
         return rec;
     }
-    function rad(deg) { return deg * Math.PI / 180; }
-    function rotation(a, cx, cy) {
-        var r = rad(a), m = [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0];
-        return cx || cy ? multiply(multiply([1, 0, 0, 1, cx, cy], m), [1, 0, 0, 1, -cx, -cy]) : m;
+    // A matrix argument's six numbers, read as the page's object answers them.
+    function sixOf(mx) {
+        if (mx === null || typeof mx !== 'object') throw new TypeErr("parameter 1 is not of type 'SVGMatrix'.");
+        return six(toNumber(mx.a), toNumber(mx.b), toNumber(mx.c), toNumber(mx.d), toNumber(mx.e), toNumber(mx.f));
     }
-    function changed(rec) { if (rec.list) rec.list.write(); }
+    // A new SVGMatrix for page script holding `m`.
+    function matrixValue(m) {
+        var o = objCreate(MATRIX_PROTO);
+        defineProp(o, 'a', field(m[0])); defineProp(o, 'b', field(m[1])); defineProp(o, 'c', field(m[2]));
+        defineProp(o, 'd', field(m[3])); defineProp(o, 'e', field(m[4])); defineProp(o, 'f', field(m[5]));
+        return o;
+    }
+    function field(v) {
+        var d = objCreate(null);
+        d.value = v; d.writable = true; d.enumerable = true; d.configurable = true;
+        return d;
+    }
+    function rad(deg) { return deg * PI / 180; }
+    function rotation(a, cx, cy) {
+        var r = rad(a), m = six(cos(r), sin(r), -sin(r), cos(r), 0, 0);
+        return cx || cy ? times(times(six(1, 0, 0, 1, cx, cy), m), six(1, 0, 0, 1, -cx, -cy)) : m;
+    }
+    function changed(rec) { if (rec.list) writeList(rec.list); }
     Object.defineProperty(SVGTransform.prototype, 'type', { get: function () { return transformRecord(this).type; }, enumerable: true, configurable: true });
     Object.defineProperty(SVGTransform.prototype, 'angle', { get: function () { return transformRecord(this).angle; }, enumerable: true, configurable: true });
-    Object.defineProperty(SVGTransform.prototype, 'matrix', { get: function () { return matrix(transformRecord(this).m); }, enumerable: true, configurable: true });
+    Object.defineProperty(SVGTransform.prototype, 'matrix', { get: function () { return matrixValue(transformRecord(this).m); }, enumerable: true, configurable: true });
     var SETTERS = {
-        setMatrix: function (mx) { var r = transformRecord(this); r.type = T.MATRIX; r.angle = 0; r.m = values(mx); r.cx = r.cy = 0; changed(r); },
-        setTranslate: function (tx, ty) { var r = transformRecord(this); r.type = T.TRANSLATE; r.angle = 0; r.m = [1, 0, 0, 1, Number(tx), Number(ty)]; changed(r); },
-        setScale: function (sx, sy) { var r = transformRecord(this); r.type = T.SCALE; r.angle = 0; r.m = [Number(sx), 0, 0, Number(sy), 0, 0]; changed(r); },
-        setRotate: function (a, cx, cy) {
-            var r = transformRecord(this); a = Number(a); cx = Number(cx) || 0; cy = Number(cy) || 0;
-            r.type = T.ROTATE; r.angle = a; r.m = rotation(a, cx, cy); r.cx = cx; r.cy = cy; changed(r);
+        setMatrix: function (mx) { var r = transformRecord(this), m = sixOf(mx); r.type = T_MATRIX; r.angle = 0; r.m = m; r.cx = r.cy = 0; changed(r); },
+        setTranslate: function (tx, ty) {
+            var r = transformRecord(this), m = six(1, 0, 0, 1, toNumber(tx), toNumber(ty));
+            r.type = T_TRANSLATE; r.angle = 0; r.m = m; r.cx = r.cy = 0; changed(r);
         },
-        setSkewX: function (a) { var r = transformRecord(this); a = Number(a); r.type = T.SKEWX; r.angle = a; r.m = [1, 0, Math.tan(rad(a)), 1, 0, 0]; changed(r); },
-        setSkewY: function (a) { var r = transformRecord(this); a = Number(a); r.type = T.SKEWY; r.angle = a; r.m = [1, Math.tan(rad(a)), 0, 1, 0, 0]; changed(r); }
+        setScale: function (sx, sy) {
+            var r = transformRecord(this), m = six(toNumber(sx), 0, 0, toNumber(sy), 0, 0);
+            r.type = T_SCALE; r.angle = 0; r.m = m; r.cx = r.cy = 0; changed(r);
+        },
+        setRotate: function (a, cx, cy) {
+            var r = transformRecord(this); a = toNumber(a); cx = toNumber(cx) || 0; cy = toNumber(cy) || 0;
+            r.type = T_ROTATE; r.angle = a; r.m = rotation(a, cx, cy); r.cx = cx; r.cy = cy; changed(r);
+        },
+        setSkewX: function (a) { var r = transformRecord(this); a = toNumber(a); r.type = T_SKEWX; r.angle = a; r.m = six(1, 0, tan(rad(a)), 1, 0, 0); r.cx = r.cy = 0; changed(r); },
+        setSkewY: function (a) { var r = transformRecord(this); a = toNumber(a); r.type = T_SKEWY; r.angle = a; r.m = six(1, tan(rad(a)), 0, 1, 0, 0); r.cx = r.cy = 0; changed(r); }
     };
     Object.keys(SETTERS).forEach(function (name) { method(SVGTransform.prototype, name, SETTERS[name]); });
 
@@ -341,34 +395,60 @@
     function serialize(rec) {
         var m = rec.m;
         switch (rec.type) {
-            case T.TRANSLATE: return 'translate(' + m[4] + ' ' + m[5] + ')';
-            case T.SCALE: return 'scale(' + m[0] + ' ' + m[3] + ')';
-            case T.ROTATE: return rec.cx || rec.cy ? 'rotate(' + rec.angle + ' ' + rec.cx + ' ' + rec.cy + ')' : 'rotate(' + rec.angle + ')';
-            case T.SKEWX: return 'skewX(' + rec.angle + ')';
-            case T.SKEWY: return 'skewY(' + rec.angle + ')';
-            default: return 'matrix(' + m.join(' ') + ')';
+            case T_TRANSLATE: return 'translate(' + m[4] + ' ' + m[5] + ')';
+            case T_SCALE: return 'scale(' + m[0] + ' ' + m[3] + ')';
+            case T_ROTATE: return rec.cx || rec.cy ? 'rotate(' + rec.angle + ' ' + rec.cx + ' ' + rec.cy + ')' : 'rotate(' + rec.angle + ')';
+            case T_SKEWX: return 'skewX(' + rec.angle + ')';
+            case T_SKEWY: return 'skewY(' + rec.angle + ')';
+            default: return 'matrix(' + m[0] + ' ' + m[1] + ' ' + m[2] + ' ' + m[3] + ' ' + m[4] + ' ' + m[5] + ')';
         }
+    }
+    // A list of records: entries 0..n-1.
+    function newItems() { var l = objCreate(null); l.n = 0; return l; }
+    function itemsAdd(l, r) { l[l.n] = r; l.n = l.n + 1; }
+    function itemsInsert(l, i, r) {
+        for (var k = l.n; k > i; k--) l[k] = l[k - 1];
+        l[i] = r; l.n = l.n + 1;
+    }
+    function itemsRemove(l, i) {
+        var r = l[i];
+        for (var k = i; k < l.n - 1; k++) l[k] = l[k + 1];
+        l.n = l.n - 1; delete l[l.n];
+        return r;
+    }
+    // The arguments of one function in the attribute, split at whitespace and commas, as numbers.
+    function numbersIn(s) {
+        var out = newItems(), start = -1, i, c;
+        for (i = 0; i <= s.length; i++) {
+            c = i < s.length ? strCode(s, i) : 32;
+            var sep = c === 32 || c === 9 || c === 10 || c === 12 || c === 13 || c === 44;
+            if (sep) {
+                if (start >= 0) { itemsAdd(out, toNumber(strSlice(s, start, i))); start = -1; }
+            } else if (start < 0) {
+                start = i;
+            }
+        }
+        return out;
     }
     // An attribute's text as records; an unreadable list is empty.
     function parseList(text) {
-        var out = [], re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g, hit;
+        var out = newItems(), re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g, hit;
         if (!text) return out;
-        while ((hit = re.exec(text))) {
-            var a = hit[2].split(/[\s,]+/).filter(function (s) { return s !== ''; }).map(Number);
-            if (a.some(function (n) { return !isFinite(n); })) return [];
-            var rec = null;
+        while ((hit = reExec(re, text))) {
+            var a = numbersIn(hit[2]), n = a.n, rec = null;
+            for (var k = 0; k < n; k++) if (!finite(a[k])) return newItems();
             switch (hit[1]) {
-                case 'matrix': if (a.length === 6) rec = record(T.MATRIX, 0, a); break;
-                case 'translate': if (a.length === 1 || a.length === 2) rec = record(T.TRANSLATE, 0, [1, 0, 0, 1, a[0], a.length > 1 ? a[1] : 0]); break;
-                case 'scale': if (a.length === 1 || a.length === 2) rec = record(T.SCALE, 0, [a[0], 0, 0, a.length > 1 ? a[1] : a[0], 0, 0]); break;
+                case 'matrix': if (n === 6) rec = record(T_MATRIX, 0, six(a[0], a[1], a[2], a[3], a[4], a[5])); break;
+                case 'translate': if (n === 1 || n === 2) rec = record(T_TRANSLATE, 0, six(1, 0, 0, 1, a[0], n > 1 ? a[1] : 0)); break;
+                case 'scale': if (n === 1 || n === 2) rec = record(T_SCALE, 0, six(a[0], 0, 0, n > 1 ? a[1] : a[0], 0, 0)); break;
                 case 'rotate':
-                    if (a.length === 1 || a.length === 3) rec = record(T.ROTATE, a[0], rotation(a[0], a[1] || 0, a[2] || 0), a[1], a[2]);
+                    if (n === 1 || n === 3) rec = record(T_ROTATE, a[0], rotation(a[0], n > 1 ? a[1] : 0, n > 1 ? a[2] : 0), n > 1 ? a[1] : 0, n > 1 ? a[2] : 0);
                     break;
-                case 'skewX': if (a.length === 1) rec = record(T.SKEWX, a[0], [1, 0, Math.tan(rad(a[0])), 1, 0, 0]); break;
-                case 'skewY': if (a.length === 1) rec = record(T.SKEWY, a[0], [1, Math.tan(rad(a[0])), 0, 1, 0, 0]); break;
+                case 'skewX': if (n === 1) rec = record(T_SKEWX, a[0], six(1, 0, tan(rad(a[0])), 1, 0, 0)); break;
+                case 'skewY': if (n === 1) rec = record(T_SKEWY, a[0], six(1, tan(rad(a[0])), 0, 1, 0, 0)); break;
             }
-            if (!rec) return [];
-            out.push(rec);
+            if (!rec) return newItems();
+            itemsAdd(out, rec);
         }
         return out;
     }
@@ -381,99 +461,107 @@
     if (g.SVGAnimatedTransformList === undefined) {
         Object.defineProperty(g, 'SVGAnimatedTransformList', { value: SVGAnimatedTransformList, writable: true, configurable: true });
     }
+    var LIST_PROTO = SVGTransformList.prototype, ANIMATED_PROTO = SVGAnimatedTransformList.prototype;
     // An element's list for one attribute: its records, and the attribute text they were read from.
-    function ListState(el, attr) { this.el = el; this.attr = attr; this.items = []; this.text = null; }
-    ListState.prototype.sync = function () {
-        var text = this.el.getAttribute(this.attr);
-        if (text === this.text) return;
-        this.items.forEach(function (r) { r.list = null; });
-        this.items = parseList(text);
-        var self = this;
-        this.items.forEach(function (r) { r.list = self; });
-        this.text = text;
-    };
-    ListState.prototype.write = function () {
-        this.el.setAttribute(this.attr, this.items.map(serialize).join(' '));
-        this.text = this.el.getAttribute(this.attr);
-    };
-    // The record a list takes for `t`: its own when free, a copy when it is in another list (or this one,
-    // which it then leaves first).
-    ListState.prototype.adopt = function (t, where) {
+    function newList(el, attr) {
+        var st = objCreate(null);
+        st.el = el; st.attr = attr; st.items = newItems(); st.text = null;
+        return st;
+    }
+    function detachAll(items, except) {
+        for (var i = 0; i < items.n; i++) if (items[i] !== except) items[i].list = null;
+    }
+    function syncList(st) {
+        var text = getAttr(st.el, st.attr);
+        if (text === st.text) return;
+        detachAll(st.items, null);
+        st.items = parseList(text);
+        for (var i = 0; i < st.items.n; i++) st.items[i].list = st;
+        st.text = text;
+    }
+    function writeList(st) {
+        var text = '', items = st.items;
+        for (var i = 0; i < items.n; i++) text += (i ? ' ' : '') + serialize(items[i]);
+        setAttr(st.el, st.attr, text);
+        st.text = getAttr(st.el, st.attr);
+    }
+    // The record a list takes for `t`: its own when free, a copy when it is in a list (this one or another).
+    function adopt(st, t, where) {
         var rec = recordOf(t, where);
-        if (rec.list === this) {
-            this.items.splice(this.items.indexOf(rec), 1);
-        } else if (rec.list) {
-            rec = record(rec.type, rec.angle, rec.m.slice(), rec.cx, rec.cy);
-        }
-        rec.list = this;
+        if (rec.list) rec = copyRecord(rec);
+        rec.list = st;
         return rec;
-    };
-    var LIST_STATE = new WeakMap(), READ_ONLY = new WeakMap();
+    }
+    var LIST_STATE = new NewWeakMap(), READ_ONLY = new NewWeakMap();
     function stateOf(list, where) {
-        var st = LIST_STATE.get(list);
-        if (!st) throw new TypeError('Illegal invocation');
-        if (where && READ_ONLY.get(list)) {
-            throw new g.DOMException("Failed to execute '" + where + "' on 'SVGTransformList': The object is read-only.", 'NoModificationAllowedError');
+        var st = list !== null && typeof list === 'object' ? mapGet(LIST_STATE, list) : undefined;
+        if (!st) throw new TypeErr('Illegal invocation');
+        if (where && mapGet(READ_ONLY, list)) {
+            throw new DOMExc("Failed to execute '" + where + "' on 'SVGTransformList': The object is read-only.", 'NoModificationAllowedError');
         }
-        st.sync();
+        syncList(st);
         return st;
     }
     function indexError(where, i, n) {
-        return new g.DOMException("Failed to execute '" + where + "' on 'SVGTransformList': The index provided (" + i +
+        return new DOMExc("Failed to execute '" + where + "' on 'SVGTransformList': The index provided (" + i +
             ") is greater than the maximum bound (" + n + ").", 'IndexSizeError');
     }
     ['numberOfItems', 'length'].forEach(function (name) {
         Object.defineProperty(SVGTransformList.prototype, name, {
-            get: function () { return stateOf(this).items.length; }, enumerable: true, configurable: true
+            get: function () { return stateOf(this).items.n; }, enumerable: true, configurable: true
         });
     });
     var LIST_METHODS = {
-        clear: function () { var st = stateOf(this, 'clear'); st.items.forEach(function (r) { r.list = null; }); st.items = []; st.write(); },
+        clear: function () {
+            var st = stateOf(this, 'clear');
+            detachAll(st.items, null); st.items = newItems(); writeList(st);
+        },
         initialize: function (t) {
-            var st = stateOf(this, 'initialize'), rec = st.adopt(t, 'initialize');
-            st.items.forEach(function (r) { if (r !== rec) r.list = null; });
-            st.items = [rec]; st.write();
+            var st = stateOf(this, 'initialize'), rec = adopt(st, t, 'initialize'), items = newItems();
+            detachAll(st.items, rec);
+            itemsAdd(items, rec); st.items = items; writeList(st);
             return freshWrapper(rec);
         },
         getItem: function (i) {
-            var st = stateOf(this); i = Number(i) >>> 0;
-            if (i >= st.items.length) throw indexError('getItem', i, st.items.length);
+            var st = stateOf(this); i = toNumber(i) >>> 0;
+            if (i >= st.items.n) throw indexError('getItem', i, st.items.n);
             return wrapperOf(st.items[i]);
         },
         insertItemBefore: function (t, i) {
-            var st = stateOf(this, 'insertItemBefore'), rec = st.adopt(t, 'insertItemBefore');
-            i = Math.min(Number(i) >>> 0, st.items.length);
-            st.items.splice(i, 0, rec); st.write();
+            var st = stateOf(this, 'insertItemBefore'), rec = adopt(st, t, 'insertItemBefore');
+            i = minOf(toNumber(i) >>> 0, st.items.n);
+            itemsInsert(st.items, i, rec); writeList(st);
             return wrapperOf(rec);
         },
         replaceItem: function (t, i) {
-            var st = stateOf(this, 'replaceItem'); i = Number(i) >>> 0;
-            if (i >= st.items.length) throw indexError('replaceItem', i, st.items.length);
-            var rec = st.adopt(t, 'replaceItem');
-            st.items[i].list = null; st.items[i] = rec; st.write();
+            var st = stateOf(this, 'replaceItem'); i = toNumber(i) >>> 0;
+            if (i >= st.items.n) throw indexError('replaceItem', i, st.items.n);
+            var rec = adopt(st, t, 'replaceItem');
+            st.items[i].list = null; st.items[i] = rec; writeList(st);
             return wrapperOf(rec);
         },
         removeItem: function (i) {
-            var st = stateOf(this, 'removeItem'); i = Number(i) >>> 0;
-            if (i >= st.items.length) throw indexError('removeItem', i, st.items.length);
-            var rec = st.items.splice(i, 1)[0];
-            rec.list = null; st.write();
+            var st = stateOf(this, 'removeItem'); i = toNumber(i) >>> 0;
+            if (i >= st.items.n) throw indexError('removeItem', i, st.items.n);
+            var rec = itemsRemove(st.items, i);
+            rec.list = null; writeList(st);
             return wrapperOf(rec);
         },
         appendItem: function (t) {
-            var st = stateOf(this, 'appendItem'), rec = st.adopt(t, 'appendItem');
-            st.items.push(rec); st.write();
+            var st = stateOf(this, 'appendItem'), rec = adopt(st, t, 'appendItem');
+            itemsAdd(st.items, rec); writeList(st);
             return wrapperOf(rec);
         },
-        createSVGTransformFromMatrix: function (mx) { return freshWrapper(record(T.MATRIX, 0, values(mx))); },
+        createSVGTransformFromMatrix: function (mx) { return freshWrapper(record(T_MATRIX, 0, sixOf(mx))); },
         // One matrix for the whole list. As Chrome does, the attribute text is left as it was.
         consolidate: function () {
-            var st = stateOf(this, 'consolidate');
-            if (!st.items.length) return null;
-            var m = st.items.reduce(function (acc, r) { return multiply(acc, r.m); }, IDENTITY);
-            st.items.forEach(function (r) { r.list = null; });
-            var rec = record(T.MATRIX, 0, m);
-            rec.list = st; st.items = [rec];
+            var st = stateOf(this, 'consolidate'), items = st.items;
+            if (!items.n) return null;
+            var m = six(1, 0, 0, 1, 0, 0);
+            for (var i = 0; i < items.n; i++) m = times(m, items[i].m);
+            detachAll(items, null);
+            var rec = record(T_MATRIX, 0, m), one = newItems();
+            rec.list = st; itemsAdd(one, rec); st.items = one;
             return wrapperOf(rec);
         }
     };
@@ -481,17 +569,17 @@
 
     // `el.transform` / `gradientTransform` / `patternTransform`: one SVGAnimatedTransformList per element
     // and attribute, its baseVal the live list and its animVal a read-only view of the same items.
-    var ANIMATED = new WeakMap();
+    var ANIMATED = new NewWeakMap();
     function animatedFor(el, attr) {
-        var byAttr = ANIMATED.get(el);
-        if (!byAttr) { byAttr = Object.create(null); ANIMATED.set(el, byAttr); }
+        var byAttr = mapGet(ANIMATED, el);
+        if (!byAttr) { byAttr = objCreate(null); mapSet(ANIMATED, el, byAttr); }
         if (byAttr[attr]) return byAttr[attr];
-        var st = new ListState(el, attr);
-        var base = Object.create(SVGTransformList.prototype), anim = Object.create(SVGTransformList.prototype);
-        LIST_STATE.set(base, st); LIST_STATE.set(anim, st); READ_ONLY.set(anim, true);
-        var a = Object.create(SVGAnimatedTransformList.prototype);
-        Object.defineProperty(a, 'baseVal', { value: base, enumerable: true });
-        Object.defineProperty(a, 'animVal', { value: anim, enumerable: true });
+        var st = newList(el, attr);
+        var base = objCreate(LIST_PROTO), anim = objCreate(LIST_PROTO);
+        mapSet(LIST_STATE, base, st); mapSet(LIST_STATE, anim, st); mapSet(READ_ONLY, anim, true);
+        var a = objCreate(ANIMATED_PROTO);
+        defineProp(a, 'baseVal', desc(base, true));
+        defineProp(a, 'animVal', desc(anim, true));
         byAttr[attr] = a;
         return a;
     }
@@ -506,10 +594,10 @@
     animatedAttribute(g.SVGPatternElement && g.SVGPatternElement.prototype, 'patternTransform');
     if (SVGSVG) {
         method(SVGSVG.prototype, 'createSVGTransform', function createSVGTransform() {
-            return freshWrapper(record(T.MATRIX, 0, IDENTITY.slice()));
+            return freshWrapper(record(T_MATRIX, 0, six(1, 0, 0, 1, 0, 0)));
         });
         method(SVGSVG.prototype, 'createSVGTransformFromMatrix', function createSVGTransformFromMatrix(mx) {
-            return freshWrapper(record(T.MATRIX, 0, values(mx)));
+            return freshWrapper(record(T_MATRIX, 0, sixOf(mx)));
         });
     }
     ['ownerSVGElement', 'viewportElement'].forEach(function (name) {
