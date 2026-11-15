@@ -142,3 +142,160 @@ fn a_style_changed_again_inside_the_write_is_read_as_it_stands() {
         "color: blue; width: 9px|blue|9px|2"
     );
 }
+
+/// Reads `s` (the element's style) as kept, then sets the attribute again with a space in front (different
+/// text, the same declarations, so the next read parses it), and says whether the two reads agree.
+const KEPT_VS_FRESH: &str = "function keptVsFresh(e, s, more) { \
+       var read = function () { return s.cssText + '|' + s.length + '|' + more.map(function (n) { return s.getPropertyValue(n); }).join(','); }; \
+       var kept = read(); e.setAttribute('style', ' ' + e.getAttribute('style')); var fresh = read(); \
+       return kept === fresh ? kept : kept + ' != ' + fresh; } ";
+
+/// The check that the parser's built-ins are the originals looks at an own data property, so an accessor
+/// in a built-in's place is not taken for the original by way of a `value` on `Object.prototype`. A parse
+/// made through it is not kept.
+#[test]
+fn an_accessor_in_place_of_a_parser_built_in_is_seen() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style, f = Array.prototype.filter; \
+             e.setAttribute('style', 'left: 1px; top: 2px; width: 3px'); \
+             Object.defineProperty(Array.prototype, 'filter', { configurable: true, get: function () { return function () { return []; }; } }); \
+             Object.prototype.value = f; \
+             try { var during = s.length; } catch (x) {} \
+             delete Object.prototype.value; \
+             Object.defineProperty(Array.prototype, 'filter', { configurable: true, writable: true, value: f }); \
+             s.cssText + '|' + s.length",
+        ),
+        "left: 1px; top: 2px; width: 3px;|3"
+    );
+}
+
+/// What a write keeps is plain strings, whatever the page's global `String` returns.
+#[test]
+fn a_write_keeps_plain_strings_when_string_is_replaced() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style, S = String, calls = 0; \
+             function P(t) { this.t = t; } \
+             P.prototype.trim = function () { return this; }; P.prototype.toLowerCase = function () { return this; }; \
+             P.prototype.toString = function () { calls++; return calls > 50 ? 'red' : this.t; }; \
+             var r = s.left; \
+             String = function (v) { return new P('' + v); }; \
+             try { s.setProperty('left', '5px'); } catch (x) {} \
+             String = S; \
+             typeof s.getPropertyValue('left') + '|' + s.getPropertyValue('left') + '|' + s.cssText",
+        ),
+        "string|5px|left: 5px; top: 2px; width: 3px;"
+    );
+}
+
+/// The kept declarations are not reachable through an index accessor on `Array.prototype`: changing what
+/// it saw, and removing it, changes nothing that is read after.
+#[test]
+fn an_index_accessor_on_array_prototype_does_not_reach_the_kept_declarations() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style, seen = Object.create(null), n = 0, last; \
+             e.setAttribute('style', 'left: 1px; top: 2px; width: 3px; height: 4px'); \
+             Object.defineProperty(Array.prototype, '3', { configurable: true, \
+               get: function () { return last; }, set: function (v) { last = v; seen[n++] = v; } }); \
+             try { var during = s.length; } catch (x) {} \
+             delete Array.prototype[3]; \
+             for (var i = 0; i < n; i++) { var v = seen[i]; if (v && typeof v === 'object' && 'value' in v) v.value = 'HACKED'; } \
+             var out; try { out = s.cssText + '|' + s.length + '|' + s.height; } catch (x) { out = 'threw ' + x; } \
+             out",
+        ),
+        "left: 1px; top: 2px; width: 3px; height: 4px;|4|4px"
+    );
+}
+
+/// A write keeps its declarations only when every one of them reads back as itself, whatever was kept
+/// before: a declaration from a parse that was not kept (here under a replaced `push` that does nothing
+/// different) is checked like the one written.
+#[test]
+fn a_write_after_a_parse_that_was_not_kept_is_checked_whole() {
+    let b = bound();
+    let got = ev(
+        &b,
+        &format!(
+            "{KEPT_VS_FRESH} var e = document.getElementById('t'), s = e.style, r = s.left, push = Array.prototype.push; \
+             Array.prototype.push = function () {{ return push.apply(this, arguments); }}; \
+             e.setAttribute('style', '--x: ('); s.top = '2px'; \
+             Array.prototype.push = push; \
+             keptVsFresh(e, s, ['top', '--x'])"
+        ),
+    );
+    assert!(!got.contains(" != "), "{got}");
+}
+
+/// A parse made while a parser built-in is replaced is not kept: once it is put back, the same text reads
+/// right.
+#[test]
+fn a_parse_while_a_built_in_is_replaced_is_not_kept() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var e = document.getElementById('t'), s = e.style, r = s.left, trim = String.prototype.trim; \
+             String.prototype.trim = function () { return 'color'; }; \
+             e.setAttribute('style', 'left: 6px; top: 7px'); try { var during = s.left; } catch (x) {} \
+             String.prototype.trim = trim; \
+             s.cssText + '|' + s.length + '|' + s.left",
+        ),
+        "left: 6px; top: 7px;|2|6px"
+    );
+}
+
+/// A write the element answers by writing its own inline style (`this.style.top` inside
+/// attributeChangedCallback) leaves both writes, read as the attribute stands.
+#[test]
+fn a_style_write_inside_the_write_is_read_as_it_stands() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "var seen = 0; \
+             customElements.define('x-retop', class extends HTMLElement { \
+               static get observedAttributes() { return ['style']; } \
+               attributeChangedCallback() { if (seen++ === 0) this.style.top = '7px'; } }); \
+             var e = document.createElement('x-retop'); document.body.appendChild(e); \
+             e.style.color = 'red'; \
+             [e.getAttribute('style'), e.style.color, e.style.top, e.style.length].join('|')",
+        ),
+        "color: red; top: 7px;|red|7px|2"
+    );
+}
+
+/// Writes of every shape read back as the attribute says: priority, quotes, escapes, braces, `url()`, a
+/// custom property, a removal, and a write on a base the kept list could not hold exactly.
+#[test]
+fn writes_of_every_shape_read_back_as_the_attribute_says() {
+    let b = bound();
+    for (base, op, names) in [
+        ("left: 1px", "s.setProperty('color', 'red', 'important')", "color"),
+        ("color: red !important; left: 1px", "s.left = '2px'", "color,left"),
+        ("left: 1px", "s.setProperty('font-family', '\"A;B\", serif')", "font-family"),
+        ("left: 1px", "s.setProperty('content', '\"a\\\\\"b\"')", "content"),
+        ("left: 1px", "s.setProperty('--a', '{ b: c; }')", "--a,left"),
+        ("left: 1px", "s.setProperty('background-image', 'url(\"a;b.png\")')", "background-image"),
+        ("left: 1px", "s.setProperty('--Custom', '3px')", "--custom,--Custom"),
+        ("left: 1px; top: 2px", "s.removeProperty('top')", "top,left"),
+        ("color: red /* c */; left: 1px", "s.top = '2px'", "color,top"),
+        ("content: \"x;y\"; left: 1px", "s.top = '2px'", "content,top"),
+    ] {
+        let names: Vec<String> = names.split(',').map(|n| format!("'{n}'")).collect();
+        let script = format!(
+            "{KEPT_VS_FRESH} var e = document.getElementById('t'), s = e.style; e.setAttribute('style', {base:?}); \
+             var r = s.length; {op}; keptVsFresh(e, s, [{}])",
+            names.join(",")
+        );
+        let got = ev(&b, &script);
+        assert!(!got.contains(" != "), "{base} / {op}: {got}");
+    }
+}
