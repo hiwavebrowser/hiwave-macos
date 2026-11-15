@@ -16,8 +16,12 @@ Engines:
                    a throwaway profile under $HOME, the restored tab pointed
                    at the runner URL). Takes ~/.claude/realwindow.lock, needs
                    HID idle >= 180 s and refuses 17:00-19:30 ET.
-  hiwave-headless  parity-capture --url --live-ms: the same engine and live
-                   loop with no window (offscreen GPU, nothing presented).
+  hiwave-headless  parity-capture --url --live-ms: the same engine with no
+                   window (offscreen GPU, nothing presented). Its live loop
+                   waits between turns as the app's content thread does
+                   (PACE1), but its turns are not the app's, so its pacing is
+                   close to the app's, not the same; the record says which
+                   wait the binary uses (`live_pacing`).
   chrome           Chrome for Testing, headless unless --headed (headed takes
                    the same lock). Its non-loopback requests go to a local
                    sink that refuses and records them.
@@ -627,6 +631,20 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     return Handle
 
 
+def headless_pacing(binary):
+    """Whose wait parity-capture's live loop uses between turns: "content-thread" (from PACE1 on,
+    the app's default loop) or "window-thread" (a binary from before PACE1, which waited at least as
+    long as the last turn took). Runs with different pacing are not comparable. None if the binary
+    does not answer --help as parity-capture."""
+    try:
+        out = subprocess.run([str(binary), "--help"], capture_output=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if b"--live-ms" not in out:
+        return None
+    return "content-thread" if b"--window-thread-pacing" in out else "window-thread"
+
+
 # A stress run may raise the engine's live-turn watchdog so a long computation, such as MotionMark's
 # end-of-test analysis, finishes and the next blocker shows. The same number is also the turn's whole
 # allowance of script time, so a raised run paces frames differently even when no callback is long. Only
@@ -1014,6 +1032,7 @@ def main():
         run["browser_own_requests"] = [h for h in sorted(set(sink.hosts)) if h.split(" ")[-1] in CHROME_OWN_HOSTS]
     if args.engine == "hiwave-headless":
         run["headless_events"] = events
+        run["live_pacing"] = headless_pacing(binary)
     path = out / (name + ".json")
     path.write_text(json.dumps(run, indent=1) + "\n")
     if left:
