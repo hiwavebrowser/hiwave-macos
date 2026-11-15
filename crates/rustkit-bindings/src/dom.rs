@@ -4644,10 +4644,26 @@ const WRAPPERS_JS: &str = r#"
     // measure behind MotionMark's Multiply, which reads and writes thousands of inline properties a frame.
     var inlineStyleParses = 0;
     __rk.inlineStyleParses = function () { return inlineStyleParses; };
+    // Each element's declarations as last parsed, with the attribute text they were parsed from: a read
+    // of unchanged text needs no parse. Keyed by the text itself, so a script's setAttribute (or anything
+    // else that changes the attribute) is read afresh. Callers get copies; the kept list is never handed out.
+    var parsedStyles = new WeakMap();
+    function copyDecls(list) {
+        return list.map(function (d) { return { name: d.name, value: d.value, important: d.important }; });
+    }
     function decls(st) {
+        var el = st[OWNER], text = el.getAttribute('style') || '';
+        var kept = parsedStyles.get(el);
+        if (!kept || kept.text !== text) {
+            kept = { text: text, list: parseDecls(text) };
+            parsedStyles.set(el, kept);
+        }
+        return copyDecls(kept.list);
+    }
+    function parseDecls(text) {
         var out = [];
         inlineStyleParses++;
-        splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
+        splitDecls(text).forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
             var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
@@ -4660,10 +4676,28 @@ const WRAPPERS_JS: &str = r#"
         });
         return out;
     }
+    // A value whose serialization reads back as itself: no quote, escape, `;` or `!`, and its parentheses
+    // and brackets balanced (`rotate(9deg)`, `hsla(…)`). Anything else is parsed again on the next read.
+    function roundTrips(value) {
+        if (/["'\\;!{}]/.test(value)) return false;
+        var depth = 0;
+        for (var i = 0; i < value.length; i++) {
+            var c = value.charAt(i);
+            if (c === '(' || c === '[') depth++;
+            else if (c === ')' || c === ']') { if (--depth < 0) return false; }
+        }
+        return depth === 0;
+    }
     function storeDecls(st, ds) {
-        st[OWNER].setAttribute('style', ds.map(function (d) {
+        var el = st[OWNER];
+        el.setAttribute('style', ds.map(function (d) {
             return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
         }).join(' '));
+        // What was just written is what a parse of it gives, when every value reads back as itself: keep it
+        // under the attribute's text as it now stands, so the next read needs no parse.
+        if (ds.every(function (d) { return roundTrips(d.value); })) {
+            parsedStyles.set(el, { text: el.getAttribute('style') || '', list: copyDecls(ds) });
+        }
     }
     function cssName(prop) {
         if (prop === 'cssFloat') return 'float';
