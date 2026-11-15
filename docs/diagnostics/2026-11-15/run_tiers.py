@@ -53,7 +53,10 @@ def run(cmd, cwd, timeout):
     except subprocess.TimeoutExpired:
         return {"error": f"timeout after {timeout}s"}
     if p.returncode != 0:
-        return {"error": (p.stderr or p.stdout).strip().splitlines()[-1][:300] if (p.stderr or p.stdout).strip() else f"exit {p.returncode}"}
+        lines = (p.stderr or p.stdout).strip().splitlines()
+        # The harness panics with the script's error on the line after "panicked at".
+        msg = next((lines[i + 1] for i, l in enumerate(lines[:-1]) if "panicked at" in l), lines[-1] if lines else f"exit {p.returncode}")
+        return {"error": msg[:400]}
     line = p.stdout.strip().splitlines()[-1]
     r = json.loads(line)
     r["wall_s"] = round(time.time() - t, 1)
