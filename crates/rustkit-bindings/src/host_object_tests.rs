@@ -68,6 +68,14 @@ fn shared_names() -> std::collections::BTreeSet<String> {
 /// `loaded`: it is also a ProgressEvent's, set on the page's own event.)
 const FRAME_NAMES: &str = "now nextId timers count pumps pumpCount up top el win tree changed scan attach size nodeId byTag";
 
+/// The names the engine describes the events of the user's input, of
+/// transitions and of animations with (the fields it writes on what it
+/// hands `make`).
+const INIT_NAMES: &str = "bubbles cancelable composed view detail relatedTarget related dataTransfer pointerId \
+    pointerType isPrimary pressure deltaX deltaY deltaZ deltaMode wheelDeltaX wheelDeltaY key code repeat keyCode \
+    charCode clientX clientY screenX screenY offsetX offsetY movementX movementY pageX pageY which button buttons \
+    ctrlKey altKey shiftKey metaKey propertyName animationName elapsedTime pseudoElement data inputType";
+
 /// The page: an accessor on `Object.prototype` for every name, counting
 /// its calls. `mine` holds what the page made or was given; a receiver
 /// that is not in it, not a node, an event or a function, is counted as
@@ -559,6 +567,15 @@ fn an_attach_leaves_no_window_behind() {
     assert_eq!(text(t.parent.host_turn(left, &[]).unwrap()), "true", "nothing left after an attach that was refused");
     let expected = if attached { "the frame" } else { "none" };
     assert_eq!(text(t.parent.evaluate(frame_window).unwrap()), expected, "attached: {attached}");
+    // One whose frame's window cannot take its place in the tree: the
+    // frame holds no window, and nothing is left with either document.
+    let t = tree(false, "");
+    t.child.evaluate("Object.defineProperty(window, 'top', { value: 1, writable: false, configurable: false });").unwrap();
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(!matches!(attached, Ok(true)), "an attach that cannot be completed: {attached:?}");
+    assert_eq!(text(t.parent.host_turn(left, &[]).unwrap()), "true", "nothing left with the page after a failed attach");
+    assert_eq!(text(t.child.host_turn(left, &[]).unwrap()), "true", "nothing left with the frame after a failed attach");
+    assert_eq!(text(t.parent.evaluate(frame_window).unwrap()), "none", "a frame that was not attached holds no window");
     // One for a node that is not a frame.
     let t = tree(false, "");
     let para = t.doc.get_element_by_id("p").unwrap().id.raw();
@@ -664,26 +681,27 @@ fn an_event_of_one_window_keeps_its_dispatch_state_in_another() {
     let attached = t.parent.attach_frame(t.node, &t.child);
     assert!(matches!(attached, Ok(true)), "{attached:?}");
     // `doc` is the document dispatched in, `W` the window whose `Event` makes the event.
-    let run = "function run(doc, W) {
+    let run = "function run(doc, W, n) {
+        var x = 'x' + n, y = 'y' + n;
         var seen = [], p = doc.getElementById('p'), b = doc.getElementById('b');
-        p.addEventListener('x', function (e) {
+        p.addEventListener(x, function (e) {
             seen.push(e.composedPath()[0] === p ? 'path' : 'no-path');
             e.stopPropagation();
             seen.push('stopped:' + e.cancelBubble);
         });
-        doc.body.addEventListener('x', function () { seen.push('body'); });
-        p.dispatchEvent(new W.Event('x', { bubbles: true }));
-        b.addEventListener('y', function (e) { seen.push('first'); e.stopImmediatePropagation(); });
-        b.addEventListener('y', function () { seen.push('second'); });
-        doc.body.addEventListener('y', function () { seen.push('body'); });
-        b.dispatchEvent(new W.Event('y', { bubbles: true }));
+        doc.body.addEventListener(x, function () { seen.push('body'); });
+        p.dispatchEvent(new W.Event(x, { bubbles: true }));
+        b.addEventListener(y, function (e) { seen.push('first'); e.stopImmediatePropagation(); });
+        b.addEventListener(y, function () { seen.push('second'); });
+        doc.body.addEventListener(y, function () { seen.push('body'); });
+        b.dispatchEvent(new W.Event(y, { bubbles: true }));
         return seen.join(' ');
     }";
     let got = text(
         t.parent
             .evaluate(&format!(
                 "{run} var w = document.getElementById('fr').contentWindow; \
-                 [run(document, w), run(w.document, window), run(document, window), run(w.document, w)].join(' | ')"
+                 [run(document, w, 1), run(w.document, window, 2), run(document, window, 3), run(w.document, w, 4)].join(' | ')"
             ))
             .unwrap(),
     );
@@ -693,4 +711,42 @@ fn an_event_of_one_window_keeps_its_dispatch_state_in_another() {
         format!("{one} | {one} | {one} | {one}"),
         "the frame's event in the page, the page's in the frame, each window's own"
     );
+}
+
+/// The user's input and the engine's transition and animation events in
+/// a frame tree, with an accessor on both windows' `Object.prototype` for
+/// every name such an event is described with: none is invoked, in the
+/// page or in its frame, and each event arrives as the engine made it.
+#[test]
+fn input_events_in_a_frame_tree_are_described_by_objects_that_inherit_nothing() {
+    let names = format!("var NAMES = {INIT_NAMES:?};");
+    let listen = "var seen = []; ['mousedown', 'click', 'keydown', 'wheel', 'dragstart', 'transitionend', 'animationend'].forEach(function (type) { \
+        document.addEventListener(type, function (e) { seen.push(type + ':' + e.isTrusted + ':' + e.bubbles + ':' + e.cancelable); }); });";
+    let t = tree(false, &format!("{names}{TRAP}{listen}"));
+    t.child.evaluate(&format!("{names}{TRAP}{listen}")).unwrap();
+    let attached = t.parent.attach_frame(t.node, &t.child);
+    assert!(matches!(attached, Ok(true)), "{attached:?}");
+    t.parent.evaluate("adopt(document.getElementById('fr').contentWindow);").unwrap();
+    t.child.evaluate("adopt(parent);").unwrap();
+    let mouse = MouseEventBindingData { client_x: 5.0, client_y: 5.0, ..Default::default() };
+    let key = KeyboardEventBindingData { key: "a".into(), code: "KeyA".into(), ..Default::default() };
+    let fire = |b: &DomBindings, doc: &Document| {
+        let id = |name: &str| doc.get_element_by_id(name).unwrap().id.raw();
+        let (para, input, drag) = (id("p"), id("i"), id("frag"));
+        for kind in ["mousedown", "click"] {
+            let _ = b.fire_mouse_event(para, kind, &mouse);
+        }
+        let _ = b.fire_key_event(Some(input), "keydown", &key);
+        let _ = b.fire_wheel_event(para, &mouse, 0.0, 10.0, true);
+        let _ = b.fire_drag_event(drag, "dragstart", &mouse, "move");
+        let _ = b.fire_transition_event(para, None, "transitionend", "opacity", 0.1);
+        let _ = b.fire_animation_event(para, None, "animationend", "n", 0.1);
+        (text(b.evaluate(VERDICT).unwrap()), text(b.evaluate("seen.join(' ')").unwrap()))
+    };
+    let in_frame = fire(&t.child, &t.child_doc);
+    let in_page = fire(&t.parent, &t.doc);
+    let seen = "mousedown:true:true:true click:true:true:true keydown:true:true:true wheel:true:true:true \
+        dragstart:true:true:true transitionend:true:true:true animationend:true:true:false";
+    let want = ("0 0 ".to_string(), seen.to_string());
+    assert_eq!((in_page, in_frame), (want.clone(), want), "accessor calls and what the listeners saw: in the page, in its frame");
 }
