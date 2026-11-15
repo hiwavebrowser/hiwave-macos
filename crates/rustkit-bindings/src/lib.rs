@@ -706,17 +706,33 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
-            if (best < 0 || timers[best].due > horizon) break;
+            // On the real clock the turn also reaches what has come due in
+            // real time since it began: a timer set during it (a zero-delay
+            // chain's next link, a chunk of work) runs in it, until the frame
+            // budget ends the turn, as before CLOCK3, and the turn's work is
+            // laid out once. Counted only from the turn's time, each such
+            // link waited for a turn of its own, with a relayout between
+            // (CLOCK3 R1: 41 rows of chunked work a second where Chrome does
+            // 195).
+            var reach = liveAt >= 0 && since() > horizon ? since() : horizon;
+            if (best < 0 || timers[best].due > reach) break;
             var timer = timers[best];
             // A timer a cut-short live turn owed runs after the clock has
-            // moved on; the clock does not go back for it.
-            if (timer.due > now) now = timer.due;
+            // moved on; the clock does not go back for it. One run past the
+            // turn's time (on the real clock) leaves the clock at the turn's
+            // time: the next turn's delta counts the real time it ran in.
+            if (timer.due > now) now = timer.due > horizon ? horizon : timer.due;
             // An interval that fell behind (a live turn held it back) is not
-            // caught up: its next run counts from now (on the real clock, the
-            // turn's time), as in a browser.
+            // caught up: its next run counts from now, as in a browser. On
+            // the real clock it keeps its grid, as Chrome's does: the next
+            // run is the first of its periods after the turn's time.
             if (timer.every) {
                 timer.due += timer.every;
-                if (timer.due <= since()) timer.due = since() + timer.every;
+                var from = since();
+                if (timer.due <= from) {
+                    if (liveAt >= 0) timer.due += timer.every * (Math.floor((from - timer.due) / timer.every) + 1);
+                    else timer.due = from + timer.every;
+                }
                 timer.seq = nextId++;
             }
             else removeAt(best);

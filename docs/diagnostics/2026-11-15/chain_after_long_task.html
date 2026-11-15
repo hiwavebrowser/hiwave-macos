@@ -7,6 +7,9 @@
 //                               set from the one before, so it counts its 10 ms from when it was set
 //   chainAfter, intervalAfter   chain links / interval runs in the 300 ms after it
 // When done (500 ms after the long task) it sets rec.done and logs REC <json>.
+// Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
+// harness calls it. RustKit runs a load's timers up to 5 s ahead of real time (its load horizon),
+// so its tests load with #manual and call go() in a live turn, after the load.
 window.rec = { longMs: 0, chainBurst: 0, intervalBurst: 0, chainMinGapMs: -1, chainAfter: 0,
   intervalAfter: 0, done: false };
 var start = performance.now(), longEnd = -1, lastLink = -1, iv;
@@ -36,12 +39,15 @@ function finish() {
   rec.done = true;
   console.log('REC ' + JSON.stringify(rec));
 }
-setTimeout(chain, 10);
-iv = setInterval(interval, 10);
-setTimeout(function () {
-  var t0 = performance.now();
-  while (performance.now() - t0 < 500) JSON.stringify({ a: [1, 2, 3] });
-  longEnd = performance.now();
-  rec.longMs = Math.round(longEnd - t0);
-}, 200);
+function go() {
+  setTimeout(chain, 10);
+  iv = setInterval(interval, 10);
+  setTimeout(function () {
+    var t0 = performance.now();
+    while (performance.now() - t0 < 500) JSON.stringify({ a: [1, 2, 3] });
+    longEnd = performance.now();
+    rec.longMs = Math.round(longEnd - t0);
+  }, 200);
+}
+if (location.hash !== '#manual') addEventListener('load', go);
 </script>

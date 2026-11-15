@@ -12,9 +12,9 @@
  {
   "longMs": 500,
   "chainBurst": 1,
-  "intervalBurst": 2,
+  "intervalBurst": 1,
   "chainMinGapMs": 10,
-  "chainAfter": 28,
+  "chainAfter": 29,
   "intervalAfter": 31,
   "done": true,
   "version": "Chrome/148.0.7778.216"
@@ -22,8 +22,8 @@
  {
   "longMs": 500,
   "chainBurst": 1,
-  "intervalBurst": 2,
-  "chainMinGapMs": 10,
+  "intervalBurst": 1,
+  "chainMinGapMs": 10.1,
   "chainAfter": 28,
   "intervalAfter": 31,
   "done": true,
@@ -33,7 +33,7 @@
   "longMs": 500,
   "chainBurst": 1,
   "intervalBurst": 1,
-  "chainMinGapMs": 10,
+  "chainMinGapMs": 10.1,
   "chainAfter": 28,
   "intervalAfter": 31,
   "done": true,

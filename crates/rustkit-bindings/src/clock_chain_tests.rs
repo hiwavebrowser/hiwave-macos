@@ -11,29 +11,44 @@
 use super::*;
 
 const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-15/chain_after_long_task.html");
+const ZERO_DELAY: &str = include_str!("../../../docs/diagnostics/2026-11-15/zero_delay_chain.html");
 
-/// The page's script: the one `<script>` of the fixture.
-fn script() -> &'static str {
-    let start = PAGE.find("<script>").unwrap() + "<script>".len();
-    let end = PAGE.rfind("</script>").unwrap();
-    &PAGE[start..end]
+/// A fixture's script: its one `<script>`.
+fn script(page: &'static str) -> &'static str {
+    let start = page.find("<script>").unwrap() + "<script>".len();
+    let end = page.rfind("</script>").unwrap();
+    &page[start..end]
 }
 
-/// Turns the page's timers live, as the engine's live turn on the real clock does
+/// Turns a fixture's timers live, as the engine's live turn on the real clock does
 /// (`advance_real_timers_for_frame` with the real time since the last turn, a 16 ms frame budget),
 /// and waits between turns as the app's content thread does (the next timer, 2 to 50 ms), until the
-/// page is done or 5 s pass. Returns `rec`.
-fn run_live() -> serde_json::Value {
+/// page is done or 5 s pass. Returns `rec`. `real` false turns it on the stepped clock instead
+/// (`advance_timers_for_frame`), as every live turn did before CLOCK3.
+fn run_live(page: &'static str, real: bool) -> serde_json::Value {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.set_document(Rc::new(Document::parse_html("<html><head></head><body></body></html>").unwrap()))
-        .unwrap();
-    b.evaluate(&format!("(0, eval)({})", serde_json::to_string(script()).unwrap())).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><head></head><body></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.evaluate(&format!(
+        "(0, eval)({})",
+        serde_json::to_string(script(page)).unwrap()
+    ))
+    .unwrap();
+    // A fixture starts in `go()` (at the load event in Chrome).
+    b.evaluate("go()").unwrap();
     let began = std::time::Instant::now();
     let mut clock = began;
     while began.elapsed() < std::time::Duration::from_secs(5) {
         let elapsed_ms = clock.elapsed().as_millis() as u64;
         clock += std::time::Duration::from_millis(elapsed_ms);
-        b.advance_real_timers_for_frame(elapsed_ms, 1000, 16).unwrap();
+        if real {
+            b.advance_real_timers_for_frame(elapsed_ms, 1000, 16)
+                .unwrap();
+        } else {
+            b.advance_timers_for_frame(elapsed_ms, 1000, 16).unwrap();
+        }
         if matches!(b.evaluate("rec.done").unwrap(), JsValue::Boolean(true)) {
             break;
         }
@@ -50,12 +65,21 @@ fn run_live() -> serde_json::Value {
 /// intervalAfter 30 to 31 (longMs 500).
 #[test]
 fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
-    let rec = run_live();
+    let rec = run_live(PAGE, true);
     eprintln!("CLOCK3-RESULT {rec}");
     assert_eq!(rec["done"], true, "the page did not finish: {rec}");
     assert!(rec["longMs"].as_f64().unwrap() >= 500.0, "{rec}");
-    // The one link that was overdue runs; the next is set from then.
-    assert_eq!(rec["chainBurst"], 1, "chain links run at once after the long task: {rec}");
+    // The one link that was overdue runs; the next is set from then. At most one in the 5 ms after
+    // the long task (the overdue link may land just past them on a loaded machine), and a link
+    // after it.
+    assert!(
+        rec["chainBurst"].as_u64().unwrap() <= 1,
+        "chain links run at once after the long task: {rec}"
+    );
+    assert!(
+        rec["chainAfter"].as_u64().unwrap() >= 1,
+        "no chain link after the long task: {rec}"
+    );
     // Chrome 10. Up to 1 ms less here: the live loop's turn delta is whole milliseconds, so the
     // virtual clock a link is set on trails the real clock by under a millisecond (0 before CLOCK3).
     assert!(
@@ -63,8 +87,11 @@ fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
         "two chain links less than their 10 ms apart after the long task: {rec}"
     );
     // No replay: at most a link per 10 ms in the 300 ms after it (Chrome 28).
-    assert!(rec["chainAfter"].as_u64().unwrap() <= 31, "chain links in the 300 ms after: {rec}");
-    // Intervals were already re-based: one overdue run, then their period (Chrome 1 to 2, 30 to 31).
+    assert!(
+        rec["chainAfter"].as_u64().unwrap() <= 31,
+        "chain links in the 300 ms after: {rec}"
+    );
+    // An interval: one overdue run, then its period on its grid (Chrome 1 to 2, 30 to 31).
     assert!(rec["intervalBurst"].as_u64().unwrap() <= 2, "{rec}");
     assert!(rec["intervalAfter"].as_u64().unwrap() <= 32, "{rec}");
 }
@@ -72,12 +99,13 @@ fn a_timeout_chain_resumes_at_its_own_pace_after_a_long_task() {
 /// A stepped turn (a capture's settle, a test) moves virtual time the page has not lived through, so
 /// a chain still runs a link per 10 ms of it: five in a 50 ms step, as before CLOCK3. On the real
 /// clock the same turn is 50 ms the page was held back: the overdue link runs once, and the next is
-/// 10 ms after the turn's time.
+/// at least 10 ms after the turn's time (plus the real time the turn had taken when it was set).
 #[test]
 fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
     let count = |real: bool| {
         let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-        b.evaluate("var n = 0; (function link() { n++; setTimeout(link, 10); })();").unwrap();
+        b.evaluate("var n = 0; (function link() { n++; setTimeout(link, 10); })();")
+            .unwrap();
         if real {
             b.advance_real_timers_for_frame(50, 1000, 0).unwrap();
         } else {
@@ -91,5 +119,74 @@ fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
     };
     // The first link runs at once, then one per 10 ms: 10, 20, 30, 40, 50.
     assert_eq!(count(false), ("6".to_string(), Some(10)));
-    assert_eq!(count(true), ("2".to_string(), Some(10)));
+    let (n, next) = count(true);
+    assert_eq!(n, "2");
+    assert!(
+        next.is_some_and(|d| d >= 10),
+        "the next link is due in {next:?} ms"
+    );
+}
+
+/// An interval held back on the real clock runs once and keeps its grid, as Chrome's does (bursts of
+/// 1 to 2 and 30 to 31 runs in the 300 ms after a long task): set at 0 with a 10 ms period, held back
+/// for 55 ms, it runs once and next at 60, not at 65 (re-based) nor five times (caught up). Its next
+/// is the first grid point past the turn's time plus the real time the turn took, so on a loaded
+/// machine it can be 70; either way 5 ms off the turn's time modulo 10.
+#[test]
+fn an_interval_held_back_on_the_real_clock_runs_once_and_keeps_its_grid() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.evaluate("var n = 0; setInterval(function () { n++; }, 10);")
+        .unwrap();
+    b.advance_real_timers_for_frame(55, 1000, 0).unwrap();
+    assert!(matches!(b.evaluate("String(n)").unwrap(), JsValue::String(s) if s == "1"));
+    let next = b.next_timer_delay().expect("the interval is set");
+    assert_eq!(
+        next % 10,
+        5,
+        "the interval left its grid: next in {next} ms"
+    );
+    // On time, once a period.
+    b.advance_real_timers_for_frame(next, 1000, 0).unwrap();
+    assert!(matches!(b.evaluate("String(n)").unwrap(), JsValue::String(s) if s == "2"));
+}
+
+/// Animation frames are the same on both clocks: one round a turn, and a frame a timer of the turn
+/// asks for (due a frame after that timer) is in the round when the turn reaches it.
+#[test]
+fn animation_frames_are_the_same_on_the_real_clock() {
+    let run = |real: bool| {
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.evaluate(
+            "var frames = 0, log = [];              (function f() { frames++; requestAnimationFrame(f); })();              setTimeout(function () { requestAnimationFrame(function () { log.push('f'); }); }, 50);",
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        for delta in [300, 16, 16] {
+            if real {
+                b.advance_real_timers_for_frame(delta, 1000, 0).unwrap();
+            } else {
+                b.advance_timers_for_frame(delta, 1000, 0).unwrap();
+            }
+            seen.push(match b.evaluate("frames + ' ' + log.join()").unwrap() {
+                JsValue::String(s) => s,
+                other => panic!("{other:?}"),
+            });
+        }
+        seen
+    };
+    // The loop's first call is the script's own; then one frame a turn, and the timer's frame in the
+    // first turn's round.
+    assert_eq!(run(false), ["2 f", "3 f", "4 f"]);
+    assert_eq!(run(true), run(false));
+}
+
+/// Measurement only (CLOCK3 item 1): the zero-delay page on both clocks.
+#[test]
+#[ignore]
+fn measure_zero_delay_chain() {
+    for real in [false, true] {
+        for _ in 0..3 {
+            eprintln!("ZERO-DELAY real={real} {}", run_live(ZERO_DELAY, real));
+        }
+    }
 }

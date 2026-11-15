@@ -1,0 +1,97 @@
+[
+ {
+  "links": 112,
+  "firstGapsMs": [
+   0,
+   0,
+   0,
+   0,
+   0.1,
+   4.8,
+   4,
+   4.6
+  ],
+  "medianGapMs": 4.6,
+  "frames": 31,
+  "linksPerFrameMax": 6,
+  "fromFrameMs": 0.1,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "links": 111,
+  "firstGapsMs": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   4.2,
+   4.6,
+   4.4
+  ],
+  "medianGapMs": 4.6,
+  "frames": 31,
+  "linksPerFrameMax": 6,
+  "fromFrameMs": 0.1,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "links": 114,
+  "firstGapsMs": [
+   0,
+   0.1,
+   0,
+   0,
+   0,
+   5.1,
+   4.5,
+   4.3
+  ],
+  "medianGapMs": 4.5,
+  "frames": 31,
+  "linksPerFrameMax": 6,
+  "fromFrameMs": 0.1,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "links": 113,
+  "firstGapsMs": [
+   0.1,
+   0.1,
+   0,
+   0,
+   0,
+   5.5,
+   4.8,
+   4.1
+  ],
+  "medianGapMs": 4.6,
+  "frames": 31,
+  "linksPerFrameMax": 6,
+  "fromFrameMs": 0.1,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "links": 113,
+  "firstGapsMs": [
+   0,
+   0,
+   0,
+   0.1,
+   0,
+   5,
+   4.3,
+   5.2
+  ],
+  "medianGapMs": 4.6,
+  "frames": 31,
+  "linksPerFrameMax": 6,
+  "fromFrameMs": 0.1,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ }
+]

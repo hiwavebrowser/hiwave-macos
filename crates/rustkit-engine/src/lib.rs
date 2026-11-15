@@ -714,6 +714,8 @@ mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
+mod clock_chain_live_tests;
+#[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
