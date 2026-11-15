@@ -3382,6 +3382,11 @@ Connection: close
     /// stops between turns once its real-time budget (the reference's 5 s, less if the capture's timeout
     /// has less left) is spent, and says how far virtual time got. Here every turn costs about 150 ms,
     /// so 100 turns would take 15 s.
+    ///
+    /// The bound is on the settle's own figures, not on the whole capture's wall time (FLK7: at load
+    /// 7 to 12.5 the capture took 9.5 s against a 9 s limit, the settle itself having stopped at
+    /// 4828 ms as designed): the settle stops between turns, so it ends past its budget by at most
+    /// its slowest turn, however slow the machine makes the turns.
     #[test]
     fn a_settle_whose_turns_are_slow_stops_at_its_real_time_budget() {
         let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -3413,14 +3418,16 @@ Connection: close
         });
         let url = format!("http://127.0.0.1:{port}/");
         let args = Args::try_parse_from(["parity-capture", "--url", url.as_str()]).unwrap();
-        let began = Instant::now();
         let result = run_capture(&args);
-        let took = began.elapsed();
         assert_eq!(result.status, "ok", "{:?}", result.error);
         let stats = result.settle_stats.clone().expect("a stepped capture reports its settle");
         assert!(stats.cut_short, "the settle was not cut short: {stats:?}");
         assert!(stats.virtual_ms > 0 && stats.virtual_ms < STEPPED_SETTLE_MS, "virtual time reached: {stats:?}");
-        assert!(took < Duration::from_millis(9_000), "the settle ran past its budget: the capture took {took:?} ({stats:?})");
+        let budget = SETTLE_REAL_BUDGET.as_millis() as u64;
+        assert!(
+            stats.wall_ms <= budget + stats.max_turn_ms,
+            "the settle ran past its budget by more than its slowest turn: {stats:?}"
+        );
     }
 
     /// The settle does not start a turn that would likely end past its budget: it stops when the time spent
