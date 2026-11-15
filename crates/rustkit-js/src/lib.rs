@@ -435,6 +435,11 @@ struct PendingTimer {
     repeat: bool,
 }
 
+/// Most rejection events (`unhandledrejection`, `rejectionhandled`) one
+/// turn's end announces ([`JsRuntime::set_rejection_events`]).
+#[cfg(feature = "boa")]
+const MAX_REJECTION_EVENTS: usize = 64;
+
 /// Default maximum number of loop iterations/pumps per `run_jobs` call.
 pub const DEFAULT_MAX_JOB_ITERATIONS: u64 = 10_000;
 
@@ -551,6 +556,10 @@ pub struct JsRuntime {
     deadline: std::rc::Rc<ExecutionDeadline>,
     #[cfg(feature = "boa")]
     rejections: std::rc::Rc<rejections::RejectionHooks>,
+    /// Rejections are being announced ([`Self::notify_rejections`]): the
+    /// turn ends inside it do not start another round.
+    #[cfg(feature = "boa")]
+    announcing_rejections: bool,
     #[cfg(feature = "boa")]
     diag: std::rc::Rc<diag::Diagnostics>,
     /// The natives the embedder's own scripts are handed
@@ -680,6 +689,8 @@ impl JsRuntime {
             deadline: std::rc::Rc::default(),
             #[cfg(feature = "boa")]
             rejections,
+            #[cfg(feature = "boa")]
+            announcing_rejections: false,
             #[cfg(feature = "boa")]
             diag,
             #[cfg(feature = "boa")]
@@ -814,7 +825,11 @@ impl JsRuntime {
             if let Some(host) = self.realm_hosts.get_mut(realm.0) {
                 *host = None;
             }
-            return slot.take().is_some();
+            let dropped = slot.take();
+            if let Some(realm) = &dropped {
+                self.rejections.drop_realm(realm);
+            }
+            return dropped.is_some();
         }
         false
     }
@@ -845,6 +860,7 @@ impl JsRuntime {
             let _job = DiagJob::enter("microtask");
             let result = self.context.run_jobs();
             self.consume_interrupt();
+            self.notify_rejections();
             result.map_err(|e| JsError::ExecutionError(e.to_string()))
         }
         #[cfg(not(feature = "boa"))]
@@ -943,6 +959,95 @@ impl JsRuntime {
         }
         #[cfg(not(feature = "boa"))]
         let _ = (on, keep_text);
+    }
+
+    /// Announce promise rejections to the embedder's scripts, for the
+    /// page's `unhandledrejection` and `rejectionhandled` events. Off by
+    /// default. On: when a turn of page script ends (a script, a kept call,
+    /// a host turn, [`run_jobs`](Self::run_jobs)) and its microtasks have
+    /// run, each promise rejected with no handler is handed to the host
+    /// object's `fireRejection` of the realm whose code rejected it, as
+    /// `("unhandledrejection", promise, reason)`, oldest first, with a
+    /// microtask drain after each; `false` back means a listener canceled
+    /// the event, and that rejection is then left out of the error reports.
+    /// A promise announced this way that gets a handler later is handed
+    /// over once more, as `("rejectionhandled", promise, reason)`, at the
+    /// end of the turn the handler was added in. A realm with no
+    /// `fireRejection` has no events: its rejections are reported as before.
+    pub fn set_rejection_events(&mut self, on: bool) {
+        #[cfg(feature = "boa")]
+        self.rejections.events.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
+    }
+
+    /// HTML "notify about rejected promises", at the end of a turn's
+    /// microtasks: the `rejectionhandled` owed first (a browser queues
+    /// those when the handler is added), then the rejections left
+    /// unhandled. At most [`MAX_REJECTION_EVENTS`] a turn: a listener that
+    /// rejects another promise each time is announced again and again, and
+    /// the rest wait for the next turn. Nothing is announced after a turn
+    /// the watchdog stopped.
+    #[cfg(feature = "boa")]
+    fn notify_rejections(&mut self) {
+        if !self.rejections.events.get() || self.announcing_rejections || !self.rejections.has_news() {
+            return;
+        }
+        if self.deadline.hit.get() || matches!(self.realms.get(self.current_realm.0), Some(None)) {
+            return;
+        }
+        self.announcing_rejections = true;
+        for _ in 0..MAX_REJECTION_EVENTS {
+            if let Some((promise, realm)) = self.rejections.next_handled() {
+                if let Some(reason) = rejections::reason_of(&promise) {
+                    self.fire_rejection("rejectionhandled", &promise, &reason, &realm);
+                }
+                continue;
+            }
+            let Some((promise, realm)) = self.rejections.next_pending() else {
+                break;
+            };
+            // Settled otherwise since (not a promise any more, in theory): nothing to say.
+            let Some(reason) = rejections::reason_of(&promise) else {
+                continue;
+            };
+            self.rejections.begin_dispatch(&promise);
+            let canceled = self.fire_rejection("unhandledrejection", &promise, &reason, &realm);
+            self.rejections.end_dispatch((promise, realm), reason, canceled);
+        }
+        self.announcing_rejections = false;
+    }
+
+    /// Hand one rejection to `realm`'s `fireRejection` and run the
+    /// microtasks its listeners queued. Whether a listener canceled the
+    /// event. A realm that is gone, or has no such function, has no event.
+    #[cfg(feature = "boa")]
+    fn fire_rejection(
+        &mut self,
+        kind: &str,
+        promise: &boa_engine::JsObject,
+        reason: &boa_engine::JsValue,
+        realm: &boa_engine::realm::Realm,
+    ) -> bool {
+        use boa_engine::{js_string, JsString, JsValue as BoaValue};
+        let Some(index) = self.realms.iter().position(|r| r.as_ref() == Some(realm)) else {
+            return false;
+        };
+        let outer = self.enter_realm(RealmId(index));
+        let host = self.entered_host();
+        let fire = host.get(js_string!("fireRejection"), &mut self.context).ok();
+        let mut canceled = false;
+        if let Some(fire) = fire.as_ref().and_then(|f| f.as_callable()) {
+            self.context.reset_recursion_max();
+            let args = [BoaValue::from(JsString::from(kind)), BoaValue::from(promise.clone()), reason.clone()];
+            let result = fire.call(&BoaValue::undefined(), &args, &mut self.context);
+            self.consume_interrupt();
+            let _ = self.context.run_jobs();
+            self.consume_interrupt();
+            canceled = matches!(result, Ok(value) if value.as_boolean() == Some(false));
+        }
+        self.enter_realm(outer);
+        canceled
     }
 
     /// Keep the source of each named script and module so a later error can
@@ -1149,6 +1254,7 @@ impl JsRuntime {
             let job_result = self.context.run_jobs();
             if turn {
                 self.consume_interrupt();
+                self.notify_rejections();
             }
             self.flush_console_logs();
             match result {
@@ -1317,6 +1423,7 @@ impl JsRuntime {
         // without this.
         let job_result = self.context.run_jobs();
         self.consume_interrupt();
+        self.notify_rejections();
 
         match result {
             Ok(value) => {

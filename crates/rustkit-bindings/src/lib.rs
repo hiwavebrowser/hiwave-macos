@@ -487,7 +487,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
-    "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
@@ -1578,6 +1578,9 @@ impl DomBindings {
         // (two app tests 1.4 s -> 3.0 s).
         runtime.reserve_host_slots(HOST_SLOTS)?;
         runtime.reserve_shared_slots(SHARED_SLOTS)?;
+        // Promise rejections are announced to the page (`__rk.fireRejection`,
+        // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
+        runtime.set_rejection_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
