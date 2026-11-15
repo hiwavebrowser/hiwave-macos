@@ -223,8 +223,12 @@ def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
     assert run.off_machine("hiwave", None, [], [], {"non_loopback_origins": []}) == {}
 
 
+# The first line goes to stderr (the run's engine log) before any import beyond sys and time, so a
+# run that never reached the runner says whether the fake engine started at all, and when (FLK8).
 FAKE_ENGINE = '''#!/usr/bin/env python3
-import sys, json, time, urllib.request
+import sys, time
+sys.stderr.write("fake engine started at %.3f\\n" % time.time()); sys.stderr.flush()
+import json, urllib.request
 url = sys.argv[sys.argv.index("--url") + 1]
 base = url.split("/index.html")[0]
 NETLOG
@@ -461,15 +465,42 @@ def test_a_raised_budget_is_refused_for_the_app_and_chrome(monkeypatch, tmp_path
     assert not (tmp_path / "out").exists()
 
 
+# The one failure FLK8 saw (once in 26, a loaded Mac): the run came back invalid after its full wall
+# limit with no request-log line, so the fake engine never reached the runner. Its cause is not known.
+NEVER_REACHED = "no request-log line for the runner page"
+
+
+def outcome(code, rec):
+    """What a fake-engine run did, for an assertion message: status, exit codes, wall time, and the
+    engine's own log (its first line says when it started)."""
+    return "run.py exit %r, status %r, engine exit %r, %s s after launch, off_machine %r; engine log:\n%s" % (
+        code, rec.get("status"), rec.get("exit_code"), rec.get("wall_s"), rec.get("off_machine"),
+        rec.get("log_tail", "(no tail: the run was ok)"))
+
+
+def run_ok_with_fake_engine(monkeypatch, tmp_path, capsys):
+    """A fake-engine run that must succeed. Retried once, and only on the FLK8 signature (the engine
+    never reached the runner); any other failure, or that one twice, fails with the run's outcome.
+    Returns the run and what it printed."""
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "first", "")
+    printed = capsys.readouterr()
+    if code != 0 and NEVER_REACHED in json.dumps(rec.get("off_machine")):
+        print("FLK8 signature, retrying once:", outcome(code, rec), file=sys.stderr)
+        code, rec = run_with_fake_engine(monkeypatch, tmp_path / "retry", "")
+        printed = capsys.readouterr()
+    assert code == 0 and rec.get("status") == "ok", outcome(code, rec)
+    return rec, printed
+
+
 def test_a_raised_budget_run_says_so_and_records_it(monkeypatch, tmp_path, capsys):
     # The fake engine is started the way the real one is (sandbox-exec on the Mac).
     monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
-    code, rec = run_with_fake_engine(monkeypatch, tmp_path, "")
-    cap = capsys.readouterr()
+    rec, cap = run_ok_with_fake_engine(monkeypatch, tmp_path / "raised", capsys)
     # The run's wall limit is 20 s here, so the budget is clamped to it.
-    assert code == 0 and rec["live_turn_budget_ms"] == 20000, rec
+    assert rec["live_turn_budget_ms"] == 20000, rec
     assert "TURN BUDGET RAISED" in cap.err and "clamped to the run's wall limit, 20000 ms" in cap.err, cap.err
     assert "TURN BUDGET RAISED to 20000 ms" in cap.out, cap.out
     monkeypatch.delenv(run.TURN_BUDGET_ENV)
-    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "default", "")
-    assert code == 0 and rec["live_turn_budget_ms"] is None, rec
+    rec, cap = run_ok_with_fake_engine(monkeypatch, tmp_path / "default", capsys)
+    assert rec["live_turn_budget_ms"] is None, rec
+    assert "TURN BUDGET RAISED" not in cap.err + cap.out, cap
