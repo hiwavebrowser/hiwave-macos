@@ -360,3 +360,25 @@ fn an_engine_events_dispatch_state_is_its_own() {
     });
     assert_eq!(calls, "0", "accessor calls");
 }
+
+/// The fields of an event the engine makes are read from its init record with the own-property
+/// helper of install time: they are the same whatever `Object.prototype.hasOwnProperty` and
+/// `Function.prototype.call` are when the event is made.
+#[test]
+fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() {
+    let got = bounded(|| {
+        let (b, _doc) = bindings(false);
+        b.evaluate(
+            "var calls = 0, seen = [], p;
+             window.addEventListener('unhandledrejection', function (e) {
+                 seen.push([e.type, e.cancelable, e.promise === p, e.reason, e.isTrusted].join(':'));
+             });
+             Object.prototype.hasOwnProperty = function () { calls++; return false; };
+             Function.prototype.call = function () { calls++; return false; };
+             p = Promise.reject('r');",
+        )
+        .unwrap();
+        text(b.evaluate("seen.join() + ' calls=' + calls").unwrap())
+    });
+    assert_eq!(got, "unhandledrejection:true:true:r:true calls=0");
+}
