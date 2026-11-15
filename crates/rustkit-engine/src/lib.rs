@@ -551,6 +551,12 @@ mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
+mod fixed_zindex_paint_order_tests;
+#[cfg(all(test, feature = "headless"))]
+mod lifted_clip_tests;
+#[cfg(all(test, feature = "headless"))]
+mod hit_test_cost_tests;
+#[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
@@ -695,6 +701,8 @@ mod live_turn_budget_tests;
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod app_bridge_tests;
+#[cfg(all(test, feature = "headless"))]
+mod deep_relayout_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod text_input_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -11215,6 +11223,12 @@ impl Engine {
             root_box.stamp_sticky_shifts(view.scroll_offset);
         }
 
+        // Which boxes hold something outside their own box is found again
+        // at the next hit test (`LayoutBox::forget_hit_overflow`). Before the
+        // display list: the paint orders it keeps for the hit test belong to
+        // the generation this starts.
+        root_box.forget_hit_overflow();
+
         // Generate display list
         let display_list = self.display_list_for(id, &root_box);
 
@@ -11240,13 +11254,10 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        view.doc.held_fixed = Some(root_box.held_fixed_paths());
-        // Which boxes hold something outside their own box is found again
-        // at the next hit test (`LayoutBox::forget_hit_overflow`).
-        root_box.forget_hit_overflow();
-        view.doc.layout = Some(Rc::new(root_box));
-        if let Some(layout) = view.doc.layout.as_ref() {
-            incremental_layout::adopt(&view.doc.lay, layout);
+        view.held_fixed = Some(root_box.held_fixed_paths());
+        view.layout = Some(Rc::new(root_box));
+        if let Some(layout) = view.layout.as_ref() {
+            incremental_layout::adopt(&view.lay, layout);
         }
         view.doc.laid_with = Some(LaidWith {
             hover: view.doc.lay.hover_chain.borrow().clone(),

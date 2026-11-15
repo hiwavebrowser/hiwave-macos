@@ -1108,6 +1108,7 @@
     // for `und-<script>`).
     var RTL_SCRIPTS = ' Adlm Arab Armi Avst Chrs Cprt Elym Gara Hatr Hebr Hung Khar Lydi Mand Mani Mend Merc Mero ' +
         'Narb Nbat Nkoo Orkh Ougr Palm Phli Phlp Phnx Prti Rohg Samr Sarb Sidt Sogd Sogo Syrc Thaa Yezi ';
+    // Unicode CLDR data (Unicode-3.0): notice and licence text in THIRD_PARTY_NOTICES.md at the repository root.
     // CLDR 48 supplemental weekData: regions whose week does not start on
     // Monday (1 = Monday ... 7 = Sunday), and whose weekend is not Saturday
     // and Sunday. Everything else is the world's default (001).
