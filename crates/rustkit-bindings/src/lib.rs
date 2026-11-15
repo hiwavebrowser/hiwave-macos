@@ -718,20 +718,28 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // ran. One a frame's own callbacks ask for when that frame ran late is due already and runs
     // on the next turn, and the frames after it are on the grid again, as Chrome catches up a
     // 24 ms frame without dropping one; more than a frame behind (every frame overruns), it is
-    // the next grid point after now. One a task asks for (a timer, an event) when that point is
-    // past waits for the next grid point after now, as Chrome's waits for the next vsync: never
-    // at once, and never now itself from a frame's callbacks, so one asked for in a round that ran
-    // on a grid point waits for the next frame. Until this, a frame was due 16 ms after the turn
-    // that ran the last one, so a late turn moved every later frame (173 of Chrome's 180-181 on
-    // the app's loop, PACE2).
+    // the next grid point after now, never now itself, so one asked for in a round that ran on a
+    // grid point waits for the next frame. One a task asks for (a timer, an event) is the frame of
+    // the task's time, the latest grid point at or before now, and never before the frame after
+    // the last: when that point has passed it runs at once, stamped with its grid time, as
+    // Chrome's does (`frame_stamp_probe_cft148.json`: a task 16.7-33.3 ms after a frame gets the
+    // frame at 16.7, at once; after an idle 300 ms, the frame stamped 0.6-15.3 ms before the
+    // request). Until this, a frame was due 16 ms after the turn that ran the last one, so a late
+    // turn moved every later frame (173 of Chrome's 180-181 on the app's loop, PACE2).
     function frameAt(k) { return floorOf((k * 50 + 2) / 3); }
     function nextFrame() {
         var k = Q.frameK + 1;
-        if (Q.inFrame ? frameAt(k) + 17 <= Q.now : frameAt(k) < Q.now) {
-            k = floorOf(Q.now * 3 / 50);
-            while (Q.inFrame ? frameAt(k) <= Q.now : frameAt(k) < Q.now) k++;
+        if (Q.inFrame) {
+            if (frameAt(k) + 17 <= Q.now) {
+                k = floorOf(Q.now * 3 / 50);
+                while (frameAt(k) <= Q.now) k++;
+            }
+            return k;
         }
-        return k;
+        var c = floorOf(Q.now * 3 / 50);
+        while (frameAt(c + 1) <= Q.now) c++;
+        while (c > 0 && frameAt(c) > Q.now) c--;
+        return c > k ? c : k;
     }
     function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
     function runFrame(timer) {
@@ -783,7 +791,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
             }
-            cb(Q.frameTs - base);
+            // A frame's document counts from its own origin: never before it.
+            var t = Q.frameTs - base;
+            cb(t < 0 ? 0 : t);
         }, 0, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
@@ -806,6 +816,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
+        // A turn begins outside any frame's callbacks, whatever stopped the last part-way.
+        Q.inFrame = false;
         // What a worker has sent since the last turn is delivered first.
         var ran = 0;
         for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
@@ -841,6 +853,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the turn (`ran` so far). The round is a table of the engine's own,
     // as the timers are. Returns the new count.
     function frameRound(ran, max) {
+        Q.inFrame = false;
         var round = objCreate(null), due = 0, latest = -1;
         for (var i = 0; i < Q.count; i++) {
             if (timers[i].frame && timers[i].due <= Q.now) {
