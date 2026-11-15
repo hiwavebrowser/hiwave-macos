@@ -78,6 +78,8 @@ mod dom_utils_tests;
 #[cfg(test)]
 mod web_cssom_tests;
 #[cfg(test)]
+mod inline_style_cost_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
@@ -483,9 +485,9 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "isDispatching", "keepCtor", "keepFinish", "locationHashSync", "locationSync", "make",
-    "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer", "now", "observersTick",
-    "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
+    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
+    "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
+    "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setSelection",
     "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
