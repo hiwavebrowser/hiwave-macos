@@ -4647,20 +4647,54 @@ const WRAPPERS_JS: &str = r#"
     // Each element's declarations as last parsed, with the attribute text they were parsed from: a read
     // of unchanged text needs no parse. Keyed by the text itself, so a script's setAttribute (or anything
     // else that changes the attribute) is read afresh. Callers get copies; the kept list is never handed out.
+    //
+    // This state outlives a call, so nothing on its paths is looked up when it runs: the built-ins below are
+    // taken now, and the list work is plain loops. A parse (the older code below, which reads built-ins as
+    // it goes) is kept only while those built-ins are still the ones this script started with.
     var parsedStyles = new WeakMap();
+    var ownKey = uncurry(Object.prototype.hasOwnProperty), strCode = uncurry(String.prototype.charCodeAt);
+    var strLower = uncurry(String.prototype.toLowerCase), fromCode = String.fromCharCode;
+    var ownDescriptor = Object.getOwnPropertyDescriptor;
+    var PARSER_BUILTINS = [
+        [Array.prototype, 'filter'], [Array.prototype, 'forEach'], [Array.prototype, 'push'], [Array.prototype, 'pop'],
+        [String.prototype, 'charAt'], [String.prototype, 'substr'], [String.prototype, 'slice'],
+        [String.prototype, 'indexOf'], [String.prototype, 'trim'], [String.prototype, 'toLowerCase'],
+        [String.prototype, 'replace'], [RegExp.prototype, 'test'], [RegExp.prototype, 'exec']
+    ];
+    var PARSER_ORIGINALS = [];
+    for (var pb = 0; pb < PARSER_BUILTINS.length; pb++) {
+        PARSER_ORIGINALS[pb] = ownDescriptor(PARSER_BUILTINS[pb][0], PARSER_BUILTINS[pb][1]).value;
+    }
+    // Whether the parser's built-ins are as they were: a descriptor read runs no page code.
+    function parserPristine() {
+        for (var i = 0; i < PARSER_BUILTINS.length; i++) {
+            var d = ownDescriptor(PARSER_BUILTINS[i][0], PARSER_BUILTINS[i][1]);
+            if (!d || d.value !== PARSER_ORIGINALS[i]) return false;
+        }
+        return true;
+    }
     function copyDecls(list) {
-        return list.map(function (d) { return { name: d.name, value: d.value, important: d.important }; });
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+            var d = list[i];
+            out[i] = { name: d.name, value: d.value, important: d.important };
+        }
+        return out;
+    }
+    function allRoundTrip(list) {
+        for (var i = 0; i < list.length; i++) {
+            if (!nameRoundTrips(list[i].name) || !roundTrips(list[i].value)) return false;
+        }
+        return true;
     }
     // The kept declarations, for reading only.
     function keptDecls(st) {
         var el = st[OWNER], text = el.getAttribute('style') || '';
-        var kept = parsedStyles.get(el);
-        if (!kept || kept.text !== text) {
-            var list = parseDecls(text);
-            kept = { text: text, list: list, exact: list.every(function (d) { return nameRoundTrips(d.name) && roundTrips(d.value); }) };
-            parsedStyles.set(el, kept);
-        }
-        return kept.list;
+        var kept = mapGet(parsedStyles, el);
+        if (kept && kept.text === text) return kept.list;
+        var list = parseDecls(text);
+        if (parserPristine()) mapSet(parsedStyles, el, { text: text, list: list, exact: allRoundTrip(list) });
+        return list;
     }
     // A copy, for a caller that changes it.
     function decls(st) {
@@ -4690,50 +4724,89 @@ const WRAPPERS_JS: &str = r#"
     // A declaration whose serialization reads back as itself: a plain property name (an identifier or a
     // custom property), and a value with no quote, escape, `;`, `!`, brace, comment or control character
     // whose parentheses and brackets nest and close in order (`rotate(9deg)`, `hsla(…)`). Anything else
-    // is parsed again on the next read, which is always right.
+    // is parsed again on the next read, which is always right. Character codes, not patterns.
+    function isLowerAlpha(c) { return c >= 97 && c <= 122; }
+    function isDigit(c) { return c >= 48 && c <= 57; }
     function nameRoundTrips(name) {
-        return /^(--[a-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(name);
+        var n = name.length, i = 0;
+        if (n === 0) return false;
+        if (n >= 2 && strCode(name, 0) === 45 && strCode(name, 1) === 45) {
+            if (n === 2) return false;
+            for (i = 2; i < n; i++) {
+                var k = strCode(name, i);
+                if (!isLowerAlpha(k) && !isDigit(k) && k !== 45 && k !== 95) return false;
+            }
+            return true;
+        }
+        if (strCode(name, 0) === 45) i = 1;
+        if (i >= n || !isLowerAlpha(strCode(name, i))) return false;
+        for (i = i + 1; i < n; i++) {
+            var c = strCode(name, i);
+            if (!isLowerAlpha(c) && !isDigit(c) && c !== 45) return false;
+        }
+        return true;
     }
     function roundTrips(value) {
-        if (/["'\\;!{}\x00-\x1f\x7f]/.test(value) || value.indexOf('/*') >= 0 || value.indexOf('*/') >= 0) return false;
-        if (value.indexOf('(') < 0 && value.indexOf(')') < 0 && value.indexOf('[') < 0 && value.indexOf(']') < 0) return true;
-        var open = [];
+        var open = [], depth = 0, prev = -1;
         for (var i = 0; i < value.length; i++) {
-            var c = value.charAt(i);
-            if (c === '(') open.push(')');
-            else if (c === '[') open.push(']');
-            else if ((c === ')' || c === ']') && open.pop() !== c) return false;
+            var c = strCode(value, i);
+            // " ' \ ; ! { } and control characters
+            if (c === 34 || c === 39 || c === 92 || c === 59 || c === 33 || c === 123 || c === 125 || c < 32 || c === 127) return false;
+            // `/*` and `*/`
+            if ((prev === 47 && c === 42) || (prev === 42 && c === 47)) return false;
+            if (c === 40) open[depth++] = 41;
+            else if (c === 91) open[depth++] = 93;
+            else if (c === 41 || c === 93) { if (depth === 0 || open[--depth] !== c) return false; }
+            prev = c;
         }
-        return open.length === 0;
+        return depth === 0;
+    }
+    function serializeDecls(ds) {
+        var text = '';
+        for (var i = 0; i < ds.length; i++) {
+            var d = ds[i];
+            text += (i ? ' ' : '') + d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }
+        return text;
     }
     // `ds` is the kept list with at most one declaration changed (`changed`, null for a removal). When the
-    // kept list read back exactly (`exact`) and the changed declaration does too, what was just written is
-    // what a parse of it gives: keep it under the attribute's text as it now stands, so the next read needs
-    // no parse. Only the changed declaration is checked; the rest were checked when the list was kept.
+    // kept list read back exactly (`exact`) and the changed declaration does too, what is written is what a
+    // parse of it gives: keep it under the text written, so the next read of that text needs no parse. If
+    // the write itself changes the attribute again (a custom element's attributeChangedCallback), the text
+    // no longer matches and the next read parses. Only the changed declaration is checked.
     function storeDecls(st, ds, changed) {
-        var el = st[OWNER], before = parsedStyles.get(el);
-        el.setAttribute('style', ds.map(function (d) {
-            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
-        }).join(' '));
-        if (before && before.exact && (!changed || (nameRoundTrips(changed.name) && roundTrips(changed.value)))) {
-            // `ds` is the caller's own copy, written and then dropped: kept as it is.
-            parsedStyles.set(el, { text: el.getAttribute('style') || '', list: ds, exact: true });
-        }
+        var el = st[OWNER], before = mapGet(parsedStyles, el), text = serializeDecls(ds);
+        var exact = !!(before && before.exact && (!changed || (nameRoundTrips(changed.name) && roundTrips(changed.value))));
+        el.setAttribute('style', text);
+        // `ds` is the caller's own copy, written and then dropped: kept as it is.
+        if (exact) mapSet(parsedStyles, el, { text: text, list: ds, exact: true });
     }
     // `backgroundColor` -> `background-color`, each name converted once (a null-prototype table: no
-    // inherited key answers, and page script cannot reach it).
+    // inherited key answers, and page script cannot reach it). The conversion reads character codes.
     var cssNames = objCreate(null), cssNameCount = 0;
     function cssName(prop) {
-        if (hasOwn(cssNames, prop)) return cssNames[prop];
+        if (ownKey(cssNames, prop)) return cssNames[prop];
         var name = cssNameOf(prop);
         if (cssNameCount < 4096) { cssNames[prop] = name; cssNameCount++; }
         return name;
     }
     function cssNameOf(prop) {
         if (prop === 'cssFloat') return 'float';
-        if (prop.indexOf('-') >= 0) return prop.toLowerCase();
-        return prop.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); })
-                   .replace(/^(webkit|moz|ms)-/, '-$1-');
+        var out = '', dash = false, i;
+        for (i = 0; i < prop.length; i++) if (strCode(prop, i) === 45) { dash = true; break; }
+        if (dash) return strLower(prop);
+        for (i = 0; i < prop.length; i++) {
+            var c = strCode(prop, i);
+            out += c >= 65 && c <= 90 ? '-' + fromCode(c + 32) : fromCode(c);
+        }
+        // `webkitX` -> `-webkit-x` (and moz, ms).
+        var prefixes = ['webkit-', 'moz-', 'ms-'];
+        for (i = 0; i < prefixes.length; i++) {
+            var pre = prefixes[i], match = out.length > pre.length;
+            for (var j = 0; match && j < pre.length; j++) if (strCode(out, j) !== strCode(pre, j)) match = false;
+            if (match) return '-' + out;
+        }
+        return out;
     }
     var styleMethods = {
         getPropertyValue: function (name) {
@@ -4756,15 +4829,16 @@ const WRAPPERS_JS: &str = r#"
             // so a geometry read after it lays nothing out (LAT7).
             var same = declNamed(this, name);
             if (same && same.value === value && same.important === important) return;
-            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
+            var ds = decls(this), d = null;
+            for (var i = 0; i < ds.length; i++) if (ds[i].name === name) { d = ds[i]; break; }
             if (d) { d.value = value; d.important = important; }
-            else ds.push({ name: name, value: value, important: important });
+            else ds[ds.length] = { name: name, value: value, important: important };
             storeDecls(this, ds, { name: name, value: value });
         },
         removeProperty: function (name) {
             name = String(name).trim().toLowerCase();
-            var ds = decls(this), old = this.getPropertyValue(name);
-            var kept = ds.filter(function (x) { return x.name !== name; });
+            var ds = decls(this), old = this.getPropertyValue(name), kept = [];
+            for (var i = 0; i < ds.length; i++) if (ds[i].name !== name) kept[kept.length] = ds[i];
             if (kept.length !== ds.length) storeDecls(this, kept, null);
             return old;
         },
