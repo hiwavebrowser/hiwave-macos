@@ -119,7 +119,9 @@ struct Args {
     /// (`rustkit_engine::content_turn_wait`): until the next timer, 2 to 50 ms, whatever the last turn
     /// took. Only the wait is the app's: the capture's turn is not the content thread's turn (that loop
     /// also drops each turn's sub-millisecond remainder and publishes frames), so a headless live
-    /// measurement approximates the app's pacing; it does not copy it. Recorded in `live_stats.pacing`.
+    /// measurement approximates the app's pacing; it does not copy it. The content thread's wait does
+    /// not wake when a fetch arrives, so with no timer set a response is handled up to 50 ms later than
+    /// with this flag. Recorded in `live_stats.pacing`.
     #[arg(long)]
     window_thread_pacing: bool,
 
