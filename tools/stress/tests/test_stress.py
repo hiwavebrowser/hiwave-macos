@@ -5,6 +5,7 @@ of the page channel, and the score readers.
 """
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -472,17 +473,61 @@ def test_the_turn_budget_takes_plain_digits_up_to_an_hour(monkeypatch):
     assert run.turn_budget_ms() == run.TURN_BUDGET_MAX_MS == 3600000
 
 
-def test_a_raised_budget_is_refused_for_the_app_and_chrome(monkeypatch, tmp_path):
+def test_a_raised_budget_is_refused_for_chrome_only(monkeypatch, tmp_path):
+    # Chrome has no such watchdog. The app reads the variable (it is what run.py starts it with), and
+    # the headless engine takes it as an argument: neither is refused here (this run stops later, at
+    # its missing binary).
     monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
-    for engine in ("hiwave", "chrome"):
+    for engine, said in (("chrome", "HiWave engines only"), ("hiwave", "no binary at"), ("hiwave-headless", "no binary at")):
         monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "motionmark", "--engine", engine,
                                           "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")])
         try:
             run.main()
-            raise AssertionError("ran %s with a raised budget" % engine)
+            raise AssertionError("ran %s with no binary" % engine)
         except SystemExit as e:
-            assert "hiwave-headless engine only" in str(e.code), e.code
+            assert said in str(e.code), (engine, e.code)
     assert not (tmp_path / "out").exists()
+
+
+def test_the_budget_is_not_taken_through_env_and_the_app_takes_at_most_five_minutes(monkeypatch, tmp_path):
+    # Through --env the variable would reach the app with no flag in the record and no raised-budget line:
+    # a score nobody could tell from a default one. And the app ignores more than five minutes.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    base = ["run.py", "--suite", "motionmark", "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")]
+    for engine in ("hiwave", "hiwave-headless"):
+        monkeypatch.setattr(sys, "argv", base + ["--engine", engine, "--env", run.TURN_BUDGET_ENV + "=60000"])
+        try:
+            run.main()
+            raise AssertionError("took the budget through --env for %s" % engine)
+        except SystemExit as e:
+            assert "is not a --env variable" in str(e.code), e.code
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, str(run.APP_TURN_BUDGET_MAX_MS + 1))
+    monkeypatch.setattr(sys, "argv", base + ["--engine", "hiwave"])
+    try:
+        run.main()
+        raise AssertionError("started the app with more than it honours")
+    except SystemExit as e:
+        assert "at most 300000 ms for the app" in str(e.code), e.code
+    # The app honours the variable only beside the console log switch, which every app run has.
+    assert run.NET_LOG_ENV["HIWAVE_CONSOLE_LOG"] == "1"
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_app_is_started_with_the_runs_budget_and_never_with_the_shells(monkeypatch):
+    # A raised run: the app's environment has the run's number (the one after the clamp), and the record's
+    # flags say so. A default run: nothing is passed, and a value the shell had is taken out of what the
+    # app inherits, so a score without the flag never ran under one.
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "999999")
+    assert run.app_turn_budget_env(60000) == {run.TURN_BUDGET_ENV: "60000"}
+    assert os.environ[run.TURN_BUDGET_ENV] == "999999"
+    assert run.app_turn_budget_env(None) == {}
+    assert run.TURN_BUDGET_ENV not in os.environ
+    shell = {run.TURN_BUDGET_ENV: "999999", "HIWAVE_FROM_THE_SHELL": "yes"}
+    assert run.engine_flags("hiwave", {}, inherited=shell, turn_budget=60000)[run.TURN_BUDGET_ENV] == "60000"
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave", {}, inherited=shell)
+    # The headless engine takes an argument, not the variable; Chrome reads nothing.
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave-headless", {}, inherited=shell, turn_budget=60000)
+    assert run.engine_flags("chrome", {}, inherited=shell, turn_budget=60000) == {}
 
 
 # The one failure FLK8 saw (once in 26, a loaded Mac): the run came back invalid after its full wall
@@ -544,7 +589,7 @@ def test_the_engine_flags_are_what_the_engine_process_is_started_with():
     shell = {"HIWAVE_CONTENT_THREAD": "0", "HIWAVE_FROM_THE_SHELL": "yes", "HOME": "/x", run.TURN_BUDGET_ENV: "60000"}
     asked = run.suite_env("motionmark", {"HIWAVE_ASKED": "1", "RUST_BACKTRACE": "1"})
     # Every HIWAVE_ variable in the engine's environment, the shell's included; not the dropped one, not
-    # the harness's own turn-budget variable (the record has that as live_turn_budget_ms), nothing else.
+    # the shell's own turn-budget variable (only a run that raised the budget passes one, to the app), nothing else.
     assert run.engine_flags("hiwave-headless", asked, inherited=shell) == {
         "HIWAVE_ASKED": "1", "HIWAVE_CONSOLE_LOG": "1", "HIWAVE_FROM_THE_SHELL": "yes",
         "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}

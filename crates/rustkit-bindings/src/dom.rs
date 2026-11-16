@@ -1471,10 +1471,10 @@ enum Reach {
 }
 
 impl Reach {
-    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str) {
+    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str, logged: crate::Logged) {
         match self {
-            Reach::Seen => dirty.mark(bucket, cause),
-            Reach::Unseen => dirty.mark_unseen(bucket),
+            Reach::Seen => dirty.mark(bucket, cause, logged),
+            Reach::Unseen => dirty.mark_unseen(bucket, logged),
         }
     }
 }
@@ -2494,7 +2494,7 @@ pub(crate) fn install(
                 kind: kind.clone(),
                 op: op.clone(),
             });
-            d.mark(crate::DomDirty::Layout, "animation");
+            d.mark(crate::DomDirty::Layout, "animation", crate::Logged::No);
             JsValue::Undefined
         }),
     )?;
@@ -2649,6 +2649,7 @@ pub(crate) fn install(
             let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
             match mutate(&h.borrow(), args) {
             Ok(()) => {
+                let logged = if records.is_empty() { crate::Logged::No } else { crate::Logged::Yes };
                 let mut log = l.borrow_mut();
                 for record in records {
                     log.push(record);
@@ -2659,7 +2660,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                reach.mark(&d, DomDirty::Style, cause);
+                reach.mark(&d, DomDirty::Style, cause, logged);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -2681,14 +2682,18 @@ pub(crate) fn install(
             let (reach, cause) = write_reach(&h.borrow(), args, &d);
             match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
-                if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
-                    l.borrow_mut().push(record);
-                }
+                let logged = match record.filter(|_| bucket != DomDirty::Clean) {
+                    Some(record) => {
+                        l.borrow_mut().push(record);
+                        crate::Logged::Yes
+                    }
+                    None => crate::Logged::No,
+                };
                 trace_dirty(&h.borrow(), args, bucket);
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                reach.mark(&d, bucket, cause);
+                reach.mark(&d, bucket, cause, logged);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -2714,13 +2719,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), None));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             result
         }),
     )?;
@@ -2734,13 +2741,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), Some("checked")));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             JsValue::Null
         }),
     )?;
@@ -2819,7 +2828,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             node.set_adopted_styles(texts);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
         }),
     )?;
@@ -2842,7 +2851,7 @@ pub(crate) fn install(
             };
             let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
             document.set_style_sheet_disabled(&node, on);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
         }),
     )?;

@@ -301,12 +301,15 @@ def suite_env(suite, asked):
     return env
 
 
-def engine_flags(engine, extra_env, inherited=None):
+def engine_flags(engine, extra_env, inherited=None, turn_budget=None):
     """Every HIWAVE_ variable the engine process is started with, for the
     run record: a score is read with the flags it ran under. The shell's
     own count too (both HiWave arms start from this process's
     environment). Chrome reads none. The harness's turn-budget variable is
-    not the engine's; the record has it as `live_turn_budget_ms`."""
+    the app's when a run raised it (`turn_budget`, as the app is started
+    with it: `start_hiwave`); for the headless engine it is an argument,
+    not a variable. The record has the number as `live_turn_budget_ms`
+    either way."""
     if engine == "chrome":
         return {}
     inherited = os.environ if inherited is None else inherited
@@ -315,7 +318,10 @@ def engine_flags(engine, extra_env, inherited=None):
     if engine == "hiwave":
         env["HIWAVE_TEST_HOOKS"] = "0"  # start_hiwave
     env.update(forced)
-    return {k: env[k] for k in sorted(env) if k.startswith("HIWAVE_") and k != TURN_BUDGET_ENV}
+    env.pop(TURN_BUDGET_ENV, None)
+    if engine == "hiwave" and turn_budget is not None:
+        env[TURN_BUDGET_ENV] = str(turn_budget)
+    return {k: env[k] for k in sorted(env) if k.startswith("HIWAVE_")}
 
 
 def engine_env(extra_env, inherited=None):
@@ -615,10 +621,13 @@ def seed_filter_lists(profile):
     return copied
 
 
-def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
+def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None, turn_budget=None):
     """As tools/real_window/driver.py does: let the app write its own
     first-run state under a throwaway $HOME, point the restored tab at
-    `url`, start again. `on_pid` is told each process it starts."""
+    `url`, start again. `on_pid` is told each process it starts.
+    `turn_budget`: the raised live-turn watchdog, which the app reads from
+    TURN_BUDGET_ENV; without one the variable is taken out of the app's
+    environment, whatever the shell had."""
     import driver as rw
     profile = work / "profile"
     profile.mkdir(parents=True)
@@ -628,6 +637,7 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     forced, dropped = engine_env(extra_env)
     env = {"HIWAVE_TEST_HOOKS": "0"}
     env.update(forced)
+    env.update(app_turn_budget_env(turn_budget))
     for name in dropped:
         os.environ.pop(name, None)  # the driver's App starts from os.environ
     binary = sandboxed(binary, work)
@@ -688,6 +698,9 @@ TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
 ENGINE_TURN_BUDGET_MS = 5000
 # What parity-capture's --live-turn-budget-ms takes at most (an hour).
 TURN_BUDGET_MAX_MS = 3600000
+# What the app honours at most (hiwave-app `STRESS_TURN_BUDGET_MAX_MS`), and only when it is started with
+# the console log on, which every app this harness starts is (NET_LOG_ENV).
+APP_TURN_BUDGET_MAX_MS = 300000
 
 
 def turn_budget_ms():
@@ -701,6 +714,16 @@ def turn_budget_ms():
         raise SystemExit("%s must be a whole number of milliseconds from 1 to %d, not %r"
                          % (TURN_BUDGET_ENV, TURN_BUDGET_MAX_MS, raw))
     return value
+
+
+def app_turn_budget_env(turn_budget):
+    """What the app is started with for a run's turn budget: the variable set to the run's number (after
+    the clamp to the wall limit), or, with no raised budget, nothing, and the shell's own value removed so
+    a default run cannot pick one up."""
+    if turn_budget is None:
+        os.environ.pop(TURN_BUDGET_ENV, None)  # the driver's App starts from os.environ
+        return {}
+    return {TURN_BUDGET_ENV: str(turn_budget)}
 
 
 def headless_argv(launcher, url, work, limit_s, turn_budget):
@@ -879,13 +902,19 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
-    extra_env = suite_env(args.suite, dict(kv.split("=", 1) for kv in args.env))
-    flags = engine_flags(args.engine, extra_env)
+    asked = dict(kv.split("=", 1) for kv in args.env)
+    if TURN_BUDGET_ENV in asked:
+        # Through --env it would reach the app unrecorded: no flag, no raised-budget line, no clamp.
+        sys.exit("%s is not a --env variable: set it in the environment of this command (%s=<ms> python3 "
+                 "tools/stress/run.py ...), which records it in the run" % (TURN_BUDGET_ENV, TURN_BUDGET_ENV))
+    extra_env = suite_env(args.suite, asked)
     turn_budget = turn_budget_ms()
     if turn_budget is not None:
-        if args.engine != "hiwave-headless":
-            sys.exit("%s is for the hiwave-headless engine only (the app does not read it; Chrome has no such "
-                     "watchdog)" % TURN_BUDGET_ENV)
+        if args.engine == "chrome":
+            sys.exit("%s is for the HiWave engines only (Chrome has no such watchdog)" % TURN_BUDGET_ENV)
+        if args.engine == "hiwave" and turn_budget > APP_TURN_BUDGET_MAX_MS:
+            sys.exit("%s is at most %d ms for the app (it ignores more), not %d"
+                     % (TURN_BUDGET_ENV, APP_TURN_BUDGET_MAX_MS, turn_budget))
         print("TURN BUDGET RAISED: the live turn's script watchdog is %d ms, not the engine's %d (%s): "
               "this run finds blockers; its score is not a default-engine score and report.py keeps it apart"
               % (turn_budget, ENGINE_TURN_BUDGET_MS, TURN_BUDGET_ENV), file=sys.stderr)
@@ -903,6 +932,8 @@ def main():
         # No turn can outlast the run itself.
         turn_budget = limit * 1000
         print("TURN BUDGET RAISED: clamped to the run's wall limit, %d ms" % turn_budget, file=sys.stderr)
+    # After the clamp: the record's flags are what the engine is started with.
+    flags = engine_flags(args.engine, extra_env, turn_budget=turn_budget)
     stall = args.stall or SUITE[args.suite]["stall"]
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -960,7 +991,7 @@ def main():
                     watch = SocketWatch()
                 if args.engine == "hiwave":
                     try:
-                        handle = start_hiwave(binary, url, work, extra_env, watch.add)
+                        handle = start_hiwave(binary, url, work, extra_env, watch.add, turn_budget)
                     except NotOffline as e:
                         print("%s; not run" % e, file=sys.stderr)
                         watch.close()
