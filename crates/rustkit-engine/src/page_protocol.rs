@@ -1318,7 +1318,11 @@ impl EndpointSide {
                     };
                     if slept && exact.is_some() {
                         let woke = std::time::Instant::now();
-                        overshoot.observe(aimed, woke);
+                        // Only a real sleep says how late sleeps end: one aimed at or before now
+                        // returns at once and would read as no overshoot (LINKS-SLOW R1).
+                        if aimed > now {
+                            overshoot.observe(aimed, woke);
+                        }
                         if let Some(rest) = after_wake(due, woke) {
                             match &self.cmd_wake {
                                 Some(wake) => {
@@ -1907,8 +1911,12 @@ mod tests {
         };
         // The turn after the load (its timers already ran in the load's pass).
         pump(&handle, &mut endpoint, 0);
-        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 1000); })(); 0");
-        pump(&handle, &mut endpoint, 5000);
+        // The turn's elapsed time is real (LINKS-SLOW: a timeout set in a real turn's page waits its
+        // delay on the page clock, so a turn told of 5 s that did not pass runs none of it): five
+        // links' worth passes, and the chain runs one link, not five.
+        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 10); })(); 0");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        pump(&handle, &mut endpoint, 50);
         assert_eq!(
             eval(&handle, &mut endpoint, "String(window.n)"),
             r#"String("2")"#,
