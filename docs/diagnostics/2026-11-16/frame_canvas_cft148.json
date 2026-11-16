@@ -1,0 +1,43 @@
+{
+ "browser": "148.0.7778.216",
+ "framed": {
+  "svg": {
+   "natural": "100x100",
+   "after_fill": 25,
+   "after_image": 900
+  },
+  "png": {
+   "natural": "100x100",
+   "after_fill": 25,
+   "after_image": 900
+  },
+  "other_origin": {
+   "natural": "100x100",
+   "draw": "ok",
+   "getImageData": "SecurityError",
+   "toDataURL": "SecurityError",
+   "through_a_canvas": "SecurityError",
+   "a_clean_canvas_beside_it": "ok"
+  }
+ },
+ "top": {
+  "svg": {
+   "natural": "100x100",
+   "after_fill": 25,
+   "after_image": 900
+  },
+  "png": {
+   "natural": "100x100",
+   "after_fill": 25,
+   "after_image": 900
+  },
+  "other_origin": {
+   "natural": "100x100",
+   "draw": "ok",
+   "getImageData": "SecurityError",
+   "toDataURL": "SecurityError",
+   "through_a_canvas": "SecurityError",
+   "a_clean_canvas_beside_it": "ok"
+  }
+ }
+}
