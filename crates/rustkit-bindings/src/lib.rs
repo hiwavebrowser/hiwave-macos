@@ -605,7 +605,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // counts from the same time as one the top document sets.
         Q.liveAt = -1; Q.liveReal = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
-        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -822,7 +822,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         if (delay < 0) delay = 0;
         var id = Q.nextId++;
         var timer = objCreate(null);
-        timer.id = id; timer.seq = id; timer.due = (frame ? Q.now : liveNow()) + delay; timer.cb = cb; timer.args = args;
+        // A timer set outside a real turn's timer slice (a frame callback, an event handler, a network
+        // callback after a real turn) counts from the turn's real progress, not from its start
+        // (LINKS-SLOW R1: a 10 ms timeout set after 8 ms of frame work ran 2 ms after it was set).
+        var base = frame ? Q.now : Q.liveAt >= 0 ? liveNow() : Q.realTurn && !Q.det ? turnNow() : Q.now;
+        timer.id = id; timer.seq = id; timer.due = base + delay; timer.cb = cb; timer.args = args;
+        // LINKS-SLOW: in a real turn a timeout also keeps the page clock's reading when it is set
+        // (`performance.now()`'s, on the tree's clock), and does not run until that clock has
+        // moved its delay: the page never sees a timeout early, whatever the turn's real-time base
+        // read (the loop's clock and the page's are each re-anchored per turn, a millisecond or two
+        // apart). Not on the stepped or deterministic clocks, which have no real turns.
+        if ((Q.liveAt >= 0 || Q.realTurn) && !Q.det && !frame) { timer.setPage = treeNow(); timer.delay = delay; }
         if (frame) { timer.k = nextFrame(); timer.due = frameAt(timer.k); }
         timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
         // The document that set it, and that document's own way to run it.
@@ -929,10 +939,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.taskFrom = Q.nextId;
         for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
         while (ran < max && !(until && realNow() >= until)) {
-            var best = -1;
+            var best = -1, pageNow = -1;
             for (var i = 0; i < Q.count; i++) {
                 var t = timers[i];
                 if (timersOnly && t.frame) continue;
+                // A timeout held for the page clock (`setPage`) is skipped, not waited on: the
+                // timers due behind it still run (LINKS-SLOW R1).
+                if (typeof t.setPage === 'number' && !Q.det) {
+                    if (pageNow < 0) pageNow = treeNow();
+                    if (pageNow - t.setPage < t.delay) continue;
+                }
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
@@ -957,6 +973,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // the real clock it keeps its grid, as Chrome's does: the next
             // run is the first of its periods after the turn's time.
             if (timer.every) {
+                // Only an interval's first run is held for the page clock; the rest keep its grid.
+                timer.setPage = undefined;
                 timer.due += timer.every;
                 var from = liveNow();
                 if (timer.due <= from) {
@@ -1001,6 +1019,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return ran;
     }
     __rk.runTimers = function (horizon, max) {
+        Q.realTurn = false;
         return runTimers(horizon, max, false);
     };
     // The load's clock, one callback at a time, so the host can publish a
@@ -1036,6 +1055,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
+        Q.realTurn = false;
         turnBegins();
         var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
@@ -1067,6 +1087,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `real`: `delta` is real time that has passed (the app's live loops),
     // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
     __rk.advanceTimersFramed = function (delta, max, frameMs, real, before) {
+        Q.realTurn = !!real;
         turnBegins();
         var target = Q.now + delta;
         var start = realNow();
@@ -1175,10 +1196,21 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     __rk.nextTimer = function () {
         // Only a number is a time; compared and subtracted here, with no
         // call.
-        var due = -1;
+        var due = -1, page = -1;
         for (var i = 0; i < Q.count; i++) {
             var at = timers[i].due;
             if (typeof at !== 'number') continue;
+            // A timeout held for the page clock (`setPage`) is due when that clock has moved its
+            // delay, if that is later.
+            var t = timers[i];
+            if (typeof t.setPage === 'number' && !Q.det) {
+                if (page < 0) page = treeNow();
+                // What is left is measured now: it counts from the turn's real progress, not from
+                // its start, or the loop's deadline is already past and it turns back to back
+                // until the page clock catches up (LINKS-SLOW R1).
+                var left = t.setPage + t.delay - page;
+                if (left > 0 && turnNow() + left > at) at = turnNow() + left;
+            }
             if (due < 0 || at < due) due = at;
         }
         if (due < 0) return -1;
@@ -3888,7 +3920,23 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_host_bookkeeping("return __rk.nextTimer()")
         {
-            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            // Rounded up: a timer set in a real turn is due at a fraction of a millisecond, and a
+            // loop that waits the delay must find it due (LINKS-SLOW). Truncated, the loop woke
+            // a fraction early and the rest became its 2 ms floor: ~2 ms late every link.
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n.ceil() as u64),
+            _ => None,
+        }
+    }
+
+    /// [`Self::next_timer_delay`] with its fraction of a millisecond (LINKS-SLOW): a timer set in a
+    /// real turn is due at a fraction, and the content loop aims its wake at that instant.
+    pub fn next_timer_delay_exact(&self) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping("return __rk.nextTimer()")
+        {
+            Ok(JsValue::Number(n)) if n >= 0.0 && n.is_finite() => Some(n),
             _ => None,
         }
     }

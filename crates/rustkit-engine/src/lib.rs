@@ -2469,6 +2469,10 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+    /// LINKS-SLOW: the same wait in whole microseconds, rounded up, when this turn's own timers
+    /// set it (`None` otherwise): a timer set in a real turn is due at a fraction of a
+    /// millisecond, and the content loop aims its wake at that instant.
+    pub next_timer_exact_us: Option<u64>,
 }
 
 /// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
@@ -6518,6 +6522,16 @@ impl Engine {
         self.pump_live_on(id, elapsed_ms, true).await
     }
 
+    /// [`Self::pump_live_real`] for a turn whose clock kept `fraction_ms` of real time it did not
+    /// give the page (the content loop's `LiveClock`): the turn's real instant is that much
+    /// earlier than its start, so the timers' clock reads real time (LINKS-SLOW).
+    pub async fn pump_live_real_at(&mut self, id: EngineViewId, elapsed_ms: u64, fraction_ms: f64) -> LivePump {
+        LIVE_FRACTION_MS.with(|f| f.set(if fraction_ms.is_finite() && fraction_ms > 0.0 { fraction_ms } else { 0.0 }));
+        let out = self.pump_live_on(id, elapsed_ms, true).await;
+        LIVE_FRACTION_MS.with(|f| f.set(0.0));
+        out
+    }
+
     /// Nested browsing contexts, Stage 2: take what this view's document
     /// asked of its iframes and do it. A same-origin `src` (or none:
     /// about:blank) is fetched, parsed and bound in a new realm of the
@@ -7034,7 +7048,7 @@ impl Engine {
                             elapsed_ms,
                             live_timer_cap,
                             LIVE_FRAME_MS,
-                            turn_began.elapsed().as_secs_f64() * 1000.0,
+                            turn_began.elapsed().as_secs_f64() * 1000.0 + LIVE_FRACTION_MS.with(|f| f.get()),
                         )?
                     } else {
                         bindings.advance_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
@@ -7266,6 +7280,11 @@ impl Engine {
             Some(0)
         } else {
             bindings.next_timer_delay()
+        };
+        out.next_timer_exact_us = if out.next_timer_ms.is_some_and(|ms| ms > 0) {
+            bindings.next_timer_delay_exact().map(|ms| (ms * 1000.0).ceil() as u64)
+        } else {
+            None
         };
         view.doc.script_log.extend(stopped);
         let threw = threw
@@ -47879,6 +47898,9 @@ struct RestyleBuild {
 thread_local! {
     /// LPF1, tests only: script style writes take the full rebuild (the cross-check's other arm).
     static SCRIPT_RESTYLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// LINKS-SLOW: the real time the content loop's clock kept from this turn (see
+    /// [`Engine::pump_live_real_at`]).
+    static LIVE_FRACTION_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
