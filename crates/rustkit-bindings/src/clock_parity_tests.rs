@@ -256,37 +256,97 @@ fn the_page_clock_keeps_real_time_across_a_virtual_step() {
 
 /// A long task, then the timers' clock catching up. The task's real time is given to the timers'
 /// clock on the turn after it, so the first frame after the task runs with that clock still behind
-/// and is stamped real time; the next frame used to be stamped that stamp plus the whole catch-up:
+/// and is stamped real time; a later frame used to be stamped that stamp plus the whole catch-up:
 /// the task counted twice, and `performance.now()` ran ahead of real time by the task's length from
 /// then on. In the app's window a frame's 3000 ms task left the frame's clock 3202 ms ahead
 /// (`docs/diagnostics/2026-11-15/long_task_clock_app.json`); the pinned Chrome's stays within a
 /// millisecond of `Date.now()` (`long_task_clock_cft148.json`). MotionMark reads this clock to
-/// decide a test is over.
+/// decide a test is over. (#1205's red test, moved onto the 60 Hz grid: frames at 17, then the
+/// catch-up turn, then two turns on time; on the grid the third frame after the task is the one the
+/// floor inflated.)
 ///
-/// The bound is on the values: two frames are no further apart than the real time between them
-/// plus one frame's floor, however long this test's own calls took.
+/// The bound is on the values: consecutive frames are no further apart than the real time between
+/// the first and the last plus one frame, and `performance.now()` moves no more than that, however
+/// long this test's own calls took.
 #[test]
 fn a_frame_after_a_long_tasks_catch_up_is_not_stamped_the_task_twice() {
     let b = page();
     b.evaluate(
-        "var log = []; requestAnimationFrame(function f(t) { log.push(t, performance.now()); \
-         if (log.length < 4) requestAnimationFrame(f); });",
+        "var log = []; requestAnimationFrame(function f(t) { log.push(t, performance.now());          if (log.length < 8) requestAnimationFrame(f); });",
     )
     .unwrap();
     // The task: real time the timers' clock has not been given.
     let task_ms = 300;
     std::thread::sleep(std::time::Duration::from_millis(task_ms));
     let began = std::time::Instant::now();
-    b.advance_timers(16, 10).unwrap(); // the first frame, the timers' clock a task behind
+    b.advance_timers(17, 10).unwrap(); // the first frame, the timers' clock a task behind
     b.advance_timers(task_ms, 10).unwrap(); // the catch-up, and the second frame
+    b.advance_timers(17, 10).unwrap(); // the third
+    b.advance_timers(17, 10).unwrap(); // the fourth
     let real_ms = began.elapsed().as_secs_f64() * 1000.0;
     let log: Vec<f64> = ev(&b, "log.join()").split(',').map(|x| x.parse().unwrap()).collect();
-    assert_eq!(log.len(), 4, "{log:?}");
-    let (stamps, clock) = (log[2] - log[0], log[3] - log[1]);
-    assert!(stamps >= 16.0 - 1e-6, "the two frames are {stamps} ms apart, less than a frame: {log:?}");
-    assert!(
-        stamps <= real_ms + 16.0 + 1e-6 && clock <= real_ms + 16.0 + 1e-6,
-        "{real_ms} ms of real time passed between two frames; their stamps are {stamps} ms apart and \
-         performance.now() moved {clock} ms: {log:?}"
-    );
+    assert_eq!(log.len(), 8, "{log:?}");
+    for i in 1..4 {
+        let (stamps, clock) = (log[2 * i] - log[2 * i - 2], log[2 * i + 1] - log[2 * i - 1]);
+        assert!(stamps > 0.0, "frame {i} is not after the one before: {log:?}");
+        assert!(
+            stamps <= real_ms + 17.0 + 1e-6 && clock <= real_ms + 17.0 + 1e-6,
+            "{real_ms} ms of real time passed over the frames; frame {i} is stamped {stamps} ms after              the one before and performance.now() moved {clock} ms: {log:?}"
+        );
+    }
+}
+
+/// CLOCK-INFLATE, as a property: in a live loop whose turns give the timers' clock the real time
+/// that passed (the app's `LiveClock`), long tasks of random lengths between turns, with frame
+/// loops and timer tasks reading the clock and the timeline, never leave `performance.now()`, a
+/// frame's stamp or the timeline more than one frame ahead of real time (Chrome: 0-1 ms,
+/// `long_task_clock_cft148.json`). Before the fix a task was counted twice after its catch-up.
+#[test]
+fn long_tasks_never_leave_the_page_clock_ahead_of_real_time() {
+    fn run(seed: u64) -> Result<(), String> {
+        let b = page();
+        b.evaluate(
+            "var L = []; function R() { L.push(performance.now(), document.timeline ? document.timeline.currentTime : 0); } \
+             function F() { requestAnimationFrame(function (t) { L.push(t); R(); F(); }); } F();",
+        )
+        .unwrap();
+        let mut s = seed;
+        let mut next = |m: u64| {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 33) % m
+        };
+        let ev_f = |b: &DomBindings, v: &str| -> f64 { ev(b, &format!("String({v})")).parse().unwrap() };
+        // The page clock and real time agree at the start (a turn to settle the first reading).
+        b.advance_timers(0, 10).unwrap();
+        let p0 = ev_f(&b, "performance.now()");
+        let began = std::time::Instant::now();
+        let mut last = std::time::Instant::now();
+        for _ in 0..40 {
+            if next(3) == 0 {
+                // A long task inside the next turn (a timer callback that works): real time passes
+                // in the turn that the timers' clock is given only on the turn after.
+                b.evaluate(&format!(
+                    "setTimeout(function () {{ var s = Date.now(); while (Date.now() - s < {}) {{}} }}, 0)",
+                    30 + next(150)
+                ))
+                .unwrap();
+            }
+            if next(4) == 0 {
+                b.evaluate(&format!("setTimeout(function () {{ R(); }}, {})", next(40))).unwrap();
+            }
+            // A turn: the timers' clock gets the real time since the last turn, whole ms.
+            let elapsed = last.elapsed().as_millis() as u64;
+            last += std::time::Duration::from_millis(elapsed);
+            b.advance_timers(elapsed, 100).unwrap();
+            let real = began.elapsed().as_secs_f64() * 1000.0;
+            let reads: Vec<f64> = ev(&b, "L.join()").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect();
+            let top = reads.iter().cloned().fold(f64::MIN, f64::max).max(ev_f(&b, "performance.now()"));
+            if top - p0 > real + 17.0 {
+                return Err(format!("{:.1} ms ahead of real time ({:.1} ms real)", top - p0 - real, real));
+            }
+        }
+        Ok(())
+    }
+    let failed: Vec<String> = (1..=6u64).filter_map(|seed| run(seed).err().map(|e| format!("seed {seed}: {e}"))).collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
