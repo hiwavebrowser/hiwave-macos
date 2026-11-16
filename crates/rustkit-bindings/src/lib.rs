@@ -1149,9 +1149,13 @@ pub(crate) struct DirtyMark {
     unlogged: Cell<bool>,
 }
 
-/// The write kinds whose writes are recorded in the `MutationLog` (when the write records one:
-/// see `note_unlogged` at the write and mutate natives).
-const LOGGED_KINDS: [&str; 8] = ["attribute", "class", "style", "text", "form", "html", "insert", "remove"];
+/// Whether a dirty mark's write pushed a `MutationLog` record (LPF1 R1): every caller of
+/// [`DirtyMark::mark`] says so, since it cannot be told from the write's kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Logged {
+    Yes,
+    No,
+}
 
 /// A layer write of paint properties (`opacity`, `color`,
 /// `background-color`, the border colours): the computed style sees it.
@@ -1163,11 +1167,11 @@ pub(crate) const LAYER_TRANSFORM: u8 = 2;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
-    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
+    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str, logged: Logged) {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
             self.other_since_layout.set(true);
-            if !LOGGED_KINDS.contains(&kind) {
+            if logged == Logged::No {
                 self.unlogged.set(true);
             }
             self.bump(bucket, kind);
@@ -1245,8 +1249,11 @@ impl DirtyMark {
     /// It is still a write the engine has to lay out, so it is beyond the
     /// animated-style layer: the paint-only animation frame must not skip
     /// it. A no-op write (`Clean`) is not a write and marks nothing.
-    pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
+    pub(crate) fn mark_unseen(&self, bucket: DomDirty, logged: Logged) {
         if bucket != DomDirty::Clean {
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
             self.beyond_animation_layer.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
         }
@@ -4695,7 +4702,7 @@ mod tests {
         d.laid_out();
         assert!(!d.needs_layout_for("computed_style"), "a layout publishes the layer");
         // A seen write afterwards forces every read again.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.needs_layout_for("offset"));
         assert_eq!(d.cause(), Some("text"));
     }
@@ -4714,7 +4721,7 @@ mod tests {
         // A write the published layout cannot see (display:none subtree)
         // still changes the DOM the engine lays out next: it is beyond the
         // layer, so the paint-only frame is not taken.
-        d.mark_unseen(DomDirty::Style);
+        d.mark_unseen(DomDirty::Style, Logged::Yes);
         assert!(d.beyond_animation_layer(), "an unseen write is beyond the layer");
         assert_eq!(d.cause(), Some("animation"), "it does not rename the first cause");
         assert_eq!(d.take(), DomDirty::Style);
@@ -4722,7 +4729,7 @@ mod tests {
 
         // Unseen first, on a current layout: no forced layout, but beyond.
         let d = DirtyMark::default();
-        d.mark_unseen(DomDirty::Layout);
+        d.mark_unseen(DomDirty::Layout, Logged::Yes);
         assert!(!d.written_since_layout(), "a read needs no forced layout");
         assert_eq!(d.cause(), None);
         assert!(d.beyond_animation_layer());
@@ -4731,14 +4738,14 @@ mod tests {
         // not a write, seen or unseen.
         let d = DirtyMark::default();
         d.mark_animation_layer(DomDirty::Layout, "animation");
-        d.mark(DomDirty::Clean, "style");
-        d.mark_unseen(DomDirty::Clean);
+        d.mark(DomDirty::Clean, "style", Logged::Yes);
+        d.mark_unseen(DomDirty::Clean, Logged::Yes);
         assert!(!d.beyond_animation_layer(), "a no-op write leaves the paint-only frame alone");
         assert_eq!(d.cause(), Some("animation"));
         assert_eq!(d.get(), DomDirty::Layout);
 
         // A real seen write after the layer: beyond, cause kept as first.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.beyond_animation_layer());
         assert_eq!(d.cause(), Some("animation"));
     }
