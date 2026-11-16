@@ -113,22 +113,6 @@ def test_jetstream_score_is_the_geomean_of_its_report():
     assert abs(score - 6.0) < 1e-9 and sub == {"a": 4.0, "b": 9.0}
 
 
-def test_no_window_between_five_and_half_past_seven_eastern(monkeypatch, tmp_path):
-    monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
-    monkeypatch.setattr(run, "hid_idle_seconds", lambda: 9999.0)
-    for now, ok in ((16 * 60, False),      # a 30-minute run would not cross 17:00, a 2-hour one would
-                    (17 * 60 + 5, False), (19 * 60 + 29, False), (19 * 60 + 30, True), (9 * 60, True)):
-        monkeypatch.setattr(run, "eastern_minutes", lambda offset_s=0, now=now: (now + offset_s // 60) % 1440)
-        limit = 2 * 3600 if now == 16 * 60 else 1800
-        try:
-            with run.WindowLock(limit, 0):
-                entered = True
-        except SystemExit:
-            entered = False
-        assert entered == ok, (now, entered)
-        assert not (tmp_path / "lock").exists()  # released either way
-
-
 # ── R1 on #1083 ────────────────────────────────────────────────────────────
 
 class Clock:
@@ -144,9 +128,6 @@ class Clock:
     def sleep(self, seconds):
         self.t += seconds
 
-    def minutes(self, offset_s=0):
-        return int((self.t + offset_s) // 60) % 1440
-
     def idle(self):
         return 9999.0 if self.t >= self.idle_from else 0.0
 
@@ -154,42 +135,55 @@ class Clock:
 def moving(monkeypatch, tmp_path, hhmm):
     clock = Clock(hhmm)
     monkeypatch.setattr(run, "time", clock)
-    monkeypatch.setattr(run, "eastern_minutes", clock.minutes)
     monkeypatch.setattr(run, "hid_idle_seconds", clock.idle)
     monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
     return clock
 
 
-def test_a_wait_for_an_idle_seat_that_runs_toward_five_is_refused_after_the_wait(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run: fine at entry (ends 16:30). The seat goes
-    # idle at 16:45; by then the run would end at 17:05.
+def test_a_run_at_half_past_five_with_an_idle_seat_is_allowed(monkeypatch, tmp_path):
+    # There is no time-of-day rule (the evening no-window rule was removed 2026-11-16): at any hour,
+    # for any wall limit, an idle seat gets the lock and the last check before launch passes.
+    assert not hasattr(run, "QUIET") and not hasattr(run.WindowLock, "check_quiet")
+    for hhmm, limit in ((1730, 30 * 60), (1610, 2 * 3600), (1929, 60), (900, 1800), (2359, 4 * 3600)):
+        moving(monkeypatch, tmp_path, hhmm)
+        with run.WindowLock(limit, 0) as lock:
+            assert (tmp_path / "lock").is_dir()
+            lock.clear_to_launch()
+        assert not (tmp_path / "lock").exists(), hhmm
+
+
+def test_a_busy_seat_is_waited_for_and_the_run_starts_once_it_is_idle(monkeypatch, tmp_path):
+    # 16:10: somebody is at the Mac until 16:45. The lock waits for the seat, then the run goes
+    # ahead, whatever the hour has become.
     clock = moving(monkeypatch, tmp_path, 1610)
     clock.idle_from = 16 * 3600 + 45 * 60
+    with run.WindowLock(20 * 60, 3600) as lock:
+        assert clock.t >= clock.idle_from, "it did wait for the seat"
+        lock.clear_to_launch()
+    assert not (tmp_path / "lock").exists()
+
+
+def test_a_seat_that_stays_busy_past_the_wait_is_refused_and_the_lock_released(monkeypatch, tmp_path):
+    clock = moving(monkeypatch, tmp_path, 1610)
+    clock.idle_from = clock.t + 2 * 3600
     try:
-        with run.WindowLock(20 * 60, 3600):
+        with run.WindowLock(20 * 60, 600):
             entered = True
     except SystemExit as e:
         entered, code = False, e.code
     assert not entered and code == 2
-    assert clock.t >= clock.idle_from, "it did wait for the seat"
+    assert clock.t >= 16 * 3600 + 10 * 60 + 600, "it waited as long as it was allowed"
     assert not (tmp_path / "lock").exists()
 
 
-def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run, idle seat: the lock is given. The load wait
-    # that follows lasts until 16:45: launching now could show a window at 17:05.
+def test_the_last_check_before_launch_reads_the_seat_again(monkeypatch, tmp_path):
+    # An idle seat: the lock is given. During the load wait that follows somebody sits down:
+    # the check immediately before the window goes up sees it.
     clock = moving(monkeypatch, tmp_path, 1610)
     with run.WindowLock(20 * 60, 0) as lock:
-        lock.clear_to_launch()  # 16:10: fine
+        lock.clear_to_launch()  # idle: fine
         clock.sleep(35 * 60)
-        try:
-            lock.clear_to_launch()
-            refused = False
-        except SystemExit:
-            refused = True
-        assert refused
-        # ... and somebody sitting down in the meantime is seen as well
-        clock.t = 9 * 3600.0
+        lock.clear_to_launch()  # still idle, 35 minutes later: fine at any hour
         clock.idle_from = clock.t + 1
         try:
             lock.clear_to_launch()
@@ -198,16 +192,6 @@ def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_pat
             refused = True
         assert refused
     assert not (tmp_path / "lock").exists()
-
-
-def test_a_run_whose_wall_limit_crosses_five_is_refused_at_entry(monkeypatch, tmp_path):
-    moving(monkeypatch, tmp_path, 1610)
-    try:
-        with run.WindowLock(60 * 60, 0):
-            entered = True
-    except SystemExit:
-        entered = False
-    assert not entered and not (tmp_path / "lock").exists()
 
 
 def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
