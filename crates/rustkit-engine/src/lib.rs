@@ -6566,7 +6566,7 @@ impl Engine {
             if request.sandbox.is_some() || (!blank && !same_origin) {
                 // The cross-origin floor: no request, no document, one `load`.
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             }
@@ -6583,7 +6583,7 @@ impl Engine {
                     Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
                         // The cross-origin floor, as for a cross-origin `src`.
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6604,7 +6604,7 @@ impl Engine {
                     // redirect, or the request failed): the floor too.
                     Err(_) => {
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6614,7 +6614,7 @@ impl Engine {
             // parses (HTML §13.2.3.5: `<noscript>` content is text).
             let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             };
@@ -6671,6 +6671,27 @@ impl Engine {
                 frame.doc.document = Some(document.clone());
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
+            }
+            // The frame's linked stylesheets, before its scripts and its
+            // `load`, as a page's are before its own: what the parent's
+            // `load` handler measures in the frame is styled (Chrome 148,
+            // docs/diagnostics/2026-11-15/frame_style_cft148.json). A sheet
+            // over the subresource budget lands on a live turn, as a page's.
+            // Nothing of the page runs during this wait (the tree's one
+            // loop is here), so the frame cannot be navigated under it; a
+            // later request for the element drops this view and its sheets
+            // with it. The wait ends at the subresource budget.
+            match self.load_external_stylesheets_slotted(fid).await {
+                Ok((links, fetched, late)) => {
+                    if let Some(frame) = self.views.get_mut(&fid) {
+                        frame.sheet_links = links;
+                        frame.fetched_sheets = fetched;
+                        frame.live_sheets = late;
+                        frame.rebuild_link_sheets();
+                    }
+                }
+                // The live turn's link check asks for them again.
+                Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
             }
             // The child's classic scripts, in document order.
             let listed = child.evaluate_named(
@@ -6768,8 +6789,13 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 view.frames.insert(request.node, FrameState { view: fid, url: target });
             }
-            if let Some(parent) = parent_of(self, id) {
-                let _ = parent.frame_loaded(request.node);
+            // The initial about:blank of a frame nothing listened to at
+            // its insertion: Chrome fired that `load` inside the insertion,
+            // so a handler set since must not hear it now.
+            if !request.quiet {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node, request.initial);
+                }
             }
             changed = true;
         }

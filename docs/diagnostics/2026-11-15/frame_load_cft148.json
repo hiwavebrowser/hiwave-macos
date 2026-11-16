@@ -1,0 +1,75 @@
+{
+ "cases": {
+  "insertThenOnloadThenSrc": [
+   {
+    "href": "frame_load_child.html",
+    "readyState": "complete",
+    "implicitGlobal": "object",
+    "varGlobal": "object",
+    "fnGlobal": "function",
+    "letGlobal": "undefined",
+    "ClassGlobal": "undefined",
+    "sameWindowAsFramesEntry": true,
+    "stage": true
+   }
+  ],
+  "listenerThenInsertNoSrc": [
+   {
+    "href": "about:blank",
+    "readyState": "complete",
+    "implicitGlobal": "undefined",
+    "varGlobal": "undefined",
+    "fnGlobal": "undefined",
+    "letGlobal": "undefined",
+    "ClassGlobal": "undefined",
+    "sameWindowAsFramesEntry": true,
+    "stage": false
+   }
+  ],
+  "listenerSrcThenInsert": [
+   {
+    "href": "frame_load_child.html",
+    "readyState": "complete",
+    "implicitGlobal": "object",
+    "varGlobal": "object",
+    "fnGlobal": "function",
+    "letGlobal": "undefined",
+    "ClassGlobal": "undefined",
+    "sameWindowAsFramesEntry": true,
+    "stage": true
+   }
+  ],
+  "listenerThenInsertThenSrc": [
+   {
+    "href": "about:blank",
+    "readyState": "complete",
+    "implicitGlobal": "undefined",
+    "varGlobal": "undefined",
+    "fnGlobal": "undefined",
+    "letGlobal": "undefined",
+    "ClassGlobal": "undefined",
+    "sameWindowAsFramesEntry": true,
+    "stage": false
+   },
+   {
+    "href": "frame_load_child.html",
+    "readyState": "complete",
+    "implicitGlobal": "object",
+    "varGlobal": "object",
+    "fnGlobal": "function",
+    "letGlobal": "undefined",
+    "ClassGlobal": "undefined",
+    "sameWindowAsFramesEntry": true,
+    "stage": true
+   }
+  ]
+ },
+ "errors": [],
+ "syncCounts": {
+  "insertThenOnloadThenSrc": 0,
+  "listenerThenInsertNoSrc": 1,
+  "listenerSrcThenInsert": 0,
+  "listenerThenInsertThenSrc": 1
+ },
+ "browser": "148.0.7778.216"
+}

@@ -14,7 +14,11 @@
 //
 // Stated limits of this stage: `contentWindow` is `null` until the engine
 // has drained the request (after the script that inserted the frame
-// returns; HTML makes it `about:blank` at once). A cross-origin frame is
+// returns; HTML makes it `about:blank` at once). The blank document's
+// `load` comes with it, a turn late, and goes only to what could hear it
+// at the insertion, where Chrome fires it: a listener added or a handler
+// set after the insertion never hears the blank `load` (`navigate`).
+// A cross-origin frame is
 // left blank: `contentWindow` and `contentDocument` stay `null`, and `load`
 // fires. A frame with a `sandbox` attribute is left blank the same way: the
 // engine reads the attribute itself when the request below is made
@@ -66,36 +70,57 @@
         if (src === null || trim(src) === '') return 'about:blank';
         try { return new URL_(src, (baseURI ? baseURI(doc) : doc.baseURI) || g.location.href).href; } catch (e) { return 'about:blank'; }
     }
-    function navigate(el) {
+    // `inserted`: a script just put the frame into the document; `parsed`:
+    // the parser did, and the scan found it. Chrome fires the initial
+    // about:blank's `load` inside the insertion, so only what was on the
+    // frame by then hears it. The engine's comes after the inserting script
+    // returns: what would hear it is recorded now (`HOOKS.loadSnapshot`)
+    // and the `load` is replayed to that record (`loaded`), or not asked
+    // for at all when the record is empty.
+    var NORMAL = 0, QUIET = 1, INITIAL = 2;
+    var heardAt = create(null); // node id -> what could hear the blank load
+    function navigate(el, inserted, parsed) {
         var id = HOOKS.nodeId(el);
         if (id < 0) return;
+        var url = target(el), mode = NORMAL;
         frames[id] = record(el);
-        request(id, target(el));
+        // A later `src` leaves the record: the blank request made before
+        // it is still to be answered.
+        if ((inserted || parsed) && url === 'about:blank' && HOOKS.loadSnapshot) {
+            var snap = HOOKS.loadSnapshot(el, !!parsed);
+            if (snap) { heardAt[id] = snap; mode = INITIAL; } else { delete heardAt[id]; mode = QUIET; }
+        }
+        request(id, url, mode);
     }
     function gone(el) {
         var id = HOOKS.nodeId(el);
         if (id < 0 || !frames[id]) return;
         delete frames[id];
+        delete heardAt[id];
         request(id, null);
     }
 
     // A frame that is in the document and has not been asked for yet.
-    function fresh(f) {
+    // `inserted` as for `navigate`.
+    function fresh(f, inserted) {
         var id = HOOKS.nodeId(f);
-        if (id >= 0 && !frames[id] && isConnected(f)) navigate(f);
+        if (id >= 0 && !frames[id] && isConnected(f)) navigate(f, inserted);
     }
+    // The same, for a frame a script's insertion just put in (a fragment's
+    // children, parsed markup).
+    function arrived(f) { fresh(f, true); }
     // The frames whose element is no longer in the document have left.
     function sweep() {
         for (var id in frames) {
-            if (!isConnected(frames[id].el)) { delete frames[id]; request(+id, null); }
+            if (!isConnected(frames[id].el)) { delete frames[id]; delete heardAt[id]; request(+id, null); }
         }
     }
     HOOKS.frames = Object.setPrototypeOf({
         // `parent`: where `node` went. A fragment's children are under it
         // by now, the fragment empty.
         tree: function (op, node, parent) {
-            if (op === 'insert' && node != null && node.nodeType === 11) each(parent, fresh);
-            else if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f); });
+            if (op === 'insert' && node != null && node.nodeType === 11) each(parent, arrived);
+            else if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f, true); });
             else if (op === 'remove') each(node, gone);
         },
         changed: function (node, op, name) {
@@ -103,7 +128,7 @@
             // the frames that left, then the frames that came.
             if (op === 'setHTML' || op === 'setText' || op === 'setInnerText') {
                 sweep();
-                if (op === 'setHTML') each(node, fresh);
+                if (op === 'setHTML') each(node, arrived);
                 return;
             }
             if (op !== 'setAttr' || String(name).length !== 3) return;
@@ -118,7 +143,7 @@
             var list = HOOKS.byTag('iframe');
             for (var i = 0; i < list.length; i++) {
                 var f = list[i], id = HOOKS.nodeId(f);
-                if (id >= 0 && !frames[id] && isConnected(f)) navigate(f);
+                if (id >= 0 && !frames[id] && isConnected(f)) navigate(f, false, true);
             }
         },
         // The frame takes the window (or, with null, gives it up). What
@@ -132,12 +157,25 @@
             h.up = g; h.el = r.el; h.top = null;
             return h;
         },
-        loaded: function (id) {
+        // `initial`: the document is the blank one of the frame's
+        // insertion, whose `load` goes to what was recorded then.
+        loaded: function (id, initial) {
             var r = frames[id];
+            if (!r) return false;
             // The engine's own event, through its own dispatch: whatever
             // the page has put on the element or the prototypes since.
-            if (r) __rk.dispatchTo(r.el, __rk.trust(__rk.make('Event', 'load')));
-            return !!r;
+            var ev = __rk.trust(__rk.make('Event', 'load'));
+            if (initial) {
+                var snap = heardAt[id];
+                delete heardAt[id];
+                if (snap && HOOKS.loadReplay) HOOKS.loadReplay(snap, ev);
+            } else {
+                // A record still held is for a blank document that was
+                // never made (a frame left blank by the engine): let it go.
+                delete heardAt[id];
+                __rk.dispatchTo(r.el, ev);
+            }
+            return true;
         },
         // The child's viewport until layout sizes frames (Stage 3): the
         // element's own CSS px width/height, its attributes, or 300x150.

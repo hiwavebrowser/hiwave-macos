@@ -85,8 +85,22 @@ One JSON file per run in `--out` (default `~/zg-measure/stress-runs`):
 `score`, `sub_scores`, `wall_s`, `load_avg_before`/`after`, `errors` (what
 the page threw or logged with `console.error`), `last_progress`,
 `log_findings` (lines of the app's log that say a script was stopped or the
-process died), `off_machine`, `offline_checks`, `engine_flags` and, when the
-run did not finish, `log_tail`.
+process died), `engine_errors`, `frames`, `off_machine`, `offline_checks`,
+`engine_flags` and, when the run did not finish, `log_tail`.
+
+`errors` is what the page heard: the window's `error` and
+`unhandledrejection` events and `console.error`. `engine_errors` is what the
+engine logged as uncaught (the app's console log, first 20), whether or not
+the page heard it: as of 2026-11-15 the engine fires no `error` event at the
+window for an uncaught exception
+(docs/diagnostics/2026-11-15/error_event_cft148.json is Chrome's answer), so
+a run can have `errors: []` and a full `engine_errors`. Read both.
+
+`frames` (MotionMark) is, for each test that finished, its frames in up to
+twelve steps of rising complexity (`from`, `to`, `frames`, `mean_ms`,
+`max_ms`, `fps`), how many frame lengths were not a positive number
+(`unusable`), and the complexity each ramp settled on (`ramps`). A test
+scores about 0 when no step holds the target frame rate.
 
 `engine_flags` is every `HIWAVE_` variable the engine process was started
 with: the suite's own (below), what `--env` asked for, what the offline
