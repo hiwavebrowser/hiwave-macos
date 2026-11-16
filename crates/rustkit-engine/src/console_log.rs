@@ -124,6 +124,26 @@ pub(crate) fn resolve(view: u64, path: &str) -> String {
     brief_place(url.flatten().as_deref().unwrap_or(path))
 }
 
+/// `text` for a log line: every control character and line or paragraph
+/// separator written as an escape (`\n`, `\r`, `\t`, `\u{..}`), so
+/// that text a page chose (a console call, a message, a specifier) stays
+/// inside the one line of its record.
+pub(crate) fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn emit(line: String) {
     #[cfg(test)]
     SINK.with(|slot| {
@@ -148,6 +168,7 @@ pub(crate) fn console_message(view: u64, level: LogLevel, message: &str, at: Opt
         LogLevel::Debug => "debug",
     };
     let (message, _) = cap(message, MAX_MESSAGE_CHARS);
+    let message = plain(&message);
     let where_at = match at {
         Some(at) => format!("{}:{}:{}", resolve(view, &at.path), at.line, at.column),
         None => "-".to_string(),
@@ -256,14 +277,17 @@ pub(crate) fn page_error(view: u64, report: &ErrorReport, script: &str, window: 
     }
     // An error the page cancelled is written all the same, and says so: a
     // page must not be able to keep its errors out of a run's record. The
-    // line still starts with `uncaught`, which is what readers match on.
+    // line still starts with `uncaught` or `unhandled rejection`, which is
+    // what readers match on.
     let kind = match (report.rejection, report.canceled) {
-        (true, _) => "unhandled rejection",
+        (true, true) => "unhandled rejection (cancelled by the page)",
+        (true, false) => "unhandled rejection",
         (false, true) => "uncaught (cancelled by the page)",
         (false, false) => "uncaught",
     };
     let name = report.name.unwrap_or("Error");
     let (message, _) = cap(report.message.as_deref().unwrap_or(""), MAX_MESSAGE_CHARS);
+    let message = plain(&message);
     let (url, line, column) = report.frames.first().map(|frame| (resolve(view, &frame.path), frame.line, frame.column)).unwrap_or_else(
         || (resolve(view, report.module.as_deref().unwrap_or(script)), 0, 0),
     );
@@ -335,6 +359,10 @@ pub(crate) fn sync_diag_armed() {
 /// string the parser found no scheme in is cut by hand, as a relative
 /// string: a `://` in its query is not a scheme.
 pub(crate) fn brief_url(url: &str) -> String {
+    plain(&brief_url_as_parsed(url))
+}
+
+fn brief_url_as_parsed(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(parsed) => cap_url(crate::inspector::scrub_url(&parsed, false)),
         // The parser's verdict on whether there is a scheme is the only one
@@ -504,6 +532,7 @@ pub(crate) fn dynamic_import_failed(specifier: &str, url: &str, reason: &str) {
     }
     let url = if url.is_empty() { "-".to_string() } else { brief_place(url) };
     let (reason, _) = cap(reason, MAX_MESSAGE_CHARS);
+    let reason = plain(&reason);
     let reason = reason.replace(['\n', '\r'], " ");
     emit(format!("dynamic import {} -> {url}: {reason}", brief_place(specifier)));
 }
@@ -921,6 +950,20 @@ mod tests {
         assert!(!brief.contains('\n'), "{brief:?}");
         let brief = brief_url("/a\tb?S");
         assert!(!brief.contains('\t') && !brief.contains('S'), "{brief:?}");
+    }
+
+    #[test]
+    fn plain_writes_control_characters_as_escapes() {
+        assert_eq!(plain("a b\u{e9}\u{4e2d} \"'\\"), "a b\u{e9}\u{4e2d} \"'\\");
+        assert_eq!(plain("a\nb\r\nc\td"), "a\\nb\\r\\nc\\td");
+        assert_eq!(plain("\u{0}\u{1b}[0m\u{7f}\u{85}\u{2028}\u{2029}\u{b}\u{c}"), "\\u{0}\\u{1b}[0m\\u{7f}\\u{85}\\u{2028}\\u{2029}\\u{b}\\u{c}");
+        for ch in (0u32..0x3000).filter_map(char::from_u32) {
+            let out = plain(&ch.to_string());
+            assert!(!out.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'), "{:x}", ch as u32);
+        }
+        // A URL or a label in a line goes through it too.
+        assert!(!brief_place("a\nb#1\u{2028}").contains(['\n', '\u{2028}']));
+        assert!(!brief_url("rel\u{85}ative/\u{1b}x\ny").chars().any(char::is_control));
     }
 
     #[test]
