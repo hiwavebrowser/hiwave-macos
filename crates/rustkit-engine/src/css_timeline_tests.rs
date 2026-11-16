@@ -133,9 +133,10 @@ const CHILD: &str = "<!doctype html><style>@keyframes fade{from{opacity:0}to{opa
     #a{width:10px;height:10px;animation:fade 10s linear}#s{width:10px;height:10px}</style>\
     <div id=a></div><div id=s></div><script>function tl(){return document.timeline.currentTime}\
     window.go = function () { var a = document.getElementById('a'), s = document.getElementById('s');\
-      var c = a.getAnimations()[0]; window.rows = [];\
+      var c = a.getAnimations()[0]; window.rows = []; window.paint = []; window.start0 = c.startTime;\
       (function f() { requestAnimationFrame(function () {\
         rows.push(c.startTime + c.currentTime - tl(), c.startTime - tl());\
+        paint.push(c.currentTime - parseFloat(getComputedStyle(a).opacity) * 10000);\
         if (rows.length < 6) f(); else sync(); }); })();\
       function sync() { var sa = s.animate({opacity:[0,1]}, {duration:10000}); sa.startTime = c.startTime;\
         (function f() { requestAnimationFrame(function () {\
@@ -146,7 +147,8 @@ const CHILD: &str = "<!doctype html><style>@keyframes fade{from{opacity:0}to{opa
 /// its CSS animation's start time is on the frame's timeline, never ahead of it, and a script
 /// animation given that start time runs at the CSS animation's current time (Chrome "child": 0
 /// in 15 of 15 rows; start times 11-15 ms on the frame's timeline, origin 1850-1939 ms later).
-/// Was: the CSS start time was on the engine's clock, the frame's timeline 300 ms ahead of it.
+/// Was: the frame's CSS start time was 0 on the tree's clock, before the frame was made, so it
+/// read 0 on the frame's timeline and painted the frame's origin ahead of it.
 #[test]
 fn in_a_frame_document_a_css_animation_is_on_the_frames_own_timeline() {
     let parent = "<!doctype html><body><script>window.ready = false;\
@@ -167,6 +169,17 @@ fn in_a_frame_document_a_css_animation_is_on_the_frames_own_timeline() {
         "{}",
         read(&mut engine, view, "f.contentWindow.rows")
     );
+    // The start time is on the frame's timeline: the frame's first frames, not the parent's time
+    // (Chrome 11-15 ms; the start time cancels out of the rows below, so it is read on its own).
+    let start = read(&mut engine, view, "f.contentWindow.start0");
+    let start: f64 = start.parse().unwrap_or_else(|_| panic!("{start}"));
+    assert!((0.0..50.0).contains(&start), "the CSS start time on the frame's timeline: {start} (Chrome 11-15)");
+    // ... and the frame paints the value for that time (was: its start was the tree's clock zero,
+    // before the frame was made, so it painted ~400 ms in at 183 ms on its timeline).
+    let paint = numbers(&read(&mut engine, view, "f.contentWindow.paint"));
+    for p in &paint {
+        assert!(p.abs() < 0.5, "currentTime - the painted opacity's time: {paint:?} (Chrome: 0)");
+    }
     let rows = numbers(&read(&mut engine, view, "f.contentWindow.rows"));
     for (i, pair) in rows.chunks(2).enumerate() {
         assert!(pair[0].abs() < 0.01, "row {i}: {rows:?} (Chrome: 0)");
