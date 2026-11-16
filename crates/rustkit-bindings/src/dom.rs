@@ -4048,72 +4048,180 @@ const WRAPPERS_JS: &str = r#"
     };
 
     // classList: a DOMTokenList over the class attribute, one per element.
+    //
+    // Every built-in used here is taken at install time (a page's own
+    // `String.prototype.split`, `Array.prototype.indexOf`, `Element.prototype.
+    // setAttribute` or `Reflect.get` cannot change what the list does), and the
+    // class attribute is read and written through the engine's natives, not
+    // through the element's JS methods. The token set is kept with the attribute
+    // text it was made from: the same text is not parsed twice, and a token array
+    // is never changed after it is stored (a change makes a new one), so one a
+    // forEach or iterator holds stays a snapshot.
     var DOMTokenList = iface('DOMTokenList');
-    var TOKENS = Symbol('rustkit.tokens');
-    function tokens(list) {
-        var v = list[TOKENS].getAttribute('class') || '';
+    var tlState = new WeakMap();
+    var tlStr = String, tlSlice = uncurry(String.prototype.slice), tlCode = uncurry(String.prototype.charCodeAt);
+    var tlTest = uncurry(RegExp.prototype.test), tlJoin = uncurry(Array.prototype.join), tlGet = Reflect.get;
+    var tlCall = uncurry(Function.prototype.call), tlValues = uncurry(Array.prototype.values);
+    var TL_SPACE = /[\t\n\f\r ]/, TL_INDEX = /^(0|[1-9][0-9]*)$/;
+    function tlOf(list) {
+        var st = mapGet(tlState, list);
+        if (!st) throw new TypeError('Illegal invocation');
+        return st;
+    }
+    function tlSpace(c) { return c === 32 || c === 9 || c === 10 || c === 12 || c === 13; }
+    function tlIndexOf(ts, t) {
+        for (var i = 0; i < ts.length; i++) if (ts[i] === t) return i;
+        return -1;
+    }
+    function tlWithout(ts, at) {
         var out = [];
-        v.split(/[\t\n\f\r ]+/).forEach(function (t) { if (t && out.indexOf(t) < 0) out.push(t); });
+        for (var i = 0; i < ts.length; i++) if (i !== at) out[out.length] = ts[i];
         return out;
     }
+    function tlWith(ts, t) {
+        var out = [];
+        for (var i = 0; i < ts.length; i++) out[i] = ts[i];
+        out[out.length] = t;
+        return out;
+    }
+    // The ordered set of tokens in `v`, and whether `v` already is the serialized
+    // set (one space between tokens, none at the ends, no repeats).
+    function tlParse(st, v) {
+        var out = [], n = v.length, i = 0, clean = true;
+        while (i < n) {
+            if (tlSpace(tlCode(v, i))) {
+                if (i === 0 || i === n - 1 || tlCode(v, i) !== 32 || tlSpace(tlCode(v, i + 1))) clean = false;
+                i++;
+                continue;
+            }
+            var j = i + 1;
+            while (j < n && !tlSpace(tlCode(v, j))) j++;
+            var t = tlSlice(v, i, j);
+            if (tlIndexOf(out, t) < 0) out[out.length] = t; else clean = false;
+            i = j;
+        }
+        st.ts = out;
+        st.clean = clean;
+        return out;
+    }
+    // The tokens now; `st.raw` is the class attribute's text (null: no attribute).
+    function tokens(st) {
+        var s = slotOf(st.el), v = N.attr(s.gen, s.id, 'class');
+        if (st.ts !== null && v === st.raw) return st.ts;
+        st.raw = v;
+        return tlParse(st, v === null ? '' : v);
+    }
     function checkToken(t, method) {
-        t = String(t);
+        t = tlStr(t);
         if (t === '') throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided must not be empty.", 'SyntaxError');
-        if (/[\t\n\f\r ]/.test(t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
+        if (tlTest(TL_SPACE, t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
         return t;
     }
-    function store(list, ts) { list[TOKENS].setAttribute('class', ts.join(' ')); }
-    getter(DOMTokenList.prototype, 'length', function () { return tokens(this).length; });
-    accessor(DOMTokenList.prototype, 'value', function () { return this[TOKENS].getAttribute('class') || ''; },
-        function (v) { this[TOKENS].setAttribute('class', String(v)); });
+    // The update steps: the class attribute becomes the serialized set. `text`
+    // is that serialization when the caller has it already.
+    // setData for the one attribute name `class`, without the steps that only act on another
+    // name: `attributeChanged` (on<type> attributes), `HOOKS.scripts.changed` (`async`, `src`)
+    // and `HOOKS.frames.changed` (`src`). Same write, same mutation record, same errors.
+    function putClass(el, text) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
+        var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
+        if (m) m();
+    }
+    function store(st, ts, text) {
+        if (text === undefined) text = tlJoin(ts, ' ');
+        putClass(st.el, text);
+        st.raw = text; st.ts = ts; st.clean = true;
+    }
+    getter(DOMTokenList.prototype, 'length', function () { return tokens(tlOf(this)).length; });
+    accessor(DOMTokenList.prototype, 'value', function () {
+            var st = tlOf(this), s = slotOf(st.el), v = N.attr(s.gen, s.id, 'class');
+            return v === null ? '' : v;
+        },
+        function (v) { putClass(tlOf(this).el, tlStr(v)); });
     DOMTokenList.prototype.toString = function () { return this.value; };
-    DOMTokenList.prototype.item = function (i) { var ts = tokens(this); i = i >>> 0; return i < ts.length ? ts[i] : null; };
-    DOMTokenList.prototype.contains = function (t) { return tokens(this).indexOf(String(t)) >= 0; };
+    DOMTokenList.prototype.item = function (i) { var ts = tokens(tlOf(this)); i = i >>> 0; return i < ts.length ? ts[i] : null; };
+    DOMTokenList.prototype.contains = function (t) { return tlIndexOf(tokens(tlOf(this)), tlStr(t)) >= 0; };
     DOMTokenList.prototype.add = function () {
-        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'add'); });
-        var ts = tokens(this);
-        args.forEach(function (t) { if (ts.indexOf(t) < 0) ts.push(t); });
-        store(this, ts);
+        var st = tlOf(this), n = arguments.length, args = [];
+        for (var k = 0; k < n; k++) args[k] = checkToken(arguments[k], 'add');
+        var ts = tokens(st), raw = st.raw, clean = st.clean, grown = false;
+        for (var m = 0; m < n; m++) {
+            if (tlIndexOf(ts, args[m]) < 0) { ts = tlWith(ts, args[m]); grown = true; }
+        }
+        // A token already there still rewrites the attribute (DOM's update steps
+        // run, so the text is normalized and an observer gets a record).
+        if (n === 1 && grown && clean) store(st, ts, raw === null || raw === '' ? args[0] : raw + ' ' + args[0]);
+        else if (!grown && clean && raw !== null) store(st, ts, raw);
+        else store(st, ts);
     };
     DOMTokenList.prototype.remove = function () {
-        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'remove'); });
-        var ts = tokens(this).filter(function (t) { return args.indexOf(t) < 0; });
+        var st = tlOf(this), n = arguments.length, args = [];
+        for (var k = 0; k < n; k++) args[k] = checkToken(arguments[k], 'remove');
+        var ts = tokens(st), kept = ts;
+        for (var m = 0; m < n; m++) {
+            var at = tlIndexOf(kept, args[m]);
+            if (at >= 0) kept = tlWithout(kept, at);
+        }
         // DOM's update steps skip writing a class attribute that isn't there.
-        if (this[TOKENS].hasAttribute('class')) store(this, ts);
+        if (st.raw === null) return;
+        if (kept === ts && st.clean) store(st, ts, st.raw);
+        else store(st, kept);
     };
     DOMTokenList.prototype.toggle = function (t, force) {
         t = checkToken(t, 'toggle');
-        var ts = tokens(this), i = ts.indexOf(t);
-        if (i >= 0 && force !== true) { ts.splice(i, 1); store(this, ts); return false; }
-        if (i < 0 && force !== false) { ts.push(t); store(this, ts); return true; }
+        var st = tlOf(this), ts = tokens(st), i = tlIndexOf(ts, t);
+        if (i >= 0 && force !== true) { store(st, tlWithout(ts, i)); return false; }
+        if (i < 0 && force !== false) {
+            store(st, tlWith(ts, t), st.clean && (st.raw === null || st.raw === '') ? t : st.clean ? st.raw + ' ' + t : undefined);
+            return true;
+        }
         return i >= 0;
     };
     DOMTokenList.prototype.replace = function (a, b) {
         a = checkToken(a, 'replace'); b = checkToken(b, 'replace');
-        var ts = tokens(this), i = ts.indexOf(a);
+        var st = tlOf(this), ts = tokens(st), i = tlIndexOf(ts, a);
         if (i < 0) return false;
-        var j = ts.indexOf(b);
-        if (j >= 0 && j !== i) ts.splice(i, 1); else ts[i] = b;
-        store(this, ts);
+        // The new token takes the place of whichever of the two came first; the other goes (DOM replace).
+        var j = tlIndexOf(ts, b), out = [], first = j >= 0 && j < i ? j : i;
+        for (var k = 0; k < ts.length; k++) {
+            if (k === first) out[out.length] = b; else if (k !== i && k !== j) out[out.length] = ts[k];
+        }
+        store(st, out);
         return true;
     };
-    DOMTokenList.prototype.forEach = function (cb, self) { tokens(this).forEach(cb, self); };
-    DOMTokenList.prototype[Symbol.iterator] = function () { return tokens(this)[Symbol.iterator](); };
+    // The callback gets (token, index, the list), as Chrome's does, never the kept array,
+    // and the set is read again at each step (a callback that removes a class changes what
+    // follows, Chrome 148).
+    DOMTokenList.prototype.forEach = function (cb, self) {
+        var st = tlOf(this), ts = tokens(st);
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'DOMTokenList': parameter 1 is not of type 'Function'.");
+        for (var i = 0; i < ts.length; i++) {
+            tlCall(cb, self, ts[i], i, this);
+            ts = tokens(st);
+        }
+    };
+    DOMTokenList.prototype[Symbol.iterator] = function () { return tlValues(tokens(tlOf(this))); };
     var classLists = new WeakMap();
     getter(Element.prototype, 'classList', function () {
         slotOf(this);
-        var l = classLists.get(this);
+        var l = mapGet(classLists, this);
         if (!l) {
-            l = Object.create(DOMTokenList.prototype);
-            Object.defineProperty(l, TOKENS, { value: this });
-            // The indexed getter (`classList[0]`) answers like item().
-            l = new Proxy(l, {
+            var st = { el: this, raw: null, ts: null, clean: true };
+            // The indexed getter (`classList[0]`) answers like item(). A property
+            // name that does not start with a digit cannot be an index.
+            l = new Proxy(Object.create(DOMTokenList.prototype), {
                 get: function (t, p, r) {
-                    return typeof p === 'string' && /^(0|[1-9][0-9]*)$/.test(p)
-                        ? tokens(t)[Number(p)] : Reflect.get(t, p, r);
+                    if (typeof p === 'string') {
+                        var c = tlCode(p, 0);
+                        if (c >= 48 && c <= 57 && tlTest(TL_INDEX, p)) return tokens(st)[Number(p)];
+                    }
+                    return tlGet(t, p, r);
                 }
             });
-            classLists.set(this, l);
+            mapSet(tlState, l, st);
+            mapSet(classLists, this, l);
         }
         return l;
     });
