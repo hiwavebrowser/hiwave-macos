@@ -612,7 +612,7 @@ impl EndpointSide {
             }
             PageCmd::PumpLive { elapsed_ms, reply } => {
                 let turn = match live {
-                    Some(runtime) => runtime.block_on(engine.pump_live(self.view, elapsed_ms)),
+                    Some(runtime) => runtime.block_on(engine.pump_live_real(self.view, elapsed_ms)),
                     None => LivePump::default(),
                 };
                 let _ = reply.send(turn);
@@ -1271,7 +1271,7 @@ impl EndpointSide {
             let mut cmds = self.drain_coalesced();
             if cmds.is_empty() {
                 let elapsed = clock.turn(std::time::Instant::now());
-                let turn = engine.pump_live(self.view, elapsed).await;
+                let turn = engine.pump_live_real(self.view, elapsed).await;
                 self.after_page_change(engine);
                 // A resize (or any other command) that arrived during the
                 // turn is applied before the next timer slice. The frame
@@ -1335,7 +1335,7 @@ impl EndpointSide {
                 self.after_page_change(engine);
             }
             PageCmd::PumpLive { elapsed_ms, reply } => {
-                let turn = engine.pump_live(self.view, elapsed_ms).await;
+                let turn = engine.pump_live_real(self.view, elapsed_ms).await;
                 let _ = reply.send(turn);
                 self.after_page_change(engine);
             }
@@ -1795,6 +1795,37 @@ mod tests {
         endpoint.drain(None);
         assert_eq!(handle.last_sent_nav_id(), 1);
         let _ = handle.drain_events();
+    }
+
+    /// CLOCK3: the window thread's live turn (`PumpLive`, the loop with the
+    /// content thread off) is on the real clock: its `elapsed_ms` is real time
+    /// that has passed, so a 1000 ms chain held back for 5000 ms runs its
+    /// overdue link once and sets the next from then. A stepped turn would
+    /// run five (1000 to 5000 ms). The period is long because the turn's
+    /// reach grows with the real time it takes: only a whole-second stall
+    /// inside the turn would let the next link into it.
+    #[test]
+    fn the_window_threads_live_turn_does_not_replay_a_timeout_chain() {
+        let (handle, mut endpoint) = pair();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (tx, _rx) = oneshot::channel();
+        handle.send(PageCmd::LoadHtml { html: "<p>chain</p>".into(), nav_id: 0, reply: tx });
+        endpoint.drain(Some(&rt));
+        let pump = |handle: &PageHandle, endpoint: &mut PageEndpoint, elapsed_ms: u64| {
+            let (tx, mut rx) = oneshot::channel();
+            handle.send(PageCmd::PumpLive { elapsed_ms, reply: tx });
+            endpoint.drain(Some(&rt));
+            rx.try_recv().expect("the turn ran")
+        };
+        // The turn after the load (its timers already ran in the load's pass).
+        pump(&handle, &mut endpoint, 0);
+        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 1000); })(); 0");
+        pump(&handle, &mut endpoint, 5000);
+        assert_eq!(
+            eval(&handle, &mut endpoint, "String(window.n)"),
+            r#"String("2")"#,
+            "the chain replayed the links the 5000 ms held back"
+        );
     }
 
     /// CH2.E4: what the pointer is over reaches the window as events: the
