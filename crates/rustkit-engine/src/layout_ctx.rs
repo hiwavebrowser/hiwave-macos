@@ -655,6 +655,12 @@ pub(crate) struct ViewLayout {
     /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
     /// not pay for a kept copy of its tree every frame.
     pub(crate) script_cooldown: Cell<u32>,
+    /// LPF3: the cooldown the next miss sets: 0 for a one-off miss (it costs only its own full
+    /// build, which keeps the tree for the next frame), doubling with each miss in a row (one at
+    /// the first relayout after the last one's cooldown), up to `SCRIPT_RESTYLE_COOLDOWN`.
+    pub(crate) script_backoff: Cell<u32>,
+    /// LPF3: relayouts since the short path's last miss.
+    pub(crate) script_since_miss: Cell<u32>,
     /// A window or element scroll happened in the task that dirtied the page: the short path,
     /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
     pub(crate) scrolled_in_task: Cell<bool>,

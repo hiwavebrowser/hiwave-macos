@@ -11124,7 +11124,13 @@ impl Engine {
         // LPF1: script writes that marked their elements for a new style and paint only (no box,
         // no layout, no subtree or sibling restyle) may build those elements alone.
         let cooling = self.views.get(&id).is_some_and(|view| {
+            view.lay.script_since_miss.set(view.lay.script_since_miss.get().saturating_add(1));
             let left = view.lay.script_cooldown.get();
+            // The cooldown's last relayout keeps its tree, for the attempt after it (LPF3: a
+            // `no kept tree` miss followed every cooldown).
+            if left == 1 {
+                view.lay.want_script_unlaid.set(true);
+            }
             if left > 0 {
                 view.lay.script_cooldown.set(left - 1);
             }
@@ -11784,9 +11790,21 @@ impl Engine {
         }
         if let Some(why) = why {
             view.layout = Some(laid);
-            // More than paint changed: sit out the next relayouts, and keep no tree for them.
-            view.lay.want_script_unlaid.set(false);
-            view.lay.script_cooldown.set(SCRIPT_RESTYLE_COOLDOWN);
+            // More than paint changed. A one-off miss sits out nothing: the full build that follows
+            // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
+            // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
+            // `no kept tree` miss after them). Misses in a row (each at the first relayout after
+            // the last one's cooldown) sit out 1, 2, 4, ... relayouts, keeping no tree until the
+            // last of them, so a page whose writes keep changing layout pays neither an attempt
+            // nor a kept copy every frame.
+            let in_a_row = view.lay.script_since_miss.get() <= view.lay.script_backoff.get() / 2 + 1;
+            view.lay.script_since_miss.set(0);
+            let backoff = if in_a_row { view.lay.script_backoff.get() } else { 0 };
+            view.lay.script_cooldown.set(backoff);
+            view.lay.want_script_unlaid.set(backoff <= 1);
+            view.lay
+                .script_backoff
+                .set((backoff * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
             return miss(&why);
         }
         {
@@ -11805,6 +11823,7 @@ impl Engine {
             }
         }
         *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        view.lay.script_backoff.set(0);
         laid.forget_hit_overflow();
         let display_list = self.display_list_for(id, &laid);
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -47732,7 +47751,8 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
-/// LPF1: the relayouts the script restyle path sits out after a write that changed more than paint.
+/// LPF1: the most relayouts the script restyle path sits out after writes that changed more than
+/// paint (LPF3: reached only by misses in a row; a one-off miss sits out none).
 const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
 /// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
 const SCRIPT_RESTYLE_IDLE: u32 = 8;
