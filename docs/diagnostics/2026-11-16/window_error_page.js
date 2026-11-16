@@ -5,7 +5,7 @@ var out = { events: [], onerror: [], rejections: [], frame: { parent: [], child:
 function shape(ev) {
   return { message: String(ev.message), type: Object.prototype.toString.call(ev), isTrusted: ev.isTrusted, cancelable: ev.cancelable,
            bubbles: ev.bubbles, target: ev.target === window, file: String(ev.filename).replace(/^.*\//, "").replace(/\?.*$/, ""),
-           lineno: ev.lineno > 0, colno: ev.colno > 0, error: ev.error === null ? "null" : ev.error instanceof Error ? ev.error.name : typeof ev.error,
+           lineno: ev.lineno > 0, colno: ev.colno > 0, error: ev.error === null ? "null" : ev.error instanceof Error ? ev.error.name : ev.error instanceof DOMException ? "DOMException " + ev.error.name : typeof ev.error,
            prevented: ev.defaultPrevented };
 }
 var tag = "";
@@ -31,9 +31,20 @@ window.addEventListener("error", function (ev) {
     if (out.inHandler.calls < 5) throw new Error("from the handler");
   }
 });
-window.addEventListener("unhandledrejection", function (ev) { var r = ev.reason; out.rejections.push(r instanceof Error ? r.message : typeof r === "object" && r !== null ? JSON.stringify(r) : String(r)); });
+window.addEventListener("unhandledrejection", function (ev) { var r = ev.reason; out.rejections.push(r instanceof Error ? (/missing/.test(r.message) ? r.name + ": a failed import" : r.message) : typeof r === "object" && r !== null ? JSON.stringify(r) : String(r)); });
 
+function combinators(tag) {
+  Promise.all([Promise.reject(new Error(tag + " all"))]);
+  Promise.race([Promise.reject(new Error(tag + " race"))]);
+  Promise.any([Promise.reject(new Error(tag + " any"))]);
+  Promise.allSettled([Promise.reject(new Error(tag + " allSettled, handled"))]);
+  Promise.reject(new Error(tag + " finally")).finally(function () {});
+  Promise.resolve({ then: function (resolve, reject) { reject(new Error(tag + " thenable")); } });
+  (async function () { await Promise.reject(new Error(tag + " awaited")); })();
+  import("./window_error_missing.js");
+}
 var steps = [
+  ["combinators, one origin", function () { combinators("one origin"); }],
   ["listener", function () { var b = document.createElement("button"); document.body.appendChild(b);
     b.addEventListener("click", function () { throw new Error("from a listener"); }); b.dispatchEvent(new Event("click")); out.syncAfterDispatch = out.events.length; }],
   ["timer", function () { setTimeout(function () { throw new Error("from a timer"); }, 0); }],
@@ -64,9 +75,23 @@ var steps = [
   ["other origin timer", function () { setTimeout(otherOriginThrows, 0); }],
   ["other origin rejection in a callback", function () { setTimeout(otherOriginRejects, 0); }],
   ["other origin resource that is no script", function () { var s = document.createElement("script"); s.src = window.OTHER + "/window_error_child.html"; document.body.appendChild(s); }],
+  ["other origin dom top level", function () { var s = document.createElement("script"); s.src = window.OTHER + "/window_error_dom.js"; document.body.appendChild(s); }],
+  ["other origin dom function", function () { setTimeout(function () { otherOriginBadSelector(); }, 0); }],
+  ["other origin dom hierarchy", function () { setTimeout(function () { otherOriginAppendsAncestor(); }, 0); }],
+  ["other origin dom timer", function () { otherOriginTimerDom(); }],
+  ["other origin dom listener", function () { otherOriginListens(document.body); document.body.dispatchEvent(new Event("pong")); }],
+  ["other origin dom rejections", function () { otherOriginAsyncDom(); otherOriginExecutorDom(); otherOriginReactionDom(); otherOriginCombinators(); }],
+  ["other origin string timer", function () { otherOriginStringTimer(); }],
+  ["other origin attribute", function () { otherOriginAttribute(); }],
+  ["other origin inline script", function () { otherOriginInline(); }],
   // The page's own code, with another origin's script on the page.
   ["page function called by the other origin", function () { setTimeout(function () { otherOriginCalls(function () { throw new Error("the page's, called by the other origin"); }); }, 0); }],
   ["page-made function called by the other origin", function () { var made = new Function("throw new Error('in a function the page made')"); setTimeout(function () { otherOriginCalls(made); }, 0); }],
+  ["page listener run for the other origin", function () { document.body.addEventListener("ping", function () { throw new Error("the page's listener, dispatched by the other origin"); });
+    setTimeout(function () { otherOriginDispatches(document.body); }, 0); }],
+  ["page dom after", function () { setTimeout(function () { document.querySelector("#" + "page" + "!!"); }, 0); }],
+  ["page dom hierarchy after", function () { setTimeout(function () { document.body.appendChild(document.documentElement); }, 0); }],
+  ["combinators, mixed", function () { combinators("mixed"); }],
   ["page string after", function () { setTimeout(function () { throw "the page's string"; }, 0); }],
   ["page object after", function () { setTimeout(function () { throw { ours: 1 }; }, 0); }],
   ["page rejections after", function () { setTimeout(function () { Promise.reject({ status: 404 }); Promise.reject("the page's string reason"); Promise.reject(undefined);

@@ -507,6 +507,137 @@ fn the_pages_own_code_stays_reported_in_full_beside_another_origins() {
     );
 }
 
+/// Another origin's script whose calls make the browser itself raise an error.
+const THEIR_DOM: &str = "
+function theirName() { document.createElement('their ' + 'name'); }
+function theirHierarchy() { document.body.appendChild(document.documentElement); }
+function theirArgument() { document.body.appendChild(null); }
+function theirTimer() { setTimeout(theirName, 0); }
+function theirListens(el) { el.addEventListener('pong', theirName); }
+async function theirAsyncDom() { await null; document.createElement('their name'); }
+function theirExecutorDom() { new Promise(function () { document.createElement('their name'); }); }
+function theirReactionDom() { Promise.resolve().then(function () { document.createElement('their name'); }); }
+function theirCombinators() { Promise.all([Promise.reject(new Error('their all'))]); Promise.reject(new Error('their finally')).finally(function () {}); }
+function theirDispatches(el) { el.dispatchEvent(new Event('ping')); }
+function theirStringTimer() { setTimeout(\"throw new Error('in a string timer they set')\", 0); }
+function theirAttribute() { var d = document.createElement('div'); d.setAttribute('onclick', \"throw new Error('in a handler attribute they set')\"); document.body.appendChild(d); d.dispatchEvent(new Event('click')); }
+function theirInline() { var s = document.createElement('script'); s.textContent = \"throw new Error('in an inline script they inserted')\"; document.body.appendChild(s); }
+";
+
+/// An error the engine raises for a call is the caller's: for another origin's script it is
+/// reported without detail, wherever the call is made from (an invalid element name here, an
+/// invalid selector in the probe; Chrome rows `other origin dom top
+/// level`, `... dom function`, `... dom hierarchy`, `... dom timer`, `... dom listener`; and none of
+/// its `rejections`): its top level, a function the page's timer calls, its own timer, its own
+/// listener, its async function after an `await`, its promise executor, its reaction, and the
+/// promise combinators it calls.
+#[test]
+fn an_error_the_engine_raises_for_another_origins_call_is_reported_without_detail() {
+    let (b, threw) = page_with_theirs("document.createElement('their ' + 'top name');");
+    assert!(threw);
+    assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED, "top level");
+    for call in ["theirName()", "theirHierarchy()", "theirArgument()"] {
+        let (b, _) = page_with_theirs(THEIR_DOM);
+        b.evaluate_named(&format!("setTimeout(function () {{ {call}; }}, 0);"), "inline#2").unwrap();
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.join(' ; ') + ' / ' + rejected"), format!("{MUTED} / 0"), "{call}");
+    }
+    let (b, _) = page_with_theirs(&format!("{THEIR_DOM} theirTimer(); theirListens(document.getElementById('b'));"));
+    b.evaluate_named("document.getElementById('b').dispatchEvent(new Event('pong'));", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.join(' ; ')"), format!("{MUTED} ; {MUTED}"), "their listener, their timer");
+    let (b, _) = page_with_theirs(THEIR_DOM);
+    b.evaluate_named("setTimeout(function () { theirAsyncDom(); theirExecutorDom(); theirReactionDom(); theirCombinators(); }, 0);", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "0 0", "their rejections");
+}
+
+/// The same calls by the page's own code on that page are reported in full (Chrome rows `page
+/// dom after`, `page dom hierarchy after`), and so is the page's listener when the other origin's
+/// code dispatches the event (`page listener run for the other origin`).
+#[test]
+fn an_error_the_engine_raises_for_the_pages_call_is_reported_in_full() {
+    let (b, _) = page_with_theirs(THEIR_DOM);
+    b.evaluate_named(
+        "setTimeout(function () { document.createElement('page ' + 'name'); }, 0); \
+         setTimeout(function () { document.body.appendChild(document.documentElement); }, 1); \
+         document.getElementById('b').addEventListener('ping', function () { throw new Error('the page listener'); }); \
+         setTimeout(function () { theirDispatches(document.getElementById('b')); }, 2);",
+        "inline#2",
+    )
+    .unwrap();
+    b.advance_timers(20, 10).unwrap();
+    let got = ev(&b, "seen.map(function (s) { var f = s.split('|'); return [f[1].split(':')[0], f[2], f[5]].join('|'); }).join(' ; ')");
+    assert_eq!(
+        got,
+        format!("Uncaught InvalidCharacterError|{DOC}|InvalidCharacterError ; Uncaught HierarchyRequestError|{DOC}|HierarchyRequestError ; Uncaught Error|{DOC}|Error")
+    );
+}
+
+/// Code the standard gives to the document, whoever made it (Chrome rows `other origin string
+/// timer`, `other origin attribute`, `other origin inline script`: each in full): a handler
+/// attribute, an inline script and a string given to `setTimeout`, set by another origin's code.
+#[test]
+fn a_handler_attribute_an_inline_script_and_a_string_timer_are_the_documents() {
+    let (b, _) = page_with_theirs(THEIR_DOM);
+    b.evaluate_named("setTimeout(function () { theirAttribute(); theirInline(); theirStringTimer(); }, 0);", "inline#2").unwrap();
+    b.advance_timers(40, 10).unwrap();
+    let got = ev(&b, "seen.map(function (s) { var f = s.split('|'); return [f[1], f[2], f[5]].join('|'); }).join(' ; ')");
+    assert_eq!(
+        got,
+        format!("Uncaught Error: in a handler attribute they set|{DOC}|Error ; Uncaught Error: in an inline script they inserted|{DOC}|Error ; \
+                 Uncaught Error: in a string timer they set|{DOC}|Error")
+    );
+}
+
+/// The page's own rejections that reach the page through the engine's promise machinery
+/// (Chrome `rejections`, the `one origin` and `mixed` rows: every one fires): `Promise.all`,
+/// `race`, `any`, a `finally` that passes the reason on, a thenable that rejects, an `await` of
+/// a rejected promise; with and without another origin's script on the page.
+#[test]
+fn rejections_passed_on_by_the_promise_machinery_are_announced() {
+    const COMBINATORS: &str = "var reasons = []; window.addEventListener('unhandledrejection', function (ev) { reasons.push(ev.reason.message); }); \
+        setTimeout(function () { \
+            Promise.all([Promise.reject(new Error('all'))]); \
+            Promise.race([Promise.reject(new Error('race'))]); \
+            Promise.any([Promise.reject(new Error('any'))]); \
+            Promise.allSettled([Promise.reject(new Error('allSettled, handled'))]); \
+            Promise.reject(new Error('finally')).finally(function () {}); \
+            Promise.resolve({ then: function (resolve, reject) { reject(new Error('thenable')); } }); \
+            (async function () { await Promise.reject(new Error('awaited')); })(); }, 0);";
+    let want = "All promises were rejected,all,awaited,finally,race,thenable";
+    let b = page();
+    b.evaluate_named(COMBINATORS, "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "reasons.sort().join()"), want, "one origin");
+    let (b, _) = page_with_theirs(THEIR_DOM);
+    b.evaluate_named(COMBINATORS, "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "reasons.sort().join()"), want, "beside another origin's script");
+}
+
+/// A dynamic `import()` that fails rejects with the engine's own error about a URL the importing
+/// code asked for (Chrome `rejections`: "TypeError: a failed import", on both pages): announced
+/// to the page when the page's code imported, not when another origin's code did.
+#[test]
+fn a_failed_import_is_announced_to_the_code_that_imported() {
+    let run = |theirs: bool| {
+        let b = page();
+        if theirs {
+            b.register_script("script#1", "https://other.test/lib.js", true);
+        }
+        b.evaluate_named("var failed = []; window.addEventListener('unhandledrejection', function (ev) { failed.push(ev.reason && ev.reason.name); });", "inline#2").unwrap();
+        b.evaluate_named("import('https://example.test/missing.js');", if theirs { "script#1" } else { "inline#3" }).unwrap();
+        for requested in b.take_module_requests() {
+            b.supply_module(&requested, Err("status 404".to_string()));
+        }
+        b.advance_timers(20, 10).unwrap();
+        ev(&b, "failed.join() + '/' + seen.length")
+    };
+    assert_eq!(run(false), "TypeError/0");
+    assert_eq!(run(true), "/0");
+}
+
 /// What an `error` listener rejects after a script failed is announced in the same turn.
 #[test]
 fn a_rejection_made_by_an_error_listener_is_announced_in_the_same_turn() {

@@ -14,6 +14,7 @@ function serve() {
       const name = q.url.split("?")[0].slice(1) || "window_error.html";
       if (!/^window_error(_[a-z]+)?\.(html|js)$/.test(name)) { s.statusCode = 404; s.end(); return; }
       s.setHeader("content-type", name.endsWith(".js") ? "text/javascript" : "text/html");
+      if (!fs.existsSync(path.join(dir, name))) { s.statusCode = 404; s.end(); return; }
       s.end(fs.readFileSync(path.join(dir, name)));
     }).listen(0, "127.0.0.1", () => resolve(srv));
   });
@@ -22,7 +23,7 @@ const [a, b] = [await serve(), await serve()];
 const br = await chromium.launch({ executablePath: exe, headless: true, args: ["--disable-gpu"] });
 const p = await br.newPage();
 await p.goto(`http://127.0.0.1:${a.address().port}/window_error.html?other=http://127.0.0.1:${b.address().port}`);
-await p.waitForFunction("window.__out", null, { timeout: 30000 });
+await p.waitForFunction("window.__out", null, { timeout: 60000 });
 const r = JSON.parse(await p.evaluate("window.__out"));
 r.browser = br.version();
 fs.writeFileSync(out, JSON.stringify(r, null, 1));
