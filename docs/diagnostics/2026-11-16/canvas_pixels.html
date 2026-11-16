@@ -128,6 +128,19 @@ t("with Uint8ClampedArray replaced", function () {
     return ok + " " + first + " " + back[0] + " " + (j.data instanceof real) + " " + (k.data instanceof real) + " page code ran " + calls;
   } finally { window.Uint8ClampedArray = real; real.prototype.set = set; Object.defineProperty(Object.getPrototypeOf(real.prototype), "length", tag); }
 });
+t("with WeakMap's methods replaced", function () {
+  var get = WeakMap.prototype.get, set = WeakMap.prototype.set, has = WeakMap.prototype.has, calls = 0;
+  WeakMap.prototype.get = function () { calls++; return { width: 9, height: 9, data: [] }; }; WeakMap.prototype.set = function () { calls++; return this; }; WeakMap.prototype.has = function () { calls++; return true; };
+  try { var x = filled(), i = x.getImageData(0, 0, 2, 1); i.data[0] = 50; x.putImageData(i, 0, 0); var n = new ImageData(1, 1); return [i.width, i.height, i.data.length, n.data.length, x.getImageData(0, 0, 1, 1).data[0], "page code ran " + calls].join(" "); }
+  finally { WeakMap.prototype.get = get; WeakMap.prototype.set = set; WeakMap.prototype.has = has; }
+});
+t("the getters on something that is not an ImageData", function () { var g = Object.getOwnPropertyDescriptor(ImageData.prototype, "data").get, r = []; [{}, Object.create(new ImageData(1, 1)), 1, null, undefined].forEach(function (v) { try { g.call(v); r.push("ok"); } catch (e) { r.push(e.name); } }); return r.join(); });
+function own(i) { var d = Object.getOwnPropertyDescriptor(i, "data"); return Reflect.ownKeys(i).join() + " " + (d ? [Object.prototype.toString.call(d.value), d.writable, d.enumerable, d.configurable, typeof d.get, d.value === i.data].join() : "none"); }
+t("own properties of an ImageData", function () { var x = ctx(); return [own(new ImageData(1, 1)), own(x.getImageData(0, 0, 1, 1)), own(x.createImageData(1, 1)), own(new ImageData(new Uint8ClampedArray(4), 1))].join(" | "); });
+t("the prototype's data", function () { var d = Object.getOwnPropertyDescriptor(ImageData.prototype, "data"); return [typeof d.get, typeof d.set, d.enumerable, d.configurable].join(); });
+t("data deleted from an ImageData", function () { var i = new ImageData(1, 1), d = i.data; return (delete i.data) + " " + Reflect.ownKeys(i).length + " " + (i.data === d); });
+t("data redefined on an ImageData", function () { var x = target(), i = two(); Object.defineProperty(i, "data", { value: 5 }); x.putImageData(i, 0, 0); return i.data + " " + reds(x.getImageData(0, 0, 4, 4)); });
+t("an ImageData as JSON", function () { return Object.keys(JSON.parse(JSON.stringify(new ImageData(1, 1)))).join(); });
 t("with ImageData replaced", function () { var real = window.ImageData; window.ImageData = function () { throw new Error("the page's"); }; try { var i = ctx().getImageData(0, 0, 1, 1); return (i instanceof real) + " " + i.data.length; } finally { window.ImageData = real; } });
 t("put of an object that inherits from an ImageData", function () { var x = target(); x.putImageData(Object.create(two()), 0, 0); return "ok"; });
 t("put with getters on the arguments", function () { var x = target(), order = []; x.putImageData(two(), { valueOf: function () { order.push("dx"); return 1; } }, { valueOf: function () { order.push("dy"); return 1; } }); return order.join() + " " + reds(x.getImageData(0, 0, 4, 4)); });

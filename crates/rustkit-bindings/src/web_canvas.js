@@ -19,6 +19,19 @@
     var Canvas = g.HTMLCanvasElement;
     if (typeof C !== 'function' || typeof slot !== 'function' || typeof Canvas !== 'function') return;
 
+    // A WeakMap whose methods are its own properties, taken now: the
+    // script's records are found by one direct call, whatever a page later
+    // puts on WeakMap.prototype.
+    var WM = WeakMap, wmProto = WeakMap.prototype, wmMethods = [wmProto.get, wmProto.set, wmProto.has, wmProto.delete], defineOwn = Object.defineProperty;
+    function ownMap() {
+        var m = new WM();
+        defineOwn(m, 'get', { value: wmMethods[0] });
+        defineOwn(m, 'set', { value: wmMethods[1] });
+        defineOwn(m, 'has', { value: wmMethods[2] });
+        defineOwn(m, 'delete', { value: wmMethods[3] });
+        return m;
+    }
+
     function illegal() { throw new TypeError('Illegal constructor'); }
     function iface(name) {
         var ctor = function () { illegal(); };
@@ -47,7 +60,7 @@
     // ---- HTMLCanvasElement: width/height reflect the attributes (default
     // 300x150); setting either, even to the value it has, clears the bitmap
     // and resets the context.
-    var CTX = new WeakMap();
+    var CTX = ownMap();
     function dimension(el, name, fallback) {
         var raw = el.getAttribute(name);
         if (raw === null) return fallback;
@@ -78,16 +91,16 @@
     var Ctx2D = iface('CanvasRenderingContext2D');
     var Gradient = iface('CanvasGradient');
     var Metrics = iface('TextMetrics');
-    var DATA = new WeakMap();
+    var DATA = ownMap();
     // A CanvasGradient's geometry and stops live here, on the script side,
     // and go with it when script lets it go; a fill or stroke style set to
     // it hands the Rust side a copy (PR #905 R1: no gradient table beside
     // the recording).
-    var GRAD = new WeakMap();
+    var GRAD = ownMap();
     // A CanvasPattern's source (a canvas's NodeId or an image's URL) and
     // repetition; its pixels are read when it is set as a style.
     var Pattern = iface('CanvasPattern');
-    var PAT = new WeakMap();
+    var PAT = ownMap();
 
     method(Canvas.prototype, 'getContext', function getContext(kind) {
         need(1, arguments, 'HTMLCanvasElement', 'getContext');
@@ -346,17 +359,24 @@
     // nothing is read from the array itself, so a page that replaced
     // Uint8ClampedArray, its prototype or WeakMap's methods changes nothing.
     var pixelsOut = __rk.pixelsOut, pixelsIn = __rk.pixelsIn;
-    var IMG = new WeakMap();
-    var rApply = Reflect.apply, wmGet = WeakMap.prototype.get, wmSet = WeakMap.prototype.set;
+    // The records, by ImageData. The engine reads sizes and bytes from
+    // here, never from the object's properties.
+    var IMG = ownMap();
     var trunc = Math.trunc, absOf = Math.abs, finite = isFinite, Text = String, TypeErr = TypeError, RangeErr = RangeError,
         newRecord = Object.create;
     // The bytes of the largest bitmap a canvas keeps (16384 x 16384, RGBA).
     var MAX_BYTES = 16384 * 16384 * 4;
-    function imgOf(o) { return o !== null && typeof o === 'object' ? rApply(wmGet, IMG, [o]) : undefined; }
+    function imgOf(o) { return IMG.get(o); }
     function keepImg(o, w, h, bytes) {
         var v = newRecord(null);
         v.width = w; v.height = h; v.data = bytes;
-        rApply(wmSet, IMG, [o, v]);
+        IMG.set(o, v);
+        // As in Chrome, the array is also an own property of the object
+        // (read-only, enumerable, configurable), in front of the
+        // prototype's getter: `image.data[i]` in a loop is a plain read.
+        var own = newRecord(null);
+        own.value = bytes; own.writable = false; own.enumerable = true; own.configurable = true;
+        defineOwn(o, 'data', own);
         return o;
     }
     function sizeError(which) {
@@ -414,15 +434,11 @@
     Object.defineProperty(g, 'ImageData', { value: Image, writable: true, configurable: true, enumerable: false });
     var imageProto = Image.prototype;
     function imageData(w, h, bytes) { return keepImg(newRecord(imageProto), w, h, bytes); }
-    function img(o) {
-        var v = imgOf(o);
-        if (!v) throw new TypeErr('Illegal invocation');
-        return v;
-    }
-    accessor(Image.prototype, 'width', function () { return img(this).width; });
-    accessor(Image.prototype, 'height', function () { return img(this).height; });
-    accessor(Image.prototype, 'data', function () { return img(this).data; });
-    accessor(Image.prototype, 'colorSpace', function () { img(this); return 'srgb'; });
+    function illegalImage() { throw new TypeErr('Illegal invocation'); }
+    accessor(Image.prototype, 'width', function () { var v = IMG.get(this); return v ? v.width : illegalImage(); });
+    accessor(Image.prototype, 'height', function () { var v = IMG.get(this); return v ? v.height : illegalImage(); });
+    accessor(Image.prototype, 'data', function () { var v = IMG.get(this); return v ? v.data : illegalImage(); });
+    accessor(Image.prototype, 'colorSpace', function () { return IMG.get(this) ? 'srgb' : illegalImage(); });
     method(P, 'getImageData', function getImageData(sx, sy, sw, sh, s) {
         need(4, arguments, 'CanvasRenderingContext2D', 'getImageData');
         var d = data(this);

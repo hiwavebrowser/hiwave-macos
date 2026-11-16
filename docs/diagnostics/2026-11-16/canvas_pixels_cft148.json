@@ -93,6 +93,13 @@
   "a detached buffer: createImageData of it": "2x2:0t 0t 0t 0t",
   "a detached array given to new ImageData": "threw InvalidStateError",
   "with Uint8ClampedArray replaced": "true 10,20,30,255 50 true true page code ran 0",
+  "with WeakMap's methods replaced": "2 1 8 4 50 page code ran 0",
+  "the getters on something that is not an ImageData": "TypeError,TypeError,TypeError,TypeError,TypeError",
+  "own properties of an ImageData": "data [object Uint8ClampedArray],false,true,true,undefined,true | data [object Uint8ClampedArray],false,true,true,undefined,true | data [object Uint8ClampedArray],false,true,true,undefined,true | data [object Uint8ClampedArray],false,true,true,undefined,true",
+  "the prototype's data": "function,undefined,true,true",
+  "data deleted from an ImageData": "true 0 true",
+  "data redefined on an ImageData": "5 4x4:100 101 9 9 102 103 9 9 9 9 9 9 9 9 9 9",
+  "an ImageData as JSON": "data",
   "with ImageData replaced": "true 4",
   "put of an object that inherits from an ImageData": "threw TypeError",
   "put with getters on the arguments": "dx,dy 4x4:9 9 9 9 9 100 101 9 9 102 103 9 9 9 9 9"

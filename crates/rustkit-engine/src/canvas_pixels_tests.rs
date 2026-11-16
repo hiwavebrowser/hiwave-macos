@@ -31,7 +31,7 @@ fn canvas_pixels_behave_as_in_chrome() {
     let text: String = serde_json::from_str(out.trim_start_matches("String(").trim_end_matches(')')).unwrap_or_else(|e| panic!("{e}: {out}"));
     let ours: serde_json::Value = serde_json::from_str(&text).unwrap();
     let cases = pin["cases"].as_object().unwrap();
-    assert!(cases.len() >= 95);
+    assert!(cases.len() >= 102);
     let mut failures = Vec::new();
     for (name, chrome) in cases {
         let expected = KNOWN.iter().find(|(known, _)| known == name).map(|(_, answer)| serde_json::Value::from(*answer));
