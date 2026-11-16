@@ -581,3 +581,19 @@ def test_a_motionmark_run_starts_the_engine_with_the_frames_flag_and_records_it(
     assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "0", rec["engine_flags"]
     assert engine_saw(tmp_path / "off") == ["fake engine sees nested=0"]
 
+
+def test_the_engines_own_uncaught_errors_are_read_from_its_log(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("\x1b[2m2026-11-16T01:21:24.9Z\x1b[0m  INFO hiwave::console: uncaught TypeError: cannot convert at script#9:94:31\n"
+                   "    at script#9:94:31\n"
+                   "2026-11-16T01:21:25.0Z  INFO hiwave::console: console log inline#1:2:3 uncaught is only a word here\n"
+                   "2026-11-16T01:21:25.1Z  INFO hiwave::console: unhandled rejection Error: boom at script#2:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught TypeError: cannot convert at script#9:94:31",
+                                     "unhandled rejection Error: boom at script#2:1:1"]
+    assert run.log_uncaught(tmp_path / "missing.log") == []
+
+
+def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
+    progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
+                {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
+    assert run.frames_by_test(progress) == {"Multiply": {"samples": 3}}
