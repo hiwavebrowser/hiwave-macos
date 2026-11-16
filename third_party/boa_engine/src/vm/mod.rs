@@ -83,6 +83,7 @@ pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
 mod code_block;
+pub use code_block::{code_block_flag_clashes, ErrorDetail, ErrorDetailScope}; // HIWAVE PATCH (error-detail)
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;
@@ -123,6 +124,12 @@ pub struct Vm {
     /// This eliminates the conversion between [`crate::JsNativeError`] and [`crate::JsValue`] if not needed.
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) runtime_limits: RuntimeLimits,
+
+    // HIWAVE PATCH (error-detail): the last raised error that became a
+    // value (a `catch`, a rejection), with the error-detail flag of the
+    // code that threw it. See PATCHES.md.
+    pub(crate) error_detail_note: Option<(JsValue, bool)>,
+    // END HIWAVE PATCH
 
     // HIWAVE PATCH (interrupt): a word another thread may set to stop the
     // running script, and the turn it is compared with. See PATCHES.md.
@@ -519,6 +526,7 @@ impl Vm {
             stack: Stack::new(1024),
             return_value: JsValue::undefined(),
             pending_exception: None,
+            error_detail_note: None, // HIWAVE PATCH (error-detail)
             runtime_limits: RuntimeLimits::default(),
             interrupt: None,              // HIWAVE PATCH (interrupt)
             interrupt_turn: 0,            // HIWAVE PATCH (interrupt)
@@ -672,6 +680,24 @@ impl Vm {
             .expect("registers must have an async generator object")
             .as_object()
     }
+
+    // HIWAVE PATCH (error-detail): the page script whose code is running:
+    // the innermost frame that is not the embedder's own code, `depth` such
+    // frames further out. `Some(true)`: its errors are reported without
+    // detail. `None`: no page script is running (the frame at 0 is the
+    // VM's own).
+    pub(crate) fn page_error_detail(&self, depth: usize) -> Option<bool> {
+        let mut left = depth;
+        for frame in self.frames.iter().skip(1).rev() {
+            match frame.code_block.error_detail() {
+                ErrorDetail::Embedder => {}
+                detail if left == 0 => return Some(detail == ErrorDetail::Withheld),
+                _ => left -= 1,
+            }
+        }
+        None
+    }
+    // END HIWAVE PATCH
 
     /// Retrieves the VM frame.
     ///
@@ -913,6 +939,11 @@ impl Context {
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (error-detail): raised here first, by this frame's code.
+        if err.detail_withheld.is_none() {
+            err.detail_withheld = self.vm.page_error_detail(0);
+        }
+        // END HIWAVE PATCH
         // Capture the backtrace early, before any exception handler check,
         // so that errors caught by internal handlers (e.g. async module
         // evaluation) still carry source position information.
@@ -1045,6 +1076,15 @@ impl Context {
     }
 
     fn handle_throw(&mut self) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (error-detail): as `handle_error`, for a throw that
+        // came here directly.
+        if self.vm.pending_exception.as_ref().is_some_and(|err| err.detail_withheld.is_none()) {
+            let detail = self.vm.page_error_detail(0);
+            if let Some(err) = self.vm.pending_exception.as_mut() {
+                err.detail_withheld = detail;
+            }
+        }
+        // END HIWAVE PATCH
         if self
             .vm
             .pending_exception

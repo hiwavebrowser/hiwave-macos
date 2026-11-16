@@ -167,6 +167,8 @@ mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
 #[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
 mod host_object_tests;
 #[cfg(test)]
 mod bookkeeping_paths_tests;
@@ -498,7 +500,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 pub(crate) const HOST_SLOTS: &[&str] = &[
     "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
-    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
@@ -530,9 +532,9 @@ pub(crate) const SHARED_SLOTS: &[&str] = &[
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     // Described natively (no page code runs) and queued in the runtime.
-    var reportError = __rk.reportError;
+    // Called on the host object: the realm's `error` event comes first.
     function report(e) {
-        try { reportError(e); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -920,7 +922,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function call(timer) {
         try {
             if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
-            else evalNow(toText(timer.cb));
+            else {
+                // A string timer is the document's code: its text first,
+                // then the one step that compiles and runs it.
+                var text = toText(timer.cb);
+                __rk.runDocumentScript(text);
+            }
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
@@ -1663,6 +1670,26 @@ impl Drop for InRealm<'_> {
     }
 }
 
+/// Whether the errors of a script fetched for the document at `document`
+/// are reported to the page without detail (the HTML standard's muted
+/// errors): `redirects` are the URLs that redirected on the way, `landed`
+/// the URL of the response that was read. In full only when the document
+/// has an origin of its own and every one of those URLs is of it.
+pub fn script_without_detail<'a>(
+    document: Option<&Url>,
+    redirects: impl IntoIterator<Item = &'a Url>,
+    landed: &'a Url,
+) -> bool {
+    let Some(document) = document else {
+        return true;
+    };
+    let origin = document.origin();
+    if !origin.is_tuple() {
+        return true;
+    }
+    redirects.into_iter().chain(std::iter::once(landed)).any(|url| url.origin() != origin)
+}
+
 /// What a page asked of its frames (web_frames.js): show `url` in the
 /// iframe element `node` (`Some`), or that element left the document
 /// (`None`). `sandbox` is the element's `sandbox` attribute for this
@@ -1943,6 +1970,9 @@ impl DomBindings {
         // Promise rejections are announced to the page (`__rk.fireRejection`,
         // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
         runtime.set_rejection_events(true);
+        // An uncaught exception is announced the same way (`__rk.fireError`):
+        // the `error` event at the Window.
+        runtime.set_error_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
@@ -3042,6 +3072,8 @@ impl DomBindings {
         // Update state
         self.window.borrow_mut().location = location.clone();
         self.canvases.borrow_mut().origin = Some(url.origin());
+        // The file an `error` event names for code with no script of its own.
+        self.runtime.borrow_mut().set_document_url(url.as_str());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
@@ -3119,6 +3151,28 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_script(script)
             .map_err(Into::into)
+    }
+
+    /// Evaluate `script` as a script of the page's own (unnamed), not as
+    /// the host's: what it rejects is announced to the page, and an error
+    /// raised for its calls is its own. For tests whose script stands for a
+    /// page's; a host's script goes through [`Self::evaluate`], and a
+    /// page's real scripts through [`Self::evaluate_named`].
+    #[doc(hidden)]
+    pub fn evaluate_as_page_script(&self, script: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_document_script(script)
+            .map_err(Into::into)
+    }
+
+    /// Say what the page script evaluated as `name` is (see
+    /// [`JsRuntime::register_script`]): the script at `url`, and whether
+    /// its errors are reported to the page without detail. An `error`
+    /// event for an exception thrown in a script never registered carries
+    /// no detail.
+    pub fn register_script(&self, name: &str, url: &str, muted: bool) {
+        self.runtime.borrow_mut().register_script(name, url, muted);
     }
 
     /// Evaluate a page script as `path` (see
@@ -3649,9 +3703,25 @@ impl DomBindings {
         self.runtime.borrow_mut().take_dynamic_import_failures()
     }
 
-    /// Supply one requested module's source, or why there is none.
+    /// Supply one requested module's source, or why there is none. The
+    /// module is registered as the script it is ([`Self::register_script`]):
+    /// reported in full only when the URL asked for and the URL it was
+    /// served from are both of this document's origin.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
+        if let Ok(fetched) = &outcome {
+            let document = self.document_url();
+            let muted = match (Url::parse(requested), Url::parse(&fetched.final_url)) {
+                (Ok(asked), Ok(landed)) => script_without_detail(document.as_ref(), [&asked], &landed),
+                _ => true,
+            };
+            self.register_script(&fetched.final_url, &fetched.final_url, muted);
+        }
         self.runtime.borrow_mut().supply_module(requested, outcome);
+    }
+
+    /// This document's URL, as [`Self::set_location`] last gave it.
+    pub fn document_url(&self) -> Option<Url> {
+        Url::parse(&self.window.borrow().location.href).ok()
     }
 
     /// Advance a started module and say where it is.

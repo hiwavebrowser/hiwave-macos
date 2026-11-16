@@ -3085,7 +3085,13 @@ impl<'ctx> ByteCompiler<'ctx> {
             constants: self.constants,
             bindings: self.bindings.into_boxed_slice(),
             handlers: self.handlers,
-            flags: Cell::new(self.code_block_flags),
+            // HIWAVE PATCH (error-detail): the flag of the compilation.
+            flags: Cell::new(match crate::vm::ErrorDetailScope::current() {
+                crate::vm::ErrorDetail::Full => self.code_block_flags,
+                crate::vm::ErrorDetail::Withheld => self.code_block_flags | CodeBlockFlags::ERROR_DETAIL_WITHHELD,
+                crate::vm::ErrorDetail::Embedder => self.code_block_flags | CodeBlockFlags::ERROR_DETAIL_EMBEDDER,
+            }),
+            // END HIWAVE PATCH
             ic: self.ic.into_boxed_slice(),
             source_info: SourceInfo::new(
                 SourceMap::new(source_map_entries, self.source_path),

@@ -3289,8 +3289,8 @@ const WRAPPERS_JS: &str = r#"
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
-        w = Object.create(proto);
-        Object.defineProperty(w, SLOT, { value: slotRecord(id) });
+        w = objCreate(proto);
+        defineOwn(w, SLOT, { value: slotRecord(id) });
         cache.set(id, w);
         return w;
     }
@@ -6665,6 +6665,13 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
+    function callOnError(t, h, event) {
+        try {
+            return callNow(h, t, event.message, event.filename, event.lineno, event.colno, event.error);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+        }
+    }
     // An element's on<type> handler (HTML §8.1.8): the value assigned through
     // its `on<type>` IDL attribute (`null` included, which turns the handler
     // off), else its `on<type>` content attribute. The attribute's text is
@@ -6689,9 +6696,10 @@ const WRAPPERS_JS: &str = r#"
     // depends on the throw, and one compile path is one place to get right.
     function compileHandler(src, el) {
         try {
-            return new Function('__rk_doc', '__rk_el',
-                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
-            )(el.ownerDocument || {}, el);
+            // A handler attribute is the document's code, whoever set it:
+            // its text first, then the one step that compiles it.
+            var body = 'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };';
+            return __rk.compileDocumentFunction('__rk_doc,__rk_el', body)(el.ownerDocument || {}, el);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
             return null;
@@ -6897,7 +6905,13 @@ const WRAPPERS_JS: &str = r#"
         // The on<type> handler runs with the non-capture listeners.
         var h = capture || event[STOP_NOW] ? null
             : only ? (t === only.target ? only.handler : null) : handlerOf(t, type);
-        if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
+        if (typeof h !== 'function') return;
+        // `window.onerror` (HTML §8.1.8.2, the OnErrorEventHandler): for an
+        // ErrorEvent at the Window it is called with the event's message,
+        // filename, lineno, colno and error, and `true` back cancels.
+        var special = t === g && type === 'error' && PROTOS.ErrorEvent !== undefined && isProto(PROTOS.ErrorEvent, event);
+        var back = special ? callOnError(t, h, event) : callListener(t, h, event);
+        if (back === (special ? true : false) && setHas(CANCELABLE, event)) {
             if (isRealEvent(event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
@@ -7029,6 +7043,44 @@ const WRAPPERS_JS: &str = r#"
         trust(e);
         return dispatchTo(g, e);
     };
+
+    // The `error` event for an uncaught exception (HTML §8.1.4.6 "report
+    // an exception"). The runtime calls this with the exception before it
+    // is reported any further (`JsRuntime::set_error_events`), and with
+    // what the event is to say, which the runtime decides from the scripts
+    // the engine registered (`JsRuntime::register_script`): the thrown
+    // value, the message, the file, line and column. Script errors from
+    // another origin are reported without detail, as the HTML standard's
+    // muted errors: the value is null, the message "Script error.", no
+    // file, no position. Nothing here reads a URL or decides that.
+    // The event is the engine's own: trusted, cancelable, at the Window,
+    // built and dispatched with nothing a page can replace. `false` back
+    // means a listener canceled it, which keeps the exception out of the
+    // console.
+    __rk.fireError = function (value, message, file, line, column) {
+        var init = objCreate(null);
+        init.cancelable = true;
+        init.message = message;
+        init.filename = file;
+        init.lineno = line;
+        init.colno = column;
+        init.error = value;
+        var e = make('ErrorEvent', 'error', init);
+        trust(e);
+        return dispatchTo(g, e);
+    };
+    // `reportError(e)` (HTML §8.1.4.6): `e` is reported as an uncaught
+    // exception is, the `error` event first.
+    defineOwn(g, 'reportError', {
+        value: function reportError(e) {
+            if (arguments.length < 1) {
+                throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
+            }
+            // `true`: reported for the page, by the code that called this.
+            __rk.reportError(e, true);
+        },
+        writable: true, enumerable: true, configurable: true
+    });
 
     function Event(type, init) {
         if (!(this instanceof Event)) {

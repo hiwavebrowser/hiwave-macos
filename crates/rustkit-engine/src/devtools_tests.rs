@@ -421,7 +421,8 @@ fn the_console_has_one_line_for_an_unhandled_rejection_and_none_for_a_canceled_o
     let mut since = engine.devtools_console(view, 0).unwrap().next_seq;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let mut lines_after = |engine: &mut Engine, script: &str| -> Vec<(String, String)> {
-        engine.execute_script(view, script).unwrap();
+        // The script stands for the page's own (a host's script rejects for nobody).
+        engine.execute_as_page_script(view, script).unwrap();
         // The page's errors reach the Inspector with the live loop's turn.
         rt.block_on(engine.pump_live(view, 16));
         let c = engine.devtools_console(view, since).unwrap();
