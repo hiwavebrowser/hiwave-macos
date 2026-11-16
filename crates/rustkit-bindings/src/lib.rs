@@ -1355,14 +1355,16 @@ impl Drop for InRealm<'_> {
 /// iframe element `node` (`Some`), or that element left the document
 /// (`None`). `sandbox` is the element's `sandbox` attribute for this
 /// navigation: its value when the request was made (`None`: no attribute).
-/// `quiet`: the document is the initial about:blank of a frame nothing
-/// listened to when it was inserted, so its `load` is not fired at the
-/// element (Chrome fired it inside the insertion, to nobody).
+/// `initial`: the document is the about:blank of the frame's insertion,
+/// whose `load` goes to what could hear it then ([`DomBindings::frame_loaded`]).
+/// `quiet`: nothing could, so no `load` is fired at the element (Chrome
+/// fired it inside the insertion, to nobody).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameRequest {
     pub node: usize,
     pub url: Option<String>,
     pub sandbox: Option<String>,
+    pub initial: bool,
     pub quiet: bool,
 }
 
@@ -1490,8 +1492,13 @@ impl DomBindings {
                         Some(_) => host.borrow().frame_sandbox(node).or(as_parsed),
                         None => None,
                     };
-                    let quiet = matches!(args.get(2), Some(JsValue::Boolean(true)));
-                    queue.push(FrameRequest { node, url, sandbox, quiet });
+                    // 1: the insertion's blank document, heard by nothing;
+                    // 2: heard by what the page half recorded.
+                    let mode = match args.get(2) {
+                        Some(JsValue::Number(mode)) => *mode as u8,
+                        _ => 0,
+                    };
+                    queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1 });
                 }
                 JsValue::Null
             }),
@@ -1585,11 +1592,11 @@ impl DomBindings {
 
     /// Fire `load` at this document's iframe `node` (the child's load is
     /// done, or a cross-origin frame was left blank).
-    pub fn frame_loaded(&self, node: usize) -> Result<bool, BindingError> {
+    pub fn frame_loaded(&self, node: usize, initial: bool) -> Result<bool, BindingError> {
         let fired = self
             .runtime
             .borrow_mut()
-            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}) : false;"), &[])?;
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}, {initial}) : false;"), &[])?;
         Ok(matches!(fired, JsValue::Boolean(true)))
     }
 

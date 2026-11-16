@@ -6539,7 +6539,7 @@ impl Engine {
             if request.sandbox.is_some() || (!blank && !same_origin) {
                 // The cross-origin floor: no request, no document, one `load`.
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             }
@@ -6556,7 +6556,7 @@ impl Engine {
                     Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
                         // The cross-origin floor, as for a cross-origin `src`.
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6577,7 +6577,7 @@ impl Engine {
                     // redirect, or the request failed): the floor too.
                     Err(_) => {
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6587,7 +6587,7 @@ impl Engine {
             // parses (HTML §13.2.3.5: `<noscript>` content is text).
             let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             };
@@ -6759,7 +6759,7 @@ impl Engine {
             // so a handler set since must not hear it now.
             if !request.quiet {
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, request.initial);
                 }
             }
             changed = true;

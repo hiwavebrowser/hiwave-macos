@@ -409,8 +409,8 @@ fn the_load_listener_check_asks_nothing_of_the_page() {
         let heard = b
             .host_turn(
                 "var H = __rk.domHooks, d = document; \
-                 return [H.loadHeard(d.querySelectorAll('iframe')[0]), H.loadHeard(d.querySelectorAll('iframe')[1]), \
-                         H.loadHeard(d.querySelectorAll('iframe')[2])].join();",
+                 return [!!H.loadSnapshot(d.querySelectorAll('iframe')[0]), !!H.loadSnapshot(d.querySelectorAll('iframe')[1]), \
+                         !!H.loadSnapshot(d.querySelectorAll('iframe')[2])].join();",
                 &[],
             )
             .unwrap();
