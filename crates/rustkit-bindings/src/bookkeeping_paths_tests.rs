@@ -386,6 +386,7 @@ fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() 
 /// The load-listener check made when a frame goes into the document reads
 /// the tree and the handler attribute from the engine's own records: an
 /// ancestor lookup or attribute read the page has replaced is not asked,
+/// nor is a set constructor the page put in the built-in's place;
 /// the check ends, and its answers are the same. (The check is called
 /// here as web_frames.js calls it; an insertion made with these accessors
 /// replaced has other readers of the tree.)
@@ -403,7 +404,8 @@ fn the_load_listener_check_asks_nothing_of_the_page() {
              Object.defineProperty(Node.prototype, 'parentNode', { get: function () { ran++; return this; }, configurable: true });
              Object.defineProperty(Node.prototype, 'parentElement', { get: function () { ran++; return this; }, configurable: true });
              Element.prototype.getAttribute = function () { ran++; return null; };
-             Element.prototype.hasAttribute = function () { ran++; return false; };",
+             Element.prototype.hasAttribute = function () { ran++; return false; };
+             window.WeakSet = function () { ran++; this.add = function () { ran++; }; this.has = function () { ran++; return false; }; };",
         )
         .unwrap();
         let heard = b
