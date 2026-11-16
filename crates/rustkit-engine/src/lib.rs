@@ -11068,9 +11068,38 @@ impl Engine {
                     .set(only_script && nothing_dirty && pointer_restyle.is_none());
             }
         }
+        // LPF1: script writes that marked their elements for a new style and paint only (no box,
+        // no layout, no subtree or sibling restyle) may build those elements alone.
+        let cooling = self.views.get(&id).is_some_and(|view| {
+            let left = view.lay.script_cooldown.get();
+            if left > 0 {
+                view.lay.script_cooldown.set(left - 1);
+            }
+            left > 0
+        });
+        if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
+            let only_script = !causes.counts.is_empty()
+                && causes
+                    .counts
+                    .iter()
+                    .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+            let written = dirty.as_ref().filter(|d| {
+                d.full.is_none()
+                    && !d.nodes.is_empty()
+                    && d.nodes.values().all(|bits| bits & !(restyle_invalidation::STYLE | restyle_invalidation::PAINT) == 0)
+            });
+            if let (true, Some(d), Some(view)) = (only_script, written, self.views.get(&id)) {
+                let mut roots: Vec<usize> = d.nodes.keys().copied().collect();
+                roots.sort_unstable();
+                *view.lay.script_roots.borrow_mut() = Some(roots);
+            }
+        }
         let layout_skipped = self.relayout_uncounted(id);
+        let mut script_walked = None;
         if let Some(view) = self.views.get(&id) {
             view.lay.incremental_skip_build.set(false);
+            view.lay.script_roots.borrow_mut().take();
+            script_walked = view.lay.script_walked.take();
         }
         let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
@@ -11147,6 +11176,10 @@ impl Engine {
                 view.relayout_stats.layouts_skipped =
                     view.relayout_stats.layouts_skipped.saturating_add(1);
             }
+            if let Some(walked) = script_walked {
+                view.relayout_stats.script_restyles = view.relayout_stats.script_restyles.saturating_add(1);
+                view.relayout_stats.last_restyle_walked = walked;
+            }
         }
         Ok(())
     }
@@ -11213,6 +11246,13 @@ impl Engine {
         {
             return Ok(true);
         }
+        // LPF1: script writes that change only paint build only the written elements.
+        let script_roots = self.views.get(&id).and_then(|view| view.lay.script_roots.borrow_mut().take());
+        if let Some(written) = script_roots {
+            if self.repaint_script_restyled(id, &document, &external_stylesheets, (bounds.width, bounds.height), written)? {
+                return Ok(true);
+            }
+        }
 
         let javascript_enabled = self.config.javascript_enabled;
         // INC5 stage 2: the incremental path takes the published tree back
@@ -11223,6 +11263,11 @@ impl Engine {
                 view.layout = None;
             }
         }
+        // LPF1: this build is the one the view publishes, so it is the one kept for script paint
+        // writes (when they asked for it).
+        if let Some(view) = self.views.get(&id) {
+            view.lay.retain_script_unlaid_now.set(true);
+        }
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -11230,6 +11275,9 @@ impl Engine {
             javascript_enabled,
             (bounds.width, bounds.height),
         );
+        if let Some(view) = self.views.get(&id) {
+            view.lay.retain_script_unlaid_now.set(false);
+        }
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -11518,6 +11566,185 @@ impl Engine {
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
+    }
+
+    /// LPF1: a relayout asked for by script writes that marked their elements for a new style
+    /// and paint only (`written`, from the frame's `DirtySet`). As the pointer restyle does, it
+    /// builds no more of the page than those elements, and, when their boxes come out as they were
+    /// built last time but for what is painted, copies the paint onto the laid-out tree and paints
+    /// it again: no full build and no layout. "As they were built last time" is the last full
+    /// build kept before layout (`ViewLayout::script_unlaid`, patched here too): the document no
+    /// longer has the old state to build. Anything else is a miss, named on the relayout line, and
+    /// the full build that follows keeps its tree for the next frame.
+    fn repaint_script_restyled(
+        &mut self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        size: (u32, u32),
+        written: Vec<usize>,
+    ) -> Result<bool, EngineError> {
+        let miss = |why: &str| {
+            debug!(?id, why, "Script restyle needs a full build");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = format!("script: {why}"));
+            Ok(false)
+        };
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        // The full build this relayout falls back to keeps its tree for the next one.
+        view.lay.want_script_unlaid.set(true);
+        let (Some(with), Some(_)) = (view.laid_with.as_ref(), view.layout.as_ref()) else {
+            return miss("no layout");
+        };
+        if with.size != size {
+            return miss("resized");
+        }
+        let Some(mut unlaid) = view.lay.script_unlaid.borrow_mut().take() else {
+            return miss("no kept tree");
+        };
+        // The topmost written elements, and the elements above them: the build walks down those
+        // and builds only what is under a root.
+        let body = document.body().map(|body| body.id.raw());
+        let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+        for raw in &written {
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a written element left the document");
+            };
+            let mut chain = Vec::new();
+            let mut parent = node.parent();
+            while let Some(p) = parent {
+                chain.push(p.id.raw());
+                parent = p.parent();
+            }
+            above.insert(*raw, chain);
+        }
+        let roots: Vec<usize> = written
+            .iter()
+            .copied()
+            .filter(|raw| !above[raw].iter().any(|up| written.contains(up)))
+            .collect();
+        let mut path = std::collections::HashSet::new();
+        for root in &roots {
+            // The root element and body have no box of their own to patch.
+            if !body.is_some_and(|body| above[root].contains(&body)) {
+                return miss("the root element or body was written");
+            }
+            path.extend(above[root].iter().copied());
+        }
+        let mut pending: HashMap<usize, usize> = HashMap::new();
+        let mut steps = std::collections::HashSet::new();
+        for root in &roots {
+            let mut child = *root;
+            for parent in &above[root] {
+                if steps.insert((*parent, child)) {
+                    *pending.entry(*parent).or_insert(0) += 1;
+                }
+                child = *parent;
+            }
+        }
+        let started = std::time::Instant::now();
+        let (found, walked) = {
+            let _build_time = time_stage(Stage::Build);
+            RESTYLE_BUILD.with(|build| {
+                *build.borrow_mut() = Some(RestyleBuild {
+                    path,
+                    roots: roots.iter().copied().collect(),
+                    pending,
+                    found: HashMap::new(),
+                    walked: 0,
+                })
+            });
+            self.build_layout_for_view(id, document, external_stylesheets);
+            let build = RESTYLE_BUILD.with(|build| build.borrow_mut().take());
+            match build {
+                Some(build) => (build.found, build.walked),
+                None => (HashMap::new(), 0),
+            }
+        };
+        // A build numbers its elements in the order it reaches them (`element_id`): the build of
+        // a few elements numbers them from the start. They take the numbers the full build gave
+        // them, which the laid-out boxes keep.
+        let mut found = found;
+        for root in &roots {
+            if let (Some(fresh), Some(kept)) = (found.get_mut(root), box_of_node(&unlaid, *root)) {
+                adopt_build_ids(fresh, kept);
+            }
+        }
+        // Each root as built now against its box as built last time, and its laid-out box.
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(mut laid) = view.layout.take() else {
+            return miss("no layout");
+        };
+        let mut boxed = Vec::with_capacity(roots.len());
+        let mut why = None;
+        for root in &roots {
+            let Some(fresh) = found.get(root) else {
+                why = Some("a written element was not reached".to_string());
+                break;
+            };
+            match (box_of_node(&unlaid, *root), fresh.node_id.is_some()) {
+                // No box before or now (`display: none`): nothing is painted.
+                (None, false) => continue,
+                (None, true) | (Some(_), false) => {
+                    why = Some("a box came or went".to_string());
+                    break;
+                }
+                (Some(kept), true) => {
+                    if let Some(needs) = restyle_needs_layout(kept, fresh) {
+                        why = Some(needs);
+                        break;
+                    }
+                    if !box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, fresh)) {
+                        why = Some("layout moved boxes".to_string());
+                        break;
+                    }
+                    boxed.push(*root);
+                }
+            }
+        }
+        if let Some(why) = why {
+            view.layout = Some(laid);
+            // More than paint changed: sit out the next relayouts, and keep no tree for them.
+            view.lay.want_script_unlaid.set(false);
+            view.lay.script_cooldown.set(SCRIPT_RESTYLE_COOLDOWN);
+            return miss(&why);
+        }
+        {
+            let laid = Rc::make_mut(&mut laid);
+            for root in &boxed {
+                let (Some(kept), Some(fresh)) = (box_of_node(&unlaid, *root).cloned(), found.get(root)) else {
+                    continue;
+                };
+                if let Some(laid) = box_of_node_mut(laid, *root) {
+                    copy_changed_paint(laid, &kept, fresh);
+                }
+                if let Some(kept) = box_of_node_mut(&mut unlaid, *root) {
+                    *kept = fresh.clone();
+                }
+            }
+        }
+        *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        laid.forget_hit_overflow();
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.layout = Some(laid);
+        // Script reads of computed style answer from the restyled boxes.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let _snapshot_time = time_stage(Stage::Snapshot);
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+        }
+        view.display_list = Some(Arc::new(display_list));
+        view.frame_generation += 1;
+        view.lay.script_walked.set(Some(walked));
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_forced_layout(self.forced_layout_for(id));
+        }
+        self.render(id)?;
+        debug!(?id, roots = roots.len(), walked, ms = started.elapsed().as_secs_f64() * 1000.0, "Script restyle without layout");
+        Ok(true)
     }
 
     /// The short path of a pointer restyle: `true` when the view was
@@ -12577,6 +12804,12 @@ impl layout_ctx::LayoutCtx {
                 self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
             })
         };
+        // LPF1: the tree as built, before layout writes into it, for script paint writes to
+        // compare their elements with; dropped when no such writes asked for it.
+        if let Some(lay) = lay.as_ref() {
+            let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
+            *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+        }
 
         // Layout computation
         let mut root_box = root_box;
@@ -47403,13 +47636,21 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
+/// LPF1: the relayouts the script restyle path sits out after a write that changed more than paint.
+const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
+
 /// LPF1, tests only: turn the script-write restyle path off on this thread (`false`) or back on.
+/// The last restyle short path's miss, tests only.
+#[cfg(test)]
+pub(crate) fn last_restyle_miss_for_test() -> String {
+    LAST_RESTYLE_MISS.with(|why| why.borrow().clone())
+}
+
 #[cfg(test)]
 pub(crate) fn set_script_restyle_for_test(on: bool) {
     SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
 }
 
-#[allow(dead_code)]
 fn script_restyle_enabled() -> bool {
     !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
 }
@@ -47675,6 +47916,23 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 }
 
 /// What the build gives a box besides its style and its children.
+/// LPF1: `fresh` (a build of a few elements) takes the element numbers `kept` (the full build) gave
+/// the same boxes, where the two have one shape; the build-order numbers are all that differ.
+fn adopt_build_ids(fresh: &mut LayoutBox, kept: &LayoutBox) {
+    if fresh.node_id != kept.node_id {
+        return;
+    }
+    fresh.element_id = kept.element_id;
+    if let (Some(f), Some(k)) = (fresh.identity.as_mut(), kept.identity.as_ref()) {
+        f.element_id = k.element_id;
+    }
+    if fresh.children.len() == kept.children.len() {
+        for (f, k) in fresh.children.iter_mut().zip(&kept.children) {
+            adopt_build_ids(f, k);
+        }
+    }
+}
+
 fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
     // CH2.E19: an inline svg whose markup changed only in author paint
     // (another key, the same natural size) is the same box: the new icon

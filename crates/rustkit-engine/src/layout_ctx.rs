@@ -641,6 +641,25 @@ pub(crate) struct ViewLayout {
     /// box, so its build may be skipped (`Engine::relayout` sets it, the
     /// next build takes it).
     pub(crate) incremental_skip_build: Cell<bool>,
+    /// LPF1: the view's last full build as built (before layout), kept while script writes
+    /// change only paint (`want_script_unlaid`), so a relayout for such writes builds only the
+    /// written elements and compares them with their boxes here; patched along with the laid-out
+    /// tree. `None` after any full build that was not asked to keep it.
+    pub(crate) script_unlaid: RefCell<Option<rustkit_layout::LayoutBox>>,
+    pub(crate) want_script_unlaid: Cell<bool>,
+    /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
+    /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
+    /// kept tree, since the published boxes were not laid out from it.
+    pub(crate) retain_script_unlaid_now: Cell<bool>,
+    /// After a script write that changed more than paint, the relayouts the short path sits out
+    /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
+    /// not pay for a kept copy of its tree every frame.
+    pub(crate) script_cooldown: Cell<u32>,
+    /// The written elements (raw NodeIds) the coming relayout may restyle alone
+    /// (`Engine::relayout` sets it, `relayout_uncounted` takes it), and the child nodes the last
+    /// such restyle's build went into.
+    pub(crate) script_roots: RefCell<Option<Vec<usize>>>,
+    pub(crate) script_walked: Cell<Option<usize>>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank

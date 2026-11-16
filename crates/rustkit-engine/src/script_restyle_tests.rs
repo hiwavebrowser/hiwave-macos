@@ -70,9 +70,10 @@ fn a_script_paint_write_builds_only_the_written_elements() {
     assert_eq!(
         after.script_restyles - before.script_restyles,
         5,
-        "frames that built only the written tiles (relayouts {}, layouts skipped {})",
+        "frames that built only the written tiles (relayouts {}, layouts skipped {}, last miss {:?})",
         after.relayouts - before.relayouts,
-        after.layouts_skipped - before.layouts_skipped
+        after.layouts_skipped - before.layouts_skipped,
+        last_restyle_miss_for_test()
     );
     assert!(walked.iter().all(|&w| w > 0 && w <= 40), "elements the build went into per frame: {walked:?}");
 }
@@ -90,9 +91,11 @@ fn the_short_path_paints_what_the_full_rebuild_paints() {
             out.push(format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands));
         }
         set_script_restyle_for_test(true);
-        out
+        (out, engine.relayout_stats(view).expect("view").script_restyles)
     };
-    let (short, full) = (lists(true), lists(false));
+    let ((short, took), (full, none)) = (lists(true), lists(false));
+    assert!(took >= 6, "the short path ran {took} times of 8 frames (the first builds in full)");
+    assert_eq!(none, 0, "the path was off in the other arm");
     for (i, (a, b)) in short.iter().zip(&full).enumerate() {
         assert!(a == b, "frame {i}: the short path's display list differs from the full rebuild's");
     }

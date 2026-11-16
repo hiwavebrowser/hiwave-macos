@@ -95,6 +95,7 @@ fn layout_per_frame_multiply_shape() {
     let tiles = 11_176;
     let arms = [
         measure("transform+background", tiles, "el.style.transform = 'rotate(' + (n % 360) + 'deg)'; el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", None),
+        measure("background only", tiles, "el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", None),
         measure("left+top", tiles, "el.style.left = (n % 1200) + 'px'; el.style.top = (n % 700) + 'px';", None),
         measure("data attribute", tiles, "el.setAttribute('data-n', String(n));", None),
         measure("transform+background, incremental on", tiles, "el.style.transform = 'rotate(' + (n % 360) + 'deg)'; el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", Some(Mode::On)),
