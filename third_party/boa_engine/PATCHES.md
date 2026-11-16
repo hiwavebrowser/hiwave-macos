@@ -855,3 +855,112 @@ made read-only, shadowed; a built-in prototype; strict code with no setter; `arg
 global names; a getter or setter that redefines or deletes its own property, own, on the prototype
 and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
 develop be8eb272, 22 differ).
+
+## Patch: a name-read cache hit only where it is what [[Get]] would do (`ic-exotic-get`)
+
+**What.** The property inline cache is keyed on shape, and an exotic object can share an ordinary
+object's shape: a Proxy made from `{}` has the empty shape with `Object.prototype`, and a typed array
+has the empty shape with its prototype, as does an object created from that prototype. A
+`GetPropertyByName` site warmed on ordinary objects then answered a Proxy from the prototype's slot
+(its `get` trap never ran) and a typed array reading a canonical numeric name such as `Infinity` or
+`NaN` from the prototype (a typed array's [[Get]] reads its elements for those names and never the
+prototype). The write side has had the same guard since `super-set-receiver`. Marked
+`HIWAVE PATCH (ic-exotic-get)`:
+
+- `vm/inline_cache/mod.rs`: `InlineCache::numeric_name`, whether the site's name is a canonical
+  numeric string, worked out once when the cache is made; `InlineCache::hit_is_get(object)`: an
+  ordinary [[Get]] always hits; a typed array's or an arguments object's hits for a name that is not
+  numeric (they differ from the ordinary one only for numeric names, so `ta.byteLength` and
+  `arguments.length` keep their hits); a Proxy's and a module namespace's never do.
+- `vm/opcode/get/property.rs`: the hit is taken only when `hit_is_get` holds; otherwise the full
+  [[Get]] runs.
+- `builtins/typed_array/object.rs`: `canonical_numeric_index_string` is `pub(crate)`.
+
+`GetNameGlobal` is unchanged: its receiver is the realm's global object, whose [[Get]] is the
+ordinary one.
+
+**Cost.** One function-pointer comparison per hit on an ordinary object.
+
+A typed array's and an arguments object's `[[Get]]` carry a comment pointing back to `hit_is_get`,
+which recognises them by function address: if one is wrapped or replaced, hits silently become
+misses (slower, not wrong). `InlineCache::new` runs the numeric-name parse only for a name that
+starts with a digit, `-`, `I` or `N`, the only first characters a canonical numeric string has.
+
+Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (17 cases from Chrome for Testing 148.0.7778.216:
+a Proxy sharing `Object.prototype`'s empty shape, a `super.x` read whose home object's prototype is
+such a Proxy, a Proxy's `length` read after ordinary objects that share its shape and get `length`
+from the prototype, a typed array reading `Infinity` through a prototype getter and `NaN` through a
+prototype data property; and twelve that already matched and pin what must keep working: a Proxy
+over an object with a prototype getter, a null-prototype object, ordinary hits, a typed array and a
+mapped arguments object reading a non-numeric name (and a check that the arguments object is
+mapped), a Proxy's `length` through an object with its own `length`, and the fill side, a Proxy with
+no `get` trap or only a `set` trap read twice and then an ordinary object that shares its shape; 5
+differ on develop).
+
+## Patch: a regex literal compiles once per code block (`regex-literal-cache`)
+
+**What.** `StoreRegexp` (a regular expression literal) called `JsRegExp::new` on every evaluation,
+which parsed and compiled the pattern each time. A literal in a function that runs often (a string
+helper that tests a pattern, a loop body) paid a full pattern compile on every call. Now the
+literal's compiled record (matcher, flags, source text) is built the first time it is evaluated in
+its code block and kept in `CodeBlock::regexp_literals`, keyed by the pattern and flags constant
+indexes; each evaluation makes a new RegExp object from it, with its own identity and its own
+`lastIndex`, as the language requires. Marked `HIWAVE PATCH (regex-literal-cache)`:
+
+- `builtins/regexp/mod.rs`: `RegExp::matcher` is an `Rc<Regex>` (a clone of the record shares the
+  matcher); `RegExp::from_literal` looks the literal up in the cache, compiles and stores it if it
+  is not there, and creates the object from the record. `LiteralCache` is the cache's type.
+- `vm/code_block.rs`, `bytecompiler/mod.rs`: the `regexp_literals` field (not traced; the record
+  holds no object), empty when a code block is made.
+- `vm/opcode/push/literal.rs`: `StoreRegexp` goes through `RegExp::from_literal`.
+- `vm/stats.rs`, `rustkit-js` `regexp_compile_count()`: a process-wide count of pattern compiles
+  (one relaxed increment in `compile_native_regexp`), the pin's counter.
+
+`new RegExp(...)`, `RegExp(...)` and `String.prototype.match` with a string still compile on each
+call: their pattern is a runtime value.
+
+**Cost.** One lookup in a short vector (literals per code block) per evaluation instead of a compile.
+
+Pin: `crates/rustkit-js/tests/regex_literal_compile.rs`: 1000 evaluations of one literal compile at
+most once (was 1000), in a loop and in a called function; and 7 cases from Chrome for Testing
+148.0.7778.216 (a new object each evaluation, `lastIndex` per object, flags, sticky and unicode, two
+sites with the same text, named groups after `exec`).
+
+## Patch: one inline cache entry per shape (`ic-set-dedupe`)
+
+**What.** `InlineCache::set` pushed an entry for every fill, so a site could hold several entries for
+one shape. A getter or setter that runs the same site again (a recursive accessor chain: each level
+misses, runs the accessor, and fills the same shape on the way out) filled the four slots with
+copies of one shape within five levels, and the site then went megamorphic and missed on every later
+access, for every receiver. `set` now updates the entry that already has the shape (its slot and
+holder) and pushes only a shape it does not have. Marked `HIWAVE PATCH (ic-set-dedupe)` in
+`vm/inline_cache/mod.rs`.
+
+**Cost.** A scan of at most four entries on a fill, which is a miss already.
+
+Pin: `crates/rustkit-js/tests/ic_set_dedupe.rs` counts vm-stats misses for a read site and a write
+site reached through eight levels of accessor recursion and then used for 4000 accesses of two
+shapes: 4012 read and 4009 write misses before, under 200 after (two levels of recursion miss 31
+times in the same script).
+
+## Patch: an ArrayBuffer made by the host can carry a detach key (`arraybuffer-detach-key`)
+
+`JsArrayBuffer::from_byte_block` always makes a buffer whose `[[ArrayBufferDetachKey]]` is
+undefined, so script can `transfer()` or `transferToFixedLength()` any buffer the host hands it,
+and a host that keeps pointing at that buffer's storage (the WebAssembly memory plan, W0/W2) would
+be left pointing at freed memory. The spec's answer is a detach key (the string
+"WebAssembly.Memory" for a wasm memory): with one set, script's `transfer()` throws a TypeError and
+only the host, holding the key, can detach. The slot and `JsArrayBuffer::detach(&key)` already
+existed; only a constructor was missing.
+
+**Change.** `JsArrayBuffer::from_byte_block_with_detach_key(block, key, context)` (the TODO in
+`jsarraybuffer.rs` asked for it) and a `pub(crate)` setter on the data struct. `from_byte_block` is
+unchanged (undefined key).
+
+**Cost.** None on any existing path (a new constructor).
+
+Pin: `crates/rustkit-js/tests/arraybuffer_detach_key.rs` (Chrome for Testing 148.0.7778.216, a
+`WebAssembly.Memory`'s buffer: `transfer()`, `transferToFixedLength()`, `structuredClone` with a
+transfer list and `postMessage` with one all throw a TypeError and leave the buffer attached;
+`memory.grow()` detaches it; a plain buffer's `transfer()` works). Red on develop (the constructor
+stub ignoring the key): script's `transfer()` succeeded.

@@ -340,7 +340,7 @@ mod transparent_frame_tests;
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
-    connect, content_turn_wait, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
+    connect, content_turn_wait, LiveClock, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
     PageEvent, PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
@@ -415,6 +415,8 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(test)]
+mod frame_sandbox_tests;
 #[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -544,6 +546,10 @@ mod redirect_url_tests;
 mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
+mod named_collections_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod unhandled_rejection_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod style_media_disabled_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1897,6 +1903,11 @@ pub struct EngineConfig {
     /// that steps the timers reproduces every `t`-driven frame. Off by default: a live page reads a
     /// clock that flows. Its own switch, not a side effect of `disable_animations`.
     pub deterministic_page_clock: bool,
+    /// The document timeline reads each animation frame's exact grid time, with no real time in it
+    /// (TIMELINE1): script animations compute from it, so a capture reads the same animation times
+    /// every run, however long its turns take in real time. Frame callbacks' timestamps and
+    /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
+    pub grid_frame_stamps: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -1998,6 +2009,7 @@ impl Default for EngineConfig {
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
             deterministic_page_clock: false,
+            grid_frame_stamps: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -2966,6 +2978,7 @@ impl EngineConfig {
         Self {
             disable_animations: true,
             deterministic_page_clock: true,
+            grid_frame_stamps: true,
             ..Default::default()
         }
     }
@@ -6507,7 +6520,8 @@ impl Engine {
     /// view's runtime; its classic scripts run in document order, then its
     /// `DOMContentLoaded` and `load`, then `load` at the iframe element.
     /// A cross-origin `src` is not fetched: the frame stays blank and the
-    /// element hears `load`. A frame whose element left, or that is
+    /// element hears `load`; so does a frame with a `sandbox` attribute
+    /// (`frame_sandbox_tests`). A frame whose element left, or that is
     /// navigated again, is dropped first. Not here yet (later stages):
     /// layout and paint of the frame, the child's timers and network
     /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
@@ -6543,7 +6557,11 @@ impl Engine {
             fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
                 engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
             }
-            if !blank && !same_origin {
+            // A frame with a `sandbox` attribute (as it was when the page
+            // asked for this navigation) takes the same path, whatever the
+            // attribute's tokens: `allow-scripts` and `allow-same-origin`
+            // are not acted on in this stage.
+            if request.sandbox.is_some() || (!blank && !same_origin) {
                 // The cross-origin floor: no request, no document, one `load`.
                 if let Some(parent) = parent_of(self, id) {
                     let _ = parent.frame_loaded(request.node);
@@ -10218,6 +10236,7 @@ impl Engine {
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
             // A capture (animations disabled for determinism) reads a page clock with no real time in it.
             bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
@@ -10691,6 +10710,7 @@ impl Engine {
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
             bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).

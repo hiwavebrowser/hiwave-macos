@@ -197,6 +197,40 @@ fn an_interval_keeps_its_grid_without_the_pages_math_or_clock() {
     assert_eq!(got, (Some(5), "n=1 ran=0".to_string()), "the next run's place on the grid, and the page's counts");
 }
 
+/// Animation frames are put on their grid, and a turn's frame budget is
+/// timed, with the arithmetic and clock of install time: a page whose
+/// `Math.floor` returns 0, or whose `Math` is a plain object, still gets its
+/// frames on the grid, and its `Date.now` is not what ends a turn.
+#[test]
+fn frames_and_the_frame_budget_run_without_the_pages_math_or_clock() {
+    let got = bounded(|| {
+        let (b, _) = bindings(false);
+        b.evaluate(KIT).unwrap();
+        b.evaluate(
+            "var frames = 0, threw = '', realMath = Math, realNow = Date.now;
+             Math.floor = counted; Date.now = counted;
+             (function f() { requestAnimationFrame(function () { frames++; f(); }); })();",
+        )
+        .unwrap();
+        let first = b.next_timer_delay();
+        b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        let second = b.next_timer_delay();
+        b.evaluate(
+            "Math = {};
+             try { requestAnimationFrame(function () { frames++; }); } catch (e) { threw = String(e); }",
+        )
+        .unwrap();
+        let ran_round = b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        b.evaluate("Math = realMath; Date.now = realNow;").unwrap();
+        (first, second, ran_round, text(b.evaluate("'frames=' + frames + ' ran=' + ran + ' threw=' + threw").unwrap()))
+    });
+    assert_eq!(
+        got,
+        (Some(17), Some(17), (2, false), "frames=3 ran=0 threw=".to_string()),
+        "the first and next frame's delay, the second turn's callbacks, and the page's counts"
+    );
+}
+
 /// Timers are set and cleared while the page has its own array methods in
 /// place: the timer table never passes through them, and reading the next
 /// timer runs nothing of the page's.
@@ -382,4 +416,26 @@ fn an_engine_events_dispatch_state_is_its_own() {
         text(b.evaluate("String(calls)").unwrap())
     });
     assert_eq!(calls, "0", "accessor calls");
+}
+
+/// The fields of an event the engine makes are read from its init record with the own-property
+/// helper of install time: they are the same whatever `Object.prototype.hasOwnProperty` and
+/// `Function.prototype.call` are when the event is made.
+#[test]
+fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() {
+    let got = bounded(|| {
+        let (b, _doc) = bindings(false);
+        b.evaluate(
+            "var calls = 0, seen = [], p;
+             window.addEventListener('unhandledrejection', function (e) {
+                 seen.push([e.type, e.cancelable, e.promise === p, e.reason, e.isTrusted].join(':'));
+             });
+             Object.prototype.hasOwnProperty = function () { calls++; return false; };
+             Function.prototype.call = function () { calls++; return false; };
+             p = Promise.reject('r');",
+        )
+        .unwrap();
+        text(b.evaluate("seen.join() + ' calls=' + calls").unwrap())
+    });
+    assert_eq!(got, "unhandledrejection:true:true:r:true calls=0");
 }

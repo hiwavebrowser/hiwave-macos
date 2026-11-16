@@ -1266,11 +1266,11 @@ impl EndpointSide {
     /// The content thread's loop. One current-thread runtime, already
     /// entered by the caller: timers and fetches progress on every idle wait.
     pub(crate) async fn run(&mut self, engine: &mut Engine) {
-        let mut clock = LiveClock::new(tokio::time::Instant::now());
+        let mut clock = LiveClock::new(std::time::Instant::now());
         loop {
             let mut cmds = self.drain_coalesced();
             if cmds.is_empty() {
-                let elapsed = clock.turn(tokio::time::Instant::now());
+                let elapsed = clock.turn(std::time::Instant::now());
                 let turn = engine.pump_live_real(self.view, elapsed).await;
                 self.after_page_change(engine);
                 // A resize (or any other command) that arrived during the
@@ -1283,14 +1283,15 @@ impl EndpointSide {
                 cmds = self.drain_coalesced();
                 if cmds.is_empty() {
                     let wait = content_turn_wait(turn.next_timer_ms);
-                    let now = tokio::time::Instant::now();
-                    let deadline = clock.deadline(now, wait);
-                    if deadline <= now {
+                    let now = std::time::Instant::now();
+                    let due = clock.deadline(now, wait);
+                    if due <= now {
                         // Due already: the runtime's timers and sockets get
                         // their turn first, as a sleep would give them.
                         tokio::task::yield_now().await;
                         continue;
                     }
+                    let deadline = tokio::time::Instant::from_std(due);
                     // A command ends the wait (CH3.A9): the chrome's Cmd+T
                     // used to sit here until the chrome's next timer.
                     match &self.cmd_wake {
@@ -1372,21 +1373,28 @@ pub fn content_turn_wait(next_timer_ms: Option<u64>) -> std::time::Duration {
 /// frame had ended, so a timer or frame due 10 ms after a turn came 10 ms
 /// after its end: with sleeps that end late as well, a requestAnimationFrame
 /// loop beside a 10 ms timer chain got 51-54 frames a second where Chrome
-/// gets 60. parity-capture's live loop keeps its fraction the same way.
-pub(crate) struct LiveClock {
+/// gets 60. parity-capture's live loop paces its content-thread arm with this
+/// clock, so a capture paces as the app does.
+///
+/// A page whose timer is always due (a `setTimeout(0)` chain, a turn that
+/// ran out of budget) waits at least 2 ms from each turn's start
+/// ([`content_turn_wait`]), so cheap turns come at most every 2 ms; turns
+/// follow one another at once only while each takes 2 ms or more of the
+/// page's own work, and the loop takes its commands before every turn.
+pub struct LiveClock {
     /// The last turn's time: where the page's clock stands, in real time.
     /// Behind the instant that turn began by the fraction it was not given.
-    turn_at: tokio::time::Instant,
+    turn_at: std::time::Instant,
 }
 
 impl LiveClock {
-    pub(crate) fn new(now: tokio::time::Instant) -> Self {
+    pub fn new(now: std::time::Instant) -> Self {
         Self { turn_at: now }
     }
 
     /// The whole milliseconds since the last turn's time, for the turn that
     /// begins `now`; the fraction is kept for the next turn.
-    pub(crate) fn turn(&mut self, now: tokio::time::Instant) -> u64 {
+    pub fn turn(&mut self, now: std::time::Instant) -> u64 {
         let ms = now.saturating_duration_since(self.turn_at).as_millis() as u64;
         self.turn_at += std::time::Duration::from_millis(ms);
         ms
@@ -1397,7 +1405,7 @@ impl LiveClock {
     /// the page's clock stood when the wait was measured. Not before `now`
     /// (the loop asks after the turn and its frame): a turn that took longer
     /// than the wait is followed by the next at once.
-    pub(crate) fn deadline(&self, now: tokio::time::Instant, wait: std::time::Duration) -> tokio::time::Instant {
+    pub fn deadline(&self, now: std::time::Instant, wait: std::time::Duration) -> std::time::Instant {
         (self.turn_at + wait).max(now)
     }
 }

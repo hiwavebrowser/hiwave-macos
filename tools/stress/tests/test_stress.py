@@ -247,7 +247,7 @@ import sys, time
 sys.stderr.write("fake engine started at %.3f\\n" % time.time()); sys.stderr.flush()
 import json, urllib.request
 url = sys.argv[sys.argv.index("--url") + 1]
-base = url.split("/index.html")[0]
+base = "/".join(url.split("/")[:3])
 NETLOG
 urllib.request.urlopen(url).read()
 EXTRA
@@ -256,10 +256,12 @@ time.sleep(30)
 '''
 
 
-def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True):
+def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True, suite_name="speedometer", more_argv=()):
     suite = tmp_path / "suite"
     suite.mkdir(parents=True)
-    (suite / "index.html").write_text("<!doctype html><html><head></head><body></body></html>")
+    for page in ("index.html", "MotionMark/index.html"):
+        (suite / page).parent.mkdir(exist_ok=True)
+        (suite / page).write_text("<!doctype html><html><head></head><body></body></html>")
     engine = tmp_path / "engine.py"
     netlog = 'print("INFO hiwave::console: net start GET " + url + " status=- issued nav=1", flush=True)' if request_log else ""
     engine.write_text(FAKE_ENGINE.replace("EXTRA", extra).replace("NETLOG", netlog))
@@ -267,8 +269,9 @@ def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True):
     monkeypatch.setattr(run, "check_pin", lambda s: (suite, {"version": "t", "sha": "0" * 40}))
     monkeypatch.setattr(run, "wait_for_load", lambda limit, wait: True)
     out = tmp_path / "out"
-    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "speedometer", "--engine", "hiwave-headless",
-                                      "--binary", str(engine), "--label", "fake", "--out", str(out), "--timeout", "20"])
+    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", suite_name, "--engine", "hiwave-headless",
+                                      "--binary", str(engine), "--label", "fake", "--out", str(out), "--timeout", "20",
+                                      *more_argv])
     code = run.main()
     return code, json.loads(next(out.glob("*.json")).read_text())
 
@@ -521,3 +524,60 @@ def test_a_raised_budget_run_says_so_and_records_it(monkeypatch, tmp_path, capsy
     rec, cap = run_ok_with_fake_engine(monkeypatch, tmp_path / "default", capsys)
     assert rec["live_turn_budget_ms"] is None, rec
     assert "TURN BUDGET RAISED" not in cap.err + cap.out, cap
+
+
+def test_motionmark_is_given_the_frames_flag_and_the_other_suites_are_not():
+    # MotionMark's runner loads each test in an iframe and waits for its load event; the engine makes
+    # no request for a frame unless HIWAVE_NESTED_CONTEXTS=1, so without it the suite never starts.
+    assert run.suite_env("motionmark", {}) == {"HIWAVE_NESTED_CONTEXTS": "1"}
+    for other in ("speedometer", "jetstream", "control"):
+        assert run.suite_env(other, {}) == {}, other
+    # The caller's --env is applied over the suite's (a run that looks at the suite without frames) ...
+    assert run.suite_env("motionmark", {"HIWAVE_NESTED_CONTEXTS": "0", "KEEP": "me"}) == \
+        {"HIWAVE_NESTED_CONTEXTS": "0", "KEEP": "me"}
+    # ... and the offline checks' settings still go on last.
+    env, _ = run.engine_env(run.suite_env("motionmark", {"HIWAVE_RUSTKIT_CHROME": "0"}), inherited={})
+    assert env["HIWAVE_NESTED_CONTEXTS"] == "1" and env["HIWAVE_RUSTKIT_CHROME"] == "1", env
+
+
+def test_the_engine_flags_are_what_the_engine_process_is_started_with():
+    shell = {"HIWAVE_CONTENT_THREAD": "0", "HIWAVE_FROM_THE_SHELL": "yes", "HOME": "/x", run.TURN_BUDGET_ENV: "60000"}
+    asked = run.suite_env("motionmark", {"HIWAVE_ASKED": "1", "RUST_BACKTRACE": "1"})
+    # Every HIWAVE_ variable in the engine's environment, the shell's included; not the dropped one, not
+    # the harness's own turn-budget variable (the record has that as live_turn_budget_ms), nothing else.
+    assert run.engine_flags("hiwave-headless", asked, inherited=shell) == {
+        "HIWAVE_ASKED": "1", "HIWAVE_CONSOLE_LOG": "1", "HIWAVE_FROM_THE_SHELL": "yes",
+        "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}
+    # The app is also started with its test hooks off.
+    assert run.engine_flags("hiwave", asked, inherited={})["HIWAVE_TEST_HOOKS"] == "0"
+    # Chrome reads none of them.
+    assert run.engine_flags("chrome", asked, inherited=shell) == {}
+
+
+FLAG_ECHO = 'import os; print("fake engine sees nested=" + os.environ.get("HIWAVE_NESTED_CONTEXTS", "unset"), flush=True)'
+
+
+def test_a_motionmark_run_starts_the_engine_with_the_frames_flag_and_records_it(monkeypatch, tmp_path):
+    monkeypatch.delenv("HIWAVE_NESTED_CONTEXTS", raising=False)
+
+    def engine_saw(tmp):
+        log = next((tmp / "out").glob("*.work/app.log")).read_text()
+        return [line for line in log.splitlines() if line.startswith("fake engine sees")]
+
+    # motionmark: on, in the engine's environment and in the record.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "mm", FLAG_ECHO, suite_name="motionmark", more_argv=("--keep",))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "1", rec["engine_flags"]
+    assert engine_saw(tmp_path / "mm") == ["fake engine sees nested=1"]
+    # another suite: not set, and the record says so by not listing it.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "sp", FLAG_ECHO, more_argv=("--keep",))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert "HIWAVE_NESTED_CONTEXTS" not in rec["engine_flags"] and rec["engine_flags"]["HIWAVE_RUSTKIT_CHROME"] == "1", rec
+    assert engine_saw(tmp_path / "sp") == ["fake engine sees nested=unset"]
+    # motionmark with the flag switched off by the caller: off, and recorded as off.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "off", FLAG_ECHO, suite_name="motionmark",
+                                     more_argv=("--keep", "--env", "HIWAVE_NESTED_CONTEXTS=0"))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "0", rec["engine_flags"]
+    assert engine_saw(tmp_path / "off") == ["fake engine sees nested=0"]
+

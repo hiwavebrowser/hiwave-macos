@@ -194,7 +194,8 @@ fn an_interval_held_back_on_the_real_clock_runs_once_and_keeps_its_grid() {
 }
 
 /// Animation frames are the same on both clocks: one round a turn, and a frame a timer of the turn
-/// asks for (due a frame after that timer) is in the round when the turn reaches it.
+/// asks for (on the 60 Hz grid, the frame of the timer's time, #1191) is in the round when the turn
+/// reaches it.
 #[test]
 fn animation_frames_are_the_same_on_the_real_clock() {
     let run = |real: bool| {
