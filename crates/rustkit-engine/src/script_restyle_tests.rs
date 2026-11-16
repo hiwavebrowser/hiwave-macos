@@ -414,9 +414,7 @@ fn a_spinner_beside_script_paint_writes_keeps_the_short_path() {
     }
     let after = engine.relayout_stats(view).expect("view");
     let hits = after.script_restyles - before.script_restyles;
-    let full = (after.relayouts - before.relayouts) - (after.layouts_skipped - before.layouts_skipped);
     let painted = after.animation_frames_painted - before.animation_frames_painted;
-    let _ = full;
     assert!(painted >= 4, "the spinner-only frames took the animation frame {painted} times of 5");
     assert!(hits >= 4, "the script frames took the short path {hits} times of 5 (last miss {:?})", last_restyle_miss_for_test());
 }
