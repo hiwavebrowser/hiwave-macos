@@ -15,10 +15,15 @@ fn rt() -> tokio::runtime::Runtime {
 
 /// `tiles` absolutely positioned tiles, Multiply's way (a 98-column grid in a 1280x720 stage).
 fn page(tiles: usize, script: &str) -> String {
+    page_styled(tiles, script, "")
+}
+
+fn page_styled(tiles: usize, script: &str, tile_css: &str) -> String {
     let mut p = String::from(
         "<!doctype html><style>body{margin:0}#stage{position:relative;width:1280px;height:720px;overflow:hidden}\
-         .t{position:absolute;width:12px;height:12px;background:#08f}</style><div id=stage>",
+         .t{position:absolute;width:12px;height:12px;background:#08f}",
     );
+    p.push_str(&format!(".t{{{tile_css}}}</style><div id=stage>"));
     for i in 0..tiles {
         let (x, y) = ((i % 98) * 13, (i / 98) * 6);
         p.push_str(&format!("<div class=t style=\"left:{x}px;top:{y}px\"></div>"));
@@ -43,12 +48,16 @@ struct Arm {
 }
 
 fn measure(name: &'static str, tiles: usize, write: &str, mode: Option<crate::incremental_layout::Mode>) -> Arm {
+    measure_styled(name, tiles, write, mode, "")
+}
+
+fn measure_styled(name: &'static str, tiles: usize, write: &str, mode: Option<crate::incremental_layout::Mode>, tile_css: &str) -> Arm {
     crate::incremental_layout::set_mode_for_test(mode);
     // One loop: each frame writes `write` (with `i` the tile, `n` the frame) on 6 tiles.
     let script = format!(
         "requestAnimationFrame(function f() {{ n++; for (var k = 0; k < 6; k++) {{ var i = (n * 7 + k * 1871) % tiles.length, el = tiles[i]; {write} }} requestAnimationFrame(f); }});"
     );
-    let server = serve_routes(vec![("/", "text/html", page(tiles, &script))]);
+    let server = serve_routes(vec![("/", "text/html", page_styled(tiles, &script, tile_css))]);
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 720 })
@@ -95,6 +104,7 @@ fn layout_per_frame_multiply_shape() {
     let tiles = 11_176;
     let arms = [
         measure("transform+background", tiles, "el.style.transform = 'rotate(' + (n % 360) + 'deg)'; el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", None),
+        measure_styled("transform+background, tiles already transformed", tiles, "el.style.transform = 'rotate(' + (n % 360) + 'deg)'; el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", None, "transform:rotate(0deg)"),
         measure("background only", tiles, "el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)';", None),
         measure("left+top", tiles, "el.style.left = (n % 1200) + 'px'; el.style.top = (n % 700) + 'px';", None),
         measure("data attribute", tiles, "el.setAttribute('data-n', String(n));", None),

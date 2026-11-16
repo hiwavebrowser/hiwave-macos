@@ -11693,7 +11693,7 @@ impl Engine {
                     break;
                 }
                 (Some(kept), true) => {
-                    if let Some(needs) = restyle_needs_layout(kept, fresh) {
+                    if let Some(needs) = script_restyle_needs_layout(kept, fresh) {
                         why = Some(needs);
                         break;
                     }
@@ -11720,6 +11720,7 @@ impl Engine {
                 };
                 if let Some(laid) = box_of_node_mut(laid, *root) {
                     copy_changed_paint(laid, &kept, fresh);
+                    copy_transform_and_opacity(laid, fresh);
                 }
                 if let Some(kept) = box_of_node_mut(&mut unlaid, *root) {
                     *kept = fresh.clone();
@@ -47916,6 +47917,53 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 }
 
 /// What the build gives a box besides its style and its children.
+/// LPF2: a transform that stays a transform, or an opacity that stays below 1 (or stays 1), is
+/// paint: the box keeps its stacking context and its containing block for fixed and absolute
+/// descendants (Chrome, `transform_paint_probe_cft148.json`), and layout reads neither (the painter
+/// does, from the style). One that comes or goes is not: it falls to [`restyle_needs_layout`].
+fn keeps_what_it_establishes(kept: &ComputedStyle, fresh: &ComputedStyle) -> bool {
+    kept.transform.ops.is_empty() == fresh.transform.ops.is_empty() && (kept.opacity < 1.0) == (fresh.opacity < 1.0)
+}
+
+/// [`restyle_needs_layout`] for a script write (LPF2): where a box keeps what it establishes, its
+/// transform, transform origin and opacity are compared as paint.
+fn script_restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<String> {
+    if !built_alike(kept, fresh) {
+        return Some("boxes".to_string());
+    }
+    let mut masked = fresh.clone();
+    masked.children.clear();
+    if keeps_what_it_establishes(&kept.style, &fresh.style) {
+        masked.style.transform = kept.style.transform.clone();
+        masked.style.transform_origin = kept.style.transform_origin.clone();
+        masked.style.opacity = kept.style.opacity;
+    }
+    let mut shallow = kept.clone();
+    shallow.children.clear();
+    if let Some(why) = restyle_needs_layout(&shallow, &masked) {
+        return Some(why);
+    }
+    if kept.children.len() != fresh.children.len() {
+        return Some("boxes".to_string());
+    }
+    kept.children
+        .iter()
+        .zip(&fresh.children)
+        .find_map(|(kept, fresh)| script_restyle_needs_layout(kept, fresh))
+}
+
+/// LPF2: copy the transform, its origin and the opacity of every box of `fresh` onto `laid` (one
+/// shape), after `copy_changed_paint`; [`script_restyle_needs_layout`] let only boxes that keep
+/// what they establish differ in them.
+fn copy_transform_and_opacity(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    laid.style.transform = fresh.style.transform.clone();
+    laid.style.transform_origin = fresh.style.transform_origin.clone();
+    laid.style.opacity = fresh.style.opacity;
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_transform_and_opacity(laid, fresh);
+    }
+}
+
 /// LPF1: `fresh` (a build of a few elements) takes the element numbers `kept` (the full build) gave
 /// the same boxes, where the two have one shape; the build-order numbers are all that differ.
 fn adopt_build_ids(fresh: &mut LayoutBox, kept: &LayoutBox) {

@@ -154,7 +154,7 @@ fn transform_writes_on_the_short_path_paint_and_measure_what_the_full_rebuild_do
         for _ in 0..8 {
             frame(&mut engine, view);
             let rects = engine
-                .execute_script(view, "JSON.stringify([0, 7, 331].map(function (i) { var b = tiles[i].getBoundingClientRect(); return [b.left, b.top, b.width]; }))")
+                .execute_script(view, "JSON.stringify([0, 7, 201].map(function (i) { var b = tiles[i].getBoundingClientRect(); return [b.left, b.top, b.width]; }))")
                 .unwrap();
             out.push((format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands), rects));
         }
