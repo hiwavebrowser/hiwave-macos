@@ -305,8 +305,9 @@ fn a_frame_after_a_long_tasks_catch_up_is_not_stamped_the_task_twice() {
 /// frames are kept at least the grid distance apart (Chrome's spacing), so a frame run straight
 /// after the one before can be stamped up to a step past the clock.
 ///
-/// Real time is a value here, not the wall clock (`Q.fakeReal`): a callback's work and the time
-/// between turns advance it, each turn is given what passed since the last, and the bound is exact.
+/// Real time is a value here, not the wall clock (the harness's `__rk.testRealMs`): a callback's
+/// work and the time between turns advance it, each turn is given what passed since the last, and
+/// the bound is exact.
 #[test]
 fn long_tasks_never_leave_the_page_clock_ahead_of_real_time() {
     fn run(seed: u64) -> Result<(), String> {
@@ -314,9 +315,9 @@ fn long_tasks_never_leave_the_page_clock_ahead_of_real_time() {
         b.runtime
             .borrow_mut()
             .evaluate_host_bookkeeping(
-                "var Q = __rk.shared.timerQueue; Q.fakeReal = 0; \
-                 window.__work = function (ms) { Q.fakeReal += ms; }; \
-                 window.__real = function () { return Q.fakeReal; }; return 0",
+                "var fake = 0; __rk.testRealMs = function () { return fake; }; \
+                 window.__work = function (ms) { fake += ms; }; \
+                 window.__real = function () { return fake; }; return 0",
             )
             .unwrap();
         b.evaluate(
