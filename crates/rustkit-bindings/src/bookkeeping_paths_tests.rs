@@ -382,3 +382,32 @@ fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() 
     });
     assert_eq!(got, "unhandledrejection:true:true:r:true calls=0");
 }
+
+/// The load-listener check made when a frame goes into the document reads
+/// the tree and the handler attribute from the engine's own records: an
+/// ancestor lookup or attribute read the page has replaced is not asked,
+/// the check ends, and its answers are the same.
+#[test]
+fn the_load_listener_check_asks_nothing_of_the_page() {
+    let (ran, quiet) = bounded(|| {
+        let (b, _) = bindings(false);
+        b.enable_frames().unwrap();
+        b.evaluate(
+            "var ran = 0, none = function () {};
+             var box = document.createElement('div'); box.addEventListener('load', none, true); document.body.appendChild(box);
+             var marked = document.createElement('iframe'); marked.setAttribute('onload', '0');
+             var plain = document.createElement('iframe'), inner = document.createElement('iframe');
+             Object.defineProperty(Node.prototype, 'parentNode', { get: function () { ran++; return this; }, configurable: true });
+             Object.defineProperty(Node.prototype, 'parentElement', { get: function () { ran++; return this; }, configurable: true });
+             Element.prototype.getAttribute = function () { ran++; return null; };
+             Element.prototype.hasAttribute = function () { ran++; return false; };
+             Node.prototype.appendChild.call(document.body, plain);
+             Node.prototype.appendChild.call(document.body, marked);
+             Node.prototype.appendChild.call(box, inner);",
+        )
+        .unwrap();
+        let quiet: Vec<bool> = b.take_frame_requests().into_iter().map(|r| r.quiet).collect();
+        (text(b.evaluate("String(ran)").unwrap()), quiet)
+    });
+    assert_eq!((ran.as_str(), quiet), ("0", vec![true, false, false]), "page functions run, and which requests are quiet");
+}
