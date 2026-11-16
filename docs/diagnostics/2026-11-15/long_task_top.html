@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>long task clock, one document</title></head><body>
+<script>
+// One document, no frame: a long task in a timer, then animation frames; performance.now(), Date.now()
+// and the frame timestamp since the task began.
+setTimeout(function () {
+  var p0 = performance.now(), d0 = Date.now(), rows = [];
+  while (Date.now() - d0 < 3000) { }
+  var afterTask = [Math.round(performance.now() - p0), Date.now() - d0];
+  function tick(ts) {
+    rows.push([Math.round(performance.now() - p0), Date.now() - d0, Math.round(ts - p0)]);
+    if (rows.length < 12) return requestAnimationFrame(tick);
+    var ahead = afterTask[0] - afterTask[1];
+    for (var i = 0; i < rows.length; i++) ahead = Math.max(ahead, rows[i][0] - rows[i][1]);
+    window.__out = JSON.stringify({ perfAheadOfDateMs: ahead, afterTask: afterTask, frames: rows });
+    console.log("PROBE " + window.__out);
+  }
+  requestAnimationFrame(tick);
+}, 500);
+</script>
+</body></html>

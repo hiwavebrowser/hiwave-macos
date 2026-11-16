@@ -235,3 +235,40 @@ fn the_page_clock_keeps_real_time_across_a_virtual_step() {
     let gap: f64 = ev(&b, "String(p1 - p0)").parse().unwrap();
     assert!(gap >= 140.0, "performance.now() moved {gap} ms across 150 ms of real time and a virtual step");
 }
+
+/// A long task, then the timers' clock catching up. The task's real time is given to the timers'
+/// clock on the turn after it, so the first frame after the task runs with that clock still behind
+/// and is stamped real time; the next frame used to be stamped that stamp plus the whole catch-up:
+/// the task counted twice, and `performance.now()` ran ahead of real time by the task's length from
+/// then on. In the app's window a frame's 3000 ms task left the frame's clock 3202 ms ahead
+/// (`docs/diagnostics/2026-11-15/long_task_clock_app.json`); the pinned Chrome's stays within a
+/// millisecond of `Date.now()` (`long_task_clock_cft148.json`). MotionMark reads this clock to
+/// decide a test is over.
+///
+/// The bound is on the values: two frames are no further apart than the real time between them
+/// plus one frame's floor, however long this test's own calls took.
+#[test]
+fn a_frame_after_a_long_tasks_catch_up_is_not_stamped_the_task_twice() {
+    let b = page();
+    b.evaluate(
+        "var log = []; requestAnimationFrame(function f(t) { log.push(t, performance.now()); \
+         if (log.length < 4) requestAnimationFrame(f); });",
+    )
+    .unwrap();
+    // The task: real time the timers' clock has not been given.
+    let task_ms = 300;
+    std::thread::sleep(std::time::Duration::from_millis(task_ms));
+    let began = std::time::Instant::now();
+    b.advance_timers(16, 10).unwrap(); // the first frame, the timers' clock a task behind
+    b.advance_timers(task_ms, 10).unwrap(); // the catch-up, and the second frame
+    let real_ms = began.elapsed().as_secs_f64() * 1000.0;
+    let log: Vec<f64> = ev(&b, "log.join()").split(',').map(|x| x.parse().unwrap()).collect();
+    assert_eq!(log.len(), 4, "{log:?}");
+    let (stamps, clock) = (log[2] - log[0], log[3] - log[1]);
+    assert!(stamps >= 16.0 - 1e-6, "the two frames are {stamps} ms apart, less than a frame: {log:?}");
+    assert!(
+        stamps <= real_ms + 16.0 + 1e-6 && clock <= real_ms + 16.0 + 1e-6,
+        "{real_ms} ms of real time passed between two frames; their stamps are {stamps} ms apart and \
+         performance.now() moved {clock} ms: {log:?}"
+    );
+}
