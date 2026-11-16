@@ -552,6 +552,19 @@ fn a_frames_timer_joins_the_queue_through_nothing_a_page_replaced() {
     assert_eq!(got, ("0".to_string(), "1".to_string(), "2".to_string()), "calls of what the page replaced, the page's timers run, the frame's");
 }
 
+/// The frame bindings' host function is taken off the window by their
+/// install, also by an install that finds them already there.
+#[test]
+fn the_frame_install_leaves_no_function_on_the_window() {
+    let page = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    page.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    let left = "['__rustkit_frame_request'].filter(function (n) { return n in globalThis; }).join()";
+    page.enable_frames().unwrap();
+    assert_eq!(text(page.evaluate(left).unwrap()), "");
+    page.enable_frames().unwrap();
+    assert_eq!(text(page.evaluate(left).unwrap()), "", "after a second install");
+}
+
 /// Attaching a frame hands two windows over. Whatever the outcome, nothing
 /// is left where they changed hands, and a frame that was not attached
 /// holds no window.

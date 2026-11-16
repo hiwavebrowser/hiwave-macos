@@ -780,6 +780,27 @@ impl DomHost {
         host.borrow().node(args).map(|n| n.id.raw())
     }
 
+    /// The `sandbox` attribute of the bound document's node `node`, as it
+    /// is now (`None`: no such attribute, or no such node).
+    pub(crate) fn frame_sandbox(&self, node: usize) -> Option<String> {
+        let node = self.document.as_ref()?.get_node(NodeId::new(node))?;
+        node.get_attribute("sandbox").map(str::to_string)
+    }
+
+    /// The bound document's iframes that have a `sandbox` attribute, with
+    /// its value, by NodeId.
+    pub(crate) fn frames_with_sandbox(&self) -> HashMap<usize, String> {
+        let mut found = HashMap::new();
+        if let Some(document) = &self.document {
+            for frame in document.get_elements_by_tag_name("iframe") {
+                if let Some(value) = frame.get_attribute("sandbox") {
+                    found.insert(frame.id.raw(), value.to_string());
+                }
+            }
+        }
+        found
+    }
+
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
     fn node(&self, args: &[JsValue]) -> Option<Rc<Node>> {
         self.node_at(args, 1)
@@ -3398,7 +3419,7 @@ const WRAPPERS_JS: &str = r#"
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
-        if (HOOKS.frames) HOOKS.frames.tree(op, node);
+        if (HOOKS.frames) HOOKS.frames.tree(op, node, parent);
         return node;
     }
     Node.prototype.appendChild = function (node) {
