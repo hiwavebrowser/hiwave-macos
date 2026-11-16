@@ -11077,29 +11077,51 @@ impl Engine {
             }
             left > 0
         });
+        // The one trust check (R1): everything that happened in the task is in the set the short
+        // path trusts. The set is from the log, so a mark with no log record made it full
+        // (`unlogged_mark`); a scroll in the task is not in it; and every cause is a script one.
+        let scrolled_in_task = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.lay.scrolled_in_task.replace(false));
+        let mut script_note = "-".to_string();
         if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
-            let only_script = !causes.counts.is_empty()
-                && causes
-                    .counts
-                    .iter()
-                    .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
-            let written = dirty.as_ref().filter(|d| {
-                d.full.is_none()
-                    && !d.nodes.is_empty()
-                    && d.nodes.values().all(|bits| bits & !(restyle_invalidation::STYLE | restyle_invalidation::PAINT) == 0)
-            });
-            if let (true, Some(d), Some(view)) = (only_script, written, self.views.get(&id)) {
-                let mut roots: Vec<usize> = d.nodes.keys().copied().collect();
-                roots.sort_unstable();
-                *view.lay.script_roots.borrow_mut() = Some(roots);
+            match script_restyle_roots(&causes, dirty.as_ref(), scrolled_in_task) {
+                Ok(roots) => {
+                    if let Some(view) = self.views.get(&id) {
+                        view.lay.script_idle.set(0);
+                        *view.lay.script_roots.borrow_mut() = Some(roots);
+                    }
+                }
+                Err(why) => {
+                    script_note = format!("refused:{why}");
+                    // No script paint write in a row of relayouts: the kept tree is let go.
+                    if let Some(view) = self.views.get(&id) {
+                        let idle = view.lay.script_idle.get() + 1;
+                        view.lay.script_idle.set(idle);
+                        if idle >= SCRIPT_RESTYLE_IDLE {
+                            view.lay.want_script_unlaid.set(false);
+                            view.lay.script_unlaid.borrow_mut().take();
+                        }
+                    }
+                }
             }
+        } else if cooling {
+            script_note = "cooling".to_string();
         }
+        let tried = self.views.get(&id).is_some_and(|view| view.lay.script_roots.borrow().is_some());
         let layout_skipped = self.relayout_uncounted(id);
         let mut script_walked = None;
         if let Some(view) = self.views.get(&id) {
             view.lay.incremental_skip_build.set(false);
             view.lay.script_roots.borrow_mut().take();
             script_walked = view.lay.script_walked.take();
+        }
+        if tried {
+            script_note = match script_walked {
+                Some(walked) => format!("hit:walked={walked}"),
+                None => format!("miss:{}", LAST_RESTYLE_MISS.with(|why| why.borrow().clone()).replace(' ', "_")),
+            };
         }
         let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
@@ -11154,7 +11176,7 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {} script_restyle={}",
             cause,
             causes.counts,
             causes.mutations,
@@ -11163,7 +11185,8 @@ impl Engine {
             stages,
             extract_ms,
             layout_skipped,
-            would
+            would,
+            script_note
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
@@ -11619,10 +11642,11 @@ impl Engine {
             }
             above.insert(*raw, chain);
         }
+        let written_set: std::collections::HashSet<usize> = written.iter().copied().collect();
         let roots: Vec<usize> = written
             .iter()
             .copied()
-            .filter(|raw| !above[raw].iter().any(|up| written.contains(up)))
+            .filter(|raw| !above[raw].iter().any(|up| written_set.contains(up)))
             .collect();
         let mut path = std::collections::HashSet::new();
         for root in &roots {
@@ -12029,6 +12053,10 @@ impl Engine {
             "Pointer restyle without layout"
         );
         LAST_RESTYLE_SPLIT.with(|last| last.set(split));
+        // LPF1: the laid-out tree was patched without the kept one: let it go.
+        if let Some(view) = self.views.get(&id) {
+            view.lay.script_unlaid.borrow_mut().take();
+        }
         Ok(true)
     }
 
@@ -12615,6 +12643,8 @@ impl Engine {
             stats.layouts_skipped = stats.layouts_skipped.saturating_add(1);
             stats.animation_frames_painted = stats.animation_frames_painted.saturating_add(1);
             stats.animation_paint_ms += took_ms;
+            // LPF1: the laid-out tree was patched without the kept one: let it go.
+            view.lay.script_unlaid.borrow_mut().take();
         }
         debug!(?id, elements = changes.len(), took_ms, "Animation frame painted without layout");
         Ok(true)
@@ -25736,6 +25766,7 @@ impl Engine {
         };
         // Read before the take, which clears it.
         let beyond_layer = bindings.dirty_beyond_animation_layer();
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
         let had_title = view.doc.title.is_some();
@@ -25779,8 +25810,16 @@ impl Engine {
         let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
+        if scrolled || element_scrolled {
+            view.doc.lay.scrolled_in_task.set(true);
+        }
         if dirty != DomDirty::Clean {
-            view.doc.pending_dirty = Some(view.dirty_set(&log));
+            // A mark with no log record behind it: the set from the log is not the whole.
+            view.doc.pending_dirty = Some(if unlogged {
+                restyle_invalidation::DirtySet::full("unlogged_mark")
+            } else {
+                view.dirty_set(&log)
+            });
         }
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
@@ -26065,6 +26104,7 @@ impl Engine {
     /// held outside the view (the page's own load: `run_page_scripts`). One
     /// layout per call, none when nothing changed.
     fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
@@ -26073,11 +26113,19 @@ impl Engine {
             Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-            Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
+            let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
             element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+            if scrolled || element_scrolled {
+                view.lay.scrolled_in_task.set(true);
+            }
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
-                view.pending_dirty = Some(view.dirty_set(&log));
+                // A mark with no log record behind it: the set from the log is not the whole.
+                view.pending_dirty = Some(if unlogged {
+                    restyle_invalidation::DirtySet::full("unlogged_mark")
+                } else {
+                    view.dirty_set(&log)
+                });
             }
         }
         let canvas_painted = bindings.take_canvas_painted();
@@ -47639,6 +47687,56 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 /// paint keeps the laid-out tree. Read once.
 /// LPF1: the relayouts the script restyle path sits out after a write that changed more than paint.
 const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
+/// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
+const SCRIPT_RESTYLE_IDLE: u32 = 8;
+/// LPF1: past this many written elements a relayout takes the full build (the path walks every
+/// written element's ancestors).
+const SCRIPT_RESTYLE_MAX_WRITTEN: usize = 256;
+
+/// LPF1's trust check, the one every script short path calls: the written elements to build alone,
+/// or why the relayout is not one for the short path. Every cause is a script one; the dirty set,
+/// built from the `MutationLog`, is not full (a mark with no log record makes it full:
+/// `unlogged_mark`) and marks its elements for a new style and paint only; no scroll happened in
+/// the task; and there are at most `SCRIPT_RESTYLE_MAX_WRITTEN` of them.
+fn script_restyle_roots(
+    causes: &PendingCauses,
+    dirty: Option<&restyle_invalidation::DirtySet>,
+    scrolled_in_task: bool,
+) -> Result<Vec<usize>, &'static str> {
+    if causes.counts.is_empty()
+        || !causes
+            .counts
+            .iter()
+            .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"))
+    {
+        return Err("cause");
+    }
+    let Some(dirty) = dirty else {
+        return Err("no_set");
+    };
+    if dirty.full.is_some() {
+        return Err("full");
+    }
+    if dirty.nodes.is_empty() {
+        return Err("empty");
+    }
+    if dirty.nodes.len() > SCRIPT_RESTYLE_MAX_WRITTEN {
+        return Err("too_many");
+    }
+    if !dirty
+        .nodes
+        .values()
+        .all(|bits| bits & !(restyle_invalidation::STYLE | restyle_invalidation::PAINT) == 0)
+    {
+        return Err("not_paint");
+    }
+    if scrolled_in_task {
+        return Err("scrolled");
+    }
+    let mut roots: Vec<usize> = dirty.nodes.keys().copied().collect();
+    roots.sort_unstable();
+    Ok(roots)
+}
 
 /// LPF1, tests only: turn the script-write restyle path off on this thread (`false`) or back on.
 /// The last restyle short path's miss, tests only.
@@ -47652,8 +47750,12 @@ pub(crate) fn set_script_restyle_for_test(on: bool) {
     SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
 }
 
+/// LPF1's switch: `RUSTKIT_SCRIPT_RESTYLE=0` turns the script restyle path off (on by default), so a
+/// batch can tell a mover from it; tests turn it off per thread.
 fn script_restyle_enabled() -> bool {
-    !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_SCRIPT_RESTYLE").is_none_or(|v| v != "0"))
+        && !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
 }
 
 fn restyle_repaint_enabled() -> bool {

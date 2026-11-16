@@ -1143,7 +1143,15 @@ pub(crate) struct DirtyMark {
     /// whatever property: an animation frame over the painted boxes can
     /// answer a read when no value a layout places moved.
     other_since_layout: Cell<bool>,
+    /// LPF1: the pending bucket holds a mark with no `MutationLog` record behind it (a sheet
+    /// adopted or disabled, a write or mutation the log does not record, Web Animations' layer, the
+    /// embedder's `mark_dirty`). The engine then trusts no dirty set built from the log alone.
+    unlogged: Cell<bool>,
 }
+
+/// The write kinds whose writes are recorded in the `MutationLog` (when the write records one:
+/// see `note_unlogged` at the write and mutate natives).
+const LOGGED_KINDS: [&str; 8] = ["attribute", "class", "style", "text", "form", "html", "insert", "remove"];
 
 /// A layer write of paint properties (`opacity`, `color`,
 /// `background-color`, the border colours): the computed style sees it.
@@ -1159,7 +1167,27 @@ impl DirtyMark {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
             self.other_since_layout.set(true);
-            self.mark_animation_layer(bucket, kind);
+            if !LOGGED_KINDS.contains(&kind) {
+                self.unlogged.set(true);
+            }
+            self.bump(bucket, kind);
+        }
+    }
+
+    /// A mark with no `MutationLog` record behind it (see `unlogged`).
+    pub(crate) fn note_unlogged(&self) {
+        self.unlogged.set(true);
+    }
+
+    /// Whether the pending bucket holds a mark with no log record (see `unlogged`).
+    pub(crate) fn unlogged(&self) -> bool {
+        self.unlogged.get()
+    }
+
+    fn bump(&self, bucket: DomDirty, kind: &'static str) {
+        self.bucket.set(self.bucket.get().max(bucket));
+        if !self.since_layout.replace(true) {
+            self.cause.set(Some(kind));
         }
     }
 
@@ -1175,10 +1203,8 @@ impl DirtyMark {
     /// the forced-layout log like every other mark.
     pub(crate) fn mark_animation_layer(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
-            self.bucket.set(self.bucket.get().max(bucket));
-            if !self.since_layout.replace(true) {
-                self.cause.set(Some(kind));
-            }
+            self.unlogged.set(true);
+            self.bump(bucket, kind);
         }
     }
 
@@ -1190,6 +1216,7 @@ impl DirtyMark {
     /// only the reads that see the values lay out (`needs_layout_for`).
     pub(crate) fn mark_animation_paint(&self, bucket: DomDirty, reads: u8) {
         if bucket != DomDirty::Clean {
+            self.unlogged.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
             self.layer_since_layout.set(self.layer_since_layout.get() | reads);
         }
@@ -1242,6 +1269,7 @@ impl DirtyMark {
 
     fn take(&self) -> DomDirty {
         self.beyond_animation_layer.set(false);
+        self.unlogged.set(false);
         self.bucket.replace(DomDirty::Clean)
     }
 
@@ -1942,8 +1970,17 @@ impl DomBindings {
         // they do not make a geometry read lay the page out.
         if bucket != DomDirty::Clean {
             self.dirty.beyond_animation_layer.set(true);
+            self.dirty.note_unlogged();
         }
         self.dirty.bucket.set(self.dirty.get().max(bucket));
+    }
+
+    /// Whether the invalidation pending (until `take_dirty`) holds a mark with no `MutationLog`
+    /// record behind it: a sheet adopted or disabled, a write the log does not record, Web
+    /// Animations' layer, or a `mark_dirty` from the embedder. Read before `take_dirty`. A dirty
+    /// set computed from the log alone is then not the whole of what changed (LPF1).
+    pub fn dirty_unlogged(&self) -> bool {
+        self.dirty.unlogged()
     }
 
     /// Whether the invalidation pending (until `take_dirty`) holds anything

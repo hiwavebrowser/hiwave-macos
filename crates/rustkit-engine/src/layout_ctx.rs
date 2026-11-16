@@ -655,6 +655,11 @@ pub(crate) struct ViewLayout {
     /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
     /// not pay for a kept copy of its tree every frame.
     pub(crate) script_cooldown: Cell<u32>,
+    /// A window or element scroll happened in the task that dirtied the page: the short path,
+    /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
+    pub(crate) scrolled_in_task: Cell<bool>,
+    /// Relayouts in a row that no script paint write asked for; at 8 the kept tree is let go.
+    pub(crate) script_idle: Cell<u32>,
     /// The written elements (raw NodeIds) the coming relayout may restyle alone
     /// (`Engine::relayout` sets it, `relayout_uncounted` takes it), and the child nodes the last
     /// such restyle's build went into.

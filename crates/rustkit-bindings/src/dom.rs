@@ -2649,6 +2649,9 @@ pub(crate) fn install(
             let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
             match mutate(&h.borrow(), args) {
             Ok(()) => {
+                if records.is_empty() {
+                    d.note_unlogged();
+                }
                 let mut log = l.borrow_mut();
                 for record in records {
                     log.push(record);
@@ -2681,8 +2684,10 @@ pub(crate) fn install(
             let (reach, cause) = write_reach(&h.borrow(), args, &d);
             match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
-                if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
-                    l.borrow_mut().push(record);
+                match record.filter(|_| bucket != DomDirty::Clean) {
+                    Some(record) => l.borrow_mut().push(record),
+                    None if bucket != DomDirty::Clean => d.note_unlogged(),
+                    None => {}
                 }
                 trace_dirty(&h.borrow(), args, bucket);
                 note_mutation(&m, bucket, write_kind(args), || {
