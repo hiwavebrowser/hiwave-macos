@@ -719,3 +719,27 @@ fn a_rejection_made_by_an_error_listener_is_announced_in_the_same_turn() {
     assert!(b.evaluate_named("throw new Error('first');", "inline#3").is_err());
     assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "1 1");
 }
+
+/// What a script's code says of its errors and the mark of a comparator
+/// that is `a - b` (the engine's sort shortcut) are separate: host code,
+/// a page's script and another origin's script all sort with `a - b`,
+/// `b - a` and a comparator that is neither exactly as written, and a
+/// page's own `a - b` function that throws is reported in full.
+#[test]
+fn a_scripts_error_detail_and_the_sort_shortcut_do_not_mix() {
+    const SORTS: &str = "(function () { var calls = 0; return [[3, 1, 2, 10].sort(function (a, b) { return a - b; }).join(), \
+        [3, 1, 2, 10].sort(function (a, b) { return b - a; }).join(), [3, 1, 2, 10].sort(function () { calls++; return 0; }).join(), \
+        [3, 1, 2, 10].sort(function (a, b) { calls++; return (b - a) + 0; }).join(), calls > 3].join('|'); })()";
+    const SORTED: &str = "1,2,3,10|10,3,2,1|3,1,2,10|10,3,2,1|true";
+    let b = page();
+    assert_eq!(ev(&b, SORTS), SORTED, "host code");
+    b.evaluate_named(&format!("window.ours = {SORTS};"), "inline#2").unwrap();
+    assert_eq!(ev(&b, "window.ours"), SORTED, "the page's script");
+    b.register_script("script#1", "https://other.test/lib.js", true);
+    b.evaluate_named(&format!("window.theirs = {SORTS};"), "script#1").unwrap();
+    assert_eq!(ev(&b, "window.theirs"), SORTED, "another origin's script");
+    b.evaluate_named("setTimeout(function () { var difference = function (a, b) { return a - b; }; difference(Symbol(), 1); }, 0);", "inline#3").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    let message = ev(&b, "seen.length + ' ' + seen[0].split('|')[1]");
+    assert!(message.starts_with("1 Uncaught TypeError"), "{message}");
+}

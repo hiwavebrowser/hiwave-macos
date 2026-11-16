@@ -1014,3 +1014,27 @@ plain and bound functions, `eval` and `Function` code, accessors, a proxy trap, 
 resumed after `await`, promise reactions and combinators, the embedder's own errors raised for a
 call, another document's code), against Chrome for Testing 148.0.7778.216
 (`docs/diagnostics/2026-11-16/window_error_cft148.json`).
+`CodeBlockFlags::ERROR_DETAIL_WITHHELD` and `ERROR_DETAIL_EMBEDDER` are bits 11 and 12 (bits 9 and
+10 are `sort-diff`'s). `vm::code_block_flag_clashes()` lists any flag that is not one bit or shares
+one; `crates/rustkit-js/tests/code_block_flags.rs` asserts there is none.
+
+## Patch: a comparator that is `a - b` is not called for two Numbers (`sort-diff`)
+
+**Why.** `Array.prototype.sort` with a comparator costs one native-to-script call per comparison
+(about 200 ns each; 100,000 numbers make about 1.5 million calls). The sort itself costs the same as a
+plain loop making those calls, so the cost is the call. A comparator that is exactly `return a - b`
+(or `b - a`) over its two plain parameters does nothing else: for two Numbers it computes their
+difference, with no side effect.
+
+**What.** The bytecompiler marks a function (not async, generator or method) whose parameter list is
+two plain identifiers and whose body is one `return a - b` or `return b - a`, parentheses allowed
+(`CodeBlockFlags::NUMERIC_DIFF`, `NUMERIC_DIFF_SWAPPED`). `Array.prototype.sort` and `toSorted` read the
+flag once; `compare_array_elements` computes the difference itself when both elements are Numbers and
+calls the function otherwise (strings, objects with `valueOf`, BigInts, anything else). The result is
+treated as `ToNumber(call)` is: NaN counts as equal. `TypedArray.prototype.sort` is not changed.
+
+**Pin.** `crates/rustkit-js/tests/sort_numeric_difference.rs`: 20 answers equal Chrome's (numbers,
+Infinity, NaN, -0, mixed strings, holes, `undefined`, BigInt, objects with `valueOf`, defaults and
+other shapes that must still be called), and an opcode budget in a child process (4000 numbers: 17
+opcodes with `a - b` or `b - a`, 510,293 for `a - b + 0`, 383,709 when half the elements are strings).
+Red without the fast path (425,247).

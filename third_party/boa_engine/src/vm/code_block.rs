@@ -51,12 +51,19 @@ bitflags! {
         /// If the function requires a function scope.
         const HAS_FUNCTION_SCOPE = 0b1_0000_0000;
 
+        /// HIWAVE PATCH (sort-diff): the whole body is `return a - b` over the two plain
+        /// parameters. `Array.prototype.sort` compares two Numbers natively for such a function.
+        const NUMERIC_DIFF = 0b10_0000_0000;
+
+        /// With `NUMERIC_DIFF`: the body is `return b - a`.
+        const NUMERIC_DIFF_SWAPPED = 0b100_0000_0000;
+
         // HIWAVE PATCH (error-detail): the code is of a script whose errors
         // the host reports without detail. See PATCHES.md.
-        const ERROR_DETAIL_WITHHELD = 0b10_0000_0000;
+        const ERROR_DETAIL_WITHHELD = 0b1000_0000_0000;
         // The code is the embedder's own, not a script of the page: an
         // error is never placed in it.
-        const ERROR_DETAIL_EMBEDDER = 0b100_0000_0000;
+        const ERROR_DETAIL_EMBEDDER = 0b1_0000_0000_0000;
         // END HIWAVE PATCH
 
         /// Trace instruction execution to `stdout`.
@@ -1323,3 +1330,28 @@ pub(crate) fn create_function_object_fast(code: Gc<CodeBlock>, context: &mut Con
         constructor
     }
 }
+
+// HIWAVE PATCH (error-detail, sort-diff): the patches' flags are bits of
+// their own. `boa_engine`'s own tests do not run in this workspace, so the
+// check is a function a test of the embedder calls
+// (`crates/rustkit-js/tests/code_block_flags.rs`).
+
+/// The names of `CodeBlockFlags` constants that are not one bit or share a
+/// bit with an earlier one, and how many constants there are.
+#[doc(hidden)]
+#[must_use]
+pub fn code_block_flag_clashes() -> (Vec<&'static str>, usize) {
+    let mut seen = 0u16;
+    let mut clashes = Vec::new();
+    let mut count = 0;
+    for (name, flag) in CodeBlockFlags::all().iter_names() {
+        let bits = flag.bits();
+        if bits.count_ones() != 1 || seen & bits != 0 {
+            clashes.push(name);
+        }
+        seen |= bits;
+        count += 1;
+    }
+    (clashes, count)
+}
+// END HIWAVE PATCH

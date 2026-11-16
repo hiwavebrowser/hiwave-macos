@@ -83,7 +83,7 @@ pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
 mod code_block;
-pub use code_block::{ErrorDetail, ErrorDetailScope}; // HIWAVE PATCH (error-detail)
+pub use code_block::{code_block_flag_clashes, ErrorDetail, ErrorDetailScope}; // HIWAVE PATCH (error-detail)
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;

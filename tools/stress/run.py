@@ -810,6 +810,24 @@ def log_findings(path):
     return hits[:20], text[-1500:]
 
 
+def log_uncaught(path):
+    """What the engine itself logged as uncaught (the app's console log: exceptions and rejections nothing
+    handled, with where). The page-side reporter hears these only through the window's `error` and
+    `unhandledrejection` events, so an engine that does not fire one for an exception leaves `errors`
+    empty: this is the engine's own account, read from its log. The first 20, 300 characters each."""
+    try:
+        text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
+    except OSError:
+        return []
+    hits = [m.group(1).strip()[:300] for m in re.finditer(r"(?m)^.*hiwave::console: ((?:uncaught|unhandled rejection) .*)$", text)]
+    return hits[:20]
+
+
+def frames_by_test(progress):
+    """MotionMark: what each finished test measured (reporter.js `motionmarkFrames`), by test name."""
+    return {str(p.get("test")): p["frames"] for p in progress if p.get("event") == "test-done" and p.get("frames")}
+
+
 def headless_events(path):
     """From parity-capture's event log: request hosts and script errors."""
     hosts, errors, unsupported = {}, [], {}
@@ -1046,6 +1064,10 @@ def main():
         "not_found": record.not_found,
         "done_get_score": record.done_score,
         "log_findings": findings,
+        # Uncaught exceptions and rejections in the engine's own log (the app's console log).
+        "engine_errors": log_uncaught(work / "app.log") if handle is not None else [],
+        # MotionMark: frames by complexity for each finished test.
+        "frames": frames_by_test(record.progress),
         "off_machine": left,
         "discarded_score": discarded_score,
         # Every HIWAVE_ variable the engine was started with (the suite's own, --env, the shell's).
@@ -1080,10 +1102,11 @@ def main():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
     shutil.rmtree(work, ignore_errors=True)
-    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d -> %s"
+    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d engine_errors=%d -> %s"
           % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0],
              "" if turn_budget is None else " (TURN BUDGET RAISED to %d ms: not a default-engine score)" % turn_budget,
-             "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors), path))
+             "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors),
+             len(run["engine_errors"]), path))
     return 0 if status == "ok" else 1
 
 

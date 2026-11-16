@@ -191,6 +191,14 @@ pub fn vm_stats_report() -> String {
     String::new()
 }
 
+/// The interpreter's code-block flags that are not one bit or share a bit with another, and how
+/// many flags there are (two patches once took the same bits). Tests.
+#[cfg(feature = "boa")]
+#[doc(hidden)]
+pub fn code_block_flag_clashes() -> (Vec<&'static str>, usize) {
+    boa_engine::vm::code_block_flag_clashes()
+}
+
 /// How many times a regular expression pattern has been compiled to a matcher in this process (a
 /// regex literal evaluated again, `new RegExp(...)`, `RegExp.prototype.compile`). Diagnostic and tests.
 #[cfg(feature = "boa")]

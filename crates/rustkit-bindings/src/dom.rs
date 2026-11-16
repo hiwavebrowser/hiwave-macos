@@ -2893,6 +2893,8 @@ const WRAPPERS_JS: &str = r#"
     // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
     // or `Object.defineProperty` afterwards changes nothing here.
     var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    // The constructor of install time too, for a set made later.
+    var WeakSetNow = WeakSet;
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
@@ -3132,7 +3134,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadSnapshot = HOOKS.loadReplay = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -6696,7 +6698,10 @@ const WRAPPERS_JS: &str = r#"
     }
     function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return null;
+        return src === null ? null : inlineFrom(t, type, src);
+    }
+    // The handler `src` is as `t`'s `on<type>` attribute, compiled once.
+    function inlineFrom(t, type, src) {
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
@@ -6864,6 +6869,8 @@ const WRAPPERS_JS: &str = r#"
         if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
         var type = evType(event);
         var all = LISTENERS.get(t), list = all && all[type];
+        // A replayed `load` (below) reaches only what its record holds.
+        var only = ONLY !== null && ONLY.event === event ? ONLY : null;
         // The legacy type, at a target with no listener or handler for the
         // event's own (the user's wheel as `mousewheel`). The engine's
         // event changes type in the type map only, never by assignment.
@@ -6879,6 +6886,7 @@ const WRAPPERS_JS: &str = r#"
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
+                if (only && !setHas(only.entries, l)) continue;
                 if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
                 var passiveBefore = passiveNow;
                 passiveNow = l.passive === true ? event : null;
@@ -6886,7 +6894,8 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
+        var h = capture || event[STOP_NOW] ? null
+            : only ? (t === only.target ? only.handler : null) : handlerOf(t, type);
         if (typeof h !== 'function') return;
         // `window.onerror` (HTML §8.1.8.2, the OnErrorEventHandler): for an
         // ErrorEvent at the Window it is called with the event's message,
@@ -6907,6 +6916,46 @@ const WRAPPERS_JS: &str = r#"
         // A composed event goes on from a shadow root to its host.
         return p || (HOOKS.shadowParent ? HOOKS.shadowParent(n, event) : null);
     }
+    // What a `load` dispatched at `target` right now would call: its own
+    // listeners and handler, and the capturing listeners above it (`load`
+    // does not bubble and stops at the document). `null` when nothing would
+    // hear it. For web_frames.js: Chrome fires a blank frame's `load` inside
+    // the frame's insertion; the engine's comes later and is replayed to
+    // this record, so what was added, or put in a handler's place, after
+    // the insertion does not hear it. `parsed`: the frame was the parser's,
+    // and at its insertion only its `onload` attribute could be on it.
+    //
+    // Read from the engine's own records: the handler as assigned or as the
+    // `onload` attribute in the node store, the listener registry, and the
+    // node store's parent, in a walk with an end.
+    var ONLY = null, LOAD_WALK_MAX = 65536;
+    HOOKS.loadSnapshot = function (target, parsed) {
+        var t = thisTarget(target), s = t[SLOT], a = parsed ? undefined : ASSIGNED.get(t);
+        var snap = objCreate(null), any = false;
+        snap.target = t; snap.event = null; snap.handler = null; snap.src = null; snap.entries = new WeakSetNow();
+        if (a && 'load' in a) { if (typeof a.load === 'function') snap.handler = a.load; }
+        else if (s && s.gen === gen) {
+            var src = N.attr(s.gen, s.id, 'onload');
+            // Compiled when the `load` is replayed, as a dispatch does.
+            if (src !== null) snap.src = src;
+        }
+        for (var n = t, steps = 0; !parsed && n && n !== g && steps < LOAD_WALK_MAX; steps++) {
+            var all = LISTENERS.get(n), list = all && all.load;
+            for (var i = 0; list && i < list.length; i++) {
+                if (n === t || list[i].capture) { setAdd(snap.entries, list[i]); any = true; }
+            }
+            n = n === doc || !n[SLOT] ? null : related(n, 'parent');
+        }
+        return any || snap.src !== null || typeof snap.handler === 'function' ? snap : null;
+    };
+    // Dispatch `event` at the record's target to what the record holds (a
+    // listener removed since is not called).
+    HOOKS.loadReplay = function (snap, event) {
+        var was = ONLY;
+        if (snap.src !== null) { snap.handler = inlineFrom(snap.target, 'load', snap.src); snap.src = null; }
+        snap.event = event; ONLY = snap;
+        try { return dispatchTo(snap.target, event); } finally { ONLY = was; snap.event = null; }
+    };
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
     // checkbox before its listeners run and clicks a label's control after.
