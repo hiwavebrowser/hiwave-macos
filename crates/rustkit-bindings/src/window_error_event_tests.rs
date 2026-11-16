@@ -590,6 +590,67 @@ fn a_handler_attribute_an_inline_script_and_a_string_timer_are_the_documents() {
     );
 }
 
+/// Text the engine compiles for the document that does not compile, or whose text is produced by
+/// page code, leaves nothing behind: an engine module first used afterwards (a stream here, which
+/// the engine installs on first use) is still the engine's own code, and an error it raises for
+/// another origin's call is reported without detail.
+#[test]
+fn document_text_that_fails_leaves_the_engines_later_code_its_own() {
+    const THEIR_STREAM: &str = "function theirLocked() { var s = new ReadableStream(); s.getReader(); s.getReader(); }";
+    for before in [
+        // A string timer that does not parse.
+        "setTimeout('((', 0);",
+        // A timer whose text is made by the page's own `toString`.
+        "setTimeout({ toString: function () { window.asked = true; return ''; } }, 0);",
+        // A handler attribute that does not parse.
+        "var d = document.createElement('div'); d.setAttribute('onclick', '(('); document.body.appendChild(d); d.dispatchEvent(new Event('click'));",
+        // An inline script that does not parse.
+        "var s = document.createElement('script'); s.textContent = '(('; document.body.appendChild(s);",
+    ] {
+        // The module is installed on first use in a frame's document: the page fails first, then
+        // the frame uses a stream for the first time, then the other origin's code in the frame
+        // makes the module raise.
+        let parent = page();
+        let child = parent.new_child().unwrap();
+        child
+            .set_document(Rc::new(Document::parse_html("<html><head></head><body></body></html>").unwrap()))
+            .unwrap();
+        child.set_location(&Url::parse("https://example.test/frame.html").unwrap()).unwrap();
+        child.register_script("frame-inline#1", "https://example.test/frame.html", false);
+        child.evaluate_named(WATCH, "frame-inline#1").unwrap();
+        child.register_script("script#1", "https://other.test/lib.js", true);
+        child.evaluate_named(THEIR_STREAM, "script#1").unwrap();
+        parent.evaluate_named(before, "inline#2").unwrap();
+        parent.advance_timers(20, 10).unwrap();
+        child
+            .evaluate_named("var first = new ReadableStream(); setTimeout(function () { theirLocked(); }, 0);", "frame-inline#1")
+            .unwrap();
+        parent.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&child, "seen.join(' ; ')"), MUTED, "after: {before}");
+    }
+}
+
+/// The engine's compile of document text takes a string and nothing else, and keeps no state:
+/// handed anything else it throws, and what the engine compiles next is still its own.
+#[test]
+fn the_document_text_natives_take_a_string_and_leave_nothing() {
+    let b = page();
+    let got = b
+        .host_turn(
+            "var out = []; \
+             [function () { __rk.runDocumentScript(5); }, function () { __rk.runDocumentScript({ toString: function () { return '1'; } }); }, \
+              function () { __rk.compileDocumentFunction('a', 5); }, function () { __rk.compileDocumentFunction(5, 'return 1'); }, \
+              function () { __rk.runDocumentScript('(('); }, function () { __rk.compileDocumentFunction('a', '(('); }] \
+                 .forEach(function (f) { try { f(); out.push('returned'); } catch (e) { out.push(e.name); } }); \
+             out.push(typeof __rk.compileDocumentFunction('a,b', 'return a + b'), __rk.compileDocumentFunction('a,b', 'return a + b')(2, 3)); \
+             __rk.runDocumentScript('var ranAsScript = 7;'); out.push(globalThis.ranAsScript); \
+             return out.join();",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(format!("{got:?}"), r#"String("TypeError,TypeError,TypeError,TypeError,SyntaxError,SyntaxError,function,5,7")"#);
+}
+
 /// The page's own rejections that reach the page through the engine's promise machinery
 /// (Chrome `rejections`, the `one origin` and `mixed` rows: every one fires): `Promise.all`,
 /// `race`, `any`, a `finally` that passes the reason on, a thenable that rejects, an `await` of
