@@ -82,6 +82,18 @@ impl Page {
         }
     }
 
+    /// Turn the page until `done` reads true, at most `max` times: whether
+    /// it did. No clock is read.
+    fn turns(&mut self, done: &str, max: usize) -> bool {
+        for _ in 0..max {
+            self.rt.block_on(self.engine.pump_live(self.view, 20));
+            if self.js(done) == "Boolean(true)" {
+                return true;
+            }
+        }
+        false
+    }
+
     fn served(&self, path: &str) -> usize {
         self.server.served(path).len()
     }
@@ -859,8 +871,10 @@ document.body.appendChild(late);
 late.onload = function () { heard.push('late'); };
 </script></body>";
     let mut page = Page::load(true, page);
-    page.turns_until("window.events.length >= 1", Duration::from_secs(8));
-    page.turns_until("false", Duration::from_millis(200));
+    // Counted in turns, not in time: the event's own timer has run within
+    // 200 turns, and 10 more would show a second `load` or call.
+    assert!(page.turns("window.events.length >= 1", 200), "the error event's timer never ran");
+    page.turns("false", 10);
     assert_eq!(page.js("window.heard.join()"), r#"String("early")"#);
     assert_eq!(page.js("window.calls.join()"), r#"String("5:true:Uncaught Error: from the handler:true")"#);
     assert_eq!(page.js("window.events.join()"), r#"String("true")"#);

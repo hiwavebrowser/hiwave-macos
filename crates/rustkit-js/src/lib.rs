@@ -394,6 +394,11 @@ pub struct ErrorReport {
     /// A module that threw after a top-level `await` outlived the step that
     /// ran it: its path.
     pub module: Option<String>,
+    /// The page cancelled the event fired for it (`error`: `window.onerror`
+    /// returned true, or a listener called `preventDefault`;
+    /// `unhandledrejection` likewise). A console
+    /// shows no such error; a record of what a page threw still has it.
+    pub canceled: bool,
 }
 
 /// Timer callback.
@@ -1110,6 +1115,10 @@ impl JsRuntime {
                 // What the listeners rejected is announced in this turn too.
                 self.notify_rejections();
                 if canceled {
+                    // Still described for the embedder, with the mark.
+                    if self.diag.on.get() {
+                        self.diag.push(ErrorReport { canceled: true, ..report });
+                    }
                     return;
                 }
             }
@@ -1266,9 +1275,9 @@ impl JsRuntime {
                 reports.push(report);
             }
             let reasons = self.rejections.take();
-            for reason in reasons {
+            for (reason, canceled) in reasons {
                 let report = self.diag.describe(&reason, None, true, &mut self.context);
-                reports.push(report);
+                reports.push(ErrorReport { canceled, ..report });
             }
             reports
         }

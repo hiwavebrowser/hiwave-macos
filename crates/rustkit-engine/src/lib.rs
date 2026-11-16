@@ -6339,6 +6339,9 @@ impl Engine {
             if timer_stopped {
                 log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(_)));
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6363,7 +6366,8 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_ms);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -9726,12 +9730,17 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
-                timers_ms += step_started.elapsed().as_millis() as u64;
+                let slice_ms = step_started.elapsed().as_millis() as u64;
+                // A slice that ends in a record of its own (stopped, threw)
+                // has its time there, not in the errors' (SCRIPT-TIME-DUP).
+                if !(stopped || matches!(caught, Ok(Err(_)) | Err(_))) {
+                    timers_ms += slice_ms;
+                }
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
                 if stopped && !matches!(caught, Err(_)) {
-                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    let elapsed_ms = slice_ms;
                     log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
                     inspector_glue::log_script(
                         log,
