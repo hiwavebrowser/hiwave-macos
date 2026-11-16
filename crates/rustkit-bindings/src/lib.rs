@@ -84,6 +84,10 @@ mod dom_accessor_cost_tests;
 #[cfg(test)]
 mod class_list_cost_tests;
 #[cfg(test)]
+mod attr_write_cost_tests;
+#[cfg(test)]
+mod attr_write_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
