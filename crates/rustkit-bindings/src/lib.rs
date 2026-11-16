@@ -823,6 +823,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                     if (Q.liveAt >= 0) timer.due += timer.every * (floorOf((from - timer.due) / timer.every) + 1);
                     else timer.due = from + timer.every;
                 }
+                // Whatever the grid step gave (it rests on one captured built-in), the next run is
+                // after the turn's time: one that is not (or is not a number) counts from it.
+                if (!(timer.due > from)) timer.due = from + timer.every;
                 timer.seq = Q.nextId++;
             }
             else removeAt(best);

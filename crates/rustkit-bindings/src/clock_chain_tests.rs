@@ -131,8 +131,9 @@ fn a_stepped_turn_still_runs_a_chain_link_per_period_of_virtual_time() {
 
 /// A frame tree is one timer queue on one clock (#1109), so the real clock's turn is the tree's: a
 /// chain a same-origin frame set, run by the page's turn, counts from the turn's time as the page's
-/// own does (2 links in a 50 ms real turn, 6 stepped), and the page's and the frame's chains, set
-/// together, run in step.
+/// own does (2 links in a 5000 ms real turn, 6 stepped), and the page's and the frame's chains, set
+/// together, run in step. A 1000 ms period, so that only a whole-second stall inside the turn could
+/// change a count (#1183 R1 follow-up).
 #[test]
 fn a_frames_chain_on_the_real_clock_counts_from_the_trees_turn() {
     let count = |real: bool| {
@@ -145,15 +146,15 @@ fn a_frames_chain_on_the_real_clock_counts_from_the_trees_turn() {
             .set_document(Rc::new(Document::parse_html("<html><body></body></html>").unwrap()))
             .unwrap();
         child
-            .evaluate("var n = 0; (function link() { n++; setTimeout(link, 10); })();")
+            .evaluate("var n = 0; (function link() { n++; setTimeout(link, 1000); })();")
             .unwrap();
         parent
-            .evaluate("var m = 0; (function link() { m++; setTimeout(link, 10); })();")
+            .evaluate("var m = 0; (function link() { m++; setTimeout(link, 1000); })();")
             .unwrap();
         if real {
-            parent.advance_real_timers_for_frame(50, 1000, 0).unwrap();
+            parent.advance_real_timers_for_frame(5000, 1000, 0).unwrap();
         } else {
-            parent.advance_timers_for_frame(50, 1000, 0).unwrap();
+            parent.advance_timers_for_frame(5000, 1000, 0).unwrap();
         }
         let read = |b: &DomBindings, v: &str| match b.evaluate(&format!("String({v})")).unwrap() {
             JsValue::String(s) => s,
@@ -161,10 +162,10 @@ fn a_frames_chain_on_the_real_clock_counts_from_the_trees_turn() {
         };
         (read(&child, "n"), read(&parent, "m"), parent.next_timer_delay())
     };
-    assert_eq!(count(false), ("6".to_string(), "6".to_string(), Some(10)));
+    assert_eq!(count(false), ("6".to_string(), "6".to_string(), Some(1000)));
     let (n, m, next) = count(true);
     assert_eq!((n.as_str(), m.as_str()), ("2", "2"));
-    assert!(next.is_some_and(|d| d >= 10), "the next link is due in {next:?} ms");
+    assert!(next.is_some_and(|d| d >= 1000), "the next link is due in {next:?} ms");
 }
 
 /// An interval held back on the real clock runs once and keeps its grid, as Chrome's does (bursts of
