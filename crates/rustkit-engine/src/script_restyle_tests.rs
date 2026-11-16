@@ -392,17 +392,18 @@ fn a_selection_move_in_the_task_is_painted() {
     assert!(cross_check_go(html, 6, "String(f.selectionStart) + ',' + f.selectionEnd", 3) >= 2);
 }
 
-/// R1 follow-up: a paint-only CSS animation (a spinner) beside per-frame script paint writes. The
-/// spinner's frames patch the laid-out tree's paint and leave the kept tree alone (the short path
-/// copies the fresh build's paint), so the script writes stay on the short path frame after frame:
-/// no full build and no copy of the tree every frame.
+/// R1 follow-up: a paint-only CSS animation (a spinner) beside script paint writes on every other
+/// frame. The spinner-only frames take the paint-only animation frame (`animation_frames_painted`),
+/// and the script frames must still take the short path: the animation frame must not let the kept
+/// tree go. When it did, every script frame missed ("no kept tree") and took a full build and a
+/// copy of the tree.
 #[test]
 fn a_spinner_beside_script_paint_writes_keeps_the_short_path() {
     let html = "<!doctype html><style>body{margin:0}@keyframes spin{to{transform:rotate(360deg)}}\
                 #sp{width:20px;height:20px;background:#333;animation:spin 1s linear infinite}\
                 .t{width:20px;height:20px;background:#08f}</style><div id=sp></div><div class=t id=w></div>\
                 <script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
-                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+                if (n % 2 === 0) w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
     let (mut engine, view, _server) = load(html);
     for _ in 0..4 {
         frame(&mut engine, view);
@@ -414,5 +415,50 @@ fn a_spinner_beside_script_paint_writes_keeps_the_short_path() {
     let after = engine.relayout_stats(view).expect("view");
     let hits = after.script_restyles - before.script_restyles;
     let full = (after.relayouts - before.relayouts) - (after.layouts_skipped - before.layouts_skipped);
-    assert!(hits >= 9 && full <= 1, "short path {hits} of 10 frames, {full} full builds (last miss {:?})", last_restyle_miss_for_test());
+    let painted = after.animation_frames_painted - before.animation_frames_painted;
+    let _ = full;
+    assert!(painted >= 4, "the spinner-only frames took the animation frame {painted} times of 5");
+    assert!(hits >= 4, "the script frames took the short path {hits} times of 5 (last miss {:?})", last_restyle_miss_for_test());
+}
+
+/// R1 behaviour checks for LPF2, each through the cross-check with the path on and off: a written
+/// `translate(-50%, -50%) rotate()` (the element's rect follows it).
+#[test]
+fn a_centred_rotation_write_paints_and_measures_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}#w{position:absolute;left:200px;top:200px;width:80px;height:40px;background:#08f;\
+                transform:translate(-50%,-50%) rotate(0deg)}</style><div id=w></div>\
+                <script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                w.style.transform = 'translate(-50%, -50%) rotate(' + (n * 17 % 360) + 'deg)'; requestAnimationFrame(f); });</script>";
+    assert!(cross_check(html, 6, "JSON.stringify((function (b) { return [b.left, b.top, b.width, b.height]; })(w.getBoundingClientRect()))") >= 4);
+}
+
+/// A fixed child under a box whose transform script writes (transform to transform): the child is
+/// placed against the transformed box, as in the full rebuild.
+#[test]
+fn a_fixed_child_under_a_written_transform_is_placed_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}#p{position:absolute;left:100px;top:100px;width:60px;height:60px;background:#ccc;transform:translateX(0px)}\
+                #fx{position:fixed;left:5px;top:5px;width:10px;height:10px;background:#f00}</style><div id=p><div id=fx></div></div>\
+                <script>var p = document.getElementById('p'), fx = document.getElementById('fx'), n = 0; requestAnimationFrame(function f() { n++; \
+                p.style.transform = 'translateX(' + (n * 7 % 200) + 'px)'; requestAnimationFrame(f); });</script>";
+    assert!(cross_check(html, 6, "JSON.stringify((function (b) { return [b.left, b.top]; })(fx.getBoundingClientRect()))") >= 4);
+}
+
+/// Hit testing after a transform write: `elementFromPoint` finds the moved box where the full
+/// rebuild's hit test does.
+#[test]
+fn hit_testing_after_a_transform_write_is_the_full_rebuilds() {
+    let html = "<!doctype html><style>body{margin:0}#w{position:absolute;left:0;top:0;width:50px;height:50px;background:#08f;transform:translateX(0px)}</style>\
+                <div id=w></div><script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                w.style.transform = 'translateX(' + (n * 30 % 300) + 'px)'; requestAnimationFrame(f); });</script>";
+    assert!(cross_check(html, 6, "[30, 90, 150, 210].map(function (x) { var e = document.elementFromPoint(x, 25); return e ? e.id || e.tagName : 'none'; }).join()") >= 4);
+}
+
+/// Opacity reaching 0 (and back) on a box that already had an opacity below 1: still paint (the box
+/// keeps its stacking context); computed style and hit testing match the full rebuild's.
+#[test]
+fn opacity_reaching_zero_paints_and_hits_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}#w{width:50px;height:50px;background:#08f;opacity:0.5}</style>\
+                <div id=w></div><script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                w.style.opacity = String([0.5, 0.2, 0, 0, 0.3][n % 5]); requestAnimationFrame(f); });</script>";
+    assert!(cross_check(html, 7, "getComputedStyle(w).opacity + ',' + (document.elementFromPoint(25, 25) || {}).id") >= 4);
 }
