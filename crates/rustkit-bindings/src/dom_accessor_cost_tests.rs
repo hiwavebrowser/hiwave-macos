@@ -166,3 +166,48 @@ fn readers_do_not_run_page_replaceable_built_ins() {
         out.join('|') + '|' + seen + ':' + which.join(',')"#);
     assert_eq!(got, "k|m|2|3|2|0:");
 }
+
+/// Chrome 148 (ac_chrome2.mjs): a collection's index is `{writable: false, enumerable: true, configurable: true}` and
+/// redefining one throws TypeError. Here the index is non-configurable, so a redefinition throws too; a define at an
+/// index past the end succeeds (Chrome throws), and `configurable` reads false. The engine's own readers do not
+/// read the page's collection at all.
+#[test]
+fn a_page_cannot_change_what_the_engines_own_readers_answer() {
+    let got = ev(r#"var d = document.createElement('div'); d.innerHTML = '<i></i><b></b>'; var c = d.children, r = [];
+        function t(f) { try { f(); return 'ok'; } catch (e) { return e.name; } }
+        r.push(t(function () { Object.defineProperty(c, 0, { value: 42 }); }));
+        r.push(t(function () { Object.defineProperty(c, 0, { value: c[0], writable: false, enumerable: true, configurable: true }); }));
+        r.push(t(function () { 'use strict'; delete c[0]; }));
+        var dd = Object.getOwnPropertyDescriptor(c, 0); r.push([dd.writable, dd.enumerable, dd.configurable].join());
+        r.push(Object.keys(c).join('/'), d.firstElementChild.localName, d.lastElementChild.localName, d.childElementCount);
+        var n = d.childNodes; r.push(t(function () { Object.defineProperty(n, 0, { value: 42 }); }));
+        c.expando = 1; r.push(d.children.expando);
+        r.join('|')"#);
+    assert_eq!(got, "TypeError|TypeError|TypeError|false,true,false|0/1|i|b|2|TypeError|1");
+}
+
+/// Engine-owned records inherit nothing: a field a page puts on `Object.prototype` is not read as one of theirs.
+#[test]
+fn the_per_element_record_inherits_nothing() {
+    let got = ev(r#"var fake = { length: 1, 0: 'FAKE' }, hits = 0;
+        Object.defineProperty(Object.prototype, 'kidsE', { configurable: true, get: function () { hits++; return { ids: '', list: fake, items: fake, n: 1 }; }, set: function (v) { hits += 100; } });
+        Object.defineProperty(Object.prototype, 'kidsN', { configurable: true, get: function () { hits++; return { ids: '', list: fake, items: fake, n: 1 }; }, set: function (v) { hits += 100; } });
+        var d = document.createElement('div');
+        var out = [d.children === fake, d.childNodes === fake, d.firstElementChild, d.lastElementChild, d.childElementCount, d.children.length];
+        d.append(document.createElement('a')); out.push(d.firstElementChild.localName, d.children.length, hits);
+        delete Object.prototype.kidsE; delete Object.prototype.kidsN;
+        out.join('|')"#);
+    assert_eq!(got, "false|false|||0|0|a|1|0");
+}
+
+/// A write through the native setters is seen by every reader that depends on the attribute.
+#[test]
+fn the_native_id_and_class_setters_update_what_depends_on_them() {
+    let got = ev(r#"var e = document.createElement('div'); e.id = 'a'; document.body.append(e); var r = [];
+        e.id = 'n'; r.push(document.getElementById('a') === null, document.getElementById('n') === e, document.querySelector('#n') === e, document.querySelector('#a') === null);
+        e.className = 'k'; r.push(document.querySelector('.k') === e, document.getElementsByClassName('k').length, e.matches('.k'));
+        e.id = 'm'; r.push(document.getElementById('n') === null, document.getElementById('m') === e);
+        e.className = ''; r.push(document.querySelector('.k') === null, document.getElementsByClassName('k').length, e.matches('.k'));
+        r.join('|')"#);
+    assert_eq!(got, "true|true|true|true|true|1|true|true|true|true|0|false");
+}

@@ -3094,6 +3094,9 @@ const WRAPPERS_JS: &str = r#"
     var DOMException = g.DOMException;
 
     var SLOT = Symbol('rustkit.node');
+    // The record behind a wrapper: engine-owned, so it inherits nothing (a page's Object.prototype
+    // cannot answer for a field it does not have). Fields: id, gen, and the children caches.
+    function slotRecord(id) { var r = objCreate(null); r.id = id; r.gen = gen; return r; }
     // Hooks web_shadow.js fills in so that events and tree queries can cross
     // a shadow boundary: `shadowParent(root, event)` is the host a composed
     // event goes on to from a shadow root, `retarget(target, against)` the
@@ -3255,7 +3258,7 @@ const WRAPPERS_JS: &str = r#"
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = Object.create(proto);
-        Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
+        Object.defineProperty(w, SLOT, { value: slotRecord(id) });
         cache.set(id, w);
         return w;
     }
@@ -3274,32 +3277,37 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: n });
         return out;
     }
-    // A node's children as the collection `children` (elements) or `childNodes` (nodes) answers: the same
+    // A node's children as the collection `children` (elements) or `childNodes` (nodes): the same
     // object while the child ids the engine reports are the same, as Chrome's live collections are (a
-    // new one when they change; a held one stays the snapshot it was). Built with plain loops and
-    // install-time built-ins; each index is a non-writable property, so a page's write to one cannot
-    // change what a later read answers.
+    // new one when they change; a held one stays the snapshot it was). The record keeps two things:
+    // `list`, the collection the page gets, and `items`/`n`, the engine's own copy that its readers
+    // (firstElementChild and the rest) use, so nothing a page does to its collection reaches them.
+    // Built with plain loops and install-time built-ins. Each index of `list` is non-writable and
+    // non-configurable, so a page's redefinition throws as Chrome's does.
     var lsSplit = uncurry(String.prototype.split), lsDef = Object.defineProperty;
-    function cachedList(o, onlyElements) {
+    function cachedKids(o, onlyElements) {
         var s = slotOf(o);
         var ids = s.gen === gen ? N.info(s.gen, s.id, 'children') : '';
         var key = onlyElements ? 'kidsE' : 'kidsN';
         var c = s[key];
-        if (c !== undefined && c.ids === ids) return c.list;
-        var out = objCreate(onlyElements ? HTMLCollection.prototype : NodeList.prototype), n = 0;
+        if (c !== undefined && c.ids === ids) return c;
+        var out = objCreate(onlyElements ? HTMLCollection.prototype : NodeList.prototype), n = 0, items = objCreate(null);
         if (typeof ids === 'string' && ids !== '') {
             var parts = lsSplit(ids, ' ');
             for (var i = 0; i < parts.length; i++) {
                 var id = +parts[i], w = wrap(id);
                 if (w && (!onlyElements || N.info(gen, id, 'type') === 1)) {
-                    lsDef(out, n, { value: w, enumerable: true, configurable: true });
+                    lsDef(out, n, { value: w, enumerable: true });
+                    items[n] = w;
                     n++;
                 }
             }
         }
         lsDef(out, 'length', { value: n });
-        s[key] = { ids: ids, list: out };
-        return out;
+        c = objCreate(null);
+        c.ids = ids; c.list = out; c.items = items; c.n = n;
+        s[key] = c;
+        return c;
     }
     // The document's elements of one tag, for the embedder's scripts
     // (web_frames.js's scan): the native's answer read with plain loops,
@@ -3384,7 +3392,7 @@ const WRAPPERS_JS: &str = r#"
     getter(Node.prototype, 'lastChild', function () { return related(this, 'last'); });
     getter(Node.prototype, 'nextSibling', function () { return related(this, 'next'); });
     getter(Node.prototype, 'previousSibling', function () { return related(this, 'prev'); });
-    getter(Node.prototype, 'childNodes', function () { return cachedList(this, false); });
+    getter(Node.prototype, 'childNodes', function () { return cachedKids(this, false).list; });
     // A node in a DOMParser document is owned by it; every other node by
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
@@ -3675,9 +3683,11 @@ const WRAPPERS_JS: &str = r#"
     function putPlain(el, name, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', name);
+        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', name);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, name, text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
         if (m) m();
+        if (ar) ar();
     }
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
         var attr = p[1];
@@ -3686,25 +3696,25 @@ const WRAPPERS_JS: &str = r#"
             return v === null ? '' : v;
         }, function (v) { putPlain(this, attr, accStr(v)); });
     });
-    getter(Element.prototype, 'children', function () { return cachedList(this, true); });
+    getter(Element.prototype, 'children', function () { return cachedKids(this, true).list; });
 
     // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
     // §4.2.7), over the same tree reads as childNodes and the siblings.
-    function elementChildren(o) { return cachedList(o, true); }
+    function elementChildren(o) { return cachedKids(o, true); }
     function elementSibling(o, field) {
         var n = o[field];
         while (n && n.nodeType !== 1) n = n[field];
         return n;
     }
     [Element, Document, DocumentFragment].forEach(function (C) {
-        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'firstElementChild', function () { var c = elementChildren(this); return c.n ? c.items[0] : null; });
         getter(C.prototype, 'lastElementChild', function () {
-            var c = elementChildren(this); return c[c.length - 1] || null;
+            var c = elementChildren(this); return c.n ? c.items[c.n - 1] : null;
         });
-        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).n; });
     });
     [Document, DocumentFragment].forEach(function (C) {
-        getter(C.prototype, 'children', function () { return cachedList(this, true); });
+        getter(C.prototype, 'children', function () { return cachedKids(this, true).list; });
     });
     [Element, CharacterData].forEach(function (C) {
         getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
@@ -7170,7 +7180,7 @@ const WRAPPERS_JS: &str = r#"
         gen = newGen;
         cache = new Map();
         var root = N.root(gen, 'document');
-        Object.defineProperty(doc, SLOT, { value: { id: root, gen: gen }, configurable: true });
+        Object.defineProperty(doc, SLOT, { value: slotRecord(root), configurable: true });
         if (typeof root === 'number') cache.set(root, doc);
     };
     __rk.domReset(0);
