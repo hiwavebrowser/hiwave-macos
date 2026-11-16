@@ -223,8 +223,30 @@ const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 /// remove it: the script still runs on the window's thread.
 const LIVE_TURN_BUDGET_MS: u64 = 5_000;
 
+/// The stress harness's variable for a longer budget (tools/stress/run.py,
+/// which starts the app with it for a suite run and records it in the run's
+/// `engine_flags`). Chrome has no such stop, and a benchmark's long
+/// end-of-test computation dies at 5 s; a run that wants to see what comes
+/// after it raises the budget, and its score says so. Unset, and for any
+/// value that is not a whole number of milliseconds from 1 to an hour, the
+/// budget is [`LIVE_TURN_BUDGET_MS`]: an app started normally is unchanged.
+const STRESS_TURN_BUDGET_ENV: &str = "HIWAVE_STRESS_TURN_BUDGET_MS";
+const STRESS_TURN_BUDGET_MAX_MS: u64 = 3_600_000;
+
+/// The live turn's budget for `raw`, the variable's value if it is set.
+fn live_turn_budget_ms(raw: Option<&str>) -> u64 {
+    raw.filter(|raw| !raw.is_empty() && raw.len() <= 8 && raw.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| (1..=STRESS_TURN_BUDGET_MAX_MS).contains(ms))
+        .unwrap_or(LIVE_TURN_BUDGET_MS)
+}
+
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
+    let turn_budget = live_turn_budget_ms(std::env::var(STRESS_TURN_BUDGET_ENV).ok().as_deref());
+    if turn_budget != LIVE_TURN_BUDGET_MS {
+        warn!(budget_ms = turn_budget, default_ms = LIVE_TURN_BUDGET_MS, "Live turn budget raised for a stress run");
+    }
     // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
     // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
     // every thumbnail, 2026-08-05 live session) — servers gate on the
@@ -239,7 +261,7 @@ fn content_engine_builder() -> EngineBuilder {
         // the window's thread, and ebay.com's module graph held it for
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
-        .live_turn_budget_ms(LIVE_TURN_BUDGET_MS)
+        .live_turn_budget_ms(turn_budget)
         // The event loop loads what a page's script asks for
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
@@ -1727,6 +1749,18 @@ mod tests {
         // the engine's own default (parity-capture, the board) stay at 5 s.
         assert_eq!(builder.config().timer_horizon_ms, 5_000);
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
+    }
+
+    /// The stress harness's variable raises the budget; anything else leaves 5 s.
+    #[test]
+    fn the_live_turn_budget_is_five_seconds_unless_a_stress_run_set_it() {
+        assert_eq!(live_turn_budget_ms(None), 5_000);
+        assert_eq!(live_turn_budget_ms(Some("60000")), 60_000);
+        assert_eq!(live_turn_budget_ms(Some("1")), 1);
+        assert_eq!(live_turn_budget_ms(Some("3600000")), 3_600_000);
+        for unchanged in ["", "0", "3600001", "-5", "60s", " 60000", "6e4", "999999999"] {
+            assert_eq!(live_turn_budget_ms(Some(unchanged)), 5_000, "{unchanged:?}");
+        }
     }
 
     #[test]

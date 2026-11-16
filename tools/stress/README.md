@@ -92,9 +92,10 @@ run did not finish, `log_tail`.
 with: the suite's own (below), what `--env` asked for, what the offline
 checks force, and whatever the shell had. `{}` for Chrome. A score is read
 with its flags: two runs whose `engine_flags` differ did not measure the
-same engine. Records from before 2026-11-15 have no such key. (The harness's
-own `HIWAVE_STRESS_TURN_BUDGET_MS` is not listed there; it is
-`live_turn_budget_ms`.)
+same engine. Records from before 2026-11-15 have no such key.
+`HIWAVE_STRESS_TURN_BUDGET_MS` is listed there only for a real-window run
+that raised the budget (the app is started with it, at the run's number);
+`live_turn_budget_ms` has the number for either HiWave engine.
 
 ### What a suite's engine is started with
 
@@ -204,8 +205,11 @@ animation loop and every later test. To list everything that stops a suite in on
 
     HIWAVE_STRESS_TURN_BUDGET_MS=60000 python3 tools/stress/run.py --suite motionmark --engine hiwave-headless --binary <parity-capture>
 
-- For `hiwave-headless` only (it passes `--live-turn-budget-ms` to parity-capture, with
-  `--interrupt-scripts`, which the flag requires); refused for the other engines.
+- For the HiWave engines; refused for Chrome. `hiwave-headless` gets it as `--live-turn-budget-ms`
+  (with `--interrupt-scripts`, which the flag requires). The app (`--engine hiwave`) reads the variable
+  itself when it builds a content view's engine, and run.py starts it with the run's number; a run
+  without a raised budget starts the app with the variable removed, whatever the shell had. An app
+  started any other way, with the variable unset, is unchanged: 5000 ms.
 - Off unless set; the engine's default does not change. Whole milliseconds, 1 to 3600000; above the run's
   wall limit it is clamped to that limit.
 - It raises more than the stop: the same number is the turn's whole allowance of script time
