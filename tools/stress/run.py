@@ -76,7 +76,13 @@ CHROME_OWN_HOSTS = {"accounts.google.com", "clients2.google.com", "content-autof
 # Runner page (the one reporter.js is added to) and default time limits.
 SUITE = {
     "speedometer": {"page": "/index.html", "timeout": 1500, "stall": 240},
-    "motionmark": {"page": "/MotionMark/index.html", "timeout": 900, "stall": 180},
+    # MotionMark's runner loads each test in an iframe and waits for its
+    # load event. The engine issues no request for a frame unless nested
+    # browsing contexts are on (off by default), so the suite never starts
+    # without the flag. `env` is what a suite's engine is started with
+    # (`suite_env`); the record lists it under `engine_flags`.
+    "motionmark": {"page": "/MotionMark/index.html", "timeout": 900, "stall": 180,
+                   "env": {"HIWAVE_NESTED_CONTEXTS": "1"}},
     "jetstream": {"page": "/index.html", "timeout": 3600, "stall": 600},
     # Not a benchmark: tools/stress/control/index.html tries one off-machine
     # fetch and then reports a score. A run of it must end `invalid` on
@@ -283,6 +289,33 @@ NET_LOG_ENV = {"HIWAVE_CONSOLE_LOG": "1", "RUST_LOG": "warn,hiwave=info,rustkit_
 # is unset (hiwave-app main.rs).
 FORCED_ENV = {"HIWAVE_RUSTKIT_CHROME": "1"}
 DROPPED_ENV = ("HIWAVE_CONTENT_THREAD",)
+
+
+def suite_env(suite, asked):
+    """The `--env` of a run of `suite`: the variables the suite cannot run
+    without (`SUITE[suite]["env"]`), then what the caller asked for, which
+    may change them (a run that looks at the suite with a flag off). The
+    record's `engine_flags` says what the engine ended up with."""
+    env = dict(SUITE[suite].get("env", {}))
+    env.update(asked)
+    return env
+
+
+def engine_flags(engine, extra_env, inherited=None):
+    """Every HIWAVE_ variable the engine process is started with, for the
+    run record: a score is read with the flags it ran under. The shell's
+    own count too (both HiWave arms start from this process's
+    environment). Chrome reads none. The harness's turn-budget variable is
+    not the engine's; the record has it as `live_turn_budget_ms`."""
+    if engine == "chrome":
+        return {}
+    inherited = os.environ if inherited is None else inherited
+    forced, dropped = engine_env(extra_env, inherited)
+    env = {k: v for k, v in inherited.items() if k not in dropped}
+    if engine == "hiwave":
+        env["HIWAVE_TEST_HOOKS"] = "0"  # start_hiwave
+    env.update(forced)
+    return {k: env[k] for k in sorted(env) if k.startswith("HIWAVE_") and k != TURN_BUDGET_ENV}
 
 
 def engine_env(extra_env, inherited=None):
@@ -828,7 +861,8 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
-    extra_env = dict(kv.split("=", 1) for kv in args.env)
+    extra_env = suite_env(args.suite, dict(kv.split("=", 1) for kv in args.env))
+    flags = engine_flags(args.engine, extra_env)
     turn_budget = turn_budget_ms()
     if turn_budget is not None:
         if args.engine != "hiwave-headless":
@@ -1014,6 +1048,8 @@ def main():
         "log_findings": findings,
         "off_machine": left,
         "discarded_score": discarded_score,
+        # Every HIWAVE_ variable the engine was started with (the suite's own, --env, the shell's).
+        "engine_flags": flags,
         # Set only when the run raised the live-turn watchdog (HIWAVE_STRESS_TURN_BUDGET_MS).
         "live_turn_budget_ms": turn_budget,
         "offline_checks": (["sink_proxy"] if sink is not None else

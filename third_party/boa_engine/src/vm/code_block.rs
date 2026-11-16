@@ -186,6 +186,11 @@ pub struct CodeBlock {
     // Used for identifying anonymous functions in compiled output and call frames.
     pub(crate) debug_id: u64,
 
+    /// HIWAVE PATCH (regex-literal-cache): the compiled record of each regex literal evaluated in
+    /// this code block (see `RegExp::from_literal`).
+    #[unsafe_ignore_trace]
+    pub(crate) regexp_literals: crate::builtins::regexp::LiteralCache,
+
     #[cfg(feature = "trace")]
     #[unsafe_ignore_trace]
     pub(crate) traced: Cell<bool>,
@@ -219,6 +224,7 @@ impl CodeBlock {
             global_fns: Box::default(),
             global_vars: Box::default(),
             debug_id: CodeBlock::get_next_codeblock_id(),
+            regexp_literals: Default::default(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
         }
