@@ -663,6 +663,26 @@ def test_the_stress_reader_matches_the_engines_line_prefix(tmp_path):
                                      "unhandled rejection Error: coloured, as the app writes it at inline#2:1:1"]
 
 
+def test_a_record_written_inside_the_engines_spans_is_listed(tmp_path):
+    # The logger writes the open spans between the level and the target. The engine's own, with the fields
+    # they have, are part of its prefix; a span the reader does not know, or other text in the braces, is not.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    spans = "relayout{id=EngineViewId(1) view_id=EngineViewId(1)}:relayout{id=EngineViewId(1)}:build_layout_tree"
+    log.write_text(
+        stamp + "  INFO " + spans + ": hiwave::console: uncaught Error: inside a relayout at inline#1:1:1\n"
+        + stamp + "  INFO render{id=EngineViewId(12) view_id=EngineViewId(12)}:renderer_execute{cmd_count=40}: hiwave::console: unhandled rejection Error: inside a render at inline#2:1:1\n"
+        + stamp + "  INFO layout_compute: hiwave::console: uncaught Error: a span with no fields at inline#3:1:1\n"
+        + stamp + "  INFO " + spans + ": rustkit_engine: Style share verify=false\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1) title=x}: hiwave::console: uncaught Error: text in the braces at inline#9:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)} hiwave::console: uncaught Error: no colon at inline#9:1:1\n"
+        + stamp + "  INFO page_span{id=EngineViewId(1)}: hiwave::console: uncaught Error: a span that is not the engine's at inline#9:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)}:rustkit_engine: hiwave::console: uncaught Error: after a target at inline#9:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught Error: inside a relayout at inline#1:1:1",
+                                     "unhandled rejection Error: inside a render at inline#2:1:1",
+                                     "uncaught Error: a span with no fields at inline#3:1:1"]
+
+
 def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
     progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
                 {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
