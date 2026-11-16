@@ -125,6 +125,47 @@ f.src = '/child.html';
     );
 }
 
+/// The initial about:blank's `load` (docs/diagnostics/2026-11-15/frame_load_*,
+/// Chrome 148 in frame_load_cft148.json). Chrome fires it inside the
+/// insertion, so a handler set after the insertion never hears it: a runner
+/// that inserts the frame, then sets `onload`, then `src` (MotionMark's)
+/// hears one `load`, the document's. A listener added before the insertion
+/// hears the blank one, and the document's too when `src` follows.
+#[test]
+fn a_handler_set_after_the_insertion_does_not_hear_the_blank_load() {
+    let page = "<!doctype html><body><div id=host></div><script>
+window.seen = { late: [], early: [], both: [], capture: [] };
+function see(list) { return function (ev) { var w = ev.target.contentWindow; list.push(w.location.pathname + ':' + typeof w.childFn); }; }
+var host = document.getElementById('host');
+var late = document.createElement('iframe');
+host.appendChild(late);
+late.onload = see(seen.late);
+late.src = '/child.html';
+var early = document.createElement('iframe');
+early.addEventListener('load', see(seen.early));
+host.appendChild(early);
+var both = document.createElement('iframe');
+both.addEventListener('load', see(seen.both));
+host.appendChild(both);
+both.src = '/child.html';
+var box = document.createElement('div');
+box.addEventListener('load', see(seen.capture), true);
+host.appendChild(box);
+box.appendChild(document.createElement('iframe'));
+window.done = function () { return seen.late.length >= 1 && seen.early.length >= 1 && seen.both.length >= 2 && seen.capture.length >= 1; };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.done()", Duration::from_secs(5));
+    // A few more turns: a second `load` at `late` would arrive by now.
+    for _ in 0..5 {
+        page.rt.block_on(page.engine.pump_live(page.view, 20));
+    }
+    assert_eq!(
+        page.js("[seen.late.join(), seen.early.join(), seen.both.join(), seen.capture.join()].join(' | ')"),
+        r#"String("/child.html:function | blank:undefined | blank:undefined,/child.html:function | blank:undefined")"#
+    );
+}
+
 /// A cross-origin `src` is never requested in this stage (the plan's
 /// floor): no document is reachable, and the element still hears `load`
 /// so a page waiting on it goes on. (Chrome loads the document; the
