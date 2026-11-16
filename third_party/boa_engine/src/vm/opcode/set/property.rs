@@ -87,33 +87,41 @@ fn set_by_name(
     {
         let slot_index = slot.index as usize;
 
+        // HIWAVE PATCH (ic-holder): every cached index is read with `get`, and a hit that finds no
+        // slot, or no callable setter, falls through to the full [[Set]] below instead of
+        // indexing out of bounds or returning as if a setter had run. A setter can become
+        // `undefined` without a shape change (accessor -> accessor keeps the slot's bits), and
+        // the full path is what throws for that in strict code.
         if slot.attributes.is_accessor_descriptor() {
-            let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+            let setter = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
                 let prototype = shape.prototype().expect("prototype should have value");
                 let prototype = prototype.borrow();
-
-                prototype.properties().storage[slot_index + 1].clone()
+                prototype.properties().storage.get(slot_index + 1).cloned()
             } else {
-                object_borrowed.properties().storage[slot_index + 1].clone()
+                object_borrowed
+                    .properties()
+                    .storage
+                    .get(slot_index + 1)
+                    .cloned()
             };
 
-            drop(object_borrowed);
-            if slot.attributes.has_set() && result.is_object() {
-                result.as_object().expect("should contain getter").call(
-                    receiver,
-                    std::slice::from_ref(&value),
-                    context,
-                )?;
+            if slot.attributes.has_set()
+                && let Some(setter) = setter.as_ref().and_then(JsValue::as_object)
+            {
+                drop(object_borrowed);
+                setter.call(receiver, std::slice::from_ref(&value), context)?;
+                return Ok(());
             }
-        } else {
+        } else if slot_index < object_borrowed.properties().storage.len() {
             // HIWAVE PATCH (super-set-receiver): a data hit is always the object's own slot (the
             // guard above); upstream's branch writing a prototype's data slot in place is gone.
+            // (ic-holder: and the index is checked; a slot that is not there takes the full path.)
             debug_assert!(!slot.attributes.contains(SlotAttributes::PROTOTYPE));
             drop(object_borrowed);
             let mut object_borrowed = object.borrow_mut();
             object_borrowed.properties_mut().storage[slot_index] = value.clone();
+            return Ok(());
         }
-        return Ok(());
     }
     drop(object_borrowed);
 

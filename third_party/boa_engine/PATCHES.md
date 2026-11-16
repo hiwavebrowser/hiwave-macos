@@ -807,3 +807,138 @@ prototype for many receivers and for a primitive base, a primitive base over a p
 property, `Reflect.set` with another receiver, a plain write over a prototype data property, a proxy
 and a typed array (`Infinity`, `NaN`) after an ordinary object filled a prototype-setter entry; 5
 differed on develop, and the 3 exotic-base cases differed at 179eb717).
+
+## Patch: an inline cache entry is valid only while its slot is (`ic-holder`)
+
+**What.** Upstream keys a property inline-cache entry on the receiver's shape alone. For a property
+found on the receiver's prototype, that shape does not change when the prototype's property is
+deleted or redefined, so a site kept reading or writing a slot of the prototype that had moved or
+gone (another property's value or accessor, or past the end of storage). And a unique (dictionary
+mode) shape is changed in place, without a new shape, by an attribute change that keeps the slot's
+width (`Object.freeze`, `writable: false`, an accessor's getter or setter replaced) and by an own
+property added to it, so a site keyed on it kept writing a property that had become read-only, or
+kept answering from the prototype after an own property shadowed it. Three changes, each marked
+`HIWAVE PATCH (ic-holder)`:
+
+- `vm/inline_cache/mod.rs`: an entry for a prototype slot also holds the prototype's shape when
+  it was made (strongly, so its address is not reused while the entry exists); `get` hits only
+  while the prototype still has that shape and drops the entry otherwise. Prototype slots are not
+  cached for a receiver whose shape is unique. `set` caches only if the name still resolves to the
+  slot, with the same attributes, in the holder's current shape: the slot is taken when the lookup
+  finds the property but the shapes after any getter or setter it ran, and one that redefines or
+  deletes its own property (a self-replacing lazy getter) would otherwise cache a stale slot under
+  the new shape. For a prototype slot it also caches only if the receiver's shape still lacks the
+  name: a prototype accessor that defines it on the receiver (a memoising getter) gives the
+  receiver a new shape that has it, and an entry under that shape would skip the own property.
+- `object/shape/unique_shape.rs` `change_attributes_transition`: the same-width case makes a new
+  unique shape, as the width-changing case already did (upstream's "TODO: invalidate the pointer").
+- `vm/opcode/get/property.rs`, `get/name.rs`, `set/property.rs`: cached indexes are read with
+  `get`; a slot that is not there falls through to the full [[Get]]/[[Set]], and so does a cached
+  accessor write whose setter is no longer callable (a setter replaced by `undefined` keeps the
+  slot's bits, so the shape does not change; the full path is what throws in strict code).
+
+**Cost.** Inline-cache misses are the same as develop's, count for count, on richards,
+delta-blue, raytrace, hash-map, navier-stokes and Babylon (vm-stats); on splay they differ by at
+most 12 of 288k, within develop's own run-to-run variation. Wall time against develop be8eb272,
+both pinned to one core, median of five alternated rounds of 8 iterations (Linux x86-64,
+release): richards +3.3%, delta-blue +2.8%, raytrace +2.2%, hash-map +3.4%, Babylon +2.3%,
+splay +0.4%, navier-stokes +0.3% (single rounds swing up to about 10%). A weakly held
+holder (an upgrade on every prototype hit) cost about 1 point more on richards and delta-blue.
+The cost is one prototype borrow and one address comparison on each prototype hit; folding the
+check into the three hit paths, which already borrow the prototype, would remove the second
+borrow, at the price of every hit path having to remember it.
+
+Pin: `crates/rustkit-js/tests/ic_holder.rs` (cases from Chrome for Testing 148.0.7778.216, each
+warming a site twice before the change: prototype property deleted, accessor to data, data to
+accessor, read-only, getter or setter swapped, on reads and writes; dictionary-mode objects frozen,
+made read-only, shadowed; a built-in prototype; strict code with no setter; `arguments` objects;
+global names; a getter or setter that redefines or deletes its own property, own, on the prototype
+and global; a prototype getter or setter that defines the name on the receiver. 33 cases; on
+develop be8eb272, 22 differ).
+
+## Patch: a name-read cache hit only where it is what [[Get]] would do (`ic-exotic-get`)
+
+**What.** The property inline cache is keyed on shape, and an exotic object can share an ordinary
+object's shape: a Proxy made from `{}` has the empty shape with `Object.prototype`, and a typed array
+has the empty shape with its prototype, as does an object created from that prototype. A
+`GetPropertyByName` site warmed on ordinary objects then answered a Proxy from the prototype's slot
+(its `get` trap never ran) and a typed array reading a canonical numeric name such as `Infinity` or
+`NaN` from the prototype (a typed array's [[Get]] reads its elements for those names and never the
+prototype). The write side has had the same guard since `super-set-receiver`. Marked
+`HIWAVE PATCH (ic-exotic-get)`:
+
+- `vm/inline_cache/mod.rs`: `InlineCache::numeric_name`, whether the site's name is a canonical
+  numeric string, worked out once when the cache is made; `InlineCache::hit_is_get(object)`: an
+  ordinary [[Get]] always hits; a typed array's or an arguments object's hits for a name that is not
+  numeric (they differ from the ordinary one only for numeric names, so `ta.byteLength` and
+  `arguments.length` keep their hits); a Proxy's and a module namespace's never do.
+- `vm/opcode/get/property.rs`: the hit is taken only when `hit_is_get` holds; otherwise the full
+  [[Get]] runs.
+- `builtins/typed_array/object.rs`: `canonical_numeric_index_string` is `pub(crate)`.
+
+`GetNameGlobal` is unchanged: its receiver is the realm's global object, whose [[Get]] is the
+ordinary one.
+
+**Cost.** One function-pointer comparison per hit on an ordinary object.
+
+A typed array's and an arguments object's `[[Get]]` carry a comment pointing back to `hit_is_get`,
+which recognises them by function address: if one is wrapped or replaced, hits silently become
+misses (slower, not wrong). `InlineCache::new` runs the numeric-name parse only for a name that
+starts with a digit, `-`, `I` or `N`, the only first characters a canonical numeric string has.
+
+Pin: `crates/rustkit-js/tests/ic_exotic_get.rs` (17 cases from Chrome for Testing 148.0.7778.216:
+a Proxy sharing `Object.prototype`'s empty shape, a `super.x` read whose home object's prototype is
+such a Proxy, a Proxy's `length` read after ordinary objects that share its shape and get `length`
+from the prototype, a typed array reading `Infinity` through a prototype getter and `NaN` through a
+prototype data property; and twelve that already matched and pin what must keep working: a Proxy
+over an object with a prototype getter, a null-prototype object, ordinary hits, a typed array and a
+mapped arguments object reading a non-numeric name (and a check that the arguments object is
+mapped), a Proxy's `length` through an object with its own `length`, and the fill side, a Proxy with
+no `get` trap or only a `set` trap read twice and then an ordinary object that shares its shape; 5
+differ on develop).
+
+## Patch: a regex literal compiles once per code block (`regex-literal-cache`)
+
+**What.** `StoreRegexp` (a regular expression literal) called `JsRegExp::new` on every evaluation,
+which parsed and compiled the pattern each time. A literal in a function that runs often (a string
+helper that tests a pattern, a loop body) paid a full pattern compile on every call. Now the
+literal's compiled record (matcher, flags, source text) is built the first time it is evaluated in
+its code block and kept in `CodeBlock::regexp_literals`, keyed by the pattern and flags constant
+indexes; each evaluation makes a new RegExp object from it, with its own identity and its own
+`lastIndex`, as the language requires. Marked `HIWAVE PATCH (regex-literal-cache)`:
+
+- `builtins/regexp/mod.rs`: `RegExp::matcher` is an `Rc<Regex>` (a clone of the record shares the
+  matcher); `RegExp::from_literal` looks the literal up in the cache, compiles and stores it if it
+  is not there, and creates the object from the record. `LiteralCache` is the cache's type.
+- `vm/code_block.rs`, `bytecompiler/mod.rs`: the `regexp_literals` field (not traced; the record
+  holds no object), empty when a code block is made.
+- `vm/opcode/push/literal.rs`: `StoreRegexp` goes through `RegExp::from_literal`.
+- `vm/stats.rs`, `rustkit-js` `regexp_compile_count()`: a process-wide count of pattern compiles
+  (one relaxed increment in `compile_native_regexp`), the pin's counter.
+
+`new RegExp(...)`, `RegExp(...)` and `String.prototype.match` with a string still compile on each
+call: their pattern is a runtime value.
+
+**Cost.** One lookup in a short vector (literals per code block) per evaluation instead of a compile.
+
+Pin: `crates/rustkit-js/tests/regex_literal_compile.rs`: 1000 evaluations of one literal compile at
+most once (was 1000), in a loop and in a called function; and 7 cases from Chrome for Testing
+148.0.7778.216 (a new object each evaluation, `lastIndex` per object, flags, sticky and unicode, two
+sites with the same text, named groups after `exec`).
+
+## Patch: one inline cache entry per shape (`ic-set-dedupe`)
+
+**What.** `InlineCache::set` pushed an entry for every fill, so a site could hold several entries for
+one shape. A getter or setter that runs the same site again (a recursive accessor chain: each level
+misses, runs the accessor, and fills the same shape on the way out) filled the four slots with
+copies of one shape within five levels, and the site then went megamorphic and missed on every later
+access, for every receiver. `set` now updates the entry that already has the shape (its slot and
+holder) and pushes only a shape it does not have. Marked `HIWAVE PATCH (ic-set-dedupe)` in
+`vm/inline_cache/mod.rs`.
+
+**Cost.** A scan of at most four entries on a fill, which is a miss already.
+
+Pin: `crates/rustkit-js/tests/ic_set_dedupe.rs` counts vm-stats misses for a read site and a write
+site reached through eight levels of accessor recursion and then used for 4000 accesses of two
+shapes: 4012 read and 4009 write misses before, under 200 after (two levels of recursion miss 31
+times in the same script).

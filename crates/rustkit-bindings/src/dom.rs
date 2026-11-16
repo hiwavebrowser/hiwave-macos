@@ -4307,7 +4307,7 @@ const WRAPPERS_JS: &str = r#"
         'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
         'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
     };
-    var hasOwn = function (o, n) { return Object.prototype.hasOwnProperty.call(o, n); };
+    // `hasOwn` here is the install-time helper declared above, with the event records.
     // Names a read answers but an enumeration leaves out, as Chromium does:
     // shorthands (still readable by name).
     var COMPUTED_SHORTHANDS = {};
@@ -6778,6 +6778,23 @@ const WRAPPERS_JS: &str = r#"
     // in place of `dispatchEvent` since.
     var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
     __rk.dispatchTo = dispatchTo;
+    // Promise rejection events (HTML §8.1.7.4 "unhandled promise
+    // rejections"). The runtime calls this when a turn's microtasks have
+    // run (`JsRuntime::set_rejection_events`): once for each promise
+    // rejected with no handler (`unhandledrejection`, cancelable), and once
+    // more for one that got its handler after that (`rejectionhandled`).
+    // The event is the engine's own: trusted, at the Window, built and
+    // dispatched with nothing a page can replace. `false` back means a
+    // listener canceled it, which keeps the rejection out of the console.
+    __rk.fireRejection = function (type, promise, reason) {
+        var init = objCreate(null);
+        init.cancelable = type === 'unhandledrejection';
+        init.promise = promise;
+        init.reason = reason;
+        var e = make('PromiseRejectionEvent', type, init);
+        trust(e);
+        return dispatchTo(g, e);
+    };
 
     function Event(type, init) {
         if (!(this instanceof Event)) {

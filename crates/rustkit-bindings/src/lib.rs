@@ -141,6 +141,10 @@ mod frame_clock_tests;
 #[cfg(test)]
 mod frame_grid_tests;
 #[cfg(test)]
+mod named_collections_tests;
+#[cfg(test)]
+mod unhandled_rejection_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
@@ -485,14 +489,14 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
-    "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setSelection",
     "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust", "userEdit",
-    "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
     // The frame tree's shared state, which the runtime puts there itself.
@@ -976,6 +980,18 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             for (Q.pumpCount--; p < Q.pumpCount; p++) pumps[p] = pumps[p + 1];
             delete pumps[Q.pumpCount];
         }
+    };
+    // The runtime asks for another turn at once (rejections it has still
+    // to announce, `JsRuntime::set_rejection_events`): a timer of the
+    // engine's own that is due now and does nothing, so the live loop's
+    // next-timer read says "now" and the turn that runs it ends as any
+    // turn does. One is enough: a second ask while one waits adds none.
+    var wake = null;
+    function woke() { wake = null; }
+    __rk.wakeSoon = function () {
+        if (wake !== null && slotOf(wake) >= 0) return;
+        schedule(woke, 0, rest(arguments, 0), false);
+        wake = timers[Q.count - 1];
     };
     __rk.nextTimer = function () {
         // Only a number is a time; compared and subtracted here, with no
@@ -1642,6 +1658,9 @@ impl DomBindings {
         // (two app tests 1.4 s -> 3.0 s).
         runtime.reserve_host_slots(HOST_SLOTS)?;
         runtime.reserve_shared_slots(SHARED_SLOTS)?;
+        // Promise rejections are announced to the page (`__rk.fireRejection`,
+        // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
+        runtime.set_rejection_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
