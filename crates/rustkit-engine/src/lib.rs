@@ -439,6 +439,10 @@ mod load_turns_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_pacing_tests;
 #[cfg(all(test, feature = "headless"))]
+mod frame_rate_tests;
+#[cfg(test)]
+mod live_clock_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_stream_tests;
 #[cfg(all(test, feature = "headless"))]
 mod error_page_script_tests;
