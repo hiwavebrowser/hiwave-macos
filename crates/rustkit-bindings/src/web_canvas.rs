@@ -206,6 +206,37 @@ fn number_list<const N: usize>(s: Option<&str>) -> Option<[f32; N]> {
     Some(out)
 }
 
+/// The ImageData a put writes, from what the script left in the pixel
+/// slot and the size it gave: only when the size is a whole number of
+/// pixels a canvas can hold and the bytes are exactly that many.
+fn image_from_slot(data: Option<Vec<u8>>, width: f32, height: f32) -> Option<ImageData> {
+    let whole = |v: f32| v >= 1.0 && v <= rustkit_canvas::MAX_CANVAS_SIDE as f32 && v.fract() == 0.0;
+    if !whole(width) || !whole(height) {
+        return None;
+    }
+    let (width, height) = (width as u32, height as u32);
+    let data = data.filter(|data| rustkit_canvas::rgba_len(width, height) == Some(data.len()))?;
+    Some(ImageData { width, height, data })
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::image_from_slot;
+
+    #[test]
+    fn a_put_takes_the_slots_bytes_only_at_exactly_the_size_given() {
+        let made = image_from_slot(Some(vec![7; 24]), 2.0, 3.0).expect("2 x 3 pixels are 24 bytes");
+        assert_eq!((made.width, made.height, made.data.len()), (2, 3, 24));
+        for (bytes, width, height) in [
+            (Some(23), 2.0, 3.0), (Some(25), 2.0, 3.0), (Some(0), 2.0, 3.0), (None, 2.0, 3.0), (Some(24), 3.0, 3.0), (Some(24), 0.0, 3.0),
+            (Some(24), 2.5, 3.0), (Some(24), -2.0, -3.0), (Some(24), f32::NAN, 3.0), (Some(24), f32::INFINITY, 1.0), (Some(24), 4294967296.0, 4294967296.0),
+            (Some(4), 65536.0, 1.0), (Some(0), 0.0, 0.0),
+        ] {
+            assert!(image_from_slot(bytes.map(|n| vec![0; n]), width, height).is_none(), "{bytes:?} {width} {height}");
+        }
+    }
+}
+
 fn flag(args: &[JsValue], i: usize) -> bool {
     matches!(args.get(i), Some(JsValue::Boolean(true)))
 }
@@ -468,16 +499,14 @@ pub(crate) fn install(
                     // image); the bytes are what the script's `pixelsIn`
                     // left in the slot, and must be the image's size.
                     let data = pixels.take();
-                    if let (Some(data), Some([w, hh, dx, dy]), Some([x, y, dw, dh])) = (data, nums::<4>(args, 3), nums::<4>(args, 7)) {
-                        let whole = |v: f32| v >= 1.0 && v <= 16384.0 && v.fract() == 0.0;
-                        if whole(w) && whole(hh) && rustkit_canvas::rgba_len(w as u32, hh as u32) == Some(data.len()) {
-                            let data = ImageData { width: w as u32, height: hh as u32, data };
-                            ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]);
-                        } else {
-                            drew = false;
-                        }
-                    } else {
-                        drew = false;
+                    match (nums::<4>(args, 3), nums::<4>(args, 7)) {
+                        (Some([w, hh, dx, dy]), Some([x, y, dw, dh])) => match image_from_slot(data, w, hh) {
+                            // The casts saturate, and the canvas cuts the rect
+                            // to the image and the bitmap (`raster::put_span`).
+                            Some(data) => ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]),
+                            None => drew = false,
+                        },
+                        _ => drew = false,
                     }
                 }
                 "lineWidth" => {
@@ -694,6 +723,9 @@ pub(crate) fn install(
             result
         }),
     )?;
+    // The host function is the canvas script's alone: moved to the host
+    // object now, before any page script, and never on the window again.
+    runtime.evaluate_with_host("__rk.canvasCall = globalThis.__rustkit_canvas; delete globalThis.__rustkit_canvas;")?;
     if !script {
         return Ok(());
     }

@@ -496,12 +496,13 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationRound", "becomeFrame", "builtins",
+    "canvasCall", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
+    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
@@ -2414,7 +2415,7 @@ impl DomBindings {
         web_intl_likely::install(runtime)?;
         if !lazy {
             runtime.evaluate_with_host(include_str!("web_streams.js"))?;
-            runtime.evaluate_script(include_str!("web_intl.js"))?;
+            runtime.evaluate_with_host(include_str!("web_intl.js"))?;
         }
 
         // IPC bridge for communication with Rust: the app's own documents

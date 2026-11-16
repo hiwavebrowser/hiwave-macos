@@ -11,10 +11,10 @@
 // The sources come in `__rustkit_lazy_sources` (taken and deleted here);
 // each runs as the eager install would have run it. What this file needs
 // to do that is taken now, at realm creation, before any page script: the
-// built-ins it calls, and the natives the scripts take from the window
-// (which are not left there meanwhile). A lazily installed script is not
-// given the host object: the two that report through it get its two
-// reporting natives, the others nothing.
+// built-ins it calls. The natives the scripts work through are on the host
+// object, never on the window. A lazily installed script is not given the
+// host object itself: it gets an object with the natives it needs and
+// nothing else.
 (function (g) {
     var SOURCES = g.__rustkit_lazy_sources;
     delete g.__rustkit_lazy_sources;
@@ -25,25 +25,37 @@
     var reporting = create(null);
     reporting.reportError = __rk.reportError;
     reporting.unsupported = __rk.unsupported;
-    // The natives a script takes from the window when it installs: off
-    // the window from now, put back only while that script installs.
-    var NATIVES = bare({ animations: bare(['__rustkit_animated_style']), intl: bare(['__rustkit_likely_subtags']),
-                         canvas: bare(['__rustkit_canvas', '__rustkit_canvas_slot']) });
-    var held = create(null);
-    ['animations', 'intl', 'canvas'].forEach(function (key) {
-        var names = NATIVES[key], had = bare([]);
-        for (var i = 0; i < names.length; i++) {
-            had[i] = bare(gOPD(g, names[i]));
-            delete g[names[i]];
+    // What each script is handed in place of the host object, made when
+    // it installs from what was taken now: the natives it works through,
+    // which live on the host object and are never on the window, and for
+    // the canvas script the built-ins it keeps its records with.
+    var host = __rk, wmProto = g.WeakMap.prototype, builtins = create(null);
+    builtins.WeakMap = g.WeakMap; builtins.wmGet = wmProto.get; builtins.wmSet = wmProto.set;
+    builtins.wmHas = wmProto.has; builtins.wmDelete = wmProto.delete;
+    builtins.defineProperty = dP; builtins.create = create;
+    builtins.trunc = g.Math.trunc; builtins.abs = g.Math.abs; builtins.isFinite = g.isFinite;
+    builtins.String = g.String; builtins.TypeError = g.TypeError; builtins.RangeError = g.RangeError;
+    builtins.apply = apply;
+    builtins.bufferOf = gOPD(g.Object.getPrototypeOf(g.Uint8ClampedArray.prototype), 'buffer').get;
+    var resizable = gOPD(g.ArrayBuffer.prototype, 'resizable');
+    builtins.resizableOf = resizable && resizable.get;
+    function hostFor(key) {
+        var h = create(null);
+        if (key === 'animations' || key === 'streams') {
+            h.reportError = reporting.reportError;
+            h.unsupported = reporting.unsupported;
         }
-        held[key] = had;
-    });
-    var REPORTS = bare({ animations: true, streams: true });
-    // The host natives the canvas script moves pixels with.
-    var pixels = create(null);
-    pixels.pixelsOut = __rk.pixelsOut;
-    pixels.pixelsIn = __rk.pixelsIn;
-    var HOSTS = bare({ canvas: pixels });
+        if (key === 'animations') h.animatedStyle = host.animatedStyle;
+        if (key === 'intl') h.likelySubtags = host.likelySubtags;
+        if (key === 'canvas') {
+            h.pixelsOut = host.pixelsOut;
+            h.pixelsIn = host.pixelsIn;
+            h.canvasCall = host.canvasCall;
+            h.canvasSlot = host.canvasSlot;
+            h.builtins = builtins;
+        }
+        return h;
+    }
 
     function lazy(key, globals, methods, accessors) {
         var src = SOURCES[key], done = false, undo = [];
@@ -52,9 +64,10 @@
             if (done) return;
             done = true;
             for (var i = undo.length - 1; i >= 0; i--) undo[i]();
-            var run = Fn('__rk', src), had = held[key], names = NATIVES[key], args = bare([REPORTS[key] ? reporting : HOSTS[key]]), i;
-            if (had) for (i = 0; i < names.length; i++) if (had[i]) dP(g, names[i], had[i]);
-            try { apply(run, g, args); } finally { if (had) for (i = 0; i < names.length; i++) delete g[names[i]]; }
+            // The script's names for the global object are parameters too:
+            // what a page made of `globalThis`, `window` or `self` is not asked.
+            var run = Fn('__rk', 'globalThis', 'window', 'self', src);
+            apply(run, g, bare([hostFor(key), g, g, g]));
         }
         function keep(obj, name) {
             var had = bare(gOPD(obj, name));

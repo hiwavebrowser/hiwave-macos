@@ -107,6 +107,15 @@ t("new ImageData(plain array, w)", function () { return new ImageData([0, 0, 0, 
 t("new ImageData of a view on part of a buffer", function () { var b = new ArrayBuffer(16), a = new Uint8ClampedArray(b, 4, 8), i = new ImageData(a, 2); a[0] = 7; a[3] = 255; var x = ctx(); x.putImageData(i, 0, 0); return i.data.byteOffset + " " + px(x.getImageData(0, 0, 1, 1).data); });
 t("the array given is shared", function () { var a = new Uint8ClampedArray(4), i = new ImageData(a, 1); a[0] = 5; a[3] = 255; var x = ctx(); x.putImageData(i, 0, 0); return px(x.getImageData(0, 0, 1, 1).data); });
 
+// A buffer that can change its length, and sizes past what a canvas holds.
+t("new ImageData of an array on a resizable buffer", function () { return new ImageData(new Uint8ClampedArray(new ArrayBuffer(4, { maxByteLength: 8 })), 1).data.length; });
+t("new ImageData of a fixed-length array on a resizable buffer", function () { return new ImageData(new Uint8ClampedArray(new ArrayBuffer(8, { maxByteLength: 16 }), 0, 4), 1).data.length; });
+t("read of 32768 x 32768", function () { return ctx().getImageData(0, 0, 32768, 32768).data.length; });
+t("read of 23171 x 23171", function () { return ctx().getImageData(0, 0, 23171, 23171).data.length; });
+t("read of 65536 x 1", function () { return ctx().getImageData(0, 0, 65536, 1).data.length; });
+t("new ImageData(32768, 32768)", function () { return new ImageData(32768, 32768).data.length; });
+t("createImageData(32768, 32768)", function () { return ctx().createImageData(32768, 32768).data.length; });
+
 // A buffer that has gone.
 function gone(i) { if (typeof i.data.buffer.transfer === "function") i.data.buffer.transfer(); else structuredClone(i.data.buffer, { transfer: [i.data.buffer] }); return i; }
 t("a detached buffer: length", function () { var i = gone(new ImageData(1, 1)); return i.data.length + " " + i.width + "x" + i.height; });

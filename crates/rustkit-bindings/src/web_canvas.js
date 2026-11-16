@@ -13,22 +13,38 @@
 // not listed are absent, not stubbed: no shadows, globalCompositeOperation,
 // isPointInPath, toDataURL. getContext of any other kind is null.
 (function (g) {
-    var C = g.__rustkit_canvas, slot = g.__rustkit_canvas_slot;
-    delete g.__rustkit_canvas;
-    delete g.__rustkit_canvas_slot;
+    var C = __rk.canvasCall, slot = __rk.canvasSlot;
     var Canvas = g.HTMLCanvasElement;
     if (typeof C !== 'function' || typeof slot !== 'function' || typeof Canvas !== 'function') return;
 
-    // A WeakMap whose methods are its own properties, taken now: the
-    // script's records are found by one direct call, whatever a page later
-    // puts on WeakMap.prototype.
-    var WM = WeakMap, wmProto = WeakMap.prototype, wmMethods = [wmProto.get, wmProto.set, wmProto.has, wmProto.delete], defineOwn = Object.defineProperty;
+    // The built-ins this script keeps its records with, as they were when
+    // the realm was made: handed over by the lazy installer, which took
+    // them then (a frame's realm installs this script at first canvas use,
+    // after page script has run), or taken here when this runs at realm
+    // creation itself.
+    var B = __rk.builtins || (function () {
+        var b = Object.create(null), p = WeakMap.prototype;
+        b.WeakMap = WeakMap; b.wmGet = p.get; b.wmSet = p.set; b.wmHas = p.has; b.wmDelete = p.delete;
+        b.defineProperty = Object.defineProperty; b.create = Object.create;
+        b.trunc = Math.trunc; b.abs = Math.abs; b.isFinite = isFinite;
+        b.String = String; b.TypeError = TypeError; b.RangeError = RangeError;
+        b.apply = Reflect.apply;
+        b.bufferOf = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8ClampedArray.prototype), 'buffer').get;
+        var resizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'resizable');
+        b.resizableOf = resizable && resizable.get;
+        return b;
+    })();
+    var WM = B.WeakMap, defineOwn = B.defineProperty, newRecord = B.create;
+    function valueOnly(v) { var d = newRecord(null); d.value = v; return d; }
+    // A WeakMap whose methods are its own properties: the script's records
+    // are found by one direct call, whatever a page puts on
+    // WeakMap.prototype.
     function ownMap() {
         var m = new WM();
-        defineOwn(m, 'get', { value: wmMethods[0] });
-        defineOwn(m, 'set', { value: wmMethods[1] });
-        defineOwn(m, 'has', { value: wmMethods[2] });
-        defineOwn(m, 'delete', { value: wmMethods[3] });
+        defineOwn(m, 'get', valueOnly(B.wmGet));
+        defineOwn(m, 'set', valueOnly(B.wmSet));
+        defineOwn(m, 'has', valueOnly(B.wmHas));
+        defineOwn(m, 'delete', valueOnly(B.wmDelete));
         return m;
     }
 
@@ -355,16 +371,18 @@
     // ---- Pixels: the bitmap rasterized behind the recording (STR-7).
     // An ImageData's bytes are a real Uint8ClampedArray that the host fills
     // and reads whole (`pixelsOut`, `pixelsIn`): no loop over pixels runs
-    // here. What these paths use is taken when this script installs, and
+    // here. What these paths use is the realm's as it was made (`B`), and
     // nothing is read from the array itself, so a page that replaced
     // Uint8ClampedArray, its prototype or WeakMap's methods changes nothing.
     var pixelsOut = __rk.pixelsOut, pixelsIn = __rk.pixelsIn;
     // The records, by ImageData. The engine reads sizes and bytes from
     // here, never from the object's properties.
     var IMG = ownMap();
-    var trunc = Math.trunc, absOf = Math.abs, finite = isFinite, Text = String, TypeErr = TypeError, RangeErr = RangeError,
-        newRecord = Object.create;
-    // The bytes of the largest bitmap a canvas keeps (16384 x 16384, RGBA).
+    var trunc = B.trunc, absOf = B.abs, finite = B.isFinite, Text = B.String, TypeErr = B.TypeError, RangeErr = B.RangeError;
+    // The bytes of the largest read Chrome 148 allows, which is also the
+    // largest bitmap a canvas keeps (16384 x 16384, RGBA: 1 GiB; a larger
+    // read is a RangeError there and here). A read of that size holds the
+    // bytes twice while the host copies them into the array.
     var MAX_BYTES = 16384 * 16384 * 4;
     function imgOf(o) { return IMG.get(o); }
     function keepImg(o, w, h, bytes) {
@@ -407,6 +425,10 @@
         var w, h, bytes, n = pixelsIn(a, false);
         if (n !== -2) {
             // A Uint8ClampedArray, kept as it is: the page's writes to it are this ImageData's.
+            // One on a buffer that can change its length is not taken (Chrome: TypeError).
+            if (n !== -1 && B.resizableOf && B.apply(B.resizableOf, B.apply(B.bufferOf, a, []), [])) {
+                throw new TypeErr("Failed to construct 'ImageData': The provided ArrayBufferView value must not be resizable.");
+            }
             if (n <= 0 || n % 4) {
                 throw domError('InvalidStateError', "Failed to construct 'ImageData': The input data has zero elements or its length is not a multiple of 4.");
             }
@@ -426,6 +448,7 @@
             if (!w) throw sizeError('source width');
             if (!h) throw sizeError('source height');
             settings(c, "construct 'ImageData'");
+            if (!(w * h * 4 <= MAX_BYTES)) throw domError('IndexSizeError', "Failed to construct 'ImageData': The requested image size exceeds the supported range.");
             bytes = zeros(w * h * 4, "construct 'ImageData'");
         }
         keepImg(this, w, h, bytes);

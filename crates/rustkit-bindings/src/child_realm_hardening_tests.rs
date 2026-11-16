@@ -239,9 +239,9 @@ fn a_lazy_interfaces_install_puts_nothing_on_the_window() {
 }
 
 /// The canvas script's own records are kept with the built-ins of realm
-/// creation, also when the script installs later: a frame's page that
-/// replaced `WeakMap.prototype`'s methods, `Object.defineProperty` and
-/// `Object.create` before its first canvas use is handed nothing.
+/// creation, also when the script installs later: the replacements a
+/// frame's page put on `WeakMap.prototype` before its first canvas use
+/// are never called.
 #[test]
 fn a_lazy_canvas_keeps_its_records_with_the_built_ins_of_realm_creation() {
     let (parent, _doc) = parent();
