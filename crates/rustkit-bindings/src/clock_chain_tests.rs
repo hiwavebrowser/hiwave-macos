@@ -286,3 +286,38 @@ fn a_timer_is_never_reported_due_before_it_is_due() {
         assert_eq!(read(&b), (i + 2).to_string(), "link {} was not due after the {delay} ms reported", i + 2);
     }
 }
+
+/// LINKS-SLOW: a timeout never runs before the page clock has moved its delay, whatever a real
+/// turn's real-time base reads. The loop's clock and the page's are each re-anchored per turn and
+/// were measured up to ~2.4 ms apart; a turn whose base read ahead ran timeouts early on
+/// `performance.now()` (min lateness -1.7 to -2.9 ms with the early-aimed wake; Chrome never below
+/// its 0.1 ms tick, `links_lateness_probe_cft148.json`). Here a turn is told 3 ms more pre-timer time
+/// than passed, so its base reads 3 ms ahead: the 10 ms timeout set 7 ms of page clock earlier does
+/// not run; it runs once the page clock has moved 10 ms. Real time is a value (`__rk.testRealMs`).
+#[test]
+fn a_timeout_never_runs_before_the_page_clock_moves_its_delay() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping(
+            "var fake = 1000; __rk.testRealMs = function () { return fake; }; \
+             window.__work = function (ms) { fake += ms; }; return 0",
+        )
+        .unwrap();
+    b.evaluate("var setAt = -1, ranAfter = -1; setTimeout(function () { setAt = performance.now(); \
+                setTimeout(function () { ranAfter = performance.now() - setAt; }, 10); }, 0);")
+        .unwrap();
+    b.advance_real_timers_for_frame(0, 1000, 0).unwrap();
+    // 7 ms of real time, and a turn whose base reads 3 ms ahead of it.
+    b.evaluate("__work(7)").unwrap();
+    b.advance_real_timers_for_frame_since(7, 1000, 0, 3.0).unwrap();
+    let read = |b: &DomBindings| match b.evaluate("String(ranAfter)").unwrap() {
+        JsValue::String(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(read(&b), "-1", "the timeout ran 7 ms of page clock after it was set");
+    b.evaluate("__work(3)").unwrap();
+    b.advance_real_timers_for_frame(3, 1000, 0).unwrap();
+    let after: f64 = read(&b).parse().unwrap();
+    assert!(after >= 10.0, "ran {after} ms of page clock after it was set");
+}
