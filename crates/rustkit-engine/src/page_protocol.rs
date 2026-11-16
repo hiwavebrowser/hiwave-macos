@@ -1479,6 +1479,8 @@ impl OvershootEstimate {
     /// The most a sleep is aimed early.
     pub const CAP_MS: f64 = 2.0;
 
+    /// The current estimate; read by the tests only.
+    #[cfg(test)]
     pub fn ms(&self) -> f64 {
         self.ms
     }
