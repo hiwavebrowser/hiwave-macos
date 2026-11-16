@@ -312,3 +312,123 @@ fn grid_frame_stamps_carry_no_real_time() {
     turn(&b, 17);
     assert_eq!(read(&b, "got"), "17,17");
 }
+
+/// After an idle gap, `a = el.animate(...)` in a task does not move the timeline the task reads,
+/// and `a.startTime = document.timeline.currentTime` reads 0 at once and then counts up from the
+/// frame (Chrome `timeline_probe` "idleStart", 25 rows: the timeline the same before and after
+/// `animate()`, 0 at once, then 0-0.07 (one row 16.68) in the first frame and 16.57-16.7 more in
+/// the next). The frame `animate()` asks for is no frame held up before the task: the last frame's
+/// time is not the task's. It read 17 after `animate()` where it read 10000 before, and the
+/// animation started 9983 ms in the past.
+#[test]
+fn an_animation_started_from_the_timeline_after_idle_has_no_jump() {
+    let b = page();
+    b.evaluate(
+        "var box = document.getElementById('box'), got = '', rows = [], a = null; requestAnimationFrame(function () {}); \
+         setTimeout(function () { var before = document.timeline.currentTime; \
+           a = box.animate({ opacity: [0, 1] }, { duration: 1000 }); \
+           var after = document.timeline.currentTime; a.startTime = document.timeline.currentTime; \
+           got = [after - before, a.currentTime].join(); \
+           (function f() { requestAnimationFrame(function (t) { rows.push(Math.round(a.currentTime)); \
+             if (rows.length < 2) f(); }); })(); }, 10005);",
+    )
+    .unwrap();
+    turn(&b, 17);
+    for _ in 0..8 {
+        turn(&b, b.next_timer_delay().unwrap_or(17).max(1));
+    }
+    assert_eq!(read(&b, "got"), "0,0");
+    let rows = read(&b, "rows.join()");
+    assert!(rows == "0,17" || rows == "17,33", "{rows} (Chrome: 0 then 16.7; once 16.7 then 33.4)");
+}
+
+/// Everything the page reads of time never goes back, whatever the order of task reads, frame
+/// requests, `animate()` calls, late turns and idle gaps: the timeline, the frame timestamps and
+/// `performance.now()` are each non-decreasing; a frame's timestamp is at or before the
+/// `performance.now()` its callback reads; and an animation started from the timeline never reads
+/// a negative current time in a frame. Random sequences on the hand-driven clock, with the
+/// deterministic page clock and the flowing one, grid frame stamps on and off.
+#[test]
+fn the_page_never_reads_time_going_back() {
+    fn run(seed: u64, det: bool, grid: bool) -> Result<(), String> {
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id=box></div></body></html>").unwrap(),
+        ))
+        .unwrap();
+        b.set_deterministic_clock(det);
+        b.set_grid_frame_stamps(grid);
+        b.evaluate(
+            "var L = { tl: [], t: [], p: [], over: [], neg: [] }, anims = [], box = document.getElementById('box'), n = 0; \
+             function R(w) { L.tl.push(w + ':' + document.timeline.currentTime); L.p.push(performance.now()); } \
+             function F() { requestAnimationFrame(function (t) { var p = performance.now(); L.t.push(t); \
+               if (t > p) L.over.push(t + '>' + p); R('f'); \
+               for (var i = 0; i < anims.length; i++) if (anims[i].currentTime < 0) L.neg.push(anims[i].currentTime); \
+               if (++n % 3) F(); }); } \
+             function A() { var a = box.animate({ opacity: [0, 1] }, { duration: 100000 }); \
+               a.startTime = document.timeline.currentTime; anims.push(a); R('a'); }",
+        )
+        .unwrap();
+        let mut s = seed;
+        let mut next = |m: u64| {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 33) % m
+        };
+        for _ in 0..120 {
+            match next(8) {
+                0 => {
+                    b.evaluate("R('h')").unwrap();
+                }
+                1 => {
+                    let d = next(60);
+                    let what = ["R('t')", "R('t'); F()", "R('t'); A()", "A(); R('t'); F()"][next(4) as usize];
+                    b.evaluate(&format!("setTimeout(function () {{ {what}; }}, {d})")).unwrap();
+                }
+                2 => {
+                    b.evaluate("F()").unwrap();
+                }
+                3 => {
+                    b.evaluate("A()").unwrap();
+                }
+                4 | 5 => turn(&b, next(40)),
+                6 => turn(&b, 100 + next(300)),
+                _ => {
+                    if next(2) == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(next(8)));
+                    }
+                    turn(&b, 1000 + next(2000));
+                }
+            }
+        }
+        let list = |v: &str| -> Vec<f64> {
+            read(&b, &format!("{v}.join()"))
+                .split(',')
+                .filter(|x| !x.is_empty())
+                .map(|x| x.rsplit(':').next().unwrap().parse().unwrap())
+                .collect()
+        };
+        for (name, v) in [("timeline", "L.tl"), ("frame stamps", "L.t"), ("performance.now", "L.p")] {
+            let xs = list(v);
+            if let Some(i) = xs.windows(2).position(|w| w[1] < w[0]) {
+                let tl = read(&b, "L.tl.join()");
+                return Err(format!("{name} went back at {i}: {} then {} (timeline reads {tl})", xs[i], xs[i + 1]));
+            }
+        }
+        for v in ["L.over", "L.neg"] {
+            let x = read(&b, &format!("{v}.join()"));
+            if !x.is_empty() {
+                return Err(format!("{v}: {x}"));
+            }
+        }
+        Ok(())
+    }
+    let mut failed = Vec::new();
+    for seed in 1..=12u64 {
+        for (det, grid) in [(true, false), (false, false), (false, true), (true, true)] {
+            if let Err(e) = run(seed, det, grid) {
+                failed.push(format!("seed {seed} det {det} grid {grid}: {e}"));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{} of 48 runs:\n{}", failed.len(), failed.join("\n"));
+}

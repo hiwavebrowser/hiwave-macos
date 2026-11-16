@@ -29,10 +29,13 @@
 //   pauseRate  3 times: a 1000 ms animation paused at ~100 ms and given playbackRate 2 in the same
 //              task: [currentTime after pause, after the rate change, 3 frames later, playState,
 //              playbackRate]
+//   idleStart  5 times: after 300 ms with no frame, in a timer task: [timeline, then
+//              a = animate(1000 ms); timeline again (the same?); a.startTime = timeline.currentTime;
+//              a.currentTime at once], and for 2 frames [t - a.startTime, a.currentTime], playState
 // When done it sets rec.done and logs REC <json>.
 // Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
 // harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
-window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], idle: [], stalled: [], held: [], overdue: [], pauseRate: [], done: false };
+window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], idle: [], stalled: [], held: [], overdue: [], pauseRate: [], idleStart: [], done: false };
 var box = document.getElementById('box');
 function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
 function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
@@ -178,11 +181,31 @@ function pauseRatePart(n, next) {
     })();
   }, 100);
 }
+function idleStartPart(n, next) {
+  if (n >= 5) { next(); return; }
+  setTimeout(function () {
+    var before = document.timeline.currentTime;
+    var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+    var after = document.timeline.currentTime;
+    a.startTime = document.timeline.currentTime;
+    var row = [r2(after - before), r2(a.currentTime)], k = 0;
+    (function f() {
+      requestAnimationFrame(function (t) {
+        row.push([r2(t - a.startTime), r2(a.currentTime)]);
+        if (++k < 2) { f(); return; }
+        row.push(a.playState);
+        rec.idleStart.push(row);
+        a.cancel();
+        idleStartPart(n + 1, next);
+      });
+    })();
+  }, 300);
+}
 function go() {
   framesPart(function () { taskPart(function () { startFromPart(function () { pausedPart(function () {
     finishedPart(function () { inFramePart(function () { idlePart(0, function () { stalledPart(0, function () {
       heldPart(0, function () { overduePart(0, function () { pauseRatePart(0, function () {
-        rec.done = true; console.log('REC ' + JSON.stringify(rec));
+        idleStartPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
       }); }); });
     }); }); }); });
   }); }); }); });
