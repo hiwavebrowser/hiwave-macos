@@ -56,6 +56,8 @@ var steps = [
   ["frame", function () { var f = document.createElement("iframe"); f.src = "window_error_child.html"; document.body.appendChild(f); }],
   ["other origin top level", function () { var s = document.createElement("script"); s.src = window.OTHER + "/window_error_other.js"; document.body.appendChild(s); }],
   ["other origin function", function () { setTimeout(function () { if (typeof otherOriginThrows === "function") otherOriginThrows(); else out.otherMissing = true; }, 0); }],
+  ["other origin eval", function () { setTimeout(function () { if (typeof otherOriginEvals === "function") otherOriginEvals(); }, 0); }],
+  ["other origin string", function () { setTimeout(function () { if (typeof otherOriginThrowsAString === "function") otherOriginThrowsAString(); }, 0); }],
   ["dispatched by the page", function () { var before = out.onerror.length; window.dispatchEvent(new ErrorEvent("error", { message: "made by the page", filename: "f.js", lineno: 3, colno: 4, error: null, cancelable: true }));
     out.pageDispatchCallsOnerror = out.onerror.length - before; }]
 ];

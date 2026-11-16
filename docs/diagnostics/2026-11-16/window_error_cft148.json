@@ -161,7 +161,7 @@
    "cancelable": true,
    "bubbles": false,
    "target": true,
-   "file": "127.0.0.1:52673",
+   "file": "127.0.0.1:58915",
    "lineno": true,
    "colno": true,
    "error": "Error",
@@ -175,7 +175,7 @@
    "cancelable": true,
    "bubbles": false,
    "target": true,
-   "file": "127.0.0.1:52673",
+   "file": "127.0.0.1:58915",
    "lineno": true,
    "colno": true,
    "error": "SyntaxError",
@@ -237,6 +237,34 @@
    "error": "null",
    "prevented": false,
    "where": "other origin function"
+  },
+  {
+   "message": "Script error.",
+   "type": "[object ErrorEvent]",
+   "isTrusted": true,
+   "cancelable": true,
+   "bubbles": false,
+   "target": true,
+   "file": "",
+   "lineno": false,
+   "colno": false,
+   "error": "null",
+   "prevented": false,
+   "where": "other origin eval"
+  },
+  {
+   "message": "Script error.",
+   "type": "[object ErrorEvent]",
+   "isTrusted": true,
+   "cancelable": true,
+   "bubbles": false,
+   "target": true,
+   "file": "",
+   "lineno": false,
+   "colno": false,
+   "error": "null",
+   "prevented": false,
+   "where": "other origin string"
   },
   {
    "message": "made by the page",
@@ -356,7 +384,7 @@
   {
    "n": 5,
    "message": "Uncaught Error: from an attribute handler",
-   "source": "127.0.0.1:52673",
+   "source": "127.0.0.1:58915",
    "lineno": "number",
    "colno": "number",
    "error": "Error",
@@ -365,7 +393,7 @@
   {
    "n": 5,
    "message": "Uncaught SyntaxError: Failed to execute 'appendChild' on 'Node': Unexpected token '='",
-   "source": "127.0.0.1:52673",
+   "source": "127.0.0.1:58915",
    "lineno": "number",
    "colno": "number",
    "error": "SyntaxError",
@@ -387,6 +415,24 @@
    "lineno": "number",
    "colno": "number",
    "error": "Error",
+   "thisIsWindow": true
+  },
+  {
+   "n": 5,
+   "message": "Script error.",
+   "source": "",
+   "lineno": "number",
+   "colno": "number",
+   "error": "null",
+   "thisIsWindow": true
+  },
+  {
+   "n": 5,
+   "message": "Script error.",
+   "source": "",
+   "lineno": "number",
+   "colno": "number",
+   "error": "null",
    "thisIsWindow": true
   },
   {
@@ -433,6 +479,10 @@
   ]
  },
  "order": [
+  "onerror",
+  "listener",
+  "onerror",
+  "listener",
   "onerror",
   "listener",
   "onerror",

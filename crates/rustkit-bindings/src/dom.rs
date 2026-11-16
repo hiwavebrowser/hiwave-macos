@@ -6832,38 +6832,25 @@ const WRAPPERS_JS: &str = r#"
 
     // The `error` event for an uncaught exception (HTML §8.1.4.6 "report
     // an exception"). The runtime calls this with the exception before it
-    // is reported any further (`JsRuntime::set_error_events`): the thrown
-    // value, its text as a console line has it, and where it was thrown
-    // (a script's URL or the engine's name for an inline one, line,
-    // column; "" and zeros when nowhere of the page's). The event is the
-    // engine's own: trusted, cancelable, at the Window, built and
-    // dispatched with nothing a page can replace. `false` back means a
-    // listener canceled it, which keeps the exception out of the console.
-    //
-    // A script of another origin is muted, as its text and position are
-    // not the page's to read: "Script error.", no file, no position, no
-    // value. (Every script from another origin is; a `crossorigin` script
-    // served with CORS is not told apart yet.)
-    var execNow = uncurry(RegExp.prototype.exec);
-    var URLISH = /^[a-z][a-z0-9+.\-]*:/i, ORIGIN_OF = /^[a-z][a-z0-9+.\-]*:\/\/[^\/?#]*/i;
-    function originOf(url) { var m = execNow(ORIGIN_OF, url); return m === null ? null : m[0]; }
-    __rk.fireError = function (value, text, path, line, column) {
-        var here = '';
-        try { here = '' + g.location.href; } catch (_) {}
-        var file = here, muted = false;
-        // An inline script's or a handler attribute's code is the document's.
-        if (typeof path === 'string' && execNow(URLISH, path) !== null) {
-            file = path;
-            var from = originOf(path), page = originOf(here);
-            muted = from !== null && page !== null && from !== page;
-        }
+    // is reported any further (`JsRuntime::set_error_events`), and with
+    // what the event is to say, which the runtime decides from the scripts
+    // the engine registered (`JsRuntime::register_script`): the thrown
+    // value, the message, the file, line and column. Script errors from
+    // another origin are reported without detail, as the HTML standard's
+    // muted errors: the value is null, the message "Script error.", no
+    // file, no position. Nothing here reads a URL or decides that.
+    // The event is the engine's own: trusted, cancelable, at the Window,
+    // built and dispatched with nothing a page can replace. `false` back
+    // means a listener canceled it, which keeps the exception out of the
+    // console.
+    __rk.fireError = function (value, message, file, line, column) {
         var init = objCreate(null);
         init.cancelable = true;
-        init.message = muted ? 'Script error.' : 'Uncaught ' + text;
-        init.filename = muted ? '' : file;
-        init.lineno = muted ? 0 : line;
-        init.colno = muted ? 0 : column;
-        init.error = muted ? null : value;
+        init.message = message;
+        init.filename = file;
+        init.lineno = line;
+        init.colno = column;
+        init.error = value;
         var e = make('ErrorEvent', 'error', init);
         trust(e);
         return dispatchTo(g, e);

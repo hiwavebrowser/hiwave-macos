@@ -448,11 +448,11 @@ impl JsRuntime {
 
     /// A module's error, reported once (with reports on).
     fn report_error(&mut self, error: &boa_engine::JsError) {
-        self.uncaught_error(error, true);
+        self.uncaught_error(error, true, None);
     }
 
     fn report_value(&mut self, value: &JsValue) {
-        self.uncaught_error(&boa_engine::JsError::from_opaque(value.clone()), true);
+        self.uncaught_error(&boa_engine::JsError::from_opaque(value.clone()), true, None);
     }
 
     /// A module evaluation's rejection as the module's error text, the

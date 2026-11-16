@@ -773,6 +773,7 @@ impl JsRuntime {
             Some(Some(target)) => {
                 self.context.enter_realm(target.clone());
                 self.current_realm = realm;
+                self.diag.realm.set(realm.0);
             }
             // A dropped realm is entered as gone: evaluation errors until
             // the outer realm is entered again (see `realm_gone`).
@@ -840,6 +841,7 @@ impl JsRuntime {
                 *host = None;
             }
             let dropped = slot.take();
+            self.diag.drop_realm(realm.0);
             if let Some(realm) = &dropped {
                 self.rejections.drop_realm(realm);
             }
@@ -1016,23 +1018,38 @@ impl JsRuntime {
         let _ = on;
     }
 
-    /// The script evaluated as `name`
-    /// ([`evaluate_script_named`](Self::evaluate_script_named)) is the one
-    /// at `url`: an announced exception thrown in it names `url` as its
-    /// file ([`set_error_events`](Self::set_error_events)). For an embedder
-    /// that evaluates external scripts under names of its own.
-    pub fn alias_script(&mut self, name: &str, url: &str) {
+    /// Say what the page script evaluated as `name`
+    /// ([`evaluate_script_named`](Self::evaluate_script_named), a module's
+    /// URL) is, for the realm entered: the script at `url`, and whether its
+    /// errors are reported to the page without detail (`muted`, HTML's
+    /// "muted errors": a script of another origin). An announced exception
+    /// ([`set_error_events`](Self::set_error_events)) names `url` as its
+    /// file; one thrown by a `muted` script, or by a script never
+    /// registered, is announced as "Script error." with no file, position
+    /// or value. At most 4096 scripts are kept; past that a script is an
+    /// unregistered one.
+    pub fn register_script(&mut self, name: &str, url: &str, muted: bool) {
         #[cfg(feature = "boa")]
-        self.diag.alias_script(name, url);
+        self.diag.register_script(self.current_realm.0, name, url, muted);
         #[cfg(not(feature = "boa"))]
-        let _ = (name, url);
+        let _ = (name, url, muted);
+    }
+
+    /// The URL of the document in the realm entered: the file an announced
+    /// exception names when it was thrown by code with no script of its
+    /// own (`eval` code, a handler attribute).
+    pub fn set_document_url(&mut self, url: &str) {
+        #[cfg(feature = "boa")]
+        self.diag.set_document_url(self.current_realm.0, url);
+        #[cfg(not(feature = "boa"))]
+        let _ = url;
     }
 
     /// A page script or module ended with `error`: announce it
     /// ([`set_error_events`](Self::set_error_events)), then report it
     /// unless a listener canceled the event.
     #[cfg(feature = "boa")]
-    pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool) {
+    pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool, evaluated: Option<&str>) {
         let events = announce && self.diag.error_events.get() && !self.deadline.hit.get();
         if !events && !self.diag.on.get() {
             return;
@@ -1046,10 +1063,13 @@ impl JsRuntime {
             if let Some(value) = value {
                 let host = self.entered_host();
                 self.context.reset_recursion_max();
-                let canceled = self.diag.announce(&host, &value, &report, &mut self.context);
+                self.diag.realm.set(self.current_realm.0);
+                let canceled = self.diag.announce(&host, &value, &report, evaluated, &mut self.context);
                 self.consume_interrupt();
                 let _ = self.context.run_jobs();
                 self.consume_interrupt();
+                // What the listeners rejected is announced in this turn too.
+                self.notify_rejections();
                 if canceled {
                     return;
                 }
@@ -1148,6 +1168,14 @@ impl JsRuntime {
             return false;
         };
         let outer = self.enter_realm(RealmId(index));
+        // A rejection made by a script whose errors are reported without
+        // detail fires no event (HTML HostPromiseRejectionTracker, the
+        // script's muted errors): the reason is not the page's to read.
+        let report = self.diag.describe(reason, None, true, &mut self.context);
+        if matches!(self.diag.told(&report, None), diag::Told::Nothing) {
+            self.enter_realm(outer);
+            return false;
+        }
         let host = self.entered_host();
         let fire = host.get(js_string!("fireRejection"), &mut self.context).ok();
         let mut canceled = false;
@@ -1517,7 +1545,7 @@ impl JsRuntime {
                     .context
                     .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
-            self.settle_evaluation(result, path.is_some())
+            self.settle_evaluation(result, path)
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1530,9 +1558,9 @@ impl JsRuntime {
     /// What follows a script or a kept call: the interrupt state, the microtask drain, console output and
     /// the error report, then the value.
     #[cfg(feature = "boa")]
-    /// `page`: the code was a page script's, whose uncaught exception is
+    /// `page`: the code was the page script of this name, whose uncaught exception is
     /// announced to the page ([`set_error_events`](Self::set_error_events)).
-    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>, page: bool) -> Result<JsValue, JsError> {
+    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>, page: Option<&str>) -> Result<JsValue, JsError> {
         self.consume_interrupt();
         // Promise reactions (`.then`, `await`) are jobs Boa queues but
         // does not run on its own; a page's async code never resumes
@@ -1562,7 +1590,7 @@ impl JsRuntime {
             }
             Err(err) => {
                 self.flush_console_logs();
-                self.uncaught_error(&err, page);
+                self.uncaught_error(&err, page.is_some(), page);
                 let msg = describe::error_text(&err, &mut self.context);
                 Err(JsError::ExecutionError(msg))
             }
@@ -1621,7 +1649,7 @@ impl JsRuntime {
                 .collect();
             self.context.reset_recursion_max();
             let result = callee.call(&BoaValue::undefined(), &args, &mut self.context);
-            self.settle_evaluation(result, false)
+            self.settle_evaluation(result, None)
         }
         #[cfg(not(feature = "boa"))]
         {

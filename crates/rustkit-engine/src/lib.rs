@@ -9283,8 +9283,6 @@ impl Engine {
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
                 crate::console_log::alias(inspector.view_id(), &name, &label);
-                // An `error` event's `filename` is the script's URL.
-                bindings.alias_script(&name, &label);
                 Some(name)
             };
             let began = std::time::Instant::now();

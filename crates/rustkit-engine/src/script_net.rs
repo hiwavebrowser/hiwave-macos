@@ -1855,7 +1855,6 @@ fn run_inserted(
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
             crate::console_log::alias(inspector.view_id(), &name, &record.source);
-            bindings.alias_script(&name, &record.source);
             began = true;
             let started = std::time::Instant::now();
             let (ran, stopped) = super::with_script_js(bindings, || {

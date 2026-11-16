@@ -2856,6 +2856,8 @@ impl DomBindings {
         // Update state
         self.window.borrow_mut().location = location.clone();
         self.canvases.borrow_mut().origin = Some(url.origin());
+        // The file an `error` event names for code with no script of its own.
+        self.runtime.borrow_mut().set_document_url(url.as_str());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
@@ -2935,11 +2937,13 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
-    /// The page script evaluated as `name` is the one at `url` (see
-    /// [`JsRuntime::alias_script`]): an `error` event for an exception
-    /// thrown in it has `url` as its `filename`.
-    pub fn alias_script(&self, name: &str, url: &str) {
-        self.runtime.borrow_mut().alias_script(name, url);
+    /// Say what the page script evaluated as `name` is (see
+    /// [`JsRuntime::register_script`]): the script at `url`, and whether
+    /// its errors are reported to the page without detail. An `error`
+    /// event for an exception thrown in a script never registered carries
+    /// no detail.
+    pub fn register_script(&self, name: &str, url: &str, muted: bool) {
+        self.runtime.borrow_mut().register_script(name, url, muted);
     }
 
     /// Evaluate a page script as `path` (see

@@ -12,7 +12,13 @@
 //!   - a canceled error is not reported any further (the engine's log), any other once;
 //!   - an exception thrown by an `error` handler is reported and fires no second event;
 //!   - a promise job's exception is an `unhandledrejection`, never an `error`;
-//!   - `reportError(e)` does the same for `e`, and with no argument is a `TypeError`.
+//!   - `reportError(e)` does the same for `e`, and with no argument is a `TypeError`;
+//!   - script errors from another origin are reported without detail, as the HTML standard's
+//!     muted errors: "Script error.", no file, no position, no value (Chrome rows
+//!     `other origin ...`), and their rejections fire no event.
+//!
+//! The engine says what each script it evaluates is (`register_script`: its URL, and whether its
+//! errors are reported without detail); a script it never registered is reported without detail.
 
 use super::*;
 
@@ -30,10 +36,33 @@ fn bare_page() -> DomBindings {
     b
 }
 
+const DOC: &str = "https://example.test/page.html";
+/// An event reported without detail, as `WATCH` records one.
+const MUTED: &str = "[object ErrorEvent]|Script error.||0|0|null|true|true|false|true";
+
+/// The page's own inline scripts and one external script of its origin, registered as the
+/// engine registers them.
+fn register_own(b: &DomBindings) {
+    for name in ["inline#1", "inline#2", "inline#3"] {
+        b.register_script(name, DOC, false);
+    }
+    b.register_script("https://example.test/a.js", "https://example.test/a.js", false);
+}
+
 fn page() -> DomBindings {
     let b = bare_page();
+    register_own(&b);
     b.evaluate_named(WATCH, "inline#1").unwrap();
     b
+}
+
+/// `page()`, and `theirs`: a script of another origin, evaluated under the engine's own name
+/// for it, whose errors are reported without detail.
+fn page_with_theirs(source: &str) -> (DomBindings, bool) {
+    let b = page();
+    b.register_script("script#1", "https://other.test/lib.js", true);
+    let threw = b.evaluate_named(source, "script#1").is_err();
+    (b, threw)
 }
 
 fn ev(b: &DomBindings, script: &str) -> String {
@@ -174,6 +203,7 @@ fn onerror_takes_a_page_dispatched_error_events_fields() {
 #[test]
 fn what_the_page_replaced_does_not_change_the_event() {
     let b = bare_page();
+    register_own(&b);
     b.evaluate_named(
         "var real = { toString: Object.prototype.toString, proto: ErrorEvent.prototype, apply: Reflect.apply, protoOf: Object.getPrototypeOf }, ran = 0, got = []; \
          window.addEventListener('error', function (ev) { \
@@ -193,23 +223,182 @@ fn what_the_page_replaced_does_not_change_the_event() {
     assert!(matches!(b2.evaluate("got[0]"), Ok(JsValue::String(s)) if s == "[object ErrorEvent]|true|Uncaught Error: still an event|true"));
 }
 
-/// Chrome rows `other origin top level` and `other origin function`: an exception thrown in a
-/// script of another origin is muted for the page: "Script error.", no file, no position, no
-/// value. The script's origin is its URL's, also when the engine evaluates it under a name of
-/// its own (`alias_script`); the same origin under such a name is not muted.
+/// Chrome row `other origin top level`: at the script's top level, an `Error`, an object, a
+/// string, and code the script makes with `eval` and `Function`.
 #[test]
-fn another_origins_script_is_muted() {
-    let b = page();
-    assert!(b.evaluate_named("function theirs() { throw new Error('theirs'); } throw new Error('top');", "https://other.test/lib.js").is_err());
-    b.alias_script("script#7", "https://cdn.other.test/x.js");
-    b.alias_script("script#8", "https://example.test/own.js");
-    assert!(b.evaluate_named("throw new Error('aliased');", "script#7").is_err());
-    assert!(b.evaluate_named("throw new Error('ours');", "script#8").is_err());
-    b.evaluate_named("setTimeout(function () { theirs(); }, 0);", "inline#2").unwrap();
+fn another_origins_top_level_exception_is_reported_without_detail() {
+    for source in [
+        "throw new Error('theirs');",
+        "throw { secret: 1 };",
+        "throw 'their string';",
+        "eval(\"throw new Error('in eval')\");",
+        "new Function(\"throw new Error('in a made function')\")();",
+        "eval(\"throw 'a string in eval'\");",
+    ] {
+        let (b, threw) = page_with_theirs(source);
+        assert!(threw, "{source}");
+        assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED, "{source}");
+    }
+}
+
+/// Chrome rows `other origin function`, `other origin eval`, `other origin string`: in a timer
+/// and in an event listener, the script's own and the page's that call into it.
+#[test]
+fn another_origins_exception_in_a_callback_is_reported_without_detail() {
+    let theirs = "function theirError() { throw new Error('theirs'); } \
+        function theirString() { throw 'their string'; } function theirObject() { throw { secret: 1 }; } \
+        function theirEval() { eval(\"throw new Error('in eval')\"); } \
+        function theirMade() { new Function(\"throw new Error('in a made function')\")(); } \
+        var theirButton = document.getElementById('b');";
+    for call in ["theirError", "theirString", "theirObject", "theirEval", "theirMade"] {
+        // Their timer, their listener.
+        let (b, _) = page_with_theirs(&format!(
+            "{theirs} setTimeout({call}, 0); theirButton.addEventListener('click', {call}); theirButton.dispatchEvent(new Event('click'));"
+        ));
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.join(' ; ')"), format!("{MUTED} ; {MUTED}"), "their callbacks: {call}");
+        // The page's timer and listener, calling their function.
+        let (b, _) = page_with_theirs(theirs);
+        b.evaluate_named(
+            &format!("setTimeout(function () {{ {call}(); }}, 0); document.getElementById('b').addEventListener('click', function () {{ {call}(); }}); \
+                      document.getElementById('b').dispatchEvent(new Event('click'));"),
+            "inline#2",
+        )
+        .unwrap();
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.join(' ; ')"), format!("{MUTED} ; {MUTED}"), "the page's callbacks: {call}");
+    }
+}
+
+/// Chrome `rejections` (the other origin's rejection is not in it): a rejection made by such a
+/// script, at its top level and in a reaction that throws again, fires no `unhandledrejection`
+/// and no `error`; the engine's own report still has it.
+#[test]
+fn another_origins_rejection_fires_no_event() {
+    let (b, threw) = page_with_theirs(
+        "Promise.reject(new Error('their rejection')); \
+         Promise.resolve().then(function () { throw new Error('thrown in their reaction'); }); \
+         Promise.reject(new Error('caught, then thrown again')).catch(function (e) { throw e; });",
+    );
+    assert!(!threw);
     b.advance_timers(20, 10).unwrap();
-    let muted = "[object ErrorEvent]|Script error.||0|0|null|true|true|false|true";
+    assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "0 0");
+    // The page's own rejection still fires.
+    b.evaluate_named("Promise.reject(new Error('ours'));", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "0 1");
+}
+
+/// A resource of another origin that is not a script at all (markup served for a `src`): its
+/// syntax error is reported without detail, with nothing of its text.
+#[test]
+fn another_origins_syntax_error_is_reported_without_detail() {
+    let (b, threw) = page_with_theirs("<!doctype html><title>account 12345</title>");
+    assert!(threw);
+    assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED);
+}
+
+/// A script the engine did not register is one nothing is known of: without detail. So is every
+/// script past the table's room (4096), and from then on code that is in no script's frame.
+#[test]
+fn an_unregistered_script_is_reported_without_detail() {
+    let b = page();
+    assert!(b.evaluate_named("throw new Error('unknown');", "https://example.test/never-registered.js").is_err());
+    assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED);
+
+    let b = page();
+    for n in 0..5000 {
+        b.register_script(&format!("script#{n}"), &format!("https://example.test/{n}.js"), false);
+    }
+    // In the table: reported in full. Past it: not.
+    assert!(b.evaluate_named("throw new Error('early');", "script#7").is_err());
+    assert!(b.evaluate_named("function late() { throw 'late string'; } throw new Error('late');", "script#4999").is_err());
+    b.evaluate_named("setTimeout(function () { late(); }, 0); setTimeout(function () { throw 'the page, no frame'; }, 1);", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
     assert_eq!(
         ev(&b, "seen.join(' ; ')"),
-        format!("{muted} ; {muted} ; [object ErrorEvent]|Uncaught Error: ours|https://example.test/own.js|1|7|Error|true|true|false|true ; {muted}")
+        format!("[object ErrorEvent]|Uncaught Error: early|https://example.test/7.js|1|7|Error|true|true|false|true ; {MUTED} ; {MUTED} ; {MUTED}")
     );
+}
+
+/// Two documents of one tree evaluate different scripts under one name (`script#1` counts from
+/// each document's start). Neither answers for the other: with the name another origin's in
+/// either document, an exception under it is reported without detail in both.
+#[test]
+fn a_script_name_shared_by_two_documents_of_a_tree_is_reported_without_detail() {
+    let parent = page();
+    let child = parent.new_child().unwrap();
+    child
+        .set_document(Rc::new(Document::parse_html("<html><head></head><body></body></html>").unwrap()))
+        .unwrap();
+    child.set_location(&Url::parse("https://example.test/frame.html").unwrap()).unwrap();
+    child.register_script("frame-inline#1", "https://example.test/frame.html", false);
+    child.evaluate_named(WATCH, "frame-inline#1").unwrap();
+    // The parent's `script#1` is another origin's; the frame's own `script#1` is the frame's.
+    parent.register_script("script#1", "https://other.test/lib.js", true);
+    child.register_script("script#1", "https://example.test/frame-own.js", false);
+    assert!(child.evaluate_named("throw new Error('the frame own script');", "script#1").is_err());
+    assert!(parent.evaluate_named("throw new Error('theirs');", "script#1").is_err());
+    assert_eq!(ev(&parent, "seen.join(' ; ')"), MUTED);
+    assert_eq!(ev(&child, "seen.join(' ; ')"), MUTED);
+    // The frame gone, its names go with it; the parent's stays another origin's.
+    parent.drop_child(child);
+    assert!(parent.evaluate_named("throw new Error('theirs again');", "script#1").is_err());
+    assert_eq!(ev(&parent, "seen.join(' ; ')"), format!("{MUTED} ; {MUTED}"));
+}
+
+/// A document with no origin of its own to compare (about:blank here; the engine registers an
+/// external script of such a document as reported without detail: `rustkit-engine`
+/// `script_error_detail`): the event has no detail and no file.
+#[test]
+fn a_document_without_an_origin_reports_an_external_script_without_detail() {
+    let b = bare_page();
+    b.set_location(&Url::parse("about:blank").unwrap()).unwrap();
+    b.register_script("inline#1", "about:blank", false);
+    b.evaluate_named(WATCH, "inline#1").unwrap();
+    b.register_script("script#1", "https://other.test/lib.js", true);
+    assert!(b.evaluate_named("throw new Error('theirs');", "script#1").is_err());
+    assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED);
+}
+
+/// The controls: the page's own scripts stay reported in full while another origin's script is
+/// on the page: an external script of the page's origin (by the URL it ended at), inline code,
+/// and their callbacks. One cost is stated: once such a script is registered, a thrown value
+/// that is not an error and comes from a callback (no frame to place it in) is reported without
+/// detail, whoever threw it.
+#[test]
+fn the_pages_own_scripts_stay_reported_in_full() {
+    let (b, _) = page_with_theirs("var theirs = 1;");
+    b.register_script("script#2", "https://example.test/own.js", false);
+    assert!(b.evaluate_named("function ours() { throw new TypeError('ours, later'); } throw new Error('ours');", "script#2").is_err());
+    assert!(b.evaluate_named("throw new RangeError('inline');", "inline#2").is_err());
+    b.evaluate_named("setTimeout(ours, 0); setTimeout(function () { throw 'a string of ours'; }, 1);", "inline#3").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    let full = |message: &str, file: &str, line: u32, column: u32, error: &str| {
+        format!("[object ErrorEvent]|Uncaught {message}|{file}|{line}|{column}|{error}|true|true|false|true")
+    };
+    assert_eq!(
+        ev(&b, "seen.join(' ; ')"),
+        [
+            full("Error: ours", "https://example.test/own.js", 1, 63, "Error"),
+            full("RangeError: inline", DOC, 1, 7, "RangeError"),
+            full("TypeError: ours, later", "https://example.test/own.js", 1, 25, "TypeError"),
+            MUTED.to_string(),
+        ]
+        .join(" ; ")
+    );
+    // With no such script on the page, the same string is reported in full.
+    let b = page();
+    b.evaluate_named("setTimeout(function () { throw 'a string of ours'; }, 0);", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.join(' ; ')"), full("a string of ours", DOC, 0, 0, "a string of ours"));
+}
+
+/// What an `error` listener rejects after a script failed is announced in the same turn.
+#[test]
+fn a_rejection_made_by_an_error_listener_is_announced_in_the_same_turn() {
+    let b = page();
+    b.evaluate_named("window.addEventListener('error', function () { Promise.reject(new Error('from the listener')); });", "inline#2").unwrap();
+    assert!(b.evaluate_named("throw new Error('first');", "inline#3").is_err());
+    assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "1 1");
 }
