@@ -89,10 +89,10 @@
             return;
         }
         // Attributes present at upgrade time are "changed" from null.
-        var observed = def.observed;
-        if (observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
+        var observed = def.observedSet;
+        if (def.observed.length && def.attributeChanged && typeof el.getAttributeNames === 'function') {
             el.getAttributeNames().forEach(function (n) {
-                if (observed.indexOf(n) >= 0) call(def.attributeChanged, el, [n, null, el.getAttribute(n)]);
+                if (observed[n] === true) call(def.attributeChanged, el, [n, null, el.getAttribute(n)]);
             });
         }
         enqueueConnected(el, st);
@@ -226,16 +226,20 @@
         var def = {
             name: name, ctor: ctor,
             connected: callback('connectedCallback'), disconnected: callback('disconnectedCallback'),
-            attributeChanged: callback('attributeChangedCallback'), observed: []
+            attributeChanged: callback('attributeChangedCallback'), observed: [],
+            observedSet: Object.create(null)
         };
         if (def.attributeChanged) {
             var list = ctor.observedAttributes;
             if (list !== undefined && list !== null) def.observed = Array.from(list).map(String);
+            // The names as a set, and the names any definition watches: the attribute write path asks these
+            // two questions on every write, so they are property reads on null-prototype objects.
+            for (var oi = 0; oi < def.observed.length; oi++) def.observedSet[def.observed[oi]] = watched[def.observed[oi]] = true;
         }
         byName[name] = def;
         if (byCtor) byCtor.set(ctor, def);
         names.push(name);
-        if (HOOKS && !HOOKS.attrs) HOOKS.attrs = attrHook;
+        if (HOOKS && !HOOKS.attrs) { HOOKS.watched = watched; HOOKS.attrs = attrHook; }
         selector = names.join(',');
         if (shadowHost) shadowHost.call('define', document, name);
         // Every connected element of that name that already exists upgrades,
@@ -381,10 +385,16 @@
     var HOOKS = __rk.domHooks;
     var getAttr = Function.prototype.call.bind(g.Element.prototype.getAttribute);
     var lower = Function.prototype.call.bind(String.prototype.toLowerCase);
-    function attrHook(el, op, key) {
-        key = lower(key);
-        var st = stateOf(el);
-        if (!st || st.failed || !st.def.attributeChanged || st.def.observed.indexOf(key) < 0) return undefined;
+    // The one name lookup that is not a property read: `state` is a WeakMap, and `WeakMap.prototype.get` is taken
+    // here, before any page script runs.
+    var stateGet = Function.prototype.call.bind((typeof WeakMap === 'function' ? WeakMap : Map).prototype.get);
+    var watched = Object.create(null);  // names some definition observes
+    // `lowered`: the caller's name is a literal that is already lower case ('id', 'class').
+    function attrHook(el, op, key, lowered) {
+        if (lowered !== true) key = lower(key);
+        if (watched[key] !== true) return undefined;
+        var st = stateGet(state, el);
+        if (!st || st.failed || !st.def.attributeChanged || st.def.observedSet[key] !== true) return undefined;
         var old = getAttr(el, key);
         return function () {
             if (op === 'removeAttr' && old === null) return;

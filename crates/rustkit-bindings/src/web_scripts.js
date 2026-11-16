@@ -139,6 +139,14 @@
         },
         // A `src` set, or text written, on a script already in the document.
         changed: function (node, op, name) {
+            // Only a text change or a write of `async` or `src` matters to a script: asked first, because
+            // `isScript` reads two properties of the node.
+            if (op === 'setAttr') {
+                var len = String(name).length;
+                if (len !== 5 && len !== 3) return;
+            } else if (op !== 'setText') {
+                return;
+            }
             if (isScript(node) && op === 'setAttr' && String(name).toLowerCase() === 'async') node[FORCE] = false;
             if (fresh === 0 || !isScript(node)) return;
             if (op === 'setText' || (op === 'setAttr' && String(name).toLowerCase() === 'src')) prepare(node);

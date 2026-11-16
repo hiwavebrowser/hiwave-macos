@@ -106,7 +106,8 @@
                 if (op === 'setHTML') each(node, fresh);
                 return;
             }
-            if (isFrame(node) && isConnected(node) && op === 'setAttr' && String(name).toLowerCase() === 'src') navigate(node);
+            if (op !== 'setAttr' || String(name).length !== 3) return;
+            if (isFrame(node) && isConnected(node) && String(name).toLowerCase() === 'src') navigate(node);
         }
     }, null);
 
