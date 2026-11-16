@@ -501,7 +501,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "timelineNow", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -601,7 +601,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // counts from the same time as one the top document sets.
         Q.liveAt = -1; Q.liveReal = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
-        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.fakeReal = -1;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -664,11 +664,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (the bindings give a frame's realm the page's), captured here in each realm; nothing of one
     // realm's is kept on the record.
     var hostClock = window.performance && typeof window.performance.now === 'function' ? window.performance.now : null;
-    // The real clock's reading: the host clock, or, when a test sets `Q.fakeReal` (a number on the
-    // tree's own record, which no page script reaches), that value, so a test drives real time as a
-    // value instead of waiting on it (CLOCK-INFLATE's property test).
+    // The real clock's reading: the host clock. A test harness can stand a clock of its own in
+    // (`__rk.testRealMs`, a host function that only a test installs, through the host bookkeeping
+    // path), so a test drives real time as a value instead of waiting on it.
     function realMs() {
-        if (typeof Q.fakeReal === 'number' && Q.fakeReal >= 0) return Q.fakeReal;
+        var test = __rk.testRealMs;
+        if (typeof test === 'function') return test();
         return hostClock ? hostClock() : realNow() - Q.startedAt;
     }
     var DET_STEP = 0.1;
@@ -1061,7 +1062,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     //
     // `real`: `delta` is real time that has passed (the app's live loops),
     // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
-    __rk.advanceTimersFramed = function (delta, max, frameMs, real) {
+    __rk.advanceTimersFramed = function (delta, max, frameMs, real, before) {
         turnBegins();
         var target = Q.now + delta;
         var start = realNow();
@@ -3696,7 +3697,7 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, false)
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, false, 0.0)
     }
 
     /// [`Self::advance_timers_for_frame`] for a live turn on the real clock:
@@ -3710,7 +3711,21 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
-        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true)
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true, 0.0)
+    }
+
+    /// [`Self::advance_real_timers_for_frame`] for a turn that has already run `before_ms` of
+    /// real time before its timers (a resize's layout, a parked `load`): the turn's time is its
+    /// instant, `delta_ms` after the last turn's, not when its timers begin.
+    pub fn advance_real_timers_for_frame_since(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+        before_ms: f64,
+    ) -> Result<(u32, bool), BindingError> {
+        let before = if before_ms.is_finite() && before_ms > 0.0 { before_ms } else { 0.0 };
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true, before)
     }
 
     fn advance_timers_framed(
@@ -3719,10 +3734,11 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
         real: bool,
+        before_ms: f64,
     ) -> Result<(u32, bool), BindingError> {
         let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
-            "return __rk.advanceTimersFramed({}, {}, {}, {})",
-            delta_ms, max_callbacks, frame_ms, real
+            "return __rk.advanceTimersFramed({}, {}, {}, {}, {})",
+            delta_ms, max_callbacks, frame_ms, real, before_ms
         ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),

@@ -234,3 +234,21 @@ fn measure_zero_delay_chain() {
         }
     }
 }
+
+/// A real turn's timers count from the turn's instant, not from when its timer slice begins (#1183
+/// R1 follow-up): a turn that ran 40 ms of its own work before its timers (a resize's layout, a
+/// parked `load`) has a 100 ms timeout set in it come due 140 ms after the turn's time, as in a
+/// browser where the 40 ms have passed. Counted from the slice, it came due 40 ms early (100). Real
+/// time is a value here (the harness's `__rk.testRealMs`).
+#[test]
+fn a_real_turns_timers_count_from_the_turns_instant() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping("var fake = 1000; __rk.testRealMs = function () { return fake; }; return 0")
+        .unwrap();
+    b.evaluate("setTimeout(function () { setTimeout(function () {}, 100); }, 0);")
+        .unwrap();
+    b.advance_real_timers_for_frame_since(10, 1000, 0, 40.0).unwrap();
+    assert_eq!(b.next_timer_delay(), Some(140));
+}

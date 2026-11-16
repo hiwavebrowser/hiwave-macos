@@ -6914,6 +6914,9 @@ impl Engine {
 
     async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
+        // The turn's instant: on the real clock its timers count from here, not from when the
+        // timer slice begins after the turn's own work (CLOCK3 R1).
+        let turn_began = std::time::Instant::now();
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -6997,7 +7000,12 @@ impl Engine {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let (ran, yielded) = if real_clock {
-                        bindings.advance_real_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
+                        bindings.advance_real_timers_for_frame_since(
+                            elapsed_ms,
+                            live_timer_cap,
+                            LIVE_FRAME_MS,
+                            turn_began.elapsed().as_secs_f64() * 1000.0,
+                        )?
                     } else {
                         bindings.advance_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
                     };
