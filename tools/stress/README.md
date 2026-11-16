@@ -208,8 +208,10 @@ animation loop and every later test. To list everything that stops a suite in on
 - For the HiWave engines; refused for Chrome. `hiwave-headless` gets it as `--live-turn-budget-ms`
   (with `--interrupt-scripts`, which the flag requires). The app (`--engine hiwave`) reads the variable
   itself when it builds a content view's engine, and run.py starts it with the run's number; a run
-  without a raised budget starts the app with the variable removed, whatever the shell had. An app
-  started any other way, with the variable unset, is unchanged: 5000 ms.
+  without a raised budget starts the app with the variable removed, whatever the shell had. The app
+  honours it only beside `HIWAVE_CONSOLE_LOG` (which this harness always sets and a normal launch does
+  not have) and only up to 300000 ms; run.py refuses more for the app, and refuses the variable in
+  `--env` (it would not be recorded). An app started any other way is unchanged: 5000 ms.
 - Off unless set; the engine's default does not change. Whole milliseconds, 1 to 3600000; above the run's
   wall limit it is clamped to that limit.
 - It raises more than the stop: the same number is the turn's whole allowance of script time

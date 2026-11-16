@@ -489,6 +489,30 @@ def test_a_raised_budget_is_refused_for_chrome_only(monkeypatch, tmp_path):
     assert not (tmp_path / "out").exists()
 
 
+def test_the_budget_is_not_taken_through_env_and_the_app_takes_at_most_five_minutes(monkeypatch, tmp_path):
+    # Through --env the variable would reach the app with no flag in the record and no raised-budget line:
+    # a score nobody could tell from a default one. And the app ignores more than five minutes.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    base = ["run.py", "--suite", "motionmark", "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")]
+    for engine in ("hiwave", "hiwave-headless"):
+        monkeypatch.setattr(sys, "argv", base + ["--engine", engine, "--env", run.TURN_BUDGET_ENV + "=60000"])
+        try:
+            run.main()
+            raise AssertionError("took the budget through --env for %s" % engine)
+        except SystemExit as e:
+            assert "is not a --env variable" in str(e.code), e.code
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, str(run.APP_TURN_BUDGET_MAX_MS + 1))
+    monkeypatch.setattr(sys, "argv", base + ["--engine", "hiwave"])
+    try:
+        run.main()
+        raise AssertionError("started the app with more than it honours")
+    except SystemExit as e:
+        assert "at most 300000 ms for the app" in str(e.code), e.code
+    # The app honours the variable only beside the console log switch, which every app run has.
+    assert run.NET_LOG_ENV["HIWAVE_CONSOLE_LOG"] == "1"
+    assert not (tmp_path / "out").exists()
+
+
 def test_the_app_is_started_with_the_runs_budget_and_never_with_the_shells(monkeypatch):
     # A raised run: the app's environment has the run's number (the one after the clamp), and the record's
     # flags say so. A default run: nothing is passed, and a value the shell had is taken out of what the

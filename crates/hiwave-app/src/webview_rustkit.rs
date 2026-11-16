@@ -227,14 +227,26 @@ const LIVE_TURN_BUDGET_MS: u64 = 5_000;
 /// which starts the app with it for a suite run and records it in the run's
 /// `engine_flags`). Chrome has no such stop, and a benchmark's long
 /// end-of-test computation dies at 5 s; a run that wants to see what comes
-/// after it raises the budget, and its score says so. Unset, and for any
-/// value that is not a whole number of milliseconds from 1 to an hour, the
-/// budget is [`LIVE_TURN_BUDGET_MS`]: an app started normally is unchanged.
+/// after it raises the budget, and its score says so.
+///
+/// It is honoured only together with the console log switch
+/// ([`STRESS_MARKER_ENV`], which the harness always starts the app with and
+/// a normal launch does not have), and only as a whole number of
+/// milliseconds from 1 to five minutes. Otherwise the budget is
+/// [`LIVE_TURN_BUDGET_MS`]: one stray variable changes nothing, and an app
+/// started normally is unchanged.
 const STRESS_TURN_BUDGET_ENV: &str = "HIWAVE_STRESS_TURN_BUDGET_MS";
-const STRESS_TURN_BUDGET_MAX_MS: u64 = 3_600_000;
+const STRESS_TURN_BUDGET_MAX_MS: u64 = 300_000;
+/// The harness's own marker on every app it starts: the console and
+/// request log it reads the run from (`NET_LOG_ENV` in run.py).
+const STRESS_MARKER_ENV: &str = "HIWAVE_CONSOLE_LOG";
 
-/// The live turn's budget for `raw`, the variable's value if it is set.
-fn live_turn_budget_ms(raw: Option<&str>) -> u64 {
+/// The live turn's budget: `raw` is the budget variable's value and
+/// `marker` the console log switch's, each if set.
+fn live_turn_budget_ms(raw: Option<&str>, marker: Option<&str>) -> u64 {
+    if !marker.is_some_and(|marker| !marker.is_empty() && marker != "0") {
+        return LIVE_TURN_BUDGET_MS;
+    }
     raw.filter(|raw| !raw.is_empty() && raw.len() <= 8 && raw.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| (1..=STRESS_TURN_BUDGET_MAX_MS).contains(ms))
@@ -243,7 +255,10 @@ fn live_turn_budget_ms(raw: Option<&str>) -> u64 {
 
 /// The engine builder for content views, before the shield is attached.
 fn content_engine_builder() -> EngineBuilder {
-    let turn_budget = live_turn_budget_ms(std::env::var(STRESS_TURN_BUDGET_ENV).ok().as_deref());
+    let turn_budget = live_turn_budget_ms(
+        std::env::var(STRESS_TURN_BUDGET_ENV).ok().as_deref(),
+        std::env::var(STRESS_MARKER_ENV).ok().as_deref(),
+    );
     if turn_budget != LIVE_TURN_BUDGET_MS {
         warn!(budget_ms = turn_budget, default_ms = LIVE_TURN_BUDGET_MS, "Live turn budget raised for a stress run");
     }
@@ -1751,15 +1766,23 @@ mod tests {
         assert_eq!(rustkit_engine::EngineConfig::default().script_budget_ms, 5_000);
     }
 
-    /// The stress harness's variable raises the budget; anything else leaves 5 s.
+    /// The stress harness's variable raises the budget only beside the harness's marker (the
+    /// console log switch), and only up to five minutes; anything else leaves 5 s.
     #[test]
     fn the_live_turn_budget_is_five_seconds_unless_a_stress_run_set_it() {
-        assert_eq!(live_turn_budget_ms(None), 5_000);
-        assert_eq!(live_turn_budget_ms(Some("60000")), 60_000);
-        assert_eq!(live_turn_budget_ms(Some("1")), 1);
-        assert_eq!(live_turn_budget_ms(Some("3600000")), 3_600_000);
-        for unchanged in ["", "0", "3600001", "-5", "60s", " 60000", "6e4", "999999999"] {
-            assert_eq!(live_turn_budget_ms(Some(unchanged)), 5_000, "{unchanged:?}");
+        assert_eq!(live_turn_budget_ms(None, None), 5_000);
+        assert_eq!(live_turn_budget_ms(None, Some("1")), 5_000);
+        // The variable alone, as a stray one in a user's environment would be: unchanged.
+        for marker in [None, Some(""), Some("0")] {
+            assert_eq!(live_turn_budget_ms(Some("60000"), marker), 5_000, "{marker:?}");
+        }
+        // With the marker: raised.
+        assert_eq!(live_turn_budget_ms(Some("60000"), Some("1")), 60_000);
+        assert_eq!(live_turn_budget_ms(Some("60000"), Some("/tmp/console.jsonl")), 60_000);
+        assert_eq!(live_turn_budget_ms(Some("1"), Some("1")), 1);
+        assert_eq!(live_turn_budget_ms(Some("300000"), Some("1")), 300_000);
+        for unchanged in ["", "0", "300001", "3600000", "-5", "60s", " 60000", "6e4", "999999999"] {
+            assert_eq!(live_turn_budget_ms(Some(unchanged), Some("1")), 5_000, "{unchanged:?}");
         }
     }
 

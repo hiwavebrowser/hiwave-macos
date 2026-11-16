@@ -698,6 +698,9 @@ TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
 ENGINE_TURN_BUDGET_MS = 5000
 # What parity-capture's --live-turn-budget-ms takes at most (an hour).
 TURN_BUDGET_MAX_MS = 3600000
+# What the app honours at most (hiwave-app `STRESS_TURN_BUDGET_MAX_MS`), and only when it is started with
+# the console log on, which every app this harness starts is (NET_LOG_ENV).
+APP_TURN_BUDGET_MAX_MS = 300000
 
 
 def turn_budget_ms():
@@ -881,11 +884,19 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
-    extra_env = suite_env(args.suite, dict(kv.split("=", 1) for kv in args.env))
+    asked = dict(kv.split("=", 1) for kv in args.env)
+    if TURN_BUDGET_ENV in asked:
+        # Through --env it would reach the app unrecorded: no flag, no raised-budget line, no clamp.
+        sys.exit("%s is not a --env variable: set it in the environment of this command (%s=<ms> python3 "
+                 "tools/stress/run.py ...), which records it in the run" % (TURN_BUDGET_ENV, TURN_BUDGET_ENV))
+    extra_env = suite_env(args.suite, asked)
     turn_budget = turn_budget_ms()
     if turn_budget is not None:
         if args.engine == "chrome":
             sys.exit("%s is for the HiWave engines only (Chrome has no such watchdog)" % TURN_BUDGET_ENV)
+        if args.engine == "hiwave" and turn_budget > APP_TURN_BUDGET_MAX_MS:
+            sys.exit("%s is at most %d ms for the app (it ignores more), not %d"
+                     % (TURN_BUDGET_ENV, APP_TURN_BUDGET_MAX_MS, turn_budget))
         print("TURN BUDGET RAISED: the live turn's script watchdog is %d ms, not the engine's %d (%s): "
               "this run finds blockers; its score is not a default-engine score and report.py keeps it apart"
               % (turn_budget, ENGINE_TURN_BUDGET_MS, TURN_BUDGET_ENV), file=sys.stderr)
