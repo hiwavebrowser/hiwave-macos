@@ -100,6 +100,44 @@ fn the_frame_scan_and_size_run_no_page_function() {
     assert_eq!((requests, size), (vec![node], (120.0, 40.0)));
 }
 
+/// The initial about:blank's `load` is asked for only when something
+/// could hear it at the insertion, where Chrome fires it
+/// (docs/diagnostics/2026-11-15/frame_load_cft148.json): the frame's own
+/// listener or handler, or a capturing listener above it. A bubbling
+/// listener above, the window's, and a frame inserted with a `src` do not
+/// make a blank load; a later `src` is never quiet.
+#[test]
+fn a_blank_frame_nothing_listens_to_is_asked_for_quietly() {
+    let (parent, _doc) = parent();
+    parent.scan_frames().unwrap();
+    let _ = parent.take_frame_requests();
+    ev(
+        &parent,
+        "function frame(prep, where) { var f = document.createElement('iframe'); if (prep) prep(f); (where || document.body).appendChild(f); return f; } \
+         var none = function () {}; \
+         window.addEventListener('load', none, true); \
+         var up = document.createElement('div'); up.addEventListener('load', none); document.body.appendChild(up); \
+         var cap = document.createElement('div'); cap.addEventListener('load', none, true); document.body.appendChild(cap); \
+         frame(null); \
+         frame(function (f) { f.addEventListener('load', none); }); \
+         frame(function (f) { f.onload = none; }); \
+         frame(function (f) { f.setAttribute('onload', '0'); }); \
+         frame(null, up); \
+         frame(null, cap); \
+         frame(function (f) { f.src = 'http://example.test/a'; }); \
+         frame(null).src = 'http://example.test/b'; 0",
+    );
+    let got: Vec<String> = parent
+        .take_frame_requests()
+        .into_iter()
+        .map(|r| format!("{}:{}", r.url.as_deref().unwrap_or("-").rsplit('/').next().unwrap_or(""), r.quiet))
+        .collect();
+    assert_eq!(
+        got.join(" "),
+        "about:blank:true about:blank:false about:blank:false about:blank:false about:blank:true about:blank:false a:false about:blank:true b:false"
+    );
+}
+
 /// A frame's `top` is the tree's top window, whatever the parent's page
 /// has defined as its own `top`, and attaching runs no page function.
 #[test]

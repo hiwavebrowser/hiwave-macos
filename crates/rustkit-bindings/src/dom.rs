@@ -3108,7 +3108,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadHeard = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -6717,6 +6717,21 @@ const WRAPPERS_JS: &str = r#"
         // A composed event goes on from a shadow root to its host.
         return p || (HOOKS.shadowParent ? HOOKS.shadowParent(n, event) : null);
     }
+    // Would a `load` dispatched at `target` right now call anything: its
+    // own listener or handler, or a capturing listener above it (`load`
+    // does not bubble and stops at the document)? For web_frames.js, which
+    // decides at an iframe's insertion whether its blank `load` is heard.
+    HOOKS.loadHeard = function (target) {
+        var t = thisTarget(target);
+        if (typeof handlerOf(t, 'load') === 'function') return true;
+        for (var n = t; n && n !== g; n = n === doc || !n[SLOT] ? null : n.parentNode) {
+            var all = LISTENERS.get(n), list = all && all.load;
+            for (var i = 0; list && i < list.length; i++) {
+                if (n === t || list[i].capture) return true;
+            }
+        }
+        return false;
+    };
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
     // checkbox before its listeners run and clicks a label's control after.

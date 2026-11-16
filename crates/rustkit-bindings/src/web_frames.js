@@ -13,7 +13,10 @@
 //
 // Stated limits of this stage: `contentWindow` is `null` until the engine
 // has drained the request (after the script that inserted the frame
-// returns; HTML makes it `about:blank` at once). A cross-origin frame is
+// returns; HTML makes it `about:blank` at once). The blank document's
+// `load` comes with it, a turn late, and only when something could hear it
+// at the insertion, where Chrome fires it: a handler set after the
+// insertion never hears the blank `load` (`navigate`). A cross-origin frame is
 // left blank: `contentWindow` and `contentDocument` stay `null`, and `load`
 // fires. `srcdoc`, `name` targeting and `window.frames[i]` are not here.
 (function (g) {
@@ -61,11 +64,16 @@
         if (src === null || trim(src) === '') return 'about:blank';
         try { return new URL_(src, (baseURI ? baseURI(doc) : doc.baseURI) || g.location.href).href; } catch (e) { return 'about:blank'; }
     }
-    function navigate(el) {
+    // `inserted`: the frame just went into the document. Chrome fires the
+    // initial about:blank's `load` inside the insertion, so only what
+    // listens by then hears it; the engine's comes after the inserting
+    // script returns, so it is asked for only if something listens now.
+    function navigate(el, inserted) {
         var id = HOOKS.nodeId(el);
         if (id < 0) return;
+        var url = target(el);
         frames[id] = record(el);
-        request(id, target(el));
+        request(id, url, !!inserted && url === 'about:blank' && !!HOOKS.loadHeard && !HOOKS.loadHeard(el));
     }
     function gone(el) {
         var id = HOOKS.nodeId(el);
@@ -76,7 +84,7 @@
 
     HOOKS.frames = Object.setPrototypeOf({
         tree: function (op, node) {
-            if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f); });
+            if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f, true); });
             else if (op === 'remove') each(node, gone);
         },
         changed: function (node, op, name) {

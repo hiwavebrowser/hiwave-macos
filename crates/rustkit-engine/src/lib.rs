@@ -6734,8 +6734,13 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 view.frames.insert(request.node, FrameState { view: fid, url: target });
             }
-            if let Some(parent) = parent_of(self, id) {
-                let _ = parent.frame_loaded(request.node);
+            // The initial about:blank of a frame nothing listened to at
+            // its insertion: Chrome fired that `load` inside the insertion,
+            // so a handler set since must not hear it now.
+            if !request.quiet {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node);
+                }
             }
             changed = true;
         }

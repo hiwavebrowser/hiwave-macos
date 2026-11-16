@@ -1351,11 +1351,14 @@ impl Drop for InRealm<'_> {
 
 /// What a page asked of its frames (web_frames.js): show `url` in the
 /// iframe element `node` (`Some`), or that element left the document
-/// (`None`).
+/// (`None`). `quiet`: the document is the initial about:blank of a frame
+/// nothing listened to when it was inserted, so its `load` is not fired at
+/// the element (Chrome fired it inside the insertion, to nobody).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameRequest {
     pub node: usize,
     pub url: Option<String>,
+    pub quiet: bool,
 }
 
 pub struct DomBindings {
@@ -1449,7 +1452,7 @@ impl DomBindings {
         let mut runtime = self.runtime.borrow_mut();
         runtime.register_host_function(
             "__rustkit_frame_request",
-            2,
+            3,
             Box::new(move |args| {
                 if let Some(JsValue::Number(node)) = args.first() {
                     let url = match args.get(1) {
@@ -1459,7 +1462,8 @@ impl DomBindings {
                     let mut queue = queue.borrow_mut();
                     // Bounds what a page can park between two drains.
                     if queue.len() < 256 {
-                        queue.push(FrameRequest { node: *node as usize, url });
+                        let quiet = matches!(args.get(2), Some(JsValue::Boolean(true)));
+                        queue.push(FrameRequest { node: *node as usize, url, quiet });
                     }
                 }
                 JsValue::Null
