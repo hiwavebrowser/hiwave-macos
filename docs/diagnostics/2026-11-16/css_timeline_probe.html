@@ -13,7 +13,9 @@
 //   inFrame   5 frames of a CSS animation running since load: [t === timeline.currentTime,
 //             c.startTime + c.currentTime - timeline.currentTime, c.startTime]: one timeline?
 //             a start time that stays put?
-//   inTask    3 timer tasks: [c.startTime + c.currentTime - timeline.currentTime, c.startTime]
+//   inTask    5 timer tasks 37 ms apart: [c.startTime + c.currentTime - timeline.currentTime,
+//             c.startTime, c.currentTime - computed opacity * 10000]: what does a computed read in
+//             a task return, the value for the time currentTime reports?
 //   start     5 times, in a timer task: the class that starts an animation is set and the style
 //             read (getComputedStyle), then at once [timeline T, getAnimations().length, pending,
 //             playState, startTime, currentTime]; in the next frame (next) and the one after
@@ -45,8 +47,8 @@ function inTaskPart(next) {
   var c = a.getAnimations()[0];
   (function f() {
     setTimeout(function () {
-      rec.inTask.push([r2(c.startTime + c.currentTime - tl()), r2(c.startTime)]);
-      if (rec.inTask.length < 3) f(); else next();
+      rec.inTask.push([r2(c.startTime + c.currentTime - tl()), r2(c.startTime), r2(c.currentTime - parseFloat(getComputedStyle(a).opacity) * 10000)]);
+      if (rec.inTask.length < 5) f(); else next();
     }, 37);
   })();
 }
