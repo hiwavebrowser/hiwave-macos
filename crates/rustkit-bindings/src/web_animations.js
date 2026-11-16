@@ -430,9 +430,9 @@
     }
     function frame(ts) {
         frameQueued = false;
-        // The timeline runs on the engine's virtual frame clock, not on the callback's timestamp
-        // (the page clock, which also moves in real time between virtual steps): a capture that
-        // steps the clock reproduces.
+        // CSS animations and transitions run on the engine's clock (`timeNow`, their start
+        // times'); script animations on the timeline, the frame's stamp (`ft`), which a load-only
+        // capture stamps on the exact grid (`EngineConfig::grid_frame_stamps`), so it reproduces.
         var vt = typeof __rk.now === 'function' ? __rk.now() : ts;
         if (typeof vt === 'number' && vt > timeNow) timeNow = vt;
         var ft = tnow();
@@ -591,8 +591,10 @@
         if (!isFinite(rate)) throw new TypeError("playbackRate must be a finite number");
         var ct = this.currentTime;
         this._rate = rate;
-        if (ct != null && this._holdTime == null && this._startTime != null && this._pending !== 'pause') {
-            if (rate === 0) this._holdTime = ct;
+        if (ct != null && this._holdTime == null && this._startTime != null) {
+            // A pause waiting for its frame is held here, at the time it reads (Chrome
+            // `timeline_probe` "pauseRate": the same before and after `playbackRate = 2`, and after).
+            if (rate === 0 || this._pending === 'pause') this._holdTime = ct;
             else this._startTime = tnow() - ct / rate;
         }
     };

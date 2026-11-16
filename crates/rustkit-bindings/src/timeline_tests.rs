@@ -75,8 +75,10 @@ fn a_task_after_a_frame_reads_that_frames_time() {
 
 /// A task after a long idle reads the grid point at or before its time, not the last frame's
 /// (Chrome "idle": 0.6-16.1 ms before `performance.now()` after 300 ms with no frame), the same
-/// twice; and the frame it then asks for, the frame of that grid point, is stamped with it. Here a
-/// frame at 17, then a timer at 1005: the grid point 1000.
+/// twice; and the frame it then asks for, the frame of that grid point, is stamped with it (Chrome:
+/// in 15 of 25 idle rows; in the other 10 the frame is the next grid point, +16.6, the request
+/// landing after Chrome's tick, the shape of the named long-callback divergence). Here a frame at
+/// 17, then a timer at 1005: the grid point 1000.
 #[test]
 fn an_idle_task_reads_the_grid_point_before_it() {
     let b = page();

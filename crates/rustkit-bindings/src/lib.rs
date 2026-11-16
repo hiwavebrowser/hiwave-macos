@@ -588,7 +588,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // from nothing.
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
-        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.gridStamps = false;
+        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -806,10 +806,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 // times every run. And a frame a task already read the timeline of (its grid
                 // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
                 // the task equals the frame's `t`.
-                if (!Q.det && Q.aheadAt === Q.now) ts = at;
+                if (!Q.det && (Q.gridStamps || Q.aheadAt === Q.now)) ts = at;
                 if (Q.tlAt === at) ts = Q.tlTs;
                 if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
                 if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
+                // Nor below a timeline time a task was handed (`__rk.timelineNow`).
+                if (ts < Q.tlHigh) ts = Q.tlHigh;
                 Q.frameTs = ts;
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
@@ -986,9 +988,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // so a task reads one value however long it runs, and a capture reproduces it); never below
     // the last frame's stamp. The frame of that grid point is then stamped with the same value.
     // From this document's origin, never before it.
+    // While a frame is overdue or asked for, a task reads the last frame's time: the timeline moves
+    // on at that frame (Chrome `timeline_probe` "overdue": a task run before a frame a long task
+    // held up reads T0 + 0, the frame then T0 + 16.7), so it never goes back.
+    function framePending() {
+        for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
+        return false;
+    }
     __rk.timelineNow = function () {
         var ts = Q.frameTs;
-        if (!Q.inFrame) {
+        if (!Q.inFrame && !framePending()) {
             var g = frameAt(gridAtOrBefore(Q.now));
             if (g > Q.prevFrameAt || Q.prevFrameTs < 0) {
                 if (Q.tlAt !== g) {
@@ -998,6 +1007,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 ts = Q.tlTs;
             }
         }
+        if (ts > Q.tlHigh) Q.tlHigh = ts;
         var t = ts - base;
         return t < 0 ? 0 : t;
     };

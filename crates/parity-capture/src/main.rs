@@ -2323,6 +2323,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     // The stepped clock only when asked for, and only for a stepped capture; a live run reads a clock
     // that flows.
     config.deterministic_page_clock = args.deterministic_clock && args.live_ms.is_none();
+    // Animation frames stamped on the exact grid in a load-only capture, so script animations read
+    // the same times every run (TIMELINE1); a live run's stamps follow the clock it reads.
+    config.grid_frame_stamps = args.live_ms.is_none();
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
