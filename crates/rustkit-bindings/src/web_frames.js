@@ -168,7 +168,12 @@
                 var snap = heardAt[id];
                 delete heardAt[id];
                 if (snap && HOOKS.loadReplay) HOOKS.loadReplay(snap, ev);
-            } else __rk.dispatchTo(r.el, ev);
+            } else {
+                // A record still held is for a blank document that was
+                // never made (a frame left blank by the engine): let it go.
+                delete heardAt[id];
+                __rk.dispatchTo(r.el, ev);
+            }
             return true;
         },
         // The child's viewport until layout sizes frames (Stage 3): the

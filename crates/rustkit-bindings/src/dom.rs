@@ -2893,6 +2893,8 @@ const WRAPPERS_JS: &str = r#"
     // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
     // or `Object.defineProperty` afterwards changes nothing here.
     var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    // The constructor of install time too, for a set made later.
+    var WeakSetNow = WeakSet;
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
@@ -6761,7 +6763,7 @@ const WRAPPERS_JS: &str = r#"
     HOOKS.loadSnapshot = function (target, parsed) {
         var t = thisTarget(target), s = t[SLOT], a = parsed ? undefined : ASSIGNED.get(t);
         var snap = objCreate(null), any = false;
-        snap.target = t; snap.event = null; snap.handler = null; snap.src = null; snap.entries = new WeakSet();
+        snap.target = t; snap.event = null; snap.handler = null; snap.src = null; snap.entries = new WeakSetNow();
         if (a && 'load' in a) { if (typeof a.load === 'function') snap.handler = a.load; }
         else if (s && s.gen === gen) {
             var src = N.attr(s.gen, s.id, 'onload');

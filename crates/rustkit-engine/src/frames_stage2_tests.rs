@@ -207,6 +207,10 @@ fn markup_frames_and_replaced_handlers_hear_the_loads_chrome_fires() {
     // about:blank where Chrome shows its srcdoc document. One `load` each.
     assert_eq!(want["attrSrcdoc"], serde_json::json!(["srcdoc"]));
     want["attrSrcdoc"] = serde_json::json!(["blank"]);
+    // Known difference: a listener removed between the insertion and the replay is not called.
+    // Chrome fired the `load` inside the insertion, while the listener was still on.
+    assert_eq!(want["removedAfterInsertion"], serde_json::json!(["blank"]));
+    want["removedAfterInsertion"] = serde_json::json!([]);
     assert_eq!(got, want);
 }
 

@@ -19,6 +19,9 @@
   "replacedAfter": [],
   "attrThenReplaced": [
    "blank"
+  ],
+  "removedAfterInsertion": [
+   "blank"
   ]
  },
  "browser": "148.0.7778.216"
