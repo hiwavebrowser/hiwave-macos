@@ -32,7 +32,7 @@ impl Throw {
         let mut error = JsError::from_opaque(value.clone());
         // HIWAVE PATCH (error-detail): thrown by this frame's code, also
         // when a handler in this frame takes it.
-        error.detail_withheld = Some(context.vm.frame().code_block.error_detail_withheld());
+        error.detail_withheld = context.vm.page_error_detail(0);
         // END HIWAVE PATCH
         context.vm.pending_exception = Some(error);
 

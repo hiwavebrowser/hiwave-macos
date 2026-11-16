@@ -851,7 +851,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function call(timer) {
         try {
             if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
-            else evalNow(toText(timer.cb));
+            else { __rk.documentCode(); evalNow(toText(timer.cb)); } // a string timer is the document's code
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
@@ -2951,9 +2951,11 @@ impl DomBindings {
 
     /// Evaluate a script in the bound context.
     pub fn evaluate(&self, script: &str) -> Result<JsValue, BindingError> {
+        // Run in the page as the page's own code (a host's script for the
+        // document), not as the engine's.
         self.runtime
             .borrow_mut()
-            .evaluate_script(script)
+            .evaluate_document_script(script)
             .map_err(Into::into)
     }
 

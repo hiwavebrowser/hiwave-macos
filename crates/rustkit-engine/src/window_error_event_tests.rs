@@ -119,6 +119,16 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
         &format!("Uncaught SyntaxError: Failed to execute 'appendChild' on 'Node': Unexpected token '=' | (the document, or none) | error SyntaxError | positioned true | {own}"),
         Some(&format!("Uncaught SyntaxError: expected token 'identifier', got '=' in identifier parsing at line 1, col 5 | window_error_page.js | error SyntaxError | positioned true | {own}")),
     );
+    // The engine's own errors for the page's calls: its wording, and no position (the error is
+    // made in the engine's code); an invalid selector of this shape does not throw here.
+    differ(
+        &format!("Uncaught HierarchyRequestError: Failed to execute 'appendChild' on 'Node': The new child element contains the parent. | window_error_page.js | error HierarchyRequestError | positioned true | {own}"),
+        Some(&format!("Uncaught HierarchyRequestError: Failed to execute 'appendChild' on 'Node'. | (the document, or none) | error HierarchyRequestError | positioned false | {own}")),
+    );
+    differ(
+        &format!("Uncaught SyntaxError: Failed to execute 'querySelector' on 'Document': '#page!!' is not a valid selector. | window_error_page.js | error SyntaxError | positioned true | {own}"),
+        None,
+    );
     // A module script a script inserts is `import()`ed here: its exception rejects that promise
     // and the element hears `error`; no event at the Window. (A module in the markup fires one:
     // the next test.)
@@ -135,7 +145,31 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
         assert_eq!((call["n"].as_u64(), call["thisIsWindow"].as_bool()), (Some(5), Some(true)), "{call}");
     }
     let field = |name: &str| (got[name].clone(), pin[name].clone());
-    for name in ["rejections", "frame", "inHandler", "syncAfterDispatch", "preventSeen", "reportError", "reportErrorSync",
+    // The page's rejections: `Promise.any`'s error and a failed import have the engine's own
+    // wording here.
+    let reasons = |record: &serde_json::Value| -> Vec<String> {
+        record["rejections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reason| reason.as_str().unwrap_or("?").to_string())
+            .map(|reason| {
+                if reason == "All promises were rejected" || reason.starts_with("no promise in Promise.any") {
+                    "(any)".to_string()
+                } else if reason.starts_with("Failed to fetch dynamically imported module") {
+                    "TypeError: a failed import".to_string()
+                } else {
+                    reason
+                }
+            })
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
+            .collect()
+    };
+    // As sets: the order of announcements across tasks is not held here, and the second
+    // failed import of one URL is the same reason.
+    assert_eq!(reasons(&got), reasons(&pin));
+    for name in ["frame", "inHandler", "syncAfterDispatch", "preventSeen", "reportError", "reportErrorSync",
                  "reportErrorSame", "reportErrorNoArg", "pageDispatchCallsOnerror"] {
         let (here, chrome) = field(name);
         assert_eq!(here, chrome, "{name}");

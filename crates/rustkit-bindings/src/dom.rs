@@ -6530,6 +6530,8 @@ const WRAPPERS_JS: &str = r#"
     // depends on the throw, and one compile path is one place to get right.
     function compileHandler(src, el) {
         try {
+            // A handler attribute is the document's code, whoever set it.
+            __rk.documentCode();
             return new Function('__rk_doc', '__rk_el',
                 'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
             )(el.ownerDocument || {}, el);

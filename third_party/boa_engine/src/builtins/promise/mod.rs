@@ -91,6 +91,11 @@ pub struct Promise {
     // See PATCHES.md.
     #[unsafe_ignore_trace]
     rejection_detail_withheld: Option<bool>,
+    // The flag of the page script that was running when the promise's
+    // resolving functions were made (the code it was made for): what a
+    // rejection the engine makes later, with no script running, falls to.
+    #[unsafe_ignore_trace]
+    maker_detail_withheld: Option<bool>,
     // END HIWAVE PATCH
 }
 
@@ -500,6 +505,7 @@ impl Promise {
             reject_reactions: Vec::default(),
             handled: false,
             rejection_detail_withheld: None, // HIWAVE PATCH (error-detail)
+            maker_detail_withheld: None,     // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -553,6 +559,7 @@ impl Promise {
             reject_reactions: Vec::default(),
             handled: false,
             rejection_detail_withheld: None, // HIWAVE PATCH (error-detail)
+            maker_detail_withheld: None,     // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -2411,6 +2418,18 @@ impl Promise {
         promise: &JsObject<Promise>,
         context: &mut Context,
     ) -> ResolvingFunctions {
+        // HIWAVE PATCH (error-detail): made for the page script running now
+        // (the first time: a thenable job makes a second pair later, with
+        // no script running).
+        {
+            let made_for = context.vm.page_error_detail(0);
+            let mut promise = promise.borrow_mut();
+            let promise = promise.data_mut();
+            if promise.maker_detail_withheld.is_none() {
+                promise.maker_detail_withheld = made_for;
+            }
+        }
+        // END HIWAVE PATCH
         /// `TriggerPromiseReactions ( reactions, argument )`
         ///
         /// The abstract operation `TriggerPromiseReactions` takes arguments `reactions` (a `List` of
@@ -2528,10 +2547,13 @@ impl Promise {
                 // HIWAVE PATCH (error-detail): which code rejected it. A
                 // reason that was just thrown (a reaction or an async body
                 // that threw) or passed on from another promise carries its
-                // note; otherwise it is the code calling the reject function.
+                // note; otherwise it is the page script calling the reject
+                // function (the embedder's own code is passed over); with
+                // no script running, the script the promise was made for.
                 let detail = context
                     .take_error_detail_note(&reason)
-                    .or_else(|| context.running_error_detail_withheld(0));
+                    .or_else(|| context.vm.page_error_detail(0))
+                    .or(promise.maker_detail_withheld);
                 promise.rejection_detail_withheld = detail;
                 // END HIWAVE PATCH
 
@@ -2781,6 +2803,16 @@ fn new_promise_reaction_job(
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
             Some(handler) => {
+                // HIWAVE PATCH (error-detail): a native handler of a reject
+                // reaction (a combinator's element function, `finally`'s
+                // thrower, an `await`) passes the reason on: the promise it
+                // rejects with it takes the rejected promise's flag.
+                if matches!(reaction_type, ReactionType::Reject)
+                    && handler.callback().downcast_ref::<NativeFunctionObject>().is_some()
+                {
+                    context.vm.error_detail_note = detail.map(|withheld| (argument.clone(), withheld));
+                }
+                // END HIWAVE PATCH
                 // HIWAVE PATCH (interrupt): a reaction with no capability is
                 // the engine's own (an `await` resuming its body, a module's
                 // async evaluation, `import()`'s steps; script's `then` always

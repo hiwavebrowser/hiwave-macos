@@ -178,15 +178,14 @@ impl Default for Context {
 // ==== Public API ====
 // HIWAVE PATCH (error-detail): what a host asks about the running code.
 impl Context {
-    /// The error-detail flag of the code running `depth` script frames
-    /// below the innermost (0: the code that called the native now
-    /// running); `None` when there is no such frame.
+    /// Whether errors of the page script that is running are reported
+    /// without detail: the innermost frame that is not the embedder's own
+    /// code, `depth` such frames further out (0: the page code on whose
+    /// behalf the native now running was called). `None` when no page
+    /// script is running.
     #[must_use]
     pub fn running_error_detail_withheld(&self, depth: usize) -> Option<bool> {
-        let frames = &self.vm.frames;
-        // The frame at 0 is the VM's own.
-        let index = frames.len().checked_sub(1 + depth).filter(|index| *index >= 1)?;
-        Some(frames[index].code_block.error_detail_withheld())
+        self.vm.page_error_detail(depth)
     }
 
     /// If `value` is the last raised error that became a value (it was

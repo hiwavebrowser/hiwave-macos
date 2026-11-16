@@ -1520,7 +1520,17 @@ impl JsRuntime {
     /// page's own scripts go through
     /// [`evaluate_script_named`](Self::evaluate_script_named)).
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
-        self.evaluate(source, None)
+        self.evaluate(source, None, false)
+    }
+
+    /// Evaluate JavaScript code the embedder runs in the page as the page's
+    /// own (a console's input, a test's script): unnamed, as
+    /// [`evaluate_script`](Self::evaluate_script), so its frames are passed
+    /// over in reports and its uncaught exception is not announced; but it
+    /// is the document's code, not the embedder's: what it rejects is
+    /// announced to the page, and an error raised for its calls is its own.
+    pub fn evaluate_document_script(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, None, true)
     }
 
     /// Evaluate JavaScript code as the script `path`: error positions,
@@ -1528,7 +1538,7 @@ impl JsRuntime {
     /// as a URL (`inline#3`) leaves dynamic `import()` resolving against the
     /// document, as an unnamed script does.
     pub fn evaluate_script_named(&mut self, source: &str, path: &str) -> Result<JsValue, JsError> {
-        self.evaluate(source, Some(path))
+        self.evaluate(source, Some(path), false)
     }
 
     /// Hand every source this runtime evaluates from now on to `tap`, the
@@ -1540,7 +1550,7 @@ impl JsRuntime {
         self.source_tap = tap;
     }
 
-    fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
+    fn evaluate(&mut self, source: &str, path: Option<&str>, documents: bool) -> Result<JsValue, JsError> {
         self.realm_gone()?;
         trace!(len = source.len(), "Evaluating script");
         if let Some(tap) = self.source_tap.as_ref() {
@@ -1557,20 +1567,25 @@ impl JsRuntime {
             self.context.reset_recursion_max();
             // The script's code is compiled carrying what was registered
             // for it (`register_script`); the embedder's own carries none.
-            let _detail = boa_engine::vm::ErrorDetailScope::enter(
-                path.is_some_and(|path| self.diag.compiles_withheld(path, self.current_realm.0)),
-            );
-            let result = match path {
-                Some(path) => {
-                    self.diag.know_path(path);
-                    self.sources.remember(path, source);
-                    self.context
-                        .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
-                }
-                None => self
-                    .context
-                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
+            // Only while it is compiled: what runs later compiles its own.
+            use boa_engine::vm::{ErrorDetail, ErrorDetailScope};
+            let detail = match path {
+                Some(path) if self.diag.compiles_withheld(path, self.current_realm.0) => ErrorDetail::Withheld,
+                Some(_) => ErrorDetail::Full,
+                None if documents => ErrorDetail::Full,
+                None => ErrorDetail::Embedder,
             };
+            if let Some(path) = path {
+                self.diag.know_path(path);
+                self.sources.remember(path, source);
+            }
+            let source_path = std::path::Path::new(path.unwrap_or(diag::EMBEDDER_PATH));
+            let compiled = {
+                let _detail = ErrorDetailScope::enter(detail);
+                boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
+                    .and_then(|script| script.codeblock(&mut self.context).map(|_| script))
+            };
+            let result = compiled.and_then(|script| script.evaluate(&mut self.context));
             self.settle_evaluation(result, path)
         }
 
@@ -2295,11 +2310,11 @@ fn host_object(
             // Whose code threw it. Handed over from a `catch` (the usual
             // caller): the flag the VM noted for the value it caught. Handed
             // over for the page (`reportError(e)`, second argument `true`):
-            // the code calling that function, two frames up. Unknown: not
-            // told in detail.
+            // the page script calling that function. Unknown: not told in
+            // detail.
             let for_the_page = args.get(1).and_then(boa_engine::JsValue::as_boolean) == Some(true);
             let withheld = if for_the_page {
-                context.running_error_detail_withheld(1)
+                context.running_error_detail_withheld(0)
             } else {
                 context.take_error_detail_note(&value)
             }
@@ -2324,8 +2339,16 @@ fn host_object(
         })
     };
     let mut host = ObjectInitializer::new(context);
+    // The next code the embedder's scripts make with `eval` or `Function`
+    // is text the page's document owns (an inline script, a handler
+    // attribute, a string timer): a page script reported in full.
+    let document_code = NativeFunction::from_fn_ptr(|_this, _args, _context| {
+        boa_engine::vm::ErrorDetailScope::next_embedder_made_is_full();
+        Ok(boa_engine::JsValue::undefined())
+    });
     host.function(report_error, js_string!("reportError"), 1)
-        .function(unsupported, js_string!("unsupported"), 2);
+        .function(unsupported, js_string!("unsupported"), 2)
+        .function(document_code, js_string!("documentCode"), 0);
     bytes::install(&mut host, byte_stash, blobs);
     let host = host.build();
     // The host object inherits from nothing: a name it does not own reads

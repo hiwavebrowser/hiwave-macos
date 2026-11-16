@@ -596,7 +596,9 @@ fn a_handler_attribute_an_inline_script_and_a_string_timer_are_the_documents() {
 /// a rejected promise; with and without another origin's script on the page.
 #[test]
 fn rejections_passed_on_by_the_promise_machinery_are_announced() {
-    const COMBINATORS: &str = "var reasons = []; window.addEventListener('unhandledrejection', function (ev) { reasons.push(ev.reason.message); }); \
+    // `Promise.any`'s own error is named, not quoted: its message is the engine's wording.
+    const COMBINATORS: &str = "var reasons = []; window.addEventListener('unhandledrejection', function (ev) { \
+            reasons.push(ev.reason instanceof AggregateError ? 'AggregateError' : ev.reason.message); }); \
         setTimeout(function () { \
             Promise.all([Promise.reject(new Error('all'))]); \
             Promise.race([Promise.reject(new Error('race'))]); \
@@ -605,7 +607,7 @@ fn rejections_passed_on_by_the_promise_machinery_are_announced() {
             Promise.reject(new Error('finally')).finally(function () {}); \
             Promise.resolve({ then: function (resolve, reject) { reject(new Error('thenable')); } }); \
             (async function () { await Promise.reject(new Error('awaited')); })(); }, 0);";
-    let want = "All promises were rejected,all,awaited,finally,race,thenable";
+    let want = "AggregateError,all,awaited,finally,race,thenable";
     let b = page();
     b.evaluate_named(COMBINATORS, "inline#2").unwrap();
     b.advance_timers(20, 10).unwrap();

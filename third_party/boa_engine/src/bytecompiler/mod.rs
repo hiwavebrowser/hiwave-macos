@@ -3086,10 +3086,10 @@ impl<'ctx> ByteCompiler<'ctx> {
             bindings: self.bindings.into_boxed_slice(),
             handlers: self.handlers,
             // HIWAVE PATCH (error-detail): the flag of the compilation.
-            flags: Cell::new(if crate::vm::ErrorDetailScope::current() {
-                self.code_block_flags | CodeBlockFlags::ERROR_DETAIL_WITHHELD
-            } else {
-                self.code_block_flags
+            flags: Cell::new(match crate::vm::ErrorDetailScope::current() {
+                crate::vm::ErrorDetail::Full => self.code_block_flags,
+                crate::vm::ErrorDetail::Withheld => self.code_block_flags | CodeBlockFlags::ERROR_DETAIL_WITHHELD,
+                crate::vm::ErrorDetail::Embedder => self.code_block_flags | CodeBlockFlags::ERROR_DETAIL_EMBEDDER,
             }),
             // END HIWAVE PATCH
             ic: self.ic.into_boxed_slice(),

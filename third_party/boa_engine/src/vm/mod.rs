@@ -83,7 +83,7 @@ pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
 mod code_block;
-pub use code_block::ErrorDetailScope; // HIWAVE PATCH (error-detail)
+pub use code_block::{ErrorDetail, ErrorDetailScope}; // HIWAVE PATCH (error-detail)
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;
@@ -681,6 +681,24 @@ impl Vm {
             .as_object()
     }
 
+    // HIWAVE PATCH (error-detail): the page script whose code is running:
+    // the innermost frame that is not the embedder's own code, `depth` such
+    // frames further out. `Some(true)`: its errors are reported without
+    // detail. `None`: no page script is running (the frame at 0 is the
+    // VM's own).
+    pub(crate) fn page_error_detail(&self, depth: usize) -> Option<bool> {
+        let mut left = depth;
+        for frame in self.frames.iter().skip(1).rev() {
+            match frame.code_block.error_detail() {
+                code_block::ErrorDetail::Embedder => {}
+                detail if left == 0 => return Some(detail == code_block::ErrorDetail::Withheld),
+                _ => left -= 1,
+            }
+        }
+        None
+    }
+    // END HIWAVE PATCH
+
     /// Retrieves the VM frame.
     ///
     /// NOTE: When you need a `&CallFrame` alongside a mutable borrow of another
@@ -923,7 +941,7 @@ impl Context {
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
         // HIWAVE PATCH (error-detail): raised here first, by this frame's code.
         if err.detail_withheld.is_none() {
-            err.detail_withheld = Some(self.vm.frame().code_block.error_detail_withheld());
+            err.detail_withheld = self.vm.page_error_detail(0);
         }
         // END HIWAVE PATCH
         // Capture the backtrace early, before any exception handler check,
@@ -1060,11 +1078,11 @@ impl Context {
     fn handle_throw(&mut self) -> ControlFlow<CompletionRecord> {
         // HIWAVE PATCH (error-detail): as `handle_error`, for a throw that
         // came here directly.
-        let withheld = self.vm.frame().code_block.error_detail_withheld();
-        if let Some(err) = self.vm.pending_exception.as_mut()
-            && err.detail_withheld.is_none()
-        {
-            err.detail_withheld = Some(withheld);
+        if self.vm.pending_exception.as_ref().is_some_and(|err| err.detail_withheld.is_none()) {
+            let detail = self.vm.page_error_detail(0);
+            if let Some(err) = self.vm.pending_exception.as_mut() {
+                err.detail_withheld = detail;
+            }
         }
         // END HIWAVE PATCH
         if self

@@ -247,7 +247,7 @@ impl JsRuntime {
                 self.sources.remember(url, source);
                 let path = Path::new(url);
                 // Compiled carrying what was registered for it.
-                let _detail = boa_engine::vm::ErrorDetailScope::enter(self.diag.compiles_withheld(url, self.current_realm.0));
+                let _detail = boa_engine::vm::ErrorDetailScope::enter(self.page_detail(url));
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
                     Ok(module) => module,
@@ -319,9 +319,7 @@ impl JsRuntime {
                             self.sources.remember(requested, &fetched.source);
                         }
                         let path = Path::new(fetched.final_url.as_str());
-                        let _detail = boa_engine::vm::ErrorDetailScope::enter(
-                            self.diag.compiles_withheld(&fetched.final_url, self.current_realm.0),
-                        );
+                        let _detail = boa_engine::vm::ErrorDetailScope::enter(self.page_detail(&fetched.final_url));
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
                             None,
@@ -449,6 +447,15 @@ impl JsRuntime {
                 }
                 ModuleState::Threw(self.thrown_text(&reason))
             }
+        }
+    }
+
+    /// What the module at `url` is compiled as: what was registered for it.
+    fn page_detail(&self, url: &str) -> boa_engine::vm::ErrorDetail {
+        if self.diag.compiles_withheld(url, self.current_realm.0) {
+            boa_engine::vm::ErrorDetail::Withheld
+        } else {
+            boa_engine::vm::ErrorDetail::Full
         }
     }
 

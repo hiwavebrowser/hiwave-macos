@@ -54,6 +54,9 @@ bitflags! {
         // HIWAVE PATCH (error-detail): the code is of a script whose errors
         // the host reports without detail. See PATCHES.md.
         const ERROR_DETAIL_WITHHELD = 0b10_0000_0000;
+        // The code is the embedder's own, not a script of the page: an
+        // error is never placed in it.
+        const ERROR_DETAIL_EMBEDDER = 0b100_0000_0000;
         // END HIWAVE PATCH
 
         /// Trace instruction execution to `stdout`.
@@ -63,36 +66,68 @@ bitflags! {
 }
 
 // HIWAVE PATCH (error-detail): every code block compiled while a scope is
-// entered carries the scope's flag: a script's top-level code and every
-// function compiled from its source. Code made at run time (`eval`, the
-// `Function` constructors) is compiled under the flag of the code that is
-// running. See PATCHES.md.
-thread_local! {
-    static ERROR_DETAIL_WITHHELD: Cell<bool> = const { Cell::new(false) };
+// entered carries the scope's answer: a script's top-level code and every
+// function compiled from its source. Code compiled under no scope is the
+// embedder's. Code made at run time (`eval`, the `Function` constructors)
+// carries the answer of the code that made it. See PATCHES.md.
+
+/// What a host reports of an error thrown by some code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDetail {
+    /// A script of the page whose errors are reported in full.
+    Full,
+    /// A script of the page whose errors are reported without detail.
+    Withheld,
+    /// The embedder's own code: it answers for nothing. An error raised
+    /// while it runs is placed in the nearest page script below it.
+    Embedder,
 }
 
-/// While it lives, code blocks are compiled with the error-detail flag it
-/// was entered with; the flag before it is put back when it is dropped.
+thread_local! {
+    static ERROR_DETAIL: Cell<ErrorDetail> = const { Cell::new(ErrorDetail::Embedder) };
+    static NEXT_MADE_IS_FULL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, code blocks are compiled with the answer it was entered
+/// with; the answer before it is put back when it is dropped.
 #[derive(Debug)]
-pub struct ErrorDetailScope(bool);
+pub struct ErrorDetailScope(ErrorDetail);
 
 impl ErrorDetailScope {
-    /// Compile with `withheld` from here on.
+    /// Compile with `detail` from here on.
     #[must_use]
-    pub fn enter(withheld: bool) -> Self {
-        Self(ERROR_DETAIL_WITHHELD.with(|flag| flag.replace(withheld)))
+    pub fn enter(detail: ErrorDetail) -> Self {
+        Self(ERROR_DETAIL.with(|cell| cell.replace(detail)))
     }
 
-    /// The flag code blocks are compiled with now.
+    /// The answer code blocks are compiled with now.
     #[must_use]
-    pub fn current() -> bool {
-        ERROR_DETAIL_WITHHELD.with(Cell::get)
+    pub fn current() -> ErrorDetail {
+        ERROR_DETAIL.with(Cell::get)
+    }
+
+    /// The next code the embedder's own code makes at run time (`eval`, a
+    /// `Function` constructor) is a page script reported in full: text the
+    /// page's document owns, which the embedder compiles for it.
+    pub fn next_embedder_made_is_full() {
+        NEXT_MADE_IS_FULL.with(|cell| cell.set(true));
+    }
+
+    /// The answer for code that `maker` code makes at run time: its own,
+    /// or, made by the embedder's code, the embedder's unless the embedder
+    /// said otherwise for this one.
+    pub(crate) fn made_by(maker: ErrorDetail) -> ErrorDetail {
+        let full = NEXT_MADE_IS_FULL.with(|cell| cell.replace(false));
+        match maker {
+            ErrorDetail::Embedder if full => ErrorDetail::Full,
+            other => other,
+        }
     }
 }
 
 impl Drop for ErrorDetailScope {
     fn drop(&mut self) {
-        ERROR_DETAIL_WITHHELD.with(|flag| flag.set(self.0));
+        ERROR_DETAIL.with(|cell| cell.set(self.0));
     }
 }
 // END HIWAVE PATCH
@@ -239,11 +274,17 @@ pub struct CodeBlock {
 /// ---- `CodeBlock` public API ----
 impl CodeBlock {
     // HIWAVE PATCH (error-detail)
-    /// Whether this code is of a script whose errors the host reports
-    /// without detail.
+    /// What the host reports of an error thrown by this code.
     #[must_use]
-    pub fn error_detail_withheld(&self) -> bool {
-        self.flags.get().contains(CodeBlockFlags::ERROR_DETAIL_WITHHELD)
+    pub fn error_detail(&self) -> ErrorDetail {
+        let flags = self.flags.get();
+        if flags.contains(CodeBlockFlags::ERROR_DETAIL_EMBEDDER) {
+            ErrorDetail::Embedder
+        } else if flags.contains(CodeBlockFlags::ERROR_DETAIL_WITHHELD) {
+            ErrorDetail::Withheld
+        } else {
+            ErrorDetail::Full
+        }
     }
     // END HIWAVE PATCH
 
