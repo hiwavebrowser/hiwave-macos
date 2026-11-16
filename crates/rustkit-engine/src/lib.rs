@@ -11743,7 +11743,7 @@ impl Engine {
                     continue;
                 };
                 if let Some(laid) = box_of_node_mut(laid, *root) {
-                    copy_changed_paint(laid, &kept, fresh);
+                    copy_all_paint(laid, fresh);
                     copy_transform_and_opacity(laid, fresh);
                 }
                 if let Some(kept) = box_of_node_mut(&mut unlaid, *root) {
@@ -12053,10 +12053,6 @@ impl Engine {
             "Pointer restyle without layout"
         );
         LAST_RESTYLE_SPLIT.with(|last| last.set(split));
-        // LPF1: the laid-out tree was patched without the kept one: let it go.
-        if let Some(view) = self.views.get(&id) {
-            view.lay.script_unlaid.borrow_mut().take();
-        }
         Ok(true)
     }
 
@@ -12643,8 +12639,6 @@ impl Engine {
             stats.layouts_skipped = stats.layouts_skipped.saturating_add(1);
             stats.animation_frames_painted = stats.animation_frames_painted.saturating_add(1);
             stats.animation_paint_ms += took_ms;
-            // LPF1: the laid-out tree was patched without the kept one: let it go.
-            view.lay.script_unlaid.borrow_mut().take();
         }
         debug!(?id, elements = changes.len(), took_ms, "Animation frame painted without layout");
         Ok(true)
@@ -48052,6 +48046,24 @@ fn script_restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<St
         .iter()
         .zip(&fresh.children)
         .find_map(|(kept, fresh)| script_restyle_needs_layout(kept, fresh))
+}
+
+/// LPF1 R1: copy onto `laid` every box's paint from `fresh` (one shape), whether or not it differs
+/// from the kept tree: the pointer restyle and paint-only animation frames patch the laid-out
+/// tree's paint without the kept tree, so only the fresh build says what is painted now. The kept
+/// tree answers only whether more than paint changed, which those paths never change.
+fn copy_all_paint(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    if let (BoxType::Image { url, .. }, BoxType::Image { url: is, .. }) = (&mut laid.box_type, &fresh.box_type) {
+        if url != is {
+            *url = is.clone();
+        }
+    }
+    laid.style.copy_paint_only(&fresh.style);
+    laid.focused_caret = fresh.focused_caret;
+    laid.focused_selection = fresh.focused_selection.clone();
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_all_paint(laid, fresh);
+    }
 }
 
 /// LPF2: copy the transform, its origin and the opacity of every box of `fresh` onto `laid` (one
