@@ -502,7 +502,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationRound", "becomeFrame", "builtins",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationNow", "animationRound", "becomeFrame", "builtins",
     "canvasCall", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
@@ -512,7 +512,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timelineNow", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -613,6 +613,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.liveAt = -1; Q.liveReal = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
         Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false;
+        // The animation clock's high-water mark (`__rk.animationNow`, TIMELINE2 R1).
+        Q.animHigh = 0;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -1185,7 +1187,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the turn ran late paints the time its callbacks read; with no frame of it run, the timers'
     // clock as before (a page with no animation frame still moves every turn, the engine's
     // frame). Taken without a reading of its own (the deterministic clock counts reads), and never
-    // below a time already handed out.
+    // below a time already handed out, nor below its own last value: a turn that passed a grid
+    // point with no frame ran at the timers' clock, and a frame a later timer asks for is the
+    // frame of that grid point, stamped earlier; the clock holds until time passes it (R1: the
+    // paint stepped back up to a frame, and an end or iteration could be crossed twice).
     __rk.animationNow = function () {
         var ts = Q.frameTl;
         if (!Q.inFrame && !heldFrame()) {
@@ -1193,7 +1198,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (g > Q.prevFrameAt || Q.prevFrameTs < 0) ts = Q.now;
         }
         if (ts < Q.frameTl) ts = Q.frameTl;
-        return ts < Q.tlHigh ? Q.tlHigh : ts;
+        if (ts < Q.tlHigh) ts = Q.tlHigh;
+        if (ts < Q.animHigh) ts = Q.animHigh;
+        Q.animHigh = ts;
+        return ts;
     };
     // This document's time origin on the tree's clock: a CSS animation's start time, which the
     // engine keeps on the tree's clock, is `start - origin` on this document's timeline (TIMELINE2).
