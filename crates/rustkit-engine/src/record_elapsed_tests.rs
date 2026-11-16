@@ -7,6 +7,10 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 fn load(script: &str) -> (Engine, EngineViewId) {
+    load_with(EngineConfig::default(), script)
+}
+
+fn load_with(config: EngineConfig, script: &str) -> (Engine, EngineViewId) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let body = format!("<p>x</p><script>{script}</script>");
@@ -31,7 +35,7 @@ fn load(script: &str) -> (Engine, EngineViewId) {
             });
         }
     });
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(config).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -91,4 +95,44 @@ fn a_step_that_reports_several_errors_counts_its_time_once() {
         assert_eq!(total, longest, "{source}: the step's time is counted {} times: {times:?}", times.iter().filter(|&&t| t > 0).count());
         assert_eq!(times[0], longest, "{source}: the first record carries it: {times:?}");
     }
+}
+
+/// A step that ends in a record of its own (it was stopped at the script
+/// budget) and also reported errors on the way has its time on its own
+/// record only: the errors' records carry 0, so a total over the log
+/// counts the step once. For the `load` step, a `DOMContentLoaded`
+/// listener, the timers of the load, and the timers of a live turn.
+#[test]
+fn a_step_with_its_own_record_that_also_reported_errors_counts_its_time_once() {
+    const REPORT_THEN_SPIN: &str = "reportError(new Error('reported first')); reportError(new Error('reported second')); for (;;) { document.getElementById('x'); }";
+    let budget = || EngineConfig { script_budget_ms: 300, live_turn_budget_ms: 300, interrupt_scripts_at_budget: true, ..EngineConfig::default() };
+    let check = |what: &str, source: &str, log: &[ScriptRecord]| {
+        let step: Vec<&ScriptRecord> = log.iter().filter(|r| r.source == source).collect();
+        let is_report = |r: &&&ScriptRecord| matches!(&r.outcome, ScriptOutcome::Threw(m) if m.contains("reported "));
+        let reported: Vec<u64> = step.iter().filter(is_report).map(|r| r.elapsed_ms).collect();
+        let own: Vec<u64> = step.iter().filter(|r| !is_report(r)).map(|r| r.elapsed_ms).collect();
+        assert_eq!(reported.len(), 2, "{what}: {log:#?}");
+        assert_eq!(own.len(), 1, "{what}: the step's own record: {log:#?}");
+        assert!(own[0] >= 100, "{what}: the stopped step's own record has its time: {log:#?}");
+        assert_eq!(reported, [0, 0], "{what}: the step's time is on its own record only: {log:#?}");
+    };
+    // The `load` step and a listener step before it.
+    for (source, event, target) in [("event:load", "load", "window"), ("event:DOMContentLoaded", "DOMContentLoaded", "document")] {
+        let (engine, view) = load_with(budget(), &format!("{target}.addEventListener('{event}', function () {{ {REPORT_THEN_SPIN} }});"));
+        check(source, source, &engine.script_log(view).unwrap());
+    }
+    // The timers of the load.
+    let (engine, view) = load_with(budget(), &format!("setTimeout(function () {{ {REPORT_THEN_SPIN} }}, 0);"));
+    check("the load's timers", "timers", &engine.script_log(view).unwrap());
+    // The timers of a live turn, after the load.
+    let (mut engine, view) =
+        load_with(EngineConfig { timer_horizon_ms: 0, ..budget() }, &format!("setTimeout(function () {{ {REPORT_THEN_SPIN} }}, 50);"));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    for _ in 0..20 {
+        rt.block_on(engine.pump_live(view, 50));
+        if engine.script_log(view).unwrap().iter().any(|r| r.source == "timers") {
+            break;
+        }
+    }
+    check("a live turn's timers", "timers", &engine.script_log(view).unwrap());
 }

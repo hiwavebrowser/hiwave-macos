@@ -644,6 +644,25 @@ def test_a_message_with_an_escaped_line_break_is_one_error_to_the_reader(tmp_pat
     assert found[1] == "unhandled rejection (cancelled by the page) Error: boom at inline#2:1:1"
 
 
+def test_the_stress_reader_matches_the_engines_line_prefix(tmp_path):
+    # A record is a physical line that starts with the engine's own prefix: a timestamp, a level, and the
+    # console target right after them. The same words anywhere else on a line (in the middle or at the start
+    # of another target's message, after other text) are not a record.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    log.write_text(
+        stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n"
+        + stamp + "  WARN rustkit_engine: Web font not loaded family=x " + stamp + "  INFO hiwave::console: uncaught Error: in the middle at inline#9:1:1\n"
+        + stamp + "  INFO rustkit_engine: hiwave::console: uncaught Error: at the start of a message at inline#9:1:1\n"
+        + stamp + "  INFO rustkit_net::policy: " + stamp + "  INFO hiwave::console: unhandled rejection Error: after a target at inline#9:1:1\n"
+        + "hiwave::console: uncaught Error: no prefix at inline#9:1:1\n"
+        + "  INFO hiwave::console: uncaught Error: no timestamp at inline#9:1:1\n"
+        + stamp + " hiwave::console: uncaught Error: no level at inline#9:1:1\n"
+        + "\x1b[2m" + stamp + "\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mhiwave::console\x1b[0m\x1b[2m:\x1b[0m unhandled rejection Error: coloured, as the app writes it at inline#2:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught Error: the real one at inline#1:1:1",
+                                     "unhandled rejection Error: coloured, as the app writes it at inline#2:1:1"]
+
+
 def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
     progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
                 {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
