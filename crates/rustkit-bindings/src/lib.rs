@@ -589,6 +589,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
+        Q.frameTl = 0; Q.taskFrom = 0;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -692,10 +693,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // The capture switch is the tree's: thrown from any document, it is every document's, and a
     // frame made later finds it set.
     __rk.setDetClock = function (on) { Q.det = !!on; Q.reads = 0; };
-    // Grid frame stamps (a load-only capture, `EngineConfig::grid_frame_stamps`): every frame is
-    // stamped with its exact grid time, with no real time in it, so script animations, which compute
-    // from the stamps, read the same times every run however slow the capture's turns are. The
-    // page clock itself still flows.
+    // Grid frame stamps (a capture, `EngineConfig::grid_frame_stamps`): the timeline reads every
+    // frame's exact grid time, with no real time in it, so script animations, which compute from
+    // it, read the same times every run however slow the capture's turns are. Frame callbacks'
+    // stamps and the page clock still flow.
     __rk.setGridStamps = function (on) { Q.gridStamps = !!on; };
     if (window.performance) window.performance.now = function now() { return perfNow(); };
     // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
@@ -806,14 +807,26 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 // times every run. And a frame a task already read the timeline of (its grid
                 // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
                 // the task equals the frame's `t`.
-                if (!Q.det && (Q.gridStamps || Q.aheadAt === Q.now)) ts = at;
-                if (Q.tlAt === at) ts = Q.tlTs;
+                var grid = !Q.det && Q.gridStamps;
+                if (!Q.det && Q.aheadAt === Q.now) ts = at;
+                if (!grid && Q.tlAt === at) ts = Q.tlTs;
                 if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
                 if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
                 // Nor below a timeline time a task was handed (`__rk.timelineNow`).
-                if (ts < Q.tlHigh) ts = Q.tlHigh;
+                if (!grid && ts < Q.tlHigh) ts = Q.tlHigh;
                 Q.frameTs = ts;
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
+                // The timeline's time for this frame: its stamp; with grid frame stamps (a
+                // load-only capture), the exact grid time instead, so script animations read the
+                // same times every run while the callback's stamp stays on the clock
+                // `performance.now()` reads (a page pairing the two keeps develop's relation).
+                var tl = ts;
+                if (grid) {
+                    tl = Q.tlAt === at ? Q.tlTs : at;
+                    if (tl < Q.frameTl) tl = Q.frameTl;
+                    if (tl < Q.tlHigh) tl = Q.tlHigh;
+                }
+                Q.frameTl = tl;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
             }
             // A frame's document counts from its own origin: never before it.
@@ -869,7 +882,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             else removeAt(best);
             ran++;
             if (timer.frame) { Q.frameDue = timer.due; runFrame(timer); }
-            else timer.run(timer);
+            else { Q.taskFrom = Q.nextId; timer.run(timer); }
         }
         return ran;
     }
@@ -991,23 +1004,32 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // While a frame is overdue or asked for, a task reads the last frame's time: the timeline moves
     // on at that frame (Chrome `timeline_probe` "overdue": a task run before a frame a long task
     // held up reads T0 + 0, the frame then T0 + 16.7), so it never goes back.
-    function framePending() {
-        for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
+    // Only a frame asked for before this task and overdue holds it: one the task itself asks for
+    // (`el.animate()` asks for one) does not (Chrome "idleStart": the timeline is the same before
+    // and after `animate()`). A task is a timer's callback (`Q.taskFrom`, the first timer id it
+    // could ask for); a host turn (an event, a script the engine runs) is part of the last one.
+    function heldFrame() {
+        for (var i = 0; i < Q.count; i++) {
+            var f = timers[i];
+            if (f.frame && f.id < Q.taskFrom && f.due < Q.now) return true;
+        }
         return false;
     }
     __rk.timelineNow = function () {
-        var ts = Q.frameTs;
-        if (!Q.inFrame && !framePending()) {
+        var ts = Q.frameTl;
+        if (!Q.inFrame && !heldFrame()) {
             var g = frameAt(gridAtOrBefore(Q.now));
             if (g > Q.prevFrameAt || Q.prevFrameTs < 0) {
                 if (Q.tlAt !== g) {
                     Q.tlAt = g;
-                    Q.tlTs = (Q.prevFrameTs < 0 ? 0 : Q.prevFrameTs) + (g - Q.prevFrameAt);
+                    Q.tlTs = (Q.prevFrameTs < 0 ? 0 : Q.frameTl) + (g - Q.prevFrameAt);
                 }
                 ts = Q.tlTs;
             }
         }
-        if (ts > Q.tlHigh) Q.tlHigh = ts;
+        // Never less than a time already handed out.
+        if (ts < Q.tlHigh) ts = Q.tlHigh;
+        Q.tlHigh = ts;
         var t = ts - base;
         return t < 0 ? 0 : t;
     };

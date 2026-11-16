@@ -1895,10 +1895,10 @@ pub struct EngineConfig {
     /// that steps the timers reproduces every `t`-driven frame. Off by default: a live page reads a
     /// clock that flows. Its own switch, not a side effect of `disable_animations`.
     pub deterministic_page_clock: bool,
-    /// Every animation frame is stamped with its exact grid time, with no real time in it (TIMELINE1):
-    /// script animations compute from the stamps, so a load-only capture reads the same animation
-    /// times every run, however long its turns take in real time. The page clock still flows. Off by
-    /// default: a live page's stamps follow the clock it reads.
+    /// The document timeline reads each animation frame's exact grid time, with no real time in it
+    /// (TIMELINE1): script animations compute from it, so a capture reads the same animation times
+    /// every run, however long its turns take in real time. Frame callbacks' timestamps and
+    /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
     pub grid_frame_stamps: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network

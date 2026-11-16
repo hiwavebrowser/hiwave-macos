@@ -295,9 +295,11 @@ fn a_rate_change_after_pause_keeps_the_current_time() {
 }
 
 /// Grid frame stamps (a load-only capture): with real time ahead of the timers' clock (a slow
-/// capture turn), a frame is still stamped with its exact grid time, so a script animation reads
-/// the same time every run. Here 40 ms of real time pass before the turn to 17: stamped 17. On the
-/// flowing clock alone it was stamped with the real time, about 40.
+/// capture turn), the timeline in a frame is still its exact grid time, so a script animation reads
+/// the same time every run; the callback's stamp stays on the clock `performance.now()` reads (at
+/// or after the grid time), so a page pairing the two keeps the relation it had (R1). Here 40 ms of
+/// real time pass before the turn to 17: the timeline reads 17, the stamp the real time. On the
+/// flowing clock alone the timeline read the real time too, about 40.
 #[test]
 fn grid_frame_stamps_carry_no_real_time() {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
@@ -310,7 +312,10 @@ fn grid_frame_stamps_carry_no_real_time() {
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(40));
     turn(&b, 17);
-    assert_eq!(read(&b, "got"), "17,17");
+    let got = read(&b, "got");
+    let (t, tl) = got.split_once(',').unwrap();
+    assert_eq!(tl, "17", "{got}");
+    assert!(t.parse::<f64>().unwrap() >= 17.0, "{got}");
 }
 
 /// After an idle gap, `a = el.animate(...)` in a task does not move the timeline the task reads,
