@@ -352,7 +352,9 @@ fn an_animation_started_from_the_timeline_after_idle_has_no_jump() {
 /// `performance.now()` are each non-decreasing; a frame's timestamp is at or before the
 /// `performance.now()` its callback reads; and an animation started from the timeline never reads
 /// a negative current time in a frame. Random sequences on the hand-driven clock, with the
-/// deterministic page clock and the flowing one, grid frame stamps on and off.
+/// deterministic page clock and the flowing one, grid frame stamps on and off. The flowing-clock
+/// runs (and the 0-8 ms real sleeps before some idle gaps) are not bit-reproducible: a seed's
+/// values move with real time, while the properties hold for every run.
 #[test]
 fn the_page_never_reads_time_going_back() {
     fn run(seed: u64, det: bool, grid: bool) -> Result<(), String> {
@@ -436,4 +438,54 @@ fn the_page_never_reads_time_going_back() {
         }
     }
     assert!(failed.is_empty(), "{} of 48 runs:\n{}", failed.len(), failed.join("\n"));
+}
+
+/// A worker's message delivered at the top of a late turn is a task of its own (#1200 R1
+/// follow-up): it reads the last frame's time, never one past the overdue frame, as a timer task
+/// does (Chrome "overdue"). A guard, green before the pump began a task too: the pump runs before
+/// the turn moves the clock, so it reads at the last turn's time. The worker pump stands in for a
+/// worker here.
+#[test]
+fn a_worker_message_before_an_overdue_frame_reads_the_last_frames_time() {
+    let b = page();
+    b.evaluate(
+        "var T0 = -1, rows = []; requestAnimationFrame(function (t0) { T0 = t0; \
+           requestAnimationFrame(function (t) { rows.push('f:' + (t - T0) + ':' + (document.timeline.currentTime - T0)); }); });",
+    )
+    .unwrap();
+    turn(&b, 17);
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping(
+            "var once = true; __rk.workersPump = function () { if (!once) return 0; once = false; \
+               rows.push('w:' + (document.timeline.currentTime - T0)); return 1; }; return 0",
+        )
+        .unwrap();
+    turn(&b, 123);
+    assert_eq!(read(&b, "rows.join()"), "w:0,f:17:17");
+}
+
+/// KNOWN DIVERGENCE, captures only (grid frame stamps): there the timeline reads the frame's exact
+/// grid time while the callback's `t` stays on the flowing clock `performance.now()` reads, so
+/// `a.startTime = t` in a frame puts the start ahead of the timeline by the real time in `t`, and
+/// `a.currentTime` reads that much below 0 (Chrome: `t === timeline.currentTime`, so 0). Live, with
+/// no grid stamps, the two are one value (`the_timeline_is_the_frame_stamp_inside_a_frame`). Here
+/// 40 ms of real time pass before the frame at 17.
+#[test]
+fn known_divergence_in_a_capture_a_start_time_from_a_frame_stamp_is_off_the_timeline() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><body><div id=box></div></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.set_grid_frame_stamps(true);
+    b.evaluate(
+        "var got = 1; requestAnimationFrame(function (t) { \
+           var a = document.getElementById('box').animate({ opacity: [0, 1] }, { duration: 1000 }); \
+           a.startTime = t; got = a.currentTime; });",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    turn(&b, 17);
+    assert!(num(&b, "got") < -1.0, "a.currentTime {} (Chrome: 0)", read(&b, "got"));
 }

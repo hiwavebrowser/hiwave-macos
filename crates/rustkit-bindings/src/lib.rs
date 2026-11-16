@@ -856,8 +856,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function runTimers(horizon, max, timersOnly, until) {
         // A turn begins outside any frame's callbacks, whatever stopped the last part-way.
         Q.inFrame = false;
-        // What a worker has sent since the last turn is delivered first.
+        // What a worker has sent since the last turn is delivered first, as a task of its own
+        // (`Q.taskFrom`, TIMELINE1): a frame asked for before it is one it can be held by.
         var ran = 0;
+        Q.taskFrom = Q.nextId;
         for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
         while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
