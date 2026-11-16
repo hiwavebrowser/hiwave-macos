@@ -681,6 +681,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod layout_per_frame_tests;
+#[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat22_forced_read_build_tests;
