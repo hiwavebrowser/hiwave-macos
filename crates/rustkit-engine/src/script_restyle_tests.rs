@@ -334,24 +334,30 @@ fn a_forced_read_mid_task_paints_as_the_full_rebuild() {
     cross_check(html, 6, "String(h)");
 }
 
-/// A pointer restyle (`:hover`) between script paint writes: the kept tree is let go when the
-/// pointer path patches the laid-out tree, so a later write paints as the full rebuild does (R1: a
-/// tile captured under `:hover` red, the pointer leaves, script sets red).
+/// A pointer restyle (`:hover`) between script paint writes (R1: a tile kept under `:hover` red, the
+/// pointer leaves and the pointer path paints it blue, script then sets it red): the short path
+/// copies every written box's paint from its fresh build, not only what differs from the kept tree
+/// (which still says red), so the tile is red as in the full rebuild. Copying only the differences,
+/// it stayed blue.
 #[test]
 fn a_hover_between_script_writes_paints_as_the_full_rebuild() {
     let html = "<!doctype html><style>body{margin:0}.t{width:40px;height:40px;background:#08f}.t:hover{background:#f00}</style>\
                 <div class=t id=w></div><div class=t id=v></div><script>var w = document.getElementById('w'), n = 0; \
-                requestAnimationFrame(function f() { n++; w.style.outlineColor = 'hsl(' + n * 30 + ',50%,50%)'; if (n === 4) w.style.backgroundColor = '#f00'; requestAnimationFrame(f); });</script>";
+                requestAnimationFrame(function f() { n++; w.style.outlineColor = 'hsl(' + n * 30 + ',50%,50%)'; \
+                if (window.go === 1) { window.go = 2; w.style.backgroundColor = '#f00'; } requestAnimationFrame(f); });</script>";
     let run = |on: bool| {
         set_script_restyle_for_test(on);
         let (mut engine, view, _server) = load(html);
         let mut out = Vec::new();
-        for i in 0..7 {
-            if i == 2 {
+        for i in 0..8 {
+            if i == 1 {
                 engine.mouse_move_at_point(view, 10.0, 10.0);
             }
-            if i == 3 {
+            if i == 4 {
                 engine.mouse_move_at_point(view, 300.0, 300.0);
+            }
+            if i == 6 {
+                engine.execute_script(view, "window.go = 1").unwrap();
             }
             frame(&mut engine, view);
             out.push(format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands));
@@ -384,4 +390,29 @@ fn a_selection_move_in_the_task_is_painted() {
                 requestAnimationFrame(function g() { n++; if (window.go === 1) { window.go = 2; f.setSelectionRange(0, 3); } \
                 st.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(g); });</script>";
     assert!(cross_check_go(html, 6, "String(f.selectionStart) + ',' + f.selectionEnd", 3) >= 2);
+}
+
+/// R1 follow-up: a paint-only CSS animation (a spinner) beside per-frame script paint writes. The
+/// spinner's frames patch the laid-out tree's paint and leave the kept tree alone (the short path
+/// copies the fresh build's paint), so the script writes stay on the short path frame after frame:
+/// no full build and no copy of the tree every frame.
+#[test]
+fn a_spinner_beside_script_paint_writes_keeps_the_short_path() {
+    let html = "<!doctype html><style>body{margin:0}@keyframes spin{to{transform:rotate(360deg)}}\
+                #sp{width:20px;height:20px;background:#333;animation:spin 1s linear infinite}\
+                .t{width:20px;height:20px;background:#08f}</style><div id=sp></div><div class=t id=w></div>\
+                <script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    let (mut engine, view, _server) = load(html);
+    for _ in 0..4 {
+        frame(&mut engine, view);
+    }
+    let before = engine.relayout_stats(view).expect("view").clone();
+    for _ in 0..10 {
+        frame(&mut engine, view);
+    }
+    let after = engine.relayout_stats(view).expect("view");
+    let hits = after.script_restyles - before.script_restyles;
+    let full = (after.relayouts - before.relayouts) - (after.layouts_skipped - before.layouts_skipped);
+    assert!(hits >= 9 && full <= 1, "short path {hits} of 10 frames, {full} full builds (last miss {:?})", last_restyle_miss_for_test());
 }
