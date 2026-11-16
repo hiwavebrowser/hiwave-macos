@@ -1041,6 +1041,65 @@ throw new Error('boom-inline');
         }
     }
 
+    /// The lines of the log that are an uncaught error's, once `done` of
+    /// them are there: the view is turned at most `turns` times.
+    fn uncaught_lines(config: EngineConfig, site: crate::error_page_script_tests::Handler, done: usize, turns: usize) -> Vec<String> {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let server = serve(site);
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 800 }).expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+        let lines = || -> Vec<String> { sink.lock().unwrap().iter().filter(|line: &&String| line.starts_with("uncaught")).cloned().collect() };
+        for _ in 0..turns {
+            if lines().len() >= done {
+                break;
+            }
+            rt.block_on(engine.pump_live(view, 50));
+        }
+        lines()
+    }
+
+    /// An error thrown in a timer that `window.onerror` cancels is still in
+    /// the engine's log, marked.
+    #[test]
+    fn a_timers_error_the_page_cancelled_is_logged_with_its_mark() {
+        fn site(_: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+            let page = "<!doctype html><body><script>window.onerror = function () { return true; }; \
+                        setTimeout(function () { throw new Error('boom-cancelled-timer'); }, 10);</script></body>";
+            (200, "text/html", vec![], page.into())
+        }
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let lines = uncaught_lines(EngineConfig { timer_horizon_ms: 0, ..EngineConfig::default() }, site, 1, 100);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].starts_with("uncaught (cancelled by the page) Error: boom-cancelled-timer at "), "{lines:#?}");
+    }
+
+    /// What a script of a same-origin frame throws, at its top level and in
+    /// a timer, is in the engine's log like the top document's.
+    #[test]
+    fn a_frames_uncaught_errors_are_logged() {
+        fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+            let body = match path {
+                "/frame.html" => "<!doctype html><body><script>setTimeout(function () { throw new RangeError('boom-frame-timer'); }, 10);</script>\
+                                  <script>throw new TypeError('boom-frame-inline');</script></body>",
+                _ => "<!doctype html><body><iframe src=/frame.html></iframe></body>",
+            };
+            (200, "text/html", vec![], body.into())
+        }
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let config = EngineConfig { timer_horizon_ms: 0, nested_contexts: true, post_load_requests_live: true, ..EngineConfig::default() };
+        let lines = uncaught_lines(config, site, 2, 200);
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        // A frame's inline script is named as the engine names it
+        // (`frame-inline#n`), not by the frame's URL: as it is today.
+        assert!(lines.iter().any(|line| line.starts_with("uncaught TypeError: boom-frame-inline at frame-inline#2:")), "{lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("uncaught RangeError: boom-frame-timer at frame-inline#1:")), "{lines:#?}");
+    }
+
     #[test]
     fn mirrors_console_exceptions_rejections_and_inserted_scripts() {
         let _reset = Reset;
