@@ -1,0 +1,49 @@
+<!doctype html><title>css timeline child</title>
+<style>
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#a { width: 10px; height: 10px; background: #08f; animation: fade 10s linear }
+#b { width: 10px; height: 10px; background: #f80 }
+#b.go { animation: fade 10s linear }
+#s { width: 10px; height: 10px; background: #888 }
+</style>
+<div id=a></div><div id=b></div><div id=s></div><script>
+// TIMELINE2, the frame document of css_timeline_probe.html (see there). go(done) runs its parts and
+// hands the parent { inFrame, start, sync, origin }; origin = [this document's
+// performance.timeOrigin - the parent's].
+function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
+function tl() { return document.timeline.currentTime; }
+window.go = function (done) {
+  var res = { inFrame: [], start: null, sync: [], origin: r2(performance.timeOrigin - parent.performance.timeOrigin) };
+  var a = document.getElementById('a'), b = document.getElementById('b'), s = document.getElementById('s');
+  var c = a.getAnimations()[0];
+  (function f() {
+    requestAnimationFrame(function (t) {
+      res.inFrame.push([t === tl(), r2(c.startTime + c.currentTime - tl()), r2(c.startTime)]);
+      if (res.inFrame.length < 3) f(); else startPart();
+    });
+  })();
+  function startPart() {
+    setTimeout(function () {
+      b.classList.add('go'); getComputedStyle(b).opacity;
+      var T = tl(), d = b.getAnimations()[0];
+      res.start = { atOnce: [r2(T), d.pending, r2(d.startTime)] };
+      requestAnimationFrame(function (t) {
+        res.start.next = [r2(t - T), r2(d.startTime - T), r2(d.startTime - t)];
+        syncPart();
+      });
+    }, 20);
+  }
+  function syncPart() {
+    setTimeout(function () {
+      var sa = s.animate({ opacity: [0, 1] }, { duration: 10000 });
+      sa.startTime = c.startTime;
+      (function f() {
+        requestAnimationFrame(function () {
+          res.sync.push([r2(sa.currentTime - c.currentTime), r2(c.startTime - tl())]);
+          if (res.sync.length < 3) f(); else done(res);
+        });
+      })();
+    }, 20);
+  }
+};
+</script>

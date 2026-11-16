@@ -1,0 +1,111 @@
+<!doctype html><title>css timeline probe</title>
+<style>
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#a { width: 10px; height: 10px; background: #08f; animation: fade 10s linear }
+#b { width: 10px; height: 10px; background: #f80 }
+#b.go { animation: fade 10s linear }
+#c { width: 10px; height: 10px; background: #0a0; opacity: 0; transition: opacity 10s linear }
+#c.go { opacity: 1 }
+</style>
+<div id=a></div><div id=b></div><div id=c></div><script>
+// TIMELINE2: CSS animations and transitions on the document timeline. Pinned on Chrome for Testing
+// 148.0.7778.216, HEADLESS (css_timeline_probe_chrome.mjs). Records (all times ms, 0.01):
+//   inFrame   5 frames of a CSS animation running since load: [t === timeline.currentTime,
+//             c.startTime + c.currentTime - timeline.currentTime, c.startTime]: one timeline?
+//             a start time that stays put?
+//   inTask    3 timer tasks: [c.startTime + c.currentTime - timeline.currentTime, c.startTime]
+//   start     5 times, in a timer task: the class that starts an animation is set and the style
+//             read (getComputedStyle), then at once [timeline T, getAnimations().length, pending,
+//             playState, startTime, currentTime]; in the next frame (next) and the one after
+//             (after) [t - T, startTime - T, startTime - the next frame's t, currentTime, pending]
+//   trans     the same for a 10 s opacity transition started in a task (from rest each time)
+//   late      5 times: a frame asks for the next and its callback then works 100 ms; in the late frame:
+//             [t - T0, the animation's startTime + currentTime - t, its currentTime - computed
+//             opacity * 10000]: does a late frame's CSS time follow the frame's stamp?
+//   child     the same inFrame / start / sync checks in a frame document inserted 400 ms after
+//             load (its time origin later than the top's): [inFrame rows], [start row], sync =
+//             a script animation given the CSS animation's start time, then for 3 frames
+//             [script currentTime - CSS currentTime, CSS startTime - timeline.currentTime]
+// When done it sets rec.done and logs REC <json>.
+window.rec = { inFrame: [], inTask: [], start: [], trans: [], late: [], child: null, done: false };
+var a = document.getElementById('a'), b = document.getElementById('b'), cEl = document.getElementById('c');
+function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
+function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
+function tl() { return document.timeline.currentTime; }
+function inFramePart(next) {
+  var c = a.getAnimations()[0];
+  (function f() {
+    requestAnimationFrame(function (t) {
+      rec.inFrame.push([t === tl(), r2(c.startTime + c.currentTime - tl()), r2(c.startTime)]);
+      if (rec.inFrame.length < 5) f(); else next();
+    });
+  })();
+}
+function inTaskPart(next) {
+  var c = a.getAnimations()[0];
+  (function f() {
+    setTimeout(function () {
+      rec.inTask.push([r2(c.startTime + c.currentTime - tl()), r2(c.startTime)]);
+      if (rec.inTask.length < 3) f(); else next();
+    }, 37);
+  })();
+}
+function startOnce(el, list, done) {
+  setTimeout(function () {
+    el.classList.remove('go'); el.style.transition = 'none'; getComputedStyle(el).opacity;
+    el.style.transition = ''; getComputedStyle(el).opacity;
+    setTimeout(function () {
+      el.classList.add('go'); getComputedStyle(el).opacity;
+      var T = tl(), all = el.getAnimations(), c = all[0];
+      var row = { atOnce: [r2(T), all.length, c ? c.pending : null, c ? c.playState : null, c ? r2(c.startTime) : null, c ? r2(c.currentTime) : null] };
+      requestAnimationFrame(function (t) {
+        row.next = c ? [r2(t - T), r2(c.startTime - T), r2(c.startTime - t), r2(c.currentTime), c.pending] : null;
+        requestAnimationFrame(function (t2) {
+          row.after = c ? [r2(t2 - T), r2(c.startTime - T), r2(c.startTime - t), r2(c.currentTime), c.pending] : null;
+          list.push(row); done();
+        });
+      });
+    }, 20);
+  }, 20);
+}
+function repeat(n, fn, next) { var i = 0; (function go() { if (i++ < n) fn(go); else next(); })(); }
+function latePart(next) {
+  var c = a.getAnimations()[0];
+  repeat(5, function (done) {
+    requestAnimationFrame(function (t0) {
+      requestAnimationFrame(function (t) {
+        rec.late.push([r2(t - t0), r2(c.startTime + c.currentTime - t), r2(c.currentTime - parseFloat(getComputedStyle(a).opacity) * 10000)]);
+        setTimeout(done, 30);
+      });
+      spin(100);
+    });
+  }, next);
+}
+function childPart(next) {
+  setTimeout(function () {
+    var f = document.createElement('iframe');
+    f.src = 'css_timeline_child.html';
+    f.onload = function () {
+      var w = f.contentWindow;
+      w.go(function (res) { rec.child = res; next(); });
+    };
+    document.body.appendChild(f);
+  }, 400);
+}
+function go() {
+  inFramePart(function () {
+    inTaskPart(function () {
+      repeat(5, function (d) { startOnce(b, rec.start, d); }, function () {
+        repeat(5, function (d) { startOnce(cEl, rec.trans, d); }, function () {
+          latePart(function () {
+            childPart(function () {
+              rec.done = true; console.log('REC ' + JSON.stringify(rec));
+            });
+          });
+        });
+      });
+    });
+  });
+}
+if (location.hash === '#manual') window.go = go; else addEventListener('load', function () { setTimeout(go, 50); });
+</script>
