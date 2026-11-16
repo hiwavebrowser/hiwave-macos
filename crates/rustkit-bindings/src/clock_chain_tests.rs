@@ -425,3 +425,17 @@ fn an_intervals_first_run_waits_its_delay_on_the_page_clock() {
     b.advance_real_timers_for_frame(3, 1000, 0).unwrap();
     assert!(num(&b, "first") >= 10.0);
 }
+
+/// A timeout chain set between real turns (as an event handler sets it) does not replay the links
+/// a long gap held back: after 50 ms of real time with a 10 ms chain, the turn runs one link, not
+/// five. On the supplied clock, so no stall of the machine running it can let another link through
+/// (moved here from the window thread's test, which slept real time).
+#[test]
+fn a_chain_set_between_real_turns_does_not_replay_a_gap() {
+    let b = fake_clock_bindings();
+    b.advance_real_timers_for_frame(0, 1000, 0).unwrap();
+    b.evaluate("window.n = 0; (function link() { n++; setTimeout(link, 10); })();").unwrap();
+    b.evaluate("__work(50)").unwrap();
+    b.advance_real_timers_for_frame(50, 1000, 0).unwrap();
+    assert_eq!(num(&b, "n"), 2.0, "the chain replayed the links the 50 ms held back");
+}

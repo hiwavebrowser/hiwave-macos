@@ -1911,16 +1911,16 @@ mod tests {
         };
         // The turn after the load (its timers already ran in the load's pass).
         pump(&handle, &mut endpoint, 0);
-        // The turn's elapsed time is real (LINKS-SLOW: a timeout set in a real turn's page waits its
-        // delay on the page clock, so a turn told of 5 s that did not pass runs none of it): five
-        // links' worth passes, and the chain runs one link, not five.
-        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 10); })(); 0");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        pump(&handle, &mut endpoint, 50);
-        assert_eq!(
-            eval(&handle, &mut endpoint, "String(window.n)"),
-            r#"String("2")"#,
-            "the chain replayed the links the 5000 ms held back"
+        // A turn told 5 s passed runs at most one link of the chain, never the five it held back.
+        // The exact count (one link) is pinned on the supplied clock in the bindings
+        // (`a_chain_set_between_real_turns_does_not_replay_a_gap`): here no real time passes, and a
+        // timeout set in a real turn's page waits its delay on the page clock (LINKS-SLOW).
+        eval(&handle, &mut endpoint, "window.n = 0; (function link() { n++; setTimeout(link, 1000); })(); 0");
+        pump(&handle, &mut endpoint, 5000);
+        let n = eval(&handle, &mut endpoint, "String(window.n)");
+        assert!(
+            n == r#"String("1")"# || n == r#"String("2")"#,
+            "the chain replayed the links the 5000 ms held back: {n}"
         );
     }
 
