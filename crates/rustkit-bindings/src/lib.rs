@@ -157,6 +157,8 @@ mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
 #[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
 mod host_object_tests;
 #[cfg(test)]
 mod bookkeeping_paths_tests;
