@@ -964,3 +964,24 @@ Pin: `crates/rustkit-js/tests/arraybuffer_detach_key.rs` (Chrome for Testing 148
 transfer list and `postMessage` with one all throw a TypeError and leave the buffer attached;
 `memory.grow()` detaches it; a plain buffer's `transfer()` works). Red on develop (the constructor
 stub ignoring the key): script's `transfer()` succeeded.
+
+## Patch: a comparator that is `a - b` is not called for two Numbers (`sort-diff`)
+
+**Why.** `Array.prototype.sort` with a comparator costs one native-to-script call per comparison
+(about 200 ns each; 100,000 numbers make about 1.5 million calls). The sort itself costs the same as a
+plain loop making those calls, so the cost is the call. A comparator that is exactly `return a - b`
+(or `b - a`) over its two plain parameters does nothing else: for two Numbers it computes their
+difference, with no side effect.
+
+**What.** The bytecompiler marks a function (not async, generator or method) whose parameter list is
+two plain identifiers and whose body is one `return a - b` or `return b - a`, parentheses allowed
+(`CodeBlockFlags::NUMERIC_DIFF`, `NUMERIC_DIFF_SWAPPED`). `Array.prototype.sort` and `toSorted` read the
+flag once; `compare_array_elements` computes the difference itself when both elements are Numbers and
+calls the function otherwise (strings, objects with `valueOf`, BigInts, anything else). The result is
+treated as `ToNumber(call)` is: NaN counts as equal. `TypedArray.prototype.sort` is not changed.
+
+**Pin.** `crates/rustkit-js/tests/sort_numeric_difference.rs`: 20 answers equal Chrome's (numbers,
+Infinity, NaN, -0, mixed strings, holes, `undefined`, BigInt, objects with `valueOf`, defaults and
+other shapes that must still be called), and an opcode budget in a child process (4000 numbers: 17
+opcodes with `a - b` or `b - a`, 510,293 for `a - b + 0`, 383,709 when half the elements are strings).
+Red without the fast path (425,247).

@@ -12,7 +12,7 @@ const PAGE: &str = "<!DOCTYPE html><html><head><title>t</title></head><body>\
     <canvas id=\"c\"></canvas><div id=\"frag\" draggable=\"true\">d</div></body></html>";
 
 /// Member names of the engine's registries that its scripts fill in later.
-const REGISTRY_NAMES: &str = "hasListener hostOf mutation retarget scripts shadowParent windowNamed \
+const REGISTRY_NAMES: &str = "hasListener loadSnapshot loadReplay hostOf mutation retarget scripts shadowParent windowNamed \
     request take deliver shelve unshelve fail_all waiting queued begin prepare settle";
 
 /// The names this crate's scripts use on the engine's own object, read
@@ -366,7 +366,7 @@ fn the_host_object_inherits_nothing() {
                  if (proto(__rk) !== null) out.push('host');
                  [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
                  ['domHooks', 'net', 'dragStore'].forEach(function (n) {{ if (proto(__rk[n]) !== null) out.push(n); }});
-                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'attrs'].forEach(function (n) {{
+                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'attrs'].forEach(function (n) {{
                      if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
                  }});
                  return out.join(' ');"
@@ -458,7 +458,7 @@ fn accessor_calls_in_a_frame_tree(net: bool) -> (String, String) {
     assert!(matches!(attached, Ok(true)), "the frame is attached: {attached:?}");
     t.parent.evaluate("adopt(document.getElementById('fr').contentWindow);").unwrap();
     t.child.evaluate("adopt(parent);").unwrap();
-    let _ = t.parent.frame_loaded(t.node);
+    let _ = t.parent.frame_loaded(t.node, false);
     exercise(&t.child, &t.child_doc, net);
     exercise(&t.parent, &t.doc, net);
     // Each window's script in the other's document.
@@ -511,7 +511,7 @@ fn a_frames_host_object_and_the_trees_shared_state_inherit_nothing() {
          if (proto(__rk) !== null) out.push('host');
          [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
          ['domHooks', 'net', 'dragStore', 'frames', 'shared'].forEach(function (n) {{ if (!__rk[n] || proto(__rk[n]) !== null) out.push(n); }});
-         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'nodeId', 'byTag', 'frames', 'attrs'].forEach(function (n) {{
+         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'nodeId', 'byTag', 'frames', 'attrs'].forEach(function (n) {{
              if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
          }});
          if (__rk.domHooks.frames && proto(__rk.domHooks.frames) !== null) out.push('domHooks.frames');
