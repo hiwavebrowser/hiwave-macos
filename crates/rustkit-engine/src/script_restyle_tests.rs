@@ -203,3 +203,170 @@ fn known_divergence_a_transform_is_not_in_scrollable_overflow() {
         .unwrap();
     assert!(got.contains("200"), "Chrome: 450; here {got}");
 }
+
+/// The cross-check on any page: the same page and script run with the short path on and off;
+/// the display lists (and `probe`'s value, if any) must be equal after every frame, and differ
+/// between some two frames (the page did change). Returns how many frames took the short path.
+fn cross_check(html: &str, frames: usize, probe: &str) -> u32 {
+    cross_check_go(html, frames, probe, 0)
+}
+
+/// [`cross_check`], and before frame `go_at` (a frame after the load, whose own frames run ahead)
+/// script sets `window.go = 1`: the page does its one-off write in that frame's task.
+fn cross_check_go(html: &str, frames: usize, probe: &str, go_at: usize) -> u32 {
+    let run = |on: bool| {
+        set_script_restyle_for_test(on);
+        let (mut engine, view, _server) = load(html);
+        let mut out = Vec::new();
+        for i in 0..frames {
+            if go_at > 0 && i == go_at {
+                engine.execute_script(view, "window.go = 1").unwrap();
+            }
+            frame(&mut engine, view);
+            let read = if probe.is_empty() { String::new() } else { engine.execute_script(view, probe).unwrap() };
+            out.push((format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands), read));
+        }
+        set_script_restyle_for_test(true);
+        (out, engine.relayout_stats(view).expect("view").script_restyles)
+    };
+    let ((short, took), (full, none)) = (run(true), run(false));
+    assert_eq!(none, 0, "the path was off in the other arm");
+    for (i, (a, b)) in short.iter().zip(&full).enumerate() {
+        assert!(a.0 == b.0, "frame {i}: the display list differs from the full rebuild's (short path ran {took} times)");
+        assert_eq!(a.1, b.1, "frame {i}: the probe differs from the full rebuild's");
+    }
+    assert!(full.windows(2).any(|w| w[0].0 != w[1].0), "the page did not change between frames");
+    eprintln!("cross_check: short path took {took} of {frames} frames (last miss {:?})", last_restyle_miss_for_test());
+    took
+}
+
+/// R1 hold 1: a write the mutation log does not record (here a sheet enabled through
+/// `sheet.disabled`) in the same task as a paint write: the whole page restyles, not only the
+/// written element. The short path took the paint write alone and the page kept its old theme.
+#[test]
+fn an_unlogged_sheet_write_in_the_task_restyles_the_page() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f}</style>\
+                <style id=dk>.t{background:#222}</style>\
+                <div class=t></div><div class=t></div><div class=t id=w></div>\
+                <script>var dk = document.getElementById('dk').sheet, w = document.getElementById('w'), n = 0; dk.disabled = true; \
+                requestAnimationFrame(function f() { n++; if (window.go === 1) { window.go = 2; dk.disabled = false; } \
+                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    assert!(cross_check_go(html, 6, "", 3) >= 3, "the short path ran around the toggle");
+}
+
+/// R1 hold 2: an element scroll in the same task as a paint write is laid out: the scroller's
+/// offset moves with the frame. The short path recoloured and did not scroll.
+#[test]
+fn an_element_scroll_in_the_task_is_not_dropped() {
+    let html = "<!doctype html><style>body{margin:0}#sc{width:200px;height:100px;overflow:auto}#in{width:2000px;height:50px;background:linear-gradient(90deg,#000,#fff)}\
+                #dot{width:20px;height:20px;background:#08f}</style><div id=sc><div id=in></div></div><div id=dot></div>\
+                <script>var sc = document.getElementById('sc'), dot = document.getElementById('dot'), n = 0; \
+                requestAnimationFrame(function f() { n++; sc.scrollLeft += 7; dot.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    cross_check(html, 6, "String(sc.scrollLeft)");
+}
+
+/// R1 hold 2, the window: `scrollTo` in the same task as a paint write, with a sticky header.
+#[test]
+fn a_window_scroll_in_the_task_is_not_dropped() {
+    let html = "<!doctype html><style>body{margin:0;height:3000px}#h{position:sticky;top:0;height:30px;background:#ccc}\
+                #dot{width:20px;height:20px;background:#08f}</style><div id=h></div><div style=\"height:200px\"></div><div id=dot></div>\
+                <script>var dot = document.getElementById('dot'), n = 0; \
+                requestAnimationFrame(function f() { n++; window.scrollTo(0, n * 11); dot.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    cross_check(html, 6, "String(window.scrollY)");
+}
+
+/// R1 hold 1, `adoptedStyleSheets` (also unlogged): adopted in the same task as a paint write.
+#[test]
+fn an_adopted_sheet_in_the_task_restyles_the_page() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f}</style>\
+                <div class=t></div><div class=t></div><div class=t id=w></div>\
+                <script>var dk = new CSSStyleSheet(); dk.replaceSync('.t{background:#222}'); var w = document.getElementById('w'), n = 0; \
+                requestAnimationFrame(function f() { n++; if (window.go === 1) { window.go = 2; document.adoptedStyleSheets = [dk]; } \
+                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    assert!(cross_check_go(html, 6, "", 3) >= 3, "the short path ran around the adoption");
+}
+
+/// R1's wider cross-check: what a written element's subtree inherits or derives from the written
+/// value repaints as the full rebuild does: inherited `color` on text, a `currentColor` border, a
+/// custom property consumed below (`--x`).
+#[test]
+fn inherited_and_derived_paint_follow_the_write() {
+    let html = "<!doctype html><style>body{margin:0}#w{width:200px;padding:4px;border:3px solid currentColor;--x:#0a0}\
+                #w b{color:inherit}#w i{display:block;width:20px;height:20px;background:var(--x)}</style>\
+                <div id=w><b>text that inherits</b><i></i></div>\
+                <script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                w.style.color = 'hsl(' + (n * 40 % 360) + ',60%,40%)'; w.style.setProperty('--x', 'hsl(' + (n * 70 % 360) + ',60%,50%)'); \
+                requestAnimationFrame(f); });</script>";
+    assert!(cross_check(html, 6, "getComputedStyle(document.querySelector('#w i')).backgroundColor") >= 3);
+}
+
+/// A `background-color` transition starts from a script write on the short path as on the full one.
+#[test]
+fn a_transition_starts_from_a_short_path_write() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f;transition:background-color 50ms linear}</style>\
+                <div class=t id=w></div><script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
+                if (n % 3 === 0) w.style.backgroundColor = n % 2 ? '#f00' : '#00f'; else w.style.outlineColor = 'hsl(' + n * 30 + ',50%,50%)'; requestAnimationFrame(f); });</script>";
+    cross_check(html, 7, "String(w.getAnimations().length)");
+}
+
+/// A write that changes more than paint (a miss), then paint writes again: the path sits out its
+/// cooldown and comes back, and every frame paints as the full rebuild does.
+#[test]
+fn a_miss_then_paint_writes_again_paint_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f}</style>\
+                <div class=t id=w></div><div class=t></div><script>var w = document.getElementById('w'), n = 0; \
+                requestAnimationFrame(function f() { n++; if (window.go === 1) { window.go = 2; w.style.width = '40px'; } \
+                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    // The width write misses and the path sits out its cooldown: fewer short-path frames than
+    // frames, and still some after (it came back).
+    let took = cross_check_go(html, 80, "", 5);
+    assert!(took < 70 && took > 10, "the short path ran {took} times of 80 frames");
+}
+
+/// A geometry read between two paint writes in one task (a forced layout) leaves the frame
+/// painting as the full rebuild does.
+#[test]
+fn a_forced_read_mid_task_paints_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f}</style>\
+                <div class=t id=a></div><div class=t id=b></div><script>var a = document.getElementById('a'), b = document.getElementById('b'), n = 0, h = 0; \
+                requestAnimationFrame(function f() { n++; a.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; \
+                h = b.getBoundingClientRect().top; b.style.backgroundColor = 'hsl(' + (n * 70 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    cross_check(html, 6, "String(h)");
+}
+
+/// A pointer restyle (`:hover`) between script paint writes: the kept tree is let go when the
+/// pointer path patches the laid-out tree, so a later write paints as the full rebuild does (R1: a
+/// tile captured under `:hover` red, the pointer leaves, script sets red).
+#[test]
+fn a_hover_between_script_writes_paints_as_the_full_rebuild() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:40px;height:40px;background:#08f}.t:hover{background:#f00}</style>\
+                <div class=t id=w></div><div class=t id=v></div><script>var w = document.getElementById('w'), n = 0; \
+                requestAnimationFrame(function f() { n++; w.style.outlineColor = 'hsl(' + n * 30 + ',50%,50%)'; if (n === 4) w.style.backgroundColor = '#f00'; requestAnimationFrame(f); });</script>";
+    let run = |on: bool| {
+        set_script_restyle_for_test(on);
+        let (mut engine, view, _server) = load(html);
+        let mut out = Vec::new();
+        for i in 0..7 {
+            if i == 2 {
+                engine.mouse_move_at_point(view, 10.0, 10.0);
+            }
+            if i == 3 {
+                engine.mouse_move_at_point(view, 300.0, 300.0);
+            }
+            frame(&mut engine, view);
+            out.push(format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands));
+        }
+        set_script_restyle_for_test(true);
+        out
+    };
+    let (short, full) = (run(true), run(false));
+    for (i, (a, b)) in short.iter().zip(&full).enumerate() {
+        assert!(a == b, "frame {i}: the display list differs from the full rebuild's");
+    }
+}
+
+/// `RUSTKIT_SCRIPT_RESTYLE` reads as on unless it is `0`; the batch turns the path off with it.
+#[test]
+fn the_production_switch_is_read_from_the_environment() {
+    assert!(script_restyle_enabled() || std::env::var_os("RUSTKIT_SCRIPT_RESTYLE").is_some_and(|v| v == "0"));
+}
