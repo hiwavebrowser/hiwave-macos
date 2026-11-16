@@ -16,6 +16,8 @@
 //! in rustkit-bindings (`canvas_origin_checks_follow_the_response_urls`),
 //! in a frame's realm too.
 
+#![cfg(all(target_os = "macos", feature = "headless"))]
+
 use super::*;
 use crate::canvas_context_tests::serve_with_redirects;
 use std::time::Duration;
