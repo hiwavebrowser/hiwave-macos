@@ -265,6 +265,11 @@ pub struct RelayoutStats {
     /// The most recent relayout's layout stage, in milliseconds (INC5's
     /// timing; under `RUSTKIT_INCREMENTAL_LAYOUT=verify` both passes).
     pub last_layout_ms: f64,
+    /// LPF1: relayouts asked for by script style writes that built only the written elements and
+    /// patched their paint onto the laid-out boxes (no full build, no layout).
+    pub script_restyles: u32,
+    /// The child nodes the last such restyle's build went into (its cost, in elements).
+    pub last_restyle_walked: usize,
 }
 
 impl RelayoutStats {
