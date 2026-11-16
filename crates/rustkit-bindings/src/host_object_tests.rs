@@ -654,9 +654,10 @@ fn a_stopped_turns_animation_round_runs_the_frame_callbacks() {
         text(t.child.evaluate("String(frames)").unwrap()),
         t.parent.next_timer_delay(),
     );
+    // The frame asked for in the round is the next on the 60 Hz grid: 34, from the clock at 20.
     assert_eq!(
         got,
-        (2, "1".to_string(), "1".to_string(), Some(16)),
+        (2, "1".to_string(), "1".to_string(), Some(14)),
         "callbacks run, frames seen by the page, by its frame, and when the next is due"
     );
 }

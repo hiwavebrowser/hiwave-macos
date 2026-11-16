@@ -174,6 +174,40 @@ fn the_next_timer_is_read_without_the_pages_math() {
     assert_eq!((delay, clock, ran.as_str()), (Some(1000), 0.0, "0"), "the delay, the clock, and calls of the page's functions");
 }
 
+/// Animation frames are put on their grid, and a turn's frame budget is
+/// timed, with the arithmetic and clock of install time: a page whose
+/// `Math.floor` returns 0, or whose `Math` is a plain object, still gets its
+/// frames on the grid, and its `Date.now` is not what ends a turn.
+#[test]
+fn frames_and_the_frame_budget_run_without_the_pages_math_or_clock() {
+    let got = bounded(|| {
+        let (b, _) = bindings(false);
+        b.evaluate(KIT).unwrap();
+        b.evaluate(
+            "var frames = 0, threw = '', realMath = Math, realNow = Date.now;
+             Math.floor = counted; Date.now = counted;
+             (function f() { requestAnimationFrame(function () { frames++; f(); }); })();",
+        )
+        .unwrap();
+        let first = b.next_timer_delay();
+        b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        let second = b.next_timer_delay();
+        b.evaluate(
+            "Math = {};
+             try { requestAnimationFrame(function () { frames++; }); } catch (e) { threw = String(e); }",
+        )
+        .unwrap();
+        let ran_round = b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        b.evaluate("Math = realMath; Date.now = realNow;").unwrap();
+        (first, second, ran_round, text(b.evaluate("'frames=' + frames + ' ran=' + ran + ' threw=' + threw").unwrap()))
+    });
+    assert_eq!(
+        got,
+        (Some(17), Some(17), (2, false), "frames=3 ran=0 threw=".to_string()),
+        "the first and next frame's delay, the second turn's callbacks, and the page's counts"
+    );
+}
+
 /// Timers are set and cleared while the page has its own array methods in
 /// place: the timer table never passes through them, and reading the next
 /// timer runs nothing of the page's.

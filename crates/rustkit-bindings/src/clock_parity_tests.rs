@@ -68,30 +68,35 @@ const RECORD_FRAMES: &str = "window.__turn = -1; window.__frames = []; (function
 
 /// 60 live turns of 16 ms of virtual time, `sleep_ms` of real time apart.
 ///
-/// Live, a frame's timestamp is `performance.now()` at its turn, held at least one virtual frame
-/// (16 ms) past the frame before it, so how far apart the page's frames are is how far apart this
-/// test's turns are in real time: the page's `.rafLoop.medianNearAFrame` (Chrome: the middle gap is
-/// 5 to 40 ms) is a wall-clock bound here, and a loaded runner failed it (FLK6). That one relation is
-/// checked on the values instead, against the turns this test made, which holds at any load:
-/// - each frame runs one turn after the one before (a frame asked for in a turn is due a virtual
-///   frame later, the next turn), and every callback of a turn gets the same timestamp;
-/// - consecutive frames in turns `a < b` are at least `16 * (b - a)` ms apart (the virtual floor)
-///   and at most `max(16 * (b - a), end[b] - start[a])`, where `start[k]` and `end[k]` are
-///   `performance.now()` just before and just after turn `k`: the clock is monotonic, so frame `a`'s
-///   stamp is not before `start[a]` and frame `b`'s is not past `end[b]` unless the floor put it
-///   there. The span covers the two turns and the one sleep between them.
+/// Live, a frame's timestamp is its grid time on `performance.now()`'s clock: the clock read in its
+/// turn less how late the turn ran it (`late[k]`: the turn's virtual time less the frame's grid
+/// point, the latest of the 60 Hz grid at or before it), held at least the grid step past the frame
+/// before it. So how far apart the page's frames are is how far apart this test's turns are in
+/// real time: the page's `.rafLoop.medianNearAFrame` (Chrome: the middle gap is 5 to 40 ms) is a
+/// wall-clock bound here, and a loaded runner failed it (FLK6). That one relation is checked on the
+/// values instead, against the turns this test made, which holds at any load:
+/// - each frame runs one turn after the one before (a frame asked for in a turn is due at the next
+///   grid point, which the next 16 ms turn reaches), and every callback of a turn gets the same
+///   timestamp;
+/// - consecutive frames in turns `a < b` are at least their grid points' distance apart (the
+///   floor) and at most `max(floor, end[b] - late[b] - (start[a] - late[a]))`, where `start[k]` and
+///   `end[k]` are `performance.now()` just before and just after turn `k`: the clock is monotonic,
+///   so frame `a`'s stamp is not before `start[a] - late[a]` and frame `b`'s is not past
+///   `end[b] - late[b]` unless the floor put it there. The span covers the two turns and the one
+///   sleep between them.
 /// Every other relation is compared with Chrome as it stands.
 fn live(sleep_ms: u64) {
     let b = page();
     b.evaluate(RECORD_FRAMES).unwrap();
     b.evaluate(&format!("(0, eval)({})", serde_json::to_string(PAGE_JS).unwrap())).unwrap();
     let now = |b: &DomBindings| ev(b, "String(performance.now())").parse::<f64>().unwrap();
-    let (mut start, mut end) = (Vec::new(), Vec::new());
+    let (mut start, mut end, mut at) = (Vec::new(), Vec::new(), Vec::new());
     for turn in 0..60 {
         b.evaluate(&format!("window.__turn = {turn}")).unwrap();
         start.push(now(&b));
         b.advance_timers(16, 100).unwrap();
         end.push(now(&b));
+        at.push(b.clock_now_ms());
         std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
     }
     let frames: Vec<(f64, i64)> = serde_json::from_str(&ev(&b, "JSON.stringify(window.__frames)")).unwrap();
@@ -110,11 +115,24 @@ fn live(sleep_ms: u64) {
     }
     // The page asks for 2 frames, then a loop of 11: turns 0 to 10.
     assert_eq!(stamps.len(), 11, "{frames:?}");
+    // The 60 Hz grid's latest point at or before `t`, and how late a turn at `t` ran it.
+    let grid = |k: f64| ((k * 50.0 + 2.0) / 3.0).floor();
+    let due = |t: f64| {
+        let mut k = (t * 3.0 / 50.0).floor();
+        while grid(k + 1.0) <= t {
+            k += 1.0;
+        }
+        while grid(k) > t {
+            k -= 1.0;
+        }
+        grid(k)
+    };
+    let late = |k: usize| at[k] - due(at[k]);
     for pair in stamps.windows(2) {
         let ((a, ta), (b2, tb)) = (pair[0], pair[1]);
         assert_eq!(b2, a + 1, "a frame skipped a turn: {stamps:?}");
-        let floor = 16.0 * (b2 - a) as f64;
-        let span = end[b2 as usize] - start[a as usize];
+        let floor = due(at[b2 as usize]) - due(at[a as usize]);
+        let span = (end[b2 as usize] - late(b2 as usize)) - (start[a as usize] - late(a as usize));
         assert!(tb - ta >= floor - 1e-6, "frames {a} and {b2} less than a frame apart: {stamps:?}");
         assert!(
             tb - ta <= floor.max(span) + 1e-6,
