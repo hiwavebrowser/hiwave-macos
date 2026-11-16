@@ -1,0 +1,277 @@
+{
+  "timestamp": "2026-11-16T12:43:46.818510",
+  "commit": "a82929002da8edb71d4b98447230b13bd97a99d9",
+  "branch": "develop",
+  "total": 26,
+  "passed": 26,
+  "failed": 0,
+  "not_measured": 0,
+  "measured": 26,
+  "average_diff": 0.4051251406267886,
+  "worst_case": {
+    "name": "article-typography",
+    "diff": 3.49482421875
+  },
+  "tests": [
+    {
+      "name": "article-typography",
+      "diff": 3.49482421875,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "form-controls",
+      "diff": 2.6706250000000002,
+      "threshold": 12,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "backgrounds",
+      "diff": 1.0126666666666668,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "shelf",
+      "diff": 0.5130208333333333,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "form-elements",
+      "diff": 0.42208333333333337,
+      "threshold": 12,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "new_tab",
+      "diff": 0.33798828124999997,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "css-selectors",
+      "diff": 0.2579166666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "settings",
+      "diff": 0.24706522623697916,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "card-grid",
+      "diff": 0.24316406250000003,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "rounded-corners",
+      "diff": 0.22366666666666668,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "gradient-no-radius",
+      "diff": 0.22,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "combinators",
+      "diff": 0.13765625,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "about",
+      "diff": 0.11750000000000001,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "gradient-backgrounds",
+      "diff": 0.08583333333333333,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "pseudo-classes",
+      "diff": 0.08109375,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "gpu-gradient-regression",
+      "diff": 0.06822916666666666,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "gradient-radius-only",
+      "diff": 0.06770833333333334,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "flex-positioning",
+      "diff": 0.059125,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "specificity",
+      "diff": 0.05354166666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "chrome_rustkit",
+      "diff": 0.053125000000000006,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "gradients",
+      "diff": 0.043333333333333335,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "images-intrinsic",
+      "diff": 0.039017857142857146,
+      "threshold": 10,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "bg-solid",
+      "diff": 0.03729166666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "image-gallery",
+      "diff": 0.027929687499999998,
+      "threshold": 10,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "sticky-scroll",
+      "diff": 0.01884765625,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    },
+    {
+      "name": "bg-pure",
+      "diff": 0.0,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null,
+      "not_measured": false,
+      "instrument_failure": null
+    }
+  ]
+}
