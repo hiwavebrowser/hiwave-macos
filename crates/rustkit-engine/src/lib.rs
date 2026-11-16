@@ -444,6 +444,8 @@ mod live_pacing_tests;
 mod frame_rate_tests;
 #[cfg(test)]
 mod live_clock_tests;
+#[cfg(test)]
+mod scroll_key_dy_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_stream_tests;
 #[cfg(all(test, feature = "headless"))]
