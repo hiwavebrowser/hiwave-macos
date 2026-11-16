@@ -82,3 +82,22 @@ fn measure_the_content_threads_frame_grid() {
         eprintln!("PACE2-GRID {}", run_probe_page(GRID_PAGE));
     }
 }
+
+/// LINKS-SLOW: the lateness of each link of the 10 ms chain on the content thread's loop
+/// (`links_lateness_probe.html`; Chrome, five runs, `links_lateness_probe_cft148.json`: 278-281
+/// links, lateness mean 0.64-0.75 ms, median 0.6-0.7, p90 1.1-1.5, max 2.0-2.7).
+pub(crate) const LINKS_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-16/links_lateness_probe.html");
+
+#[test]
+#[ignore]
+fn measure_the_content_threads_link_lateness() {
+    sleeps_as_on_macos_if_asked();
+    for _ in 0..3 {
+        let rec = run_probe_page(LINKS_PAGE);
+        eprintln!(
+            "LINKS-RESULT frames {} links {} summary {}",
+            rec["frames"], rec["timers"], rec["summary"]
+        );
+    }
+}

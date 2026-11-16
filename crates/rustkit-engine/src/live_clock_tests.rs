@@ -97,3 +97,14 @@ fn the_page_clock_keeps_up_and_frames_come_every_16_to_17_ms() {
     assert_eq!(timers, 299, "the page's clock fell behind real time");
     assert!(frames >= 175, "{frames} frames in 3000 ms");
 }
+
+/// LINKS-SLOW: the content loop's 2 ms floor is for a page whose timer is always due (a wait of 0):
+/// a timer due in 1 ms is waited for 1 ms. Raised to 2, a link due a fraction past a turn came a
+/// millisecond or more late.
+#[test]
+fn only_a_timer_due_now_waits_the_floor() {
+    assert_eq!(content_turn_wait(Some(0)), std::time::Duration::from_millis(2));
+    assert_eq!(content_turn_wait(Some(1)), std::time::Duration::from_millis(1));
+    assert_eq!(content_turn_wait(Some(10)), std::time::Duration::from_millis(10));
+    assert_eq!(content_turn_wait(None), std::time::Duration::from_millis(50));
+}

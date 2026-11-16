@@ -252,3 +252,37 @@ fn a_real_turns_timers_count_from_the_turns_instant() {
     b.advance_real_timers_for_frame_since(10, 1000, 0, 40.0).unwrap();
     assert_eq!(b.next_timer_delay(), Some(140));
 }
+
+/// LINKS-SLOW: a timer set in a real turn counts from when it is set, a time with a fraction of a
+/// millisecond in it; the delay to it is reported rounded up, so a loop that waits that long finds
+/// it due. Rounded down (truncated), the loop woke a fraction early, the timer was not due, and the
+/// wait to it, under a millisecond, truncated to 0 and became the loop's 2 ms floor: every link of
+/// a 10 ms chain came ~2 ms late (the Mac after #1183: 236-245 links in 3000 ms, Chrome 278-281,
+/// `links_lateness_probe_cft148.json`). Real time is a value here (`__rk.testRealMs`).
+#[test]
+fn a_timer_is_never_reported_due_before_it_is_due() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping(
+            "var fake = 1000; __rk.testRealMs = function () { return fake; }; \
+             window.__work = function (ms) { fake += ms; }; return 0",
+        )
+        .unwrap();
+    // A timer callback that works 0.4 ms, then sets the next link: it counts from a fraction.
+    b.evaluate("var links = 0; function link() { links++; __work(0.4); setTimeout(link, 10); } setTimeout(link, 0);")
+        .unwrap();
+    b.advance_real_timers_for_frame(0, 1000, 0).unwrap();
+    let read = |b: &DomBindings| match b.evaluate("String(links)").unwrap() {
+        JsValue::String(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(read(&b), "1");
+    for i in 0..5 {
+        let delay = b.next_timer_delay().expect("the next link is set");
+        // The loop waits that long; real time moves as much, and the turn is given it.
+        b.evaluate(&format!("__work({delay})")).unwrap();
+        b.advance_real_timers_for_frame(delay, 1000, 0).unwrap();
+        assert_eq!(read(&b), (i + 2).to_string(), "link {} was not due after the {delay} ms reported", i + 2);
+    }
+}
