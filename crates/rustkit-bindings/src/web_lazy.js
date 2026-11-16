@@ -23,7 +23,11 @@
         apply = Reflect.apply, create = Object.create, setProto = Object.setPrototypeOf;
     function bare(o) { return o ? setProto(o, null) : o; }
     var reporting = create(null);
+    // On this record the reporter finds the realm's `error` event too.
     reporting.reportError = __rk.reportError;
+    reporting.fireError = function (value, text, path, line, column) {
+        return typeof __rk.fireError === 'function' ? __rk.fireError(value, text, path, line, column) : undefined;
+    };
     reporting.unsupported = __rk.unsupported;
     // The natives a script takes from the window when it installs.
     var NATIVES = { animations: '__rustkit_animated_style', intl: '__rustkit_likely_subtags' };

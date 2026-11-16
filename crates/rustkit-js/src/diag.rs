@@ -151,6 +151,12 @@ pub(crate) struct Diagnostics {
     pub(crate) on: Cell<bool>,
     /// Reports keep the page's message text (unsafe to share).
     pub(crate) keep_text: Cell<bool>,
+    /// An uncaught exception is announced to the embedder's scripts first
+    /// ([`crate::JsRuntime::set_error_events`]).
+    pub(crate) error_events: Cell<bool>,
+    /// An announcement is under way: an exception thrown by what it calls is
+    /// reported and not announced.
+    announcing_error: Cell<bool>,
     reports: RefCell<VecDeque<ErrorReport>>,
     /// What listeners and timers threw, as the script log has always had it
     /// (`describe::text`), whether or not reports are on.
@@ -404,7 +410,7 @@ impl Diagnostics {
     /// `path` names a script the engine evaluates (noted only while
     /// reports are on: nothing is kept for an embedder that records none).
     pub(crate) fn know_path(&self, path: &str) {
-        if !self.on.get() {
+        if !self.on.get() && !self.error_events.get() {
             return;
         }
         let mut known = self.known_paths.borrow_mut();
@@ -427,6 +433,59 @@ impl Diagnostics {
 
     pub(crate) fn take_reported_texts(&self) -> Vec<String> {
         self.reported_texts.borrow_mut().drain(..).collect()
+    }
+
+    /// HTML "report an exception", the page's part: hand `value` to
+    /// `host`'s `fireError` (the embedder's script that fires the `error`
+    /// event at the realm's global) as `(value, text, path, line, column)`,
+    /// where `text` is the value as a console line shows it and the
+    /// position is where it was thrown (`""`, 0, 0 when that is in no
+    /// script of the page's). Whether a listener canceled the event; a
+    /// canceled exception is reported no further.
+    ///
+    /// Nothing is announced with events off, to a host with no `fireError`,
+    /// or while an announcement is under way: an exception an `error`
+    /// handler throws is reported and fires no event of its own.
+    pub(crate) fn announce(&self, host: &JsObject, value: &JsValue, report: &ErrorReport, context: &mut Context) -> bool {
+        use boa_engine::{js_string, JsString};
+        if !self.error_events.get() || self.announcing_error.get() {
+            return false;
+        }
+        // The host object inherits from nothing and owns the slot.
+        let Ok(fire) = host.get(js_string!("fireError"), context) else {
+            return false;
+        };
+        let Some(fire) = fire.as_callable() else {
+            return false;
+        };
+        let text = crate::describe::text(value, context);
+        let (path, line, column) = match report.frames.first() {
+            Some(at) if report.located => (at.path.clone(), at.line, at.column),
+            _ => (String::new(), 0, 0),
+        };
+        let args = [
+            value.clone(),
+            JsValue::from(JsString::from(text.as_str())),
+            JsValue::from(JsString::from(path.as_str())),
+            JsValue::from(line),
+            JsValue::from(column),
+        ];
+        self.announcing_error.set(true);
+        let result = fire.call(&JsValue::undefined(), &args, context);
+        self.announcing_error.set(false);
+        matches!(result, Ok(answer) if answer.as_boolean() == Some(false))
+    }
+
+    /// A listener or timer threw `value` (the bindings' reporter, called on
+    /// `host`): announced, then reported unless a listener canceled it.
+    pub(crate) fn uncaught(&self, host: Option<&JsObject>, value: &JsValue, context: &mut Context) {
+        if let Some(host) = host.filter(|_| self.error_events.get() && !self.announcing_error.get()) {
+            let report = self.describe(value, None, false, context);
+            if self.announce(host, value, &report, context) {
+                return;
+            }
+        }
+        self.reported(value, context);
     }
 
     /// A listener or timer threw `value` (the bindings' reporter).

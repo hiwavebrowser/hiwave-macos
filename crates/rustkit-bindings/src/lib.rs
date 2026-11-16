@@ -490,7 +490,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 pub(crate) const HOST_SLOTS: &[&str] = &[
     "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
-    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
@@ -522,9 +522,9 @@ pub(crate) const SHARED_SLOTS: &[&str] = &[
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     // Described natively (no page code runs) and queued in the runtime.
-    var reportError = __rk.reportError;
+    // Called on the host object: the realm's `error` event comes first.
     function report(e) {
-        try { reportError(e); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -1621,6 +1621,9 @@ impl DomBindings {
         // Promise rejections are announced to the page (`__rk.fireRejection`,
         // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
         runtime.set_rejection_events(true);
+        // An uncaught exception is announced the same way (`__rk.fireError`):
+        // the `error` event at the Window.
+        runtime.set_error_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);

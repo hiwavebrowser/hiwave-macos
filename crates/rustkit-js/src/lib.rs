@@ -997,6 +997,57 @@ impl JsRuntime {
         let _ = on;
     }
 
+    /// Announce uncaught exceptions to the embedder's scripts, for the
+    /// page's `error` event (HTML "report an exception"). Off by default.
+    /// On: an exception a page script ends with
+    /// ([`evaluate_script_named`](Self::evaluate_script_named), a module),
+    /// or one the embedder's scripts hand to the host object's
+    /// `reportError` (a listener's, a timer's), is first handed to the host
+    /// object's `fireError` of the realm it happened in, as
+    /// `(value, text, path, line, column)`. `false` back means a listener
+    /// canceled the event, and that exception is then left out of the error
+    /// reports. An exception thrown during the hand-over is reported and
+    /// not handed over; nothing is handed over after the watchdog stopped
+    /// the turn. A realm with no `fireError` has no event.
+    pub fn set_error_events(&mut self, on: bool) {
+        #[cfg(feature = "boa")]
+        self.diag.error_events.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
+    }
+
+    /// A page script or module ended with `error`: announce it
+    /// ([`set_error_events`](Self::set_error_events)), then report it
+    /// unless a listener canceled the event.
+    #[cfg(feature = "boa")]
+    pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool) {
+        let events = announce && self.diag.error_events.get() && !self.deadline.hit.get();
+        if !events && !self.diag.on.get() {
+            return;
+        }
+        let report = self.diag.describe_error(error, &mut self.context);
+        if events {
+            let value = match error.as_opaque() {
+                Some(value) => Some(value.clone()),
+                None => error.clone().into_opaque(&mut self.context).ok(),
+            };
+            if let Some(value) = value {
+                let host = self.entered_host();
+                self.context.reset_recursion_max();
+                let canceled = self.diag.announce(&host, &value, &report, &mut self.context);
+                self.consume_interrupt();
+                let _ = self.context.run_jobs();
+                self.consume_interrupt();
+                if canceled {
+                    return;
+                }
+            }
+        }
+        if self.diag.on.get() {
+            self.diag.push(report);
+        }
+    }
+
     /// HTML "notify about rejected promises", at the end of a turn's
     /// microtasks. Everything pending at that point is announced, oldest
     /// first, however many: that is one round. What the listeners rejected
@@ -1454,7 +1505,7 @@ impl JsRuntime {
                     .context
                     .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
             };
-            self.settle_evaluation(result)
+            self.settle_evaluation(result, path.is_some())
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1467,7 +1518,9 @@ impl JsRuntime {
     /// What follows a script or a kept call: the interrupt state, the microtask drain, console output and
     /// the error report, then the value.
     #[cfg(feature = "boa")]
-    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>) -> Result<JsValue, JsError> {
+    /// `page`: the code was a page script's, whose uncaught exception is
+    /// announced to the page ([`set_error_events`](Self::set_error_events)).
+    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>, page: bool) -> Result<JsValue, JsError> {
         self.consume_interrupt();
         // Promise reactions (`.then`, `await`) are jobs Boa queues but
         // does not run on its own; a page's async code never resumes
@@ -1497,10 +1550,7 @@ impl JsRuntime {
             }
             Err(err) => {
                 self.flush_console_logs();
-                if self.diag.on.get() {
-                    let report = self.diag.describe_error(&err, &mut self.context);
-                    self.diag.push(report);
-                }
+                self.uncaught_error(&err, page);
                 let msg = describe::error_text(&err, &mut self.context);
                 Err(JsError::ExecutionError(msg))
             }
@@ -1559,7 +1609,7 @@ impl JsRuntime {
                 .collect();
             self.context.reset_recursion_max();
             let result = callee.call(&BoaValue::undefined(), &args, &mut self.context);
-            self.settle_evaluation(result)
+            self.settle_evaluation(result, false)
         }
         #[cfg(not(feature = "boa"))]
         {
@@ -2174,9 +2224,11 @@ fn host_object(
     // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
     // (the stack getter, report values never) stay rooted while it lives.
     let report_error = unsafe {
-        NativeFunction::from_closure(move |_this, args, context| {
+        NativeFunction::from_closure(move |this, args, context| {
             let value = args.first().cloned().unwrap_or_default();
-            reporter.reported(&value, context);
+            // Called on the host object (`__rk.reportError(e)`): the realm's
+            // `error` event comes first, and can cancel the report.
+            reporter.uncaught(this.as_object().as_ref(), &value, context);
             Ok(boa_engine::JsValue::undefined())
         })
     };
