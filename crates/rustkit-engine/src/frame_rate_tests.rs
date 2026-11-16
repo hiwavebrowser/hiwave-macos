@@ -19,10 +19,15 @@ pub(crate) const GRID_PAGE: &str =
 
 /// Loads `page` with `#manual`, starts it in a live turn after the load, and returns its record.
 pub(crate) fn run_probe_page(page: &'static str) -> serde_json::Value {
+    run_probe_page_with(page, "")
+}
+
+/// [`run_probe_page`], with `setup` run before `go()`.
+pub(crate) fn run_probe_page_with(page: &'static str, setup: &str) -> serde_json::Value {
     let fixture = serve(vec![("/", html(page))]);
     let mut load = Load::start(&fixture, "/#manual");
     load.wait_complete();
-    let _ = load.eval("go(); 'started'", Duration::from_secs(10));
+    let _ = load.eval(&format!("{setup} go(); 'started'"), Duration::from_secs(10));
     // No commands while the probe runs: an eval is a turn the loop did not pace.
     std::thread::sleep(Duration::from_millis(3300));
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -93,10 +98,15 @@ pub(crate) const LINKS_PAGE: &str =
 #[ignore]
 fn measure_the_content_threads_link_lateness() {
     sleeps_as_on_macos_if_asked();
+    let setup = if std::env::var_os("LINKS_NO_FRAMES").is_some() { "window.NO_FRAMES = true;" } else { "" };
     for _ in 0..3 {
-        let rec = run_probe_page(LINKS_PAGE);
+        let rec = run_probe_page_with(LINKS_PAGE, setup);
+        let min = rec["late"]
+            .as_array()
+            .map(|l| l.iter().filter_map(|x| x.as_f64()).fold(f64::INFINITY, f64::min))
+            .unwrap_or(f64::NAN);
         eprintln!(
-            "LINKS-RESULT frames {} links {} summary {}",
+            "LINKS-RESULT frames {} links {} summary {} min {min}",
             rec["frames"], rec["timers"], rec["summary"]
         );
     }

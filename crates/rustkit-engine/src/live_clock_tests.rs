@@ -108,3 +108,79 @@ fn only_a_timer_due_now_waits_the_floor() {
     assert_eq!(content_turn_wait(Some(10)), std::time::Duration::from_millis(10));
     assert_eq!(content_turn_wait(None), std::time::Duration::from_millis(50));
 }
+
+/// LINKS-SLOW: the sleep-overshoot estimate, on made-up instants. It starts at 0 (a sleep is aimed
+/// at its due instant, as before), follows a steady overshoot, stays at 0 on a machine with none,
+/// drops within a few wakes when the overshoot drops (so it does not keep waking early), barely
+/// moves for a rare long sleep, and never passes its cap.
+#[test]
+fn the_overshoot_estimate_follows_this_machines_sleeps() {
+    use crate::page_protocol::OvershootEstimate;
+    let t0 = std::time::Instant::now();
+    let ms = |x: f64| std::time::Duration::from_secs_f64(x / 1000.0);
+    let mut e = OvershootEstimate::default();
+    assert_eq!(e.aim(t0 + ms(10.0)), t0 + ms(10.0), "starts at 0");
+    // A steady 1.5 ms.
+    for _ in 0..200 {
+        e.observe(t0, t0 + ms(1.5));
+    }
+    assert!((e.ms() - 1.5).abs() < 0.05, "{}", e.ms());
+    // None at all.
+    let mut z = OvershootEstimate::default();
+    for _ in 0..200 {
+        z.observe(t0, t0);
+    }
+    assert_eq!(z.ms(), 0.0);
+    // The overshoot drops from 2 ms to 0: within 6 wakes the estimate is under 0.05 ms.
+    let mut j = OvershootEstimate::default();
+    for _ in 0..200 {
+        j.observe(t0, t0 + ms(2.0));
+    }
+    for _ in 0..6 {
+        j.observe(t0, t0);
+    }
+    assert!(j.ms() < 0.05, "{}", j.ms());
+    // A rare 30 ms sleep (the thread was preempted) moves it by at most a sixteenth of the cap's
+    // double, and the cap holds.
+    let before = e.ms();
+    e.observe(t0, t0 + ms(30.0));
+    assert!(e.ms() - before <= 2.0 * OvershootEstimate::CAP_MS / 16.0 + 1e-9 && e.ms() <= OvershootEstimate::CAP_MS);
+    for _ in 0..1000 {
+        e.observe(t0, t0 + ms(30.0));
+    }
+    assert!(e.ms() <= OvershootEstimate::CAP_MS);
+}
+
+/// LINKS-SLOW: aiming early never runs a timer early. A loop model on made-up instants: a 10 ms
+/// timer chain whose sleeps overshoot by a pattern that jumps (1.9 ms, then 0, then 1.2 ms with
+/// jitter); every link runs at or after its due instant, and with a steady overshoot the links
+/// are on average under 1 ms late (aimed at its due instant, every link was one overshoot late).
+#[test]
+fn an_aimed_wake_never_runs_a_timer_early() {
+    use crate::page_protocol::{after_wake, OvershootEstimate};
+    let t0 = std::time::Instant::now();
+    let ms = |x: f64| std::time::Duration::from_secs_f64(x / 1000.0);
+    let mut e = OvershootEstimate::default();
+    let mut now = t0;
+    let mut late = Vec::new();
+    for i in 0..300 {
+        let over = match i {
+            0..=99 => 1.9 + 0.3 * ((i % 7) as f64 / 7.0),
+            100..=149 => 0.0,
+            _ => 1.2 + 0.6 * ((i % 5) as f64 / 5.0),
+        };
+        let due = now + ms(10.0);
+        let aimed = e.aim(due).max(now);
+        let woke = aimed + ms(over);
+        e.observe(aimed, woke);
+        let ran = match after_wake(due, woke) {
+            Some(rest) => rest + ms(over),
+            None => woke,
+        };
+        assert!(ran >= due, "link {i} ran before it was due");
+        late.push(ran.duration_since(due).as_secs_f64() * 1000.0);
+        now = ran;
+    }
+    let steady: f64 = late[40..100].iter().sum::<f64>() / 60.0;
+    assert!(steady < 1.0, "steady lateness {steady:.2} ms");
+}
