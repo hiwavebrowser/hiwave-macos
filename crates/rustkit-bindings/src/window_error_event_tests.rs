@@ -630,6 +630,21 @@ fn document_text_that_fails_leaves_the_engines_later_code_its_own() {
     }
 }
 
+/// A script the host runs in the page (`evaluate`: the app's own scripts, a console's input) is
+/// neither the page's nor another origin's: what it rejects is not announced to the page, and an
+/// exception from a callback it set is reported to the page without detail.
+#[test]
+fn a_hosts_own_script_is_not_the_pages() {
+    let b = page();
+    b.evaluate("Promise.reject(new Error('the host rejects')); setTimeout(function () { throw new Error('the host callback'); }, 0);").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.join(' ; ') + ' / ' + rejected"), format!("{MUTED} / 0"));
+    // The page's own code beside it is unchanged.
+    b.evaluate_named("setTimeout(function () { throw new Error('the page'); }, 0); Promise.reject(new Error('the page rejects'));", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    assert_eq!(ev(&b, "seen.length + ' ' + seen[1].split('|')[1] + ' / ' + rejected"), "2 Uncaught Error: the page / 1");
+}
+
 /// The engine's compile of document text takes a string and nothing else, and keeps no state:
 /// handed anything else it throws, and what the engine compiles next is still its own.
 #[test]

@@ -1523,8 +1523,8 @@ impl JsRuntime {
         self.evaluate(source, None, false)
     }
 
-    /// Evaluate JavaScript code the embedder runs in the page as the page's
-    /// own (a console's input, a test's script): unnamed, as
+    /// Evaluate JavaScript code as a script of the page's own with no name
+    /// (a test's script that stands for a page's): unnamed, as
     /// [`evaluate_script`](Self::evaluate_script), so its frames are passed
     /// over in reports and its uncaught exception is not announced; but it
     /// is the document's code, not the embedder's: what it rejects is
@@ -2339,16 +2339,45 @@ fn host_object(
         })
     };
     let mut host = ObjectInitializer::new(context);
-    // The next code the embedder's scripts make with `eval` or `Function`
-    // is text the page's document owns (an inline script, a handler
-    // attribute, a string timer): a page script reported in full.
-    let document_code = NativeFunction::from_fn_ptr(|_this, _args, _context| {
-        boa_engine::vm::ErrorDetailScope::next_embedder_made_is_full();
-        Ok(boa_engine::JsValue::undefined())
+    // Text the page's document owns that the embedder's scripts run for it
+    // (an inline script, a string timer; a handler attribute's function):
+    // compiled here as a page script reported in full, in one step. Each
+    // takes text already computed (anything but a string is a TypeError:
+    // nothing is converted, so no script runs to be read), and nothing is
+    // kept afterwards on any path. The embedder's own `eval` and `Function`
+    // stay the embedder's.
+    let run_document_script = NativeFunction::from_fn_ptr(|_this, args, context| {
+        use boa_engine::vm::{ErrorDetail, ErrorDetailScope};
+        let Some(text) = args.first().and_then(|text| text.as_string()) else {
+            return Err(boa_engine::JsNativeError::typ().with_message("document text must be a string").into());
+        };
+        let text = text.to_std_string_escaped();
+        let script = {
+            let _detail = ErrorDetailScope::enter(ErrorDetail::Full);
+            let script = boa_engine::Script::parse(boa_engine::Source::from_bytes(text.as_bytes()), None, context)?;
+            script.codeblock(context)?;
+            script
+        };
+        script.evaluate(context)
+    });
+    let compile_document_function = NativeFunction::from_fn_ptr(|_this, args, context| {
+        let (Some(parameters), Some(body)) =
+            (args.first().and_then(|text| text.as_string()), args.get(1).and_then(|text| text.as_string()))
+        else {
+            return Err(boa_engine::JsNativeError::typ().with_message("document text must be a string").into());
+        };
+        boa_engine::builtins::function::BuiltInFunctionObject::compile_function_as(
+            &parameters,
+            &body,
+            boa_engine::vm::ErrorDetail::Full,
+            context,
+        )
+        .map(Into::into)
     });
     host.function(report_error, js_string!("reportError"), 1)
         .function(unsupported, js_string!("unsupported"), 2)
-        .function(document_code, js_string!("documentCode"), 0);
+        .function(run_document_script, js_string!("runDocumentScript"), 1)
+        .function(compile_document_function, js_string!("compileDocumentFunction"), 2);
     bytes::install(&mut host, byte_stash, blobs);
     let host = host.build();
     // The host object inherits from nothing: a name it does not own reads

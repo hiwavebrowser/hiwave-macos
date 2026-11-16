@@ -851,7 +851,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function call(timer) {
         try {
             if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
-            else { __rk.documentCode(); evalNow(toText(timer.cb)); } // a string timer is the document's code
+            else {
+                // A string timer is the document's code: its text first,
+                // then the one step that compiles and runs it.
+                var text = toText(timer.cb);
+                __rk.runDocumentScript(text);
+            }
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
@@ -2951,8 +2956,19 @@ impl DomBindings {
 
     /// Evaluate a script in the bound context.
     pub fn evaluate(&self, script: &str) -> Result<JsValue, BindingError> {
-        // Run in the page as the page's own code (a host's script for the
-        // document), not as the engine's.
+        self.runtime
+            .borrow_mut()
+            .evaluate_script(script)
+            .map_err(Into::into)
+    }
+
+    /// Evaluate `script` as a script of the page's own (unnamed), not as
+    /// the host's: what it rejects is announced to the page, and an error
+    /// raised for its calls is its own. For tests whose script stands for a
+    /// page's; a host's script goes through [`Self::evaluate`], and a
+    /// page's real scripts through [`Self::evaluate_named`].
+    #[doc(hidden)]
+    pub fn evaluate_as_page_script(&self, script: &str) -> Result<JsValue, BindingError> {
         self.runtime
             .borrow_mut()
             .evaluate_document_script(script)

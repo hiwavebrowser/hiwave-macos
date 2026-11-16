@@ -979,9 +979,12 @@ That is a property of the code that is running when an error is thrown, so it is
   both page states, it answers for nothing. `CodeBlock::error_detail()` reads it.
 - Code made at run time carries the answer of the code that made it: `eval` (`builtins/eval`) and
   the `Function` constructors (`create_dynamic_function`) enter the scope with the current frame's.
-  Made by the embedder's code it is the embedder's, unless the embedder said beforehand that the
-  next one is text the page's document owns (`ErrorDetailScope::next_embedder_made_is_full`). A
-  module keeps the answer it was parsed under (`ModuleCode`) and is compiled with it at link time.
+  Made by the embedder's code it is the embedder's, always: nothing is kept between one compile and
+  the next. A host that compiles text for the page says what it is in the call:
+  `Script::parse` under a scope, and `BuiltInFunctionObject::compile_function_as(parameters, body,
+  detail, context)` for a function (new), which reads two strings and leaves nothing behind whether
+  the text compiles or not. A module keeps the answer it was parsed under (`ModuleCode`) and is
+  compiled with it at link time.
 - `Vm::page_error_detail(depth)`: the page script that is running, passing over the embedder's
   frames. `JsError::detail_withheld()` is that script's answer where the error was first raised,
   stamped once in `handle_error`, `handle_throw` and the `Throw` opcode; it stays with the error
@@ -995,9 +998,13 @@ That is a property of the code that is running when an error is thrown, so it is
   or a native one passes the note on), else the page script calling the reject function, else the
   page script the promise's resolving functions were made for.
 
-**Cost.** One thread-local read per compiled code block; a walk of the frames where an error is
-first raised and where a promise is made or rejected; a clone of the value where a raised error
-becomes a value. Nothing on a path that does not throw or make a promise.
+**Cost.** One thread-local read per compiled code block. Where an error is first raised, and where
+a promise's resolving functions are made or a promise is rejected, `Vm::page_error_detail` walks the
+frame stack from the top and stops at the first frame that is not the embedder's: it reads two flag
+bits a frame, allocates nothing and runs no code, and passes over only the embedder's own frames
+above the page script that called them (for an error raised with no page script running, the whole
+stack, once). Where a raised error becomes a value, a clone of the value. Nothing on a path that
+does not throw or make a promise.
 
 Pin: `crates/rustkit-bindings/src/window_error_event_tests.rs` (which code decides, by family:
 plain and bound functions, `eval` and `Function` code, accessors, a proxy trap, `valueOf` and

@@ -69,7 +69,10 @@ bitflags! {
 // entered carries the scope's answer: a script's top-level code and every
 // function compiled from its source. Code compiled under no scope is the
 // embedder's. Code made at run time (`eval`, the `Function` constructors)
-// carries the answer of the code that made it. See PATCHES.md.
+// carries the answer of the code that made it, always: nothing is kept
+// between one compile and the next. A host that compiles text for the page
+// itself says what it is in the call (`Script::parse` under a scope,
+// `BuiltInFunctionObject::compile_function_as`). See PATCHES.md.
 
 /// What a host reports of an error thrown by some code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +88,6 @@ pub enum ErrorDetail {
 
 thread_local! {
     static ERROR_DETAIL: Cell<ErrorDetail> = const { Cell::new(ErrorDetail::Embedder) };
-    static NEXT_MADE_IS_FULL: Cell<bool> = const { Cell::new(false) };
 }
 
 /// While it lives, code blocks are compiled with the answer it was entered
@@ -104,24 +106,6 @@ impl ErrorDetailScope {
     #[must_use]
     pub fn current() -> ErrorDetail {
         ERROR_DETAIL.with(Cell::get)
-    }
-
-    /// The next code the embedder's own code makes at run time (`eval`, a
-    /// `Function` constructor) is a page script reported in full: text the
-    /// page's document owns, which the embedder compiles for it.
-    pub fn next_embedder_made_is_full() {
-        NEXT_MADE_IS_FULL.with(|cell| cell.set(true));
-    }
-
-    /// The answer for code that `maker` code makes at run time: its own,
-    /// or, made by the embedder's code, the embedder's unless the embedder
-    /// said otherwise for this one.
-    pub(crate) fn made_by(maker: ErrorDetail) -> ErrorDetail {
-        let full = NEXT_MADE_IS_FULL.with(|cell| cell.replace(false));
-        match maker {
-            ErrorDetail::Embedder if full => ErrorDetail::Full,
-            other => other,
-        }
     }
 }
 

@@ -74,9 +74,10 @@
         if (k === 'module') return;
         var was = internals.current(el);
         try {
-            // An inline script is the document's code, whoever inserted it.
-            __rk.documentCode();
-            indirectEval(el.textContent);
+            // An inline script is the document's code, whoever inserted
+            // it: its text first, then the one step that compiles and runs it.
+            var text = '' + el.textContent;
+            __rk.runDocumentScript(text);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
         } finally {
