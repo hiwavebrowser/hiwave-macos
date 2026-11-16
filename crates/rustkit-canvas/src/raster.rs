@@ -375,19 +375,18 @@ impl Raster {
         let Some(pm) = self.pixmap(size.0, size.1) else {
             return;
         };
-        let (pw, ph) = (pm.width() as i64, pm.height() as i64);
-        let [x, y, w, h] = dirty;
+        let pw = pm.width() as i64;
+        // Only the rows and columns that are in the image, in `dirty` and
+        // on the bitmap are visited, whatever numbers came in.
+        let height = if width == 0 { 0 } else { (rgba.len() / 4 / width as usize).min(u32::MAX as usize) as u32 };
+        let Some((rows, cols)) = put_span((width, height), (pm.width(), pm.height()), dx, dy, dirty) else {
+            return;
+        };
         let pixels = pm.pixels_mut();
-        for row in y as i64..(y + h) as i64 {
+        for row in rows {
             let ty = dy as i64 + row;
-            if ty < 0 || ty >= ph {
-                continue;
-            }
-            for col in x as i64..(x + w) as i64 {
+            for col in cols.clone() {
                 let tx = dx as i64 + col;
-                if tx < 0 || tx >= pw {
-                    continue;
-                }
                 let i = ((row * width as i64 + col) * 4) as usize;
                 let Some(p) = rgba.get(i..i + 4) else { continue };
                 pixels[(ty * pw + tx) as usize] = tiny_skia::ColorU8::from_rgba(p[0], p[1], p[2], p[3]).premultiply();
@@ -651,4 +650,72 @@ fn arc_to(
     let ccw = cross > 0.0;
     let mut start = p0;
     ellipse(pb, cur, &mut start, c, (r, r), 0.0, a0, a1, ccw);
+}
+
+/// The rows and the columns of an image that a put writes: `dirty`
+/// (`x, y, w, h` in the image) cut to the image (`image`: width, height)
+/// and to the bitmap (`bitmap`) the image is put on at `dx, dy`. `None`
+/// when nothing is left. Every sum is made in 64 bits, so no `i32` given
+/// here overflows, and the ranges are never longer than the bitmap's side.
+pub(crate) fn put_span(
+    image: (u32, u32),
+    bitmap: (u32, u32),
+    dx: i32,
+    dy: i32,
+    dirty: [i32; 4],
+) -> Option<(std::ops::Range<i64>, std::ops::Range<i64>)> {
+    let [x, y, w, h] = dirty.map(i64::from);
+    let (dx, dy) = (i64::from(dx), i64::from(dy));
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let cols = x.max(0).max(-dx)..(x + w).min(i64::from(image.0)).min(i64::from(bitmap.0) - dx);
+    let rows = y.max(0).max(-dy)..(y + h).min(i64::from(image.1)).min(i64::from(bitmap.1) - dy);
+    (cols.start < cols.end && rows.start < rows.end).then_some((rows, cols))
+}
+
+#[cfg(test)]
+mod put_span_tests {
+    use super::put_span;
+
+    #[test]
+    fn a_put_is_cut_to_the_image_the_dirty_rect_and_the_bitmap() {
+        // Whole image inside the bitmap.
+        assert_eq!(put_span((2, 2), (4, 4), 1, 1, [0, 0, 2, 2]), Some((0..2, 0..2)));
+        // Past the bitmap's right and bottom edge; before its left and top.
+        assert_eq!(put_span((2, 2), (4, 4), 3, 3, [0, 0, 2, 2]), Some((0..1, 0..1)));
+        assert_eq!(put_span((2, 2), (4, 4), -1, -1, [0, 0, 2, 2]), Some((1..2, 1..2)));
+        // A dirty rect inside, one larger than the image, one that starts before it.
+        assert_eq!(put_span((2, 2), (4, 4), 1, 1, [1, 0, 1, 2]), Some((0..2, 1..2)));
+        assert_eq!(put_span((2, 2), (4, 4), 0, 0, [1, 1, 50, 50]), Some((1..2, 1..2)));
+        assert_eq!(put_span((2, 2), (4, 4), 0, 0, [-5, -5, 6, 6]), Some((0..1, 0..1)));
+        // Nothing left.
+        assert_eq!(put_span((2, 2), (4, 4), 4, 0, [0, 0, 2, 2]), None);
+        assert_eq!(put_span((2, 2), (4, 4), 0, -2, [0, 0, 2, 2]), None);
+        assert_eq!(put_span((2, 2), (4, 4), 0, 0, [2, 0, 1, 1]), None);
+        assert_eq!(put_span((0, 0), (4, 4), 0, 0, [0, 0, 1, 1]), None);
+        assert_eq!(put_span((2, 2), (0, 0), 0, 0, [0, 0, 2, 2]), None);
+    }
+
+    #[test]
+    fn no_number_overflows_or_makes_a_long_walk() {
+        let (lo, hi) = (i32::MIN, i32::MAX);
+        for dirty in [[hi, hi, hi, hi], [lo, lo, hi, hi], [hi, hi, lo, lo], [lo, lo, lo, lo], [0, 0, hi, hi], [-1, -1, hi, hi], [hi - 1, hi - 1, 2, 2], [0, 0, -1, 5], [0, 0, 5, 0]] {
+            for (dx, dy) in [(0, 0), (hi, hi), (lo, lo), (hi, lo), (lo, hi), (-1, 1)] {
+                for image in [(2, 2), (u32::MAX, u32::MAX), (0, 7)] {
+                    for bitmap in [(4, 4), (16384, 16384), (u32::MAX, 1)] {
+                        if let Some((rows, cols)) = put_span(image, bitmap, dx, dy, dirty) {
+                            assert!(rows.start >= 0 && cols.start >= 0, "{dirty:?} {dx} {dy} {image:?} {bitmap:?}");
+                            assert!(rows.end <= i64::from(image.1) && cols.end <= i64::from(image.0));
+                            assert!(rows.end - rows.start <= i64::from(bitmap.1) && cols.end - cols.start <= i64::from(bitmap.0));
+                            assert!(dy as i64 + rows.start >= 0 && dy as i64 + rows.end <= i64::from(bitmap.1));
+                            assert!(dx as i64 + cols.start >= 0 && dx as i64 + cols.end <= i64::from(bitmap.0));
+                        }
+                    }
+                }
+            }
+        }
+        // The whole of a large image on a large bitmap is still exactly its overlap.
+        assert_eq!(put_span((16384, 16384), (16384, 16384), 16380, 0, [0, 0, hi, hi]), Some((0..16384, 0..4)));
+    }
 }

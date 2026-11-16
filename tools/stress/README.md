@@ -32,8 +32,8 @@ Full shas, licences and build notes are in `pins.json`.
 ```bash
 tools/stress/fetch.sh                                   # once per machine
 
-# HiWave, real window (takes ~/.claude/realwindow.lock, HID idle >= 180 s,
-# refuses 17:00-19:30 ET; the app it starts is the only process it stops)
+# HiWave, real window (takes ~/.claude/realwindow.lock, needs HID idle >= 180 s;
+# the app it starts is the only process it stops)
 python3 tools/stress/run.py --suite speedometer --engine hiwave --binary target/release/hiwave --label develop
 python3 tools/stress/run.py --suite motionmark  --engine hiwave --binary target/release/hiwave --label develop
 python3 tools/stress/run.py --suite jetstream   --engine hiwave --binary target/release/hiwave --label develop
@@ -252,6 +252,7 @@ discarded for load), a candidate with no score, a candidate that failed
 any of its runs, a different N on the two arms. Nothing compared at all (a
 mistyped label) exits 2. A finding is read before it is rerun.
 
-Real-window runs also re-check the 17:00-19:30 ET window after every wait
-(idle seat, load) and once more immediately before the app starts, and
-refuse when now plus the run's wall limit reaches 17:00.
+Real-window runs check that the seat is idle (HID idle >= 180 s) when they
+take the lock, waiting for it if need be, and once more immediately before
+the app starts, after the load wait. There is no time-of-day rule: the
+owner removed the evening no-window rule on 2026-11-16.

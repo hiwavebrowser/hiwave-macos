@@ -37,7 +37,7 @@ pub(crate) fn likely_subtags(key: &str) -> Option<String> {
     Some(format!("{language}-{script}-{region}"))
 }
 
-/// Define the lookup `web_intl.js` reads (and removes from the global object).
+/// Define the lookup `web_intl.js` reads, on the host object (`__rk.likelySubtags`).
 pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
     runtime.register_host_function(
         "__rustkit_likely_subtags",
@@ -46,7 +46,10 @@ pub(crate) fn install(runtime: &mut JsRuntime) -> Result<(), JsError> {
             Some(JsValue::String(key)) => likely_subtags(key).map_or(JsValue::Undefined, JsValue::String),
             _ => JsValue::Undefined,
         }),
-    )
+    )?;
+    // Moved to the host object now, before any page script.
+    runtime.evaluate_with_host("__rk.likelySubtags = globalThis.__rustkit_likely_subtags; delete globalThis.__rustkit_likely_subtags;")?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -317,8 +317,9 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
 
 /// The natives the runtime puts on the host object itself (rustkit-js).
 const HOST_NATIVES: &[&str] = &[
+    "compileDocumentFunction", "runDocumentScript",
     "reportError", "unsupported", "base64Decode", "base64Encode", "binaryDecode", "binaryEncode", "blobGet",
-    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode",
+    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode", "pixelsIn", "pixelsOut",
 ];
 
 /// Every name this crate's sources read or write on the host object is a
@@ -366,7 +367,7 @@ fn the_host_object_inherits_nothing() {
                  if (proto(__rk) !== null) out.push('host');
                  [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
                  ['domHooks', 'net', 'dragStore'].forEach(function (n) {{ if (proto(__rk[n]) !== null) out.push(n); }});
-                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'attrs'].forEach(function (n) {{
+                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'attrs', 'watched'].forEach(function (n) {{
                      if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
                  }});
                  return out.join(' ');"
@@ -511,7 +512,7 @@ fn a_frames_host_object_and_the_trees_shared_state_inherit_nothing() {
          if (proto(__rk) !== null) out.push('host');
          [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
          ['domHooks', 'net', 'dragStore', 'frames', 'shared'].forEach(function (n) {{ if (!__rk[n] || proto(__rk[n]) !== null) out.push(n); }});
-         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'nodeId', 'byTag', 'frames', 'attrs'].forEach(function (n) {{
+         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'loadSnapshot', 'loadReplay', 'nodeId', 'byTag', 'frames', 'attrs', 'watched'].forEach(function (n) {{
              if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
          }});
          if (__rk.domHooks.frames && proto(__rk.domHooks.frames) !== null) out.push('domHooks.frames');

@@ -425,7 +425,7 @@ fn an_engine_events_dispatch_state_is_its_own() {
 fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() {
     let got = bounded(|| {
         let (b, _doc) = bindings(false);
-        b.evaluate(
+        b.evaluate_as_page_script(
             "var calls = 0, seen = [], p;
              window.addEventListener('unhandledrejection', function (e) {
                  seen.push([e.type, e.cancelable, e.promise === p, e.reason, e.isTrusted].join(':'));

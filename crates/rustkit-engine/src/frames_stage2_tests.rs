@@ -839,3 +839,29 @@ fn the_capture_clock_is_the_frames_too() {
     let (frame, top) = clocks_across_40ms(config(true));
     assert!(frame >= 35.0 && top >= 35.0, "without it the frame moved {frame} ms and the page {top} ms across 40 ms");
 }
+
+/// The blank load's replay and `window.onerror` in one dispatch: the
+/// replayed `load` reaches only the handler the frame had at its insertion
+/// (one set afterwards hears nothing), and what that handler throws
+/// reaches `window.onerror` with its five arguments, `this` the Window,
+/// where `true` back cancels the event.
+#[test]
+fn a_replayed_blank_load_reaches_its_recorded_handler_and_window_onerror_keeps_its_shape() {
+    let page = "<!doctype html><body><script>
+window.calls = []; window.heard = []; window.events = [];
+window.onerror = function () { calls.push(arguments.length + ':' + (this === window) + ':' + arguments[0] + ':' + (arguments[4] instanceof Error)); return true; };
+window.addEventListener('error', function (ev) { setTimeout(function () { events.push(ev.defaultPrevented); }, 0); });
+var early = document.createElement('iframe');
+early.onload = function () { heard.push('early'); throw new Error('from the handler'); };
+document.body.appendChild(early);
+var late = document.createElement('iframe');
+document.body.appendChild(late);
+late.onload = function () { heard.push('late'); };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.events.length >= 1", Duration::from_secs(8));
+    page.turns_until("false", Duration::from_millis(200));
+    assert_eq!(page.js("window.heard.join()"), r#"String("early")"#);
+    assert_eq!(page.js("window.calls.join()"), r#"String("5:true:Uncaught Error: from the handler:true")"#);
+    assert_eq!(page.js("window.events.join()"), r#"String("true")"#);
+}

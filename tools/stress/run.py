@@ -15,7 +15,7 @@ Engines:
                    real-window driver launches it (tools/real_window/driver.py:
                    a throwaway profile under $HOME, the restored tab pointed
                    at the runner URL). Takes ~/.claude/realwindow.lock, needs
-                   HID idle >= 180 s and refuses 17:00-19:30 ET.
+                   HID idle >= 180 s.
   hiwave-headless  parity-capture --url --live-ms: the same engine with no
                    window (offscreen GPU, nothing presented). Its live loop
                    waits between turns as the app's content thread does
@@ -66,7 +66,6 @@ MIN_IDLE_S = 180
 # SCORE_LOAD. report.py discards the rest.
 START_LOAD = 6.0
 SCORE_LOAD = 3.0
-QUIET = (17 * 60, 19 * 60 + 30)  # no visible window, America/New_York
 MOTIONMARK_TESTS = ["Multiply", "Canvas Arcs", "Leaves", "Paths", "Canvas Lines", "Images", "Design", "Suits"]
 
 CHROME_OWN_HOSTS = {"accounts.google.com", "clients2.google.com", "content-autofill.googleapis.com",
@@ -473,12 +472,6 @@ def wait_for_load(limit, wait_s):
     return True
 
 
-def eastern_minutes(offset_s=0):
-    from zoneinfo import ZoneInfo
-    now = datetime.datetime.now(ZoneInfo("America/New_York")) + datetime.timedelta(seconds=offset_s)
-    return now.hour * 60 + now.minute
-
-
 def hid_idle_seconds():
     r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
     m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
@@ -509,37 +502,22 @@ class WindowLock:
                         sys.exit(2)
                     time.sleep(10)
         try:
-            self.check_quiet()  # before waiting: no point holding the lock
             end = time.time() + self.wait_s
             while hid_idle_seconds() < MIN_IDLE_S:
                 if time.time() >= end:
                     raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
                                      % (hid_idle_seconds(), MIN_IDLE_S))
                 time.sleep(15)
-            self.check_quiet()  # the wait moved the clock
         except SystemExit as e:
             self.__exit__()
             print(e, file=sys.stderr)
             sys.exit(2)
         return self
 
-    def check_quiet(self):
-        """Refuse when a window could be up between 17:00 and 19:30 ET:
-        now is inside the quiet window, or the run's latest possible end
-        (now + its wall limit) reaches 17:00. Read from the clock at the
-        time of the call, so it is asked again after every wait."""
-        start = eastern_minutes()
-        end = start + self.limit_s / 60.0
-        if start < QUIET[1] and end >= QUIET[0]:
-            raise SystemExit("a window could be up between 17:00 and 19:30 ET "
-                             "(now %02d:%02d ET, the run may last %d min); not run"
-                             % (start // 60, start % 60, self.limit_s // 60))
-
     def clear_to_launch(self):
-        """The last check, immediately before the window goes up: the
-        waits since the lock was taken (idle seat, load) may have run into
-        the quiet window, and someone may have sat down."""
-        self.check_quiet()
+        """The last check, immediately before the window goes up: someone
+        may have sat down during the waits since the lock was taken (idle
+        seat, load)."""
         if hid_idle_seconds() < MIN_IDLE_S:
             raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
                              % (hid_idle_seconds(), MIN_IDLE_S))

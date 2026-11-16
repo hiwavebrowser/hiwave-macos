@@ -1058,9 +1058,8 @@
 
     // Likely subtags (UTS #35 §4.3) over CLDR's table, which stays on the Rust
     // side (web_intl_likely.rs): one exact-key lookup per call, through a host
-    // function taken off the global object here so that pages never see it.
-    var likelyHost = g.__rustkit_likely_subtags;
-    delete g.__rustkit_likely_subtags;
+    // function kept on the host object, which pages never see.
+    var likelyHost = __rk.likelySubtags;
     function likely(key) {
         var v = typeof likelyHost === 'function' ? likelyHost(key) : undefined;
         return typeof v === 'string' ? v.split('-') : undefined;

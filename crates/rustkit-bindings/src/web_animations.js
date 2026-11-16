@@ -11,7 +11,7 @@
 // frame, as in a browser.
 //
 // Effect: the animated values go to the engine's animated-style layer
-// (`__rustkit_animated_style.write`, one entry per property in animation
+// (`__rk.animatedStyle.write`, one entry per property in animation
 // order, with its composite), which the build overlays on the element's
 // cascaded style above its CSS animations and transitions. The `style`
 // attribute is never touched (a MutationObserver on it sees nothing;
@@ -28,8 +28,7 @@
 (function (g) {
     var document = g.document;
     if (!document || !g.Element) return;
-    var layer = g.__rustkit_animated_style;
-    try { delete g.__rustkit_animated_style; } catch (_) {}
+    var layer = __rk.animatedStyle;
     if (!layer) return;
 
     var raf = g.requestAnimationFrame;

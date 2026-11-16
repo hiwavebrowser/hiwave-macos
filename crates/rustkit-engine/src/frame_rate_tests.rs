@@ -19,10 +19,15 @@ pub(crate) const GRID_PAGE: &str =
 
 /// Loads `page` with `#manual`, starts it in a live turn after the load, and returns its record.
 pub(crate) fn run_probe_page(page: &'static str) -> serde_json::Value {
+    run_probe_page_with(page, "")
+}
+
+/// [`run_probe_page`], with `setup` run before `go()`.
+pub(crate) fn run_probe_page_with(page: &'static str, setup: &str) -> serde_json::Value {
     let fixture = serve(vec![("/", html(page))]);
     let mut load = Load::start(&fixture, "/#manual");
     load.wait_complete();
-    let _ = load.eval("go(); 'started'", Duration::from_secs(10));
+    let _ = load.eval(&format!("{setup} go(); 'started'"), Duration::from_secs(10));
     // No commands while the probe runs: an eval is a turn the loop did not pace.
     std::thread::sleep(Duration::from_millis(3300));
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -80,5 +85,29 @@ fn measure_the_content_threads_frame_grid() {
     sleeps_as_on_macos_if_asked();
     for _ in 0..3 {
         eprintln!("PACE2-GRID {}", run_probe_page(GRID_PAGE));
+    }
+}
+
+/// LINKS-SLOW: the lateness of each link of the 10 ms chain on the content thread's loop
+/// (`links_lateness_probe.html`; Chrome, five runs, `links_lateness_probe_cft148.json`: 278-281
+/// links, lateness mean 0.64-0.75 ms, median 0.6-0.7, p90 1.1-1.5, max 2.0-2.7).
+pub(crate) const LINKS_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-11-16/links_lateness_probe.html");
+
+#[test]
+#[ignore]
+fn measure_the_content_threads_link_lateness() {
+    sleeps_as_on_macos_if_asked();
+    let setup = if std::env::var_os("LINKS_NO_FRAMES").is_some() { "window.NO_FRAMES = true;" } else { "" };
+    for _ in 0..3 {
+        let rec = run_probe_page_with(LINKS_PAGE, setup);
+        let min = rec["late"]
+            .as_array()
+            .map(|l| l.iter().filter_map(|x| x.as_f64()).fold(f64::INFINITY, f64::min))
+            .unwrap_or(f64::NAN);
+        eprintln!(
+            "LINKS-RESULT frames {} links {} summary {} min {min}",
+            rec["frames"], rec["timers"], rec["summary"]
+        );
     }
 }

@@ -97,7 +97,8 @@ fn rejections_a_turn_left_unannounced_keep_the_live_loop_turning_until_all_are_a
              </script></body></html>",
         )
         .expect("load_html");
-    engine.execute_script(view, "Promise.reject(0)").unwrap();
+    // As a script of the page's own: a host's script rejects for nobody.
+    engine.execute_as_page_script(view, "Promise.reject(0)").unwrap();
     let first: u32 = read(&mut engine, view, "window.__n").parse().unwrap();
     assert!((1..200).contains(&first), "{first} announced in the first turn");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
