@@ -690,8 +690,8 @@ impl Vm {
         let mut left = depth;
         for frame in self.frames.iter().skip(1).rev() {
             match frame.code_block.error_detail() {
-                code_block::ErrorDetail::Embedder => {}
-                detail if left == 0 => return Some(detail == code_block::ErrorDetail::Withheld),
+                ErrorDetail::Embedder => {}
+                detail if left == 0 => return Some(detail == ErrorDetail::Withheld),
                 _ => left -= 1,
             }
         }
