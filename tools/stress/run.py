@@ -811,19 +811,26 @@ def log_findings(path):
     return hits[:20], text[-1500:]
 
 
+# A record of the engine's console log: a physical line that starts with the engine's own prefix (a
+# timestamp, a level, then the console target), and what follows. The same words later on a line, or
+# after another target, are text of that other line.
+ENGINE_CONSOLE_RECORD = re.compile(
+    r"(?m)^\d{4}-\d\d-\d\dT[0-9:.]+Z[ \t]+(?:TRACE|DEBUG|INFO|WARN|ERROR)[ \t]+hiwave::console: "
+    r"((?:uncaught|unhandled rejection) .*)$")
+
+
 def log_uncaught(path):
     """What the engine itself logged as uncaught (the app's console log: exceptions and rejections nothing
     handled, with where). The page-side reporter hears these only through the window's `error` and
     `unhandledrejection` events, so an engine that does not fire one for an exception leaves `errors`
     empty: this is the engine's own account, read from its log. An error the page cancelled is there too,
-    as `uncaught (cancelled by the page) ...`. A line's record is what follows the first `hiwave::console: `
-    on it (the engine escapes line breaks in page text, so later ones are inside a message). The first 20,
-    300 characters each."""
+    as `uncaught (cancelled by the page) ...`. The reader matches the engine's line prefix
+    (ENGINE_CONSOLE_RECORD). The first 20, 300 characters each."""
     try:
         text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
     except OSError:
         return []
-    hits = [m.group(1).strip()[:300] for m in re.finditer(r"(?m)^.*?hiwave::console: ((?:uncaught|unhandled rejection) .*)$", text)]
+    hits = [m.group(1).strip()[:300] for m in ENGINE_CONSOLE_RECORD.finditer(text)]
     return hits[:20]
 
 

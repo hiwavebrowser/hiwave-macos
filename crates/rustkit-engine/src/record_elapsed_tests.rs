@@ -27,9 +27,18 @@ fn load_with(config: EngineConfig, script: &str) -> (Engine, EngineViewId) {
                         Ok(n) => request.extend_from_slice(&buf[..n]),
                     }
                 }
+                // `/held.js` answers late, with a script: a page that inserted
+                // it has its `load` wait for it (the load's open tail).
+                let held = String::from_utf8_lossy(&request).starts_with("GET /held.js");
+                let (kind, body) = if held {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    ("text/javascript", "window.heldRan = true;".to_string())
+                } else {
+                    ("text/html", body)
+                };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             });
@@ -121,6 +130,22 @@ fn a_step_with_its_own_record_that_also_reported_errors_counts_its_time_once() {
         let (engine, view) = load_with(budget(), &format!("{target}.addEventListener('{event}', function () {{ {REPORT_THEN_SPIN} }});"));
         check(source, source, &engine.script_log(view).unwrap());
     }
+    // The `load` step of a load that waited for a script the page inserted
+    // (it completes in a later turn).
+    let (mut engine, view) = load_with(
+        EngineConfig { post_load_requests_live: true, ..budget() },
+        &format!("var s = document.createElement('script'); s.src = '/held.js'; document.head.appendChild(s); \
+                  window.addEventListener('load', function () {{ {REPORT_THEN_SPIN} }});"),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    for _ in 0..200 {
+        if engine.script_log(view).unwrap().iter().any(|r| r.source == "event:load") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        rt.block_on(engine.pump_live(view, 20));
+    }
+    check("a late load step", "event:load", &engine.script_log(view).unwrap());
     // The timers of the load.
     let (engine, view) = load_with(budget(), &format!("setTimeout(function () {{ {REPORT_THEN_SPIN} }}, 0);"));
     check("the load's timers", "timers", &engine.script_log(view).unwrap());
