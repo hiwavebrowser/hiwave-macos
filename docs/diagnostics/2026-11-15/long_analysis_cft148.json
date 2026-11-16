@@ -1,0 +1,24 @@
+{
+ "runs": [
+  {
+   "rows": 560,
+   "iterations": 2500,
+   "totalMs": 186,
+   "sortMs": 171,
+   "fitMs": 4,
+   "compares": 10954422,
+   "slope": -0.000037
+  },
+  {
+   "rows": 1700,
+   "iterations": 2500,
+   "totalMs": 679,
+   "sortMs": 601,
+   "fitMs": 11,
+   "compares": 40011549,
+   "slope": -0.000009
+  }
+ ],
+ "finished": true,
+ "browser": "148.0.7778.216"
+}

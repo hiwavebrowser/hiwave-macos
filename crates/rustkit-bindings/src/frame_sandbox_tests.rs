@@ -302,7 +302,7 @@ fn a_frame_replaced_by_inner_html_has_left() {
     let node = doc.get_element_by_id("f").unwrap().id.raw();
     let _ = b.take_frame_requests();
     run(&b, "document.getElementById('p').innerHTML = '<b>x</b>';");
-    assert_eq!(b.take_frame_requests(), vec![FrameRequest { node, url: None, sandbox: None }]);
+    assert_eq!(b.take_frame_requests(), vec![FrameRequest { node, url: None, sandbox: None, initial: false, quiet: false }]);
 }
 
 /// A request that was not kept (too many are parked) does not spend the attribute as parsed.

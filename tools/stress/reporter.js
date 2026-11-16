@@ -139,6 +139,36 @@
         });
     }
 
+    // What one MotionMark test measured, small enough for the record: its
+    // frames in up to twelve steps of rising complexity (frames, mean frame
+    // length, frames per second), the frame lengths that are not a positive
+    // number, and the complexity each ramp's regression settled on. A score
+    // of 0 with every step slower than the target is the engine's frame
+    // rate; one with unusable lengths is the clock.
+    function motionmarkFrames(testData) {
+        var J = Strings.json, samples = testData && testData[J.samples], series = samples && samples[J.controller];
+        if (!series || !series.data || !series.fieldMap) return null;
+        var ti = series.fieldMap[J.time], ci = series.fieldMap[J.complexity], fi = series.fieldMap[J.frameLength];
+        var rows = [], unusable = 0, i, j;
+        for (i = 1; i < series.data.length; i++) { // the first sample has no frame before it
+            var d = series.data[i];
+            if (typeof d[fi] === 'number' && d[fi] > 0 && typeof d[ci] === 'number') rows.push([d[ci], d[fi]]);
+            else unusable++;
+        }
+        rows.sort(function (a, b) { return a[0] - b[0]; });
+        var steps = [], per = Math.max(1, Math.ceil(rows.length / 12));
+        for (i = 0; i < rows.length; i += per) {
+            var sum = 0, n = 0, longest = 0;
+            for (j = i; j < rows.length && j < i + per; j++) { sum += rows[j][1]; n++; if (rows[j][1] > longest) longest = rows[j][1]; }
+            steps.push({ from: rows[i][0], to: rows[j - 1][0], frames: n, mean_ms: Math.round(sum / n * 100) / 100,
+                         max_ms: Math.round(longest * 100) / 100, fps: Math.round(n * 10000 / sum) / 10 });
+        }
+        var ramps = [], regressions = testData[J.controller] || [];
+        for (i = 0; i < regressions.length && i < 40; i++) ramps.push(Math.round(regressions[i][J.complexity] * 100) / 100);
+        var last = series.data.length ? series.data[series.data.length - 1][ti] - series.data[0][ti] : 0;
+        return { samples: series.data.length, unusable: unusable, span_ms: Math.round(last), steps: steps, ramps: ramps };
+    }
+
     // ── MotionMark: index.html + benchmarkController.startBenchmark() (what
     //    the Run Benchmark button calls), or developer.html with its query ──
     function motionmark() {
@@ -146,8 +176,13 @@
             var client = window.benchmarkRunnerClient;
             post('progress', { event: 'client-ready' });
             wrap(client, 'willStartFirstIteration', function () { post('progress', { event: 'start' }); });
-            wrap(client, 'willRunTest', function (s, t) { post('progress', { event: 'test', suite: s && s.name, test: t && t.name }); });
-            wrap(client, 'didRunTest', null, function () { post('progress', { event: 'test-done' }); });
+            var running = null;
+            wrap(client, 'willRunTest', function (s, t) { running = t && t.name; post('progress', { event: 'test', suite: s && s.name, test: running }); });
+            wrap(client, 'didRunTest', null, function (testData) {
+                var frames = null;
+                try { frames = motionmarkFrames(testData); } catch (e) { sendError('reporter', describe(e)); }
+                post('progress', { event: 'test-done', test: running, frames: frames });
+            });
             wrap(client, 'didFinishLastIteration', null, function () {
                 var dash = client.results;
                 var out = { score: dash.score, lower: dash.scoreLowerBound, upper: dash.scoreUpperBound, fps: dash._targetFrameRate || dash._systemFrameRate, tests: {} };
