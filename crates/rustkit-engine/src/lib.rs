@@ -6638,6 +6638,19 @@ impl Engine {
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
             }
+            // The frame's linked stylesheets, before its scripts and its
+            // `load`, as a page's are before its own: what the parent's
+            // `load` handler measures in the frame is styled (Chrome 148,
+            // docs/diagnostics/2026-11-15/frame_style_cft148.json). A sheet
+            // over the subresource budget lands on a live turn, as a page's.
+            if let Ok((links, fetched, late)) = self.load_external_stylesheets_slotted(fid).await {
+                if let Some(frame) = self.views.get_mut(&fid) {
+                    frame.sheet_links = links;
+                    frame.fetched_sheets = fetched;
+                    frame.live_sheets = late;
+                    frame.rebuild_link_sheets();
+                }
+            }
             // The child's classic scripts, in document order.
             let listed = child.evaluate_named(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
