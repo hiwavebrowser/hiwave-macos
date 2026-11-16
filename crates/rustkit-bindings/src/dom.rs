@@ -3419,7 +3419,7 @@ const WRAPPERS_JS: &str = r#"
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
-        if (HOOKS.frames) HOOKS.frames.tree(op, node);
+        if (HOOKS.frames) HOOKS.frames.tree(op, node, parent);
         return node;
     }
     Node.prototype.appendChild = function (node) {

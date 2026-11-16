@@ -1454,6 +1454,12 @@ impl DomBindings {
                         Some(JsValue::String(url)) => Some(url.clone()),
                         _ => None,
                     };
+                    let mut queue = queue.borrow_mut();
+                    // Bounds what a page can park between two drains. A
+                    // request that is not kept spends nothing.
+                    if queue.len() >= 256 {
+                        return JsValue::Null;
+                    }
                     // The frame's `sandbox` attribute for this navigation,
                     // read here from the document (no script is asked): the
                     // element's now, or, the first time a markup frame is
@@ -1464,11 +1470,7 @@ impl DomBindings {
                         Some(_) => host.borrow().frame_sandbox(node).or(as_parsed),
                         None => None,
                     };
-                    let mut queue = queue.borrow_mut();
-                    // Bounds what a page can park between two drains.
-                    if queue.len() < 256 {
-                        queue.push(FrameRequest { node, url, sandbox });
-                    }
+                    queue.push(FrameRequest { node, url, sandbox });
                 }
                 JsValue::Null
             }),
