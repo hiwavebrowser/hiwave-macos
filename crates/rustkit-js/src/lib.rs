@@ -18,6 +18,8 @@ pub use import_map::ImportMap;
 pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
+pub use bytes::PixelSlot;
+#[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
 mod describe;
@@ -598,6 +600,9 @@ pub struct JsRuntime {
     /// a response body crosses into script as one buffer, not as text.
     #[cfg(feature = "boa")]
     byte_stash: bytes::Stash,
+    /// Canvas pixels on their way to or from script (see `bytes::PixelSlot`).
+    #[cfg(feature = "boa")]
+    pixel_slot: bytes::PixelSlot,
     /// What stands behind the page's blob URLs (see `bytes::Blobs`).
     #[cfg(feature = "boa")]
     blobs: bytes::Blobs,
@@ -678,7 +683,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let blobs = bytes::Blobs::default();
         #[cfg(feature = "boa")]
-        let host = host_object(&diag, &byte_stash, &blobs, &mut context);
+        let pixel_slot = bytes::PixelSlot::default();
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &byte_stash, &blobs, &pixel_slot, &mut context);
         // One object every realm's host object holds as `shared`:
         // what the documents of a frame tree must agree on (which events
         // are the engine's) is kept there, not once per realm. Like the
@@ -722,6 +729,8 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             byte_stash,
             #[cfg(feature = "boa")]
+            pixel_slot,
+            #[cfg(feature = "boa")]
             blobs,
             sources: source_context::ScriptSources::default(),
             source_tap: None,
@@ -757,7 +766,7 @@ impl JsRuntime {
             let outer = self.enter_realm(id);
             let console = self.setup_console();
             // The new realm's own host object, made in it.
-            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &mut self.context);
+            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &self.pixel_slot, &mut self.context);
             if let Ok(shared) = self.host.get(boa_engine::js_string!("shared"), &mut self.context) {
                 let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut self.context);
             }
@@ -2101,6 +2110,13 @@ impl JsRuntime {
         let _ = bytes;
     }
 
+    /// The slot canvas pixels cross in (`__rk.pixelsOut`, `__rk.pixelsIn`):
+    /// the embedder's canvas code holds a clone.
+    #[cfg(feature = "boa")]
+    pub fn pixel_slot(&self) -> PixelSlot {
+        self.pixel_slot.clone()
+    }
+
     /// Forget the bytes stashed under `key`, if script did not take them.
     pub fn drop_stashed_bytes(&mut self, key: u64) {
         #[cfg(feature = "boa")]
@@ -2313,6 +2329,7 @@ fn host_object(
     diag: &std::rc::Rc<diag::Diagnostics>,
     byte_stash: &bytes::Stash,
     blobs: &bytes::Blobs,
+    pixels: &bytes::PixelSlot,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsObject {
     use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
@@ -2399,7 +2416,7 @@ fn host_object(
         .function(unsupported, js_string!("unsupported"), 2)
         .function(run_document_script, js_string!("runDocumentScript"), 1)
         .function(compile_document_function, js_string!("compileDocumentFunction"), 2);
-    bytes::install(&mut host, byte_stash, blobs);
+    bytes::install(&mut host, byte_stash, blobs, pixels);
     let host = host.build();
     // The host object inherits from nothing: a name it does not own reads
     // as `undefined` and a first write makes an own property, with no
@@ -3578,5 +3595,93 @@ mod tests {
         assert!(max >= 20, "{line}");
         let attribution = interrupt_attribution();
         assert!(attribution.contains(&line), "{attribution}");
+    }
+}
+
+#[cfg(all(test, feature = "boa"))]
+mod pixel_slot_tests {
+    use super::*;
+
+    fn text(runtime: &mut JsRuntime, body: &str) -> String {
+        match runtime.evaluate_with_host(body).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{body} evaluated to {other:?}"),
+        }
+    }
+
+    /// `pixelsOut` makes the realm's own `Uint8ClampedArray` of exactly the
+    /// length asked for, from the slot when the slot holds that many bytes,
+    /// and empties the slot; it takes a whole number in range and nothing
+    /// else, whatever the page did to the global or its prototype.
+    #[test]
+    fn pixels_out_hands_the_slots_bytes_once_as_the_realms_own_array() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = runtime.pixel_slot();
+        runtime
+            .evaluate_script(
+                "var Real = Uint8ClampedArray, ran = 0; Uint8ClampedArray = function () { ran++; }; \
+                 Real.prototype.constructor = function () { ran++; }; \
+                 Object.defineProperty(Real, Symbol.species, { get: function () { ran++; return Array; } });",
+            )
+            .unwrap();
+        slot.put(vec![1, 2, 3, 250]);
+        assert_eq!(
+            text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a instanceof Real, Object.getPrototypeOf(a) === Real.prototype, a[0], a[1], a[2], a[3], a.length, ran].join();"),
+            "true,true,1,2,3,250,4,0"
+        );
+        assert!(slot.take().is_none(), "the slot is emptied");
+        // Nothing left, another length, or `fresh`: zeros, and the slot is emptied.
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a[0], a[3], a.length].join();"), "0,0,4");
+        slot.put(vec![9; 8]);
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a[0], a.length].join();"), "0,4");
+        assert!(slot.take().is_none());
+        slot.put(vec![9; 4]);
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, true); return [a[0], a.length].join();"), "0,4");
+        assert!(slot.take().is_none());
+        assert_eq!(text(&mut runtime, "return String(__rk.pixelsOut(0, true).length);"), "0");
+        for bad in ["-1", "1.5", "NaN", "Infinity", "'4'", "{ valueOf: function () { ran++; return 4; } }", "undefined", "16384 * 16384 * 4 + 1"] {
+            slot.put(vec![9; 4]);
+            assert_eq!(
+                text(&mut runtime, &format!("try {{ __rk.pixelsOut({bad}, false); return 'made'; }} catch (e) {{ return e.name + ' ' + ran; }}")),
+                "RangeError 0",
+                "{bad}"
+            );
+            assert!(slot.take().is_none(), "{bad}: the slot is emptied");
+        }
+    }
+
+    /// `pixelsIn` answers for a `Uint8ClampedArray` on a live buffer only,
+    /// reads no property of what it is given, and leaves a copy of exactly
+    /// the array's own bytes in the slot when asked to.
+    #[test]
+    fn pixels_in_reads_a_clamped_arrays_own_bytes_and_nothing_else() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = runtime.pixel_slot();
+        runtime
+            .evaluate_script(
+                "var ran = 0, proto = Object.getPrototypeOf(Uint8ClampedArray.prototype); \
+                 ['length', 'byteLength', 'byteOffset', 'buffer'].forEach(function (k) { Object.defineProperty(proto, k, { get: function () { ran++; return 1; }, configurable: true }); }); \
+                 var whole = new Uint8ClampedArray([5, 6, 7, 8]), base = new ArrayBuffer(8), part = new Uint8ClampedArray(base, 2, 4); \
+                 new Uint8Array(base).set([0, 1, 2, 3, 4, 5, 6, 7]);",
+            )
+            .unwrap();
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(whole, false), ran].join();"), "4,0");
+        assert!(slot.take().is_none(), "nothing is kept unless asked");
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(whole, true), ran].join();"), "4,0");
+        assert_eq!(slot.take(), Some(vec![5, 6, 7, 8]));
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(part, true), ran].join();"), "4,0");
+        assert_eq!(slot.take(), Some(vec![2, 3, 4, 5]), "a view's own part of its buffer");
+        for other in [
+            "new Uint8Array(4)", "new Int8Array(4)", "new ArrayBuffer(4)", "new DataView(new ArrayBuffer(4))", "[1, 2, 3, 4]", "'abcd'", "4", "null", "undefined",
+            "Object.create(whole)", "new Proxy(whole, {})", "{ length: 4, get buffer() { ran++; return whole.buffer; } }",
+        ] {
+            assert_eq!(text(&mut runtime, &format!("return [__rk.pixelsIn({other}, true), ran].join();")), "-2,0", "{other}");
+            assert!(slot.take().is_none(), "{other}");
+        }
+        assert_eq!(
+            text(&mut runtime, "var left = new ArrayBuffer(4), gone = new Uint8ClampedArray(left); left.transfer(); return [__rk.pixelsIn(gone, true), ran].join();"),
+            "-1,0"
+        );
+        assert!(slot.take().is_none());
     }
 }

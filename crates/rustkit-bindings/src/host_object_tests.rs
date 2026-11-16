@@ -319,7 +319,7 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
 const HOST_NATIVES: &[&str] = &[
     "compileDocumentFunction", "runDocumentScript",
     "reportError", "unsupported", "base64Decode", "base64Encode", "binaryDecode", "binaryEncode", "blobGet",
-    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode",
+    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode", "pixelsIn", "pixelsOut",
 ];
 
 /// Every name this crate's sources read or write on the host object is a
