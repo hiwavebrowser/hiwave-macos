@@ -51,6 +51,13 @@ bitflags! {
         /// If the function requires a function scope.
         const HAS_FUNCTION_SCOPE = 0b1_0000_0000;
 
+        /// HIWAVE PATCH (sort-diff): the whole body is `return a - b` over the two plain
+        /// parameters. `Array.prototype.sort` compares two Numbers natively for such a function.
+        const NUMERIC_DIFF = 0b10_0000_0000;
+
+        /// With `NUMERIC_DIFF`: the body is `return b - a`.
+        const NUMERIC_DIFF_SWAPPED = 0b100_0000_0000;
+
         /// Trace instruction execution to `stdout`.
         #[cfg(feature = "trace")]
         const TRACEABLE = 0b1000_0000_0000_0000;
