@@ -3349,6 +3349,7 @@ impl DomBindings {
     /// bubble). Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_image_error(&self, node: usize) -> Result<(), BindingError> {
+        self.canvases.borrow_mut().loaded.remove(&node);
         self.runtime.borrow_mut().evaluate_host_turn(&format!(
             "return __rk.imageFailed({node});"
         ), &[])?;
@@ -3363,6 +3364,13 @@ impl DomBindings {
     /// `load` fires at it (it does not bubble). Listener exceptions are
     /// queued, see [`Self::take_reported_errors`].
     pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
+        // The engine's own record of the element's image, which a canvas
+        // draws from (web_canvas.rs): kept before any listener runs.
+        if let Some((src, srcset)) = self.dom_host.borrow().img_sources(node) {
+            // No URL: a `data:` image, which is its own `src`.
+            let url = if url.is_empty() { src.clone().unwrap_or_default() } else { url.to_string() };
+            self.canvases.borrow_mut().loaded.insert(node, web_canvas::LoadedImage { src, srcset, url, width, height });
+        }
         // The URL is an argument, never script source (`fire_key_event`).
         self.runtime
             .borrow_mut()

@@ -275,32 +275,98 @@ fn canvas_origin_checks_match_chrome() {
 
 /// Canvas origin checks across redirects, Chrome 148
 /// (canvas_taint_cases.json "redirect-same-to-other-origin" /
-/// "redirect-same-to-same-origin"): an image the page asked for at its own
-/// origin whose response came through another origin leaves the canvas
-/// not origin-clean; one that stayed at the page's origin does not. The
-/// loader reports the response's URLs (each hop and the final one).
+/// "redirect-same-to-same-origin", and
+/// docs/diagnostics/2026-11-16/frame_canvas_cft148.json, where the same
+/// four rows are pinned in a frame and at top level): an image of another
+/// origin, one the page asked for at its own origin whose response came
+/// through another origin, and one asked for at another origin whose
+/// response came back to the page's, each leave the canvas not
+/// origin-clean; one that stayed at the page's origin does not. The
+/// loader reports the response's URLs (each hop and the final one). At
+/// top level and in a frame's realm, whose canvases decide with the
+/// frame's own origin.
 #[test]
 fn canvas_origin_checks_follow_the_response_urls() {
-    for (hops, expected) in [
-        (["https://a.test/to-other", "https://b.test/img.png"], "SecurityError"),
-        (["https://a.test/to-same", "https://a.test/img.png"], "ok"),
-    ] {
-        let doc = Rc::new(Document::parse_html(
-            "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s></body></html>",
-        ).unwrap());
-        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    for framed in [false, true] {
+        for (hops, expected) in [
+            (vec!["https://b.test/img.png"], "SecurityError"),
+            (vec!["https://a.test/to-other", "https://b.test/img.png"], "SecurityError"),
+            (vec!["https://b.test/back", "https://a.test/img.png"], "SecurityError"),
+            (vec!["https://a.test/to-same", "https://a.test/img.png"], "ok"),
+        ] {
+            let doc = Rc::new(Document::parse_html(
+                "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><img id=s></body></html>",
+            ).unwrap());
+            let top = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+            // The parent is another origin's page: the frame's own origin decides.
+            top.set_location(&url::Url::parse("https://b.test/").unwrap()).unwrap();
+            let b = if framed { top.new_child().unwrap() } else { DomBindings::new(JsRuntime::new().unwrap()).unwrap() };
+            b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
+            b.set_document(doc.clone()).unwrap();
+            let urls: Vec<url::Url> = hops.iter().map(|u| url::Url::parse(u).unwrap()).collect();
+            b.set_canvas_image_loader(Some(Box::new(move |_url: &str, _size: (u32, u32)| {
+                rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|bm| (bm, urls.clone()))
+            })));
+            b.fire_image_load(doc.get_element_by_id("s").unwrap().id.raw(), 1, 1, hops[0]).unwrap();
+            let ours = ev(
+                &b,
+                "var x = document.getElementById('c').getContext('2d'); x.drawImage(document.getElementById('s'), 0, 0); \
+                 try { x.getImageData(0, 0, 1, 1); 'ok' } catch (e) { e.name }",
+            );
+            assert_eq!(ours, expected, "framed {framed}, hops {hops:?}");
+        }
+    }
+}
+
+/// Canvas image sources resolve through the element's loaded resource:
+/// what the engine recorded when it told the element its image was in.
+/// Properties a page defines on the element (`currentSrc`, `src`,
+/// `complete`, `naturalWidth`) are not consulted, and the origin check is
+/// made on the resource's URL whether or not its pixels are at hand. At
+/// top level and in a frame's realm.
+#[test]
+fn canvas_image_sources_resolve_through_the_elements_loaded_resource() {
+    const PAGE: &str = "<!DOCTYPE html><html><body><canvas id=c width=8 height=8></canvas><canvas id=d width=8 height=8></canvas>\
+                        <canvas id=e width=8 height=8></canvas><img id=s><img id=t><img id=u></body></html>";
+    for framed in [false, true] {
+        let top = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let b = if framed { top.new_child().unwrap() } else { top };
+        let doc = Rc::new(Document::parse_html(PAGE).unwrap());
         b.set_location(&url::Url::parse("https://a.test/").unwrap()).unwrap();
         b.set_document(doc.clone()).unwrap();
-        let urls: Vec<url::Url> = hops.iter().map(|u| url::Url::parse(u).unwrap()).collect();
-        b.set_canvas_image_loader(Some(Box::new(move |_url: &str, _size: (u32, u32)| {
-            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, &[255, 0, 0, 255]).map(|bm| (bm, urls.clone()))
+        let asked = Rc::new(RefCell::new(Vec::<String>::new()));
+        let log = asked.clone();
+        b.set_canvas_image_loader(Some(Box::new(move |url: &str, _size: (u32, u32)| {
+            log.borrow_mut().push(url.to_string());
+            let pixel: &[u8] = match url {
+                "https://a.test/real.png" => &[255, 0, 0, 255],
+                "https://b.test/there.png" => &[0, 0, 255, 255],
+                _ => return None,
+            };
+            rustkit_canvas::CanvasBitmap::from_rgba(1, 1, pixel).map(|bm| (bm, vec![url::Url::parse(url).unwrap()]))
         })));
-        b.fire_image_load(doc.get_element_by_id("s").unwrap().id.raw(), 1, 1, hops[0]).unwrap();
-        let ours = ev(
-            &b,
-            "var x = document.getElementById('c').getContext('2d'); x.drawImage(document.getElementById('s'), 0, 0); \
-             try { x.getImageData(0, 0, 1, 1); 'ok' } catch (e) { e.name }",
+        let node = |id: &str| doc.get_element_by_id(id).unwrap().id.raw();
+        b.fire_image_load(node("s"), 1, 1, "https://a.test/real.png").unwrap();
+        b.fire_image_load(node("t"), 1, 1, "https://b.test/absent.png").unwrap();
+        let read = "function read(canvas, image) { var x = document.getElementById(canvas).getContext('2d'); x.drawImage(image, 0, 0); \
+                    try { var p = x.getImageData(0, 0, 1, 1).data; return p[0] + ',' + p[2] + ',' + p[3]; } catch (e) { return e.name; } }";
+        // The element's own image is drawn, whatever the page says its URL is.
+        assert_eq!(
+            ev(&b, &format!("{read} var s = document.getElementById('s'); \
+                 ['currentSrc', 'src'].forEach(function (k) {{ Object.defineProperty(s, k, {{ value: 'https://b.test/there.png' }}); }}); read('c', s)")),
+            "255,0,255",
+            "framed {framed}"
         );
-        assert_eq!(ours, expected, "hops {hops:?}");
+        assert_eq!(*asked.borrow(), vec!["https://a.test/real.png".to_string()], "framed {framed}: the URLs looked up");
+        // An image that has not loaded draws nothing, whatever the page says of it.
+        assert_eq!(
+            ev(&b, "var u = document.getElementById('u'); Object.defineProperty(u, 'complete', { value: true }); Object.defineProperty(u, 'naturalWidth', { value: 1 }); \
+                    Object.defineProperty(u, 'naturalHeight', { value: 1 }); Object.defineProperty(u, 'currentSrc', { value: 'https://b.test/there.png' }); read('e', u)"),
+            "0,0,0",
+            "framed {framed}"
+        );
+        assert_eq!(asked.borrow().len(), 1, "framed {framed}: nothing more was looked up");
+        // Another origin's image leaves the canvas unreadable, with its pixels at hand or not.
+        assert_eq!(ev(&b, "read('d', document.getElementById('t'))"), "SecurityError", "framed {framed}");
     }
 }

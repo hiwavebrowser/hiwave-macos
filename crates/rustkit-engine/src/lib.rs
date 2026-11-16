@@ -419,6 +419,8 @@ mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
 #[cfg(test)]
+mod frame_canvas_tests;
+#[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
 mod inspector_tests;
@@ -6670,6 +6672,9 @@ impl Engine {
                 continue;
             };
             child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            // The images its canvases draw: what the frame's own image loads
+            // put in the engine's image store, as for a top-level page.
+            child.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             // What a top-level page's bindings are given at load, for the
             // frame's: the engine's selector matcher (without it script's
             // `querySelector` fell back to the bindings' own, which does not

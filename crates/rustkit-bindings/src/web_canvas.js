@@ -443,9 +443,11 @@
         if (w <= 0 || h <= 0) return;
         call(d, 'putImageData', hexOf(v.data), v.width, v.height, dx, dy, [x, y, w, h].join(','));
     });
-    // An image source as [kind, id or URL, width, height]; null when it
-    // has nothing to draw yet (an image still loading).
-    function source(img, member) {
+    // An image source as [kind, NodeId, width, height]; null when it has
+    // nothing to draw yet (an image still loading). What an `<img>` is as
+    // a source is the engine's record of the element (`imageSource`: its
+    // image's own size once it is in), not what its properties say.
+    function source(img, member, op) {
         if (img instanceof Canvas) {
             var s = slot(img);
             if (!img.width || !img.height) {
@@ -453,11 +455,15 @@
             }
             return ['canvas', s[1], img.width, img.height];
         }
-        if (typeof g.HTMLImageElement === 'function' && img instanceof g.HTMLImageElement) {
-            if (!img.complete || !img.naturalWidth) return null;
-            return ['image', img.currentSrc || img.src, img.naturalWidth, img.naturalHeight];
+        var at = null, answer;
+        try { at = slot(img); } catch (e) { at = null; }
+        answer = at ? C(at[0], at[1], op || 'imageSource') : 'TypeError';
+        if (typeof answer !== 'string' || answer === 'TypeError') {
+            throw new TypeError("Failed to execute '" + member + "' on 'CanvasRenderingContext2D': The provided value is not of type '(HTMLCanvasElement or HTMLImageElement)'.");
         }
-        throw new TypeError("Failed to execute '" + member + "' on 'CanvasRenderingContext2D': The provided value is not of type '(HTMLCanvasElement or HTMLImageElement)'.");
+        if (answer === '') return null;
+        var parts = answer.split(',');
+        return ['image', at[1], +parts[0], +parts[1], +parts[2]];
     }
     method(P, 'drawImage', function drawImage(img, a, b, c, e, f, h, i, j) {
         var n = arguments.length;
@@ -481,10 +487,11 @@
         if (['repeat', 'repeat-x', 'repeat-y', 'no-repeat'].indexOf(rep) < 0) {
             throw domError('SyntaxError', "Failed to execute 'createPattern' on 'CanvasRenderingContext2D': The provided type ('" + rep + "') is not one of 'repeat', 'no-repeat', 'repeat-x', or 'repeat-y'.");
         }
-        var src = source(img, 'createPattern');
+        var src = source(img, 'createPattern', 'imagePattern');
         if (!src) return null;
         var p = Object.create(Pattern.prototype);
-        PAT.set(p, { kind: src[0], src: src[1], repetition: rep });
+        // A pattern keeps the image it was made from: the host's index of it.
+        PAT.set(p, src[0] === 'image' ? { kind: 'pattern', src: src[4], repetition: rep } : { kind: src[0], src: src[1], repetition: rep });
         return p;
     });
 })(typeof globalThis === 'object' ? globalThis : this);
