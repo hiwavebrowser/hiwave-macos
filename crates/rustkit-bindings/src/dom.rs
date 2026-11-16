@@ -3153,7 +3153,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadSnapshot = HOOKS.loadReplay = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadSnapshot = HOOKS.loadReplay = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = HOOKS.watched = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -3394,21 +3394,29 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
-        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute.
+        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute (`HOOKS.watched`: the names some definition observes).
         var ar = HOOKS.attrs && (op === 'setAttr' || op === 'removeAttr') && HOOKS.attrs(o, op, a);
+        // The steps that follow an attribute write act on three kinds of name only: `on<type>` (handlers),
+        // `async` and `src` (scripts), `src` (frames), `src` and `srcset` (images). Whether the name begins with
+        // o, s or a (either case) is one index read, with no call; every other name skips them.
+        var c0 = a[0];
+        var acts = !(op === 'setAttr' || op === 'removeAttr') ||
+            c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A';
         // Removing an absent attribute runs no attribute-change steps (DOM
         // "remove an attribute by name"), so it must not drop an assigned
         // on<type> handler. N.attr matches the name as the write does.
-        var changed = op === 'setAttr' ||
-            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
+        var changed = acts && (op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null));
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
-        if (changed) attributeChanged(o, a);
-        if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
-        if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        if (acts) {
+            if (changed) attributeChanged(o, a);
+            if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+            if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        }
         if (ar) ar();
         return r;
     }
@@ -3719,12 +3727,25 @@ const WRAPPERS_JS: &str = r#"
     // write `setAttribute` makes (the mutation record included), without the steps that only act
     // on another name (`on<type>` handlers, `async`, `src`): neither name is one.
     var accStr = String;
+    // `name` is a literal that is already lower case, so the custom-element reaction is only asked for
+    // when some definition watches it.
     function putPlain(el, name, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', name);
-        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', name);
+        var ar = HOOKS.attrs && HOOKS.watched[name] === true && HOOKS.attrs(el, 'setAttr', name, true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, name, text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
+        if (m) m();
+        if (ar) ar();
+    }
+    // setAttribute and removeAttribute for a name that none of the steps after a write act on (below): the
+    // same write and the same mutation record as `setData`, any case of name.
+    function putAttr(el, op, name, text, method) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, op, name);
+        var ar = HOOKS.attrs && HOOKS.attrs(el, op, name);
+        var r = N.write(gen, op, s.gen === gen ? s.id : -1, name, text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute '" + method + "'.", r);
         if (m) m();
         if (ar) ar();
     }
@@ -4053,7 +4074,9 @@ const WRAPPERS_JS: &str = r#"
     // (E54): the marks script reads `complete` and `decode()` from are
     // updated at once, not on the next event.
     function imageWritten(el, name) {
-        var n = String(name).toLowerCase();
+        var n = String(name);
+        if (n.length !== 3 && n.length !== 6) return;
+        n = n.toLowerCase();
         if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
             __rk.imageWritten(el);
         }
@@ -4062,12 +4085,24 @@ const WRAPPERS_JS: &str = r#"
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
-        setData(this, 'setAttr', String(name), String(value), 'setAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        // A name that begins with o, s or a (either case) may be one the steps after a write act on
+        // (`on<type>`, `async`, `src`, `srcset`): those take the full write. Any other name is a plain write.
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'setAttr', n, String(value), 'setAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'setAttr', n, String(value), 'setAttribute');
+        }
     };
     Element.prototype.removeAttribute = function (name) {
-        setData(this, 'removeAttr', String(name), null, 'removeAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'removeAttr', n, null, 'removeAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'removeAttr', n, null, 'removeAttribute');
+        }
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -4207,7 +4242,7 @@ const WRAPPERS_JS: &str = r#"
     function putClass(el, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
-        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', 'class');
+        var ar = HOOKS.attrs && HOOKS.watched.class === true && HOOKS.attrs(el, 'setAttr', 'class', true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
         if (m) m();
@@ -6763,8 +6798,11 @@ const WRAPPERS_JS: &str = r#"
         // name here too. Lowercasing unconditionally is fine: SVG's on<type>
         // attributes are lowercase already, so a case-sensitive SVG name
         // either is lowercase or names no handler attribute at all.
-        name = String(name).toLowerCase();
-        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+        name = String(name);
+        // `on` in either case, asked before lowering the name (most names are not handlers).
+        var n0 = name[0], n1 = name[1];
+        if (name.length > 2 && (n0 === 'o' || n0 === 'O') && (n1 === 'n' || n1 === 'N')) {
+            name = name.toLowerCase();
             var type = name.slice(2), a = ASSIGNED.get(t);
             if (a) delete a[type];
             // The body's attribute for a Window type is the Window's
