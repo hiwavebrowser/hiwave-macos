@@ -753,7 +753,9 @@ fn run_live(
     const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
     let limit = Duration::from_millis(live_ms);
     let began = Instant::now();
-    let mut clock = began;
+    // The app's content-thread clock: whole ms a turn, the fraction kept, and the next turn due
+    // from the turn's time (PACE2). The window-thread arm keeps its own wait.
+    let mut clock = rustkit_engine::LiveClock::new(began);
     let mut stats = LiveStats {
         pacing: pacing.name().to_string(),
         ..LiveStats::default()
@@ -762,8 +764,7 @@ fn run_live(
     tracing::info!(live_ms, "Live loop started");
     loop {
         let started = Instant::now();
-        let elapsed_ms = started.duration_since(clock).as_millis() as u64;
-        clock += Duration::from_millis(elapsed_ms);
+        let elapsed_ms = clock.turn(started);
         let turn = rt.block_on(engine.pump_live(view_id, elapsed_ms));
         stats.turns += 1;
         stats.timer_callbacks += turn.timers_ran as u64;
@@ -782,10 +783,13 @@ fn run_live(
             break;
         }
         match pacing {
-            // The content thread turns again when the next timer is due, at most 50 ms on, and
-            // nothing but a command (none here) ends its wait early.
+            // The content thread turns again when the next timer is due, counted from the turn's
+            // time on the page's clock (at least 2 and at most 50 ms on), and nothing but a
+            // command (none here) ends its wait early.
             LivePacing::ContentThread => {
-                std::thread::sleep(rustkit_engine::content_turn_wait(turn.next_timer_ms).min(left))
+                let now = Instant::now();
+                let due = clock.deadline(now, rustkit_engine::content_turn_wait(turn.next_timer_ms));
+                std::thread::sleep(due.saturating_duration_since(now).min(left))
             }
             // An idle page still gets its time: in the app only input, or the
             // engine's wake, ends the wait.
@@ -2319,6 +2323,12 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     // The stepped clock only when asked for, and only for a stepped capture; a live run reads a clock
     // that flows.
     config.deterministic_page_clock = args.deterministic_clock && args.live_ms.is_none();
+    // Grid frame stamps whenever there is no --live-ms (TIMELINE1): the timeline, and so every script
+    // animation, reads exact grid times, the same every run. That includes the live turns of an
+    // --animations settle and of a prelude, which run on the real clock: there too only the
+    // timeline is on the grid; frame callbacks' timestamps and performance.now() flow as in a
+    // --live-ms run.
+    config.grid_frame_stamps = args.live_ms.is_none();
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -2621,6 +2631,10 @@ mod tests {
         assert!(!capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
         assert!(capture_config(&parsed(&["--deterministic-clock"]), None).deterministic_page_clock);
         assert!(!capture_config(&parsed(&["--deterministic-clock", "--live-ms", "1000"]), None).deterministic_page_clock);
+        // Grid frame stamps in every load-only capture (script animations reproduce), never in a
+        // live-ms run (TIMELINE1).
+        assert!(capture_config(&parsed(&[]), None).grid_frame_stamps);
+        assert!(!capture_config(&parsed(&["--live-ms", "1000"]), None).grid_frame_stamps);
     }
 
     /// LAT14: the prelude page and how long it runs live before the
