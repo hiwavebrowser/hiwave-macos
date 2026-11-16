@@ -125,7 +125,8 @@ pub(crate) fn resolve(view: u64, path: &str) -> String {
 }
 
 /// `text` for a log line: every control character and line or paragraph
-/// separator written as an escape (`\n`, `\r`, `\t`, `\u{..}`), so
+/// separator written as an escape (`\n`, `\r`, `\t`, `\u{..}`), and
+/// a backslash doubled so that an escape is never mistaken for text, so
 /// that text a page chose (a console call, a message, a specifier) stays
 /// inside the one line of its record.
 pub(crate) fn plain(text: &str) -> String {
@@ -135,6 +136,7 @@ pub(crate) fn plain(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
             c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
                 out.push_str(&format!("\\u{{{:x}}}", c as u32));
             }
@@ -219,7 +221,7 @@ pub(crate) fn excerpt(source: &str, line: u32, column: u32) -> Option<SourceWind
 fn flatten(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
+        if ch.is_control() || ch == '\u{2028}' || ch == '\u{2029}' {
             out.push(' ');
         } else {
             out.push(ch);
@@ -294,7 +296,7 @@ pub(crate) fn page_error(view: u64, report: &ErrorReport, script: &str, window: 
     let around = match window {
         Some(window) => {
             let callee = window.callee.map(|name| format!(" callee {name}")).unwrap_or_default();
-            format!("{callee} source {}", window.snippet)
+            format!("{callee} source {}", plain(&window.snippet))
         }
         None => String::new(),
     };
@@ -486,9 +488,8 @@ fn on_host_stack(depth: usize, histogram: &str, frames: &str) {
     if !enabled() {
         return;
     }
-    emit(format!(
-        "host stack depth={depth} histogram=\"{histogram}\" frames=\"{frames}\""
-    ));
+    // The names are the page's own (a property's, a function's).
+    emit(format!("host stack depth={depth} histogram=\"{}\" frames=\"{}\"", plain(histogram), plain(frames)));
 }
 
 fn on_interrupt(site: &'static str, message: &'static str, limit: &'static str) {
@@ -975,7 +976,9 @@ mod tests {
 
     #[test]
     fn plain_writes_control_characters_as_escapes() {
-        assert_eq!(plain("a b\u{e9}\u{4e2d} \"'\\"), "a b\u{e9}\u{4e2d} \"'\\");
+        assert_eq!(plain("a b\u{e9}\u{4e2d} \"'"), "a b\u{e9}\u{4e2d} \"'");
+        // A backslash is doubled: the two characters `\n` in page text are not a line break's escape.
+        assert_eq!(plain("a\\nb\nc"), "a\\\\nb\\nc");
         assert_eq!(plain("a\nb\r\nc\td"), "a\\nb\\r\\nc\\td");
         assert_eq!(plain("\u{0}\u{1b}[0m\u{7f}\u{85}\u{2028}\u{2029}\u{b}\u{c}"), "\\u{0}\\u{1b}[0m\\u{7f}\\u{85}\\u{2028}\\u{2029}\\u{b}\\u{c}");
         for ch in (0u32..0x3000).filter_map(char::from_u32) {
