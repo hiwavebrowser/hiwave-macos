@@ -21,7 +21,7 @@ const b = await chromium.launch({ executablePath: exe, headless: true, args: ["-
 const r = { browser: b.version() };
 for (const page of ["frame_canvas.html", "frame_canvas_inner.html"]) {
   const p = await b.newPage();
-  await p.goto(`http://127.0.0.1:${port}/${page}?other=${other}`);
+  await p.goto(`http://127.0.0.1:${port}/${page}#other=${other}`);
   await p.waitForFunction("window.__out", null, { timeout: 15000 });
   Object.assign(r, JSON.parse(await p.evaluate("window.__out")));
   await p.close();

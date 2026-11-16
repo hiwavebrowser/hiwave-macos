@@ -2,7 +2,7 @@
 <script>
 // What a canvas holds after an image is drawn into it, and whether it can then be read, in whichever
 // document this is: loaded on its own, or as the frame of frame_canvas.html (the answers must be the
-// same). `?other=<origin>` names another origin serving the same files.
+// same). `#other=<origin>` names another origin serving the same files.
 function load(src) { return new Promise(function (ok) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = function () { ok(null); }; i.src = src; }); }
 function count(x) { var d = x.getImageData(0, 0, 50, 50).data, n = 0; for (var i = 3; i < d.length; i += 4) if (d[i] !== 0) n++; return n; }
 function attempt(f) { try { f(); return "ok"; } catch (e) { return e.name; } }
@@ -15,7 +15,7 @@ function canvas() { var c = document.createElement("canvas"); c.width = 50; c.he
     if (img) x.drawImage(img, 0, 0, 50, 50);
     out[names[q].split(".").pop()] = img ? { natural: img.naturalWidth + "x" + img.naturalHeight, after_fill: filled, after_image: count(x) } : "error";
   }
-  var other = (/[?&]other=([^&]*)/.exec(location.search) || [])[1];
+  var other = (/^#other=(.*)$/.exec(location.hash) || [])[1];
   if (other) {
     var far = await load(decodeURIComponent(other) + "/frame_canvas_shape.png"), c = canvas(), y = c.getContext("2d");
     if (!far) out.other_origin = "load-error";
