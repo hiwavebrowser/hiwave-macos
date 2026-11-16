@@ -1,0 +1,65 @@
+[
+ {
+  "arm": "tb",
+  "frames": 177,
+  "medianGap": 16.7,
+  "maxGap": 66.6,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "tb",
+  "frames": 178,
+  "medianGap": 16.7,
+  "maxGap": 66.7,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "tb",
+  "frames": 177,
+  "medianGap": 16.7,
+  "maxGap": 66.6,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "lt",
+  "frames": 178,
+  "medianGap": 16.7,
+  "maxGap": 66.8,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "lt",
+  "frames": 178,
+  "medianGap": 16.7,
+  "maxGap": 66.8,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "lt",
+  "frames": 179,
+  "medianGap": 16.7,
+  "maxGap": 50,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "data",
+  "frames": 180,
+  "medianGap": 16.7,
+  "maxGap": 33.3,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "data",
+  "frames": 179,
+  "medianGap": 16.7,
+  "maxGap": 50,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "arm": "data",
+  "frames": 180,
+  "medianGap": 16.7,
+  "maxGap": 33.3,
+  "version": "Chrome/148.0.7778.216"
+ }
+]
