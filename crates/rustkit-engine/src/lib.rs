@@ -11739,7 +11739,7 @@ impl Engine {
         {
             let laid = Rc::make_mut(&mut laid);
             for root in &boxed {
-                let (Some(kept), Some(fresh)) = (box_of_node(&unlaid, *root).cloned(), found.get(root)) else {
+                let (Some(_), Some(fresh)) = (box_of_node(&unlaid, *root), found.get(root)) else {
                     continue;
                 };
                 if let Some(laid) = box_of_node_mut(laid, *root) {
