@@ -18,7 +18,10 @@
    "toDataURL": "SecurityError",
    "through_a_canvas": "SecurityError",
    "a_clean_canvas_beside_it": "ok"
-  }
+  },
+  "redirect_same_to_same": "ok",
+  "redirect_same_to_other": "SecurityError",
+  "redirect_other_to_same": "SecurityError"
  },
  "top": {
   "svg": {
@@ -38,6 +41,15 @@
    "toDataURL": "SecurityError",
    "through_a_canvas": "SecurityError",
    "a_clean_canvas_beside_it": "ok"
-  }
+  },
+  "redirect_same_to_same": "ok",
+  "redirect_same_to_other": "SecurityError",
+  "redirect_other_to_same": "SecurityError"
+ },
+ "blank": {
+  "about_blank": "read 900 origin http://127.0.0.1:<port>",
+  "no_src": "read 900 origin http://127.0.0.1:<port>",
+  "srcdoc": "read 900 origin http://127.0.0.1:<port>",
+  "page_origin": "http://127.0.0.1:<port>"
  }
 }

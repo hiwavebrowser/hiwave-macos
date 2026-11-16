@@ -780,6 +780,16 @@ impl DomHost {
         host.borrow().node(args).map(|n| n.id.raw())
     }
 
+    /// The `src` and `srcset` attributes of the bound document's node
+    /// `node` as they are now, when it is an `<img>` element.
+    pub(crate) fn img_sources(&self, node: usize) -> Option<(Option<String>, Option<String>)> {
+        let node = self.document.as_ref()?.get_node(NodeId::new(node))?;
+        if !node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("img")) {
+            return None;
+        }
+        Some((node.get_attribute("src").map(str::to_string), node.get_attribute("srcset").map(str::to_string)))
+    }
+
     /// The `sandbox` attribute of the bound document's node `node`, as it
     /// is now (`None`: no such attribute, or no such node).
     pub(crate) fn frame_sandbox(&self, node: usize) -> Option<String> {

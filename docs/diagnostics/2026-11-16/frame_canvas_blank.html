@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>canvas image in an about:blank or srcdoc frame probe</title></head><body>
+<script>
+// A frame with no URL of its own (about:blank, srcdoc) has its parent's origin: a canvas in it that
+// draws the parent's own image can be read. Each frame's document loads the image itself.
+var out = {};
+function attempt(f) { try { return f(); } catch (e) { return e.name; } }
+function probe(name, frame) {
+  return new Promise(function (ok) {
+    var w = frame.contentWindow, d = frame.contentDocument;
+    if (!w || !d) { out[name] = "no document"; ok(); return; }
+    var img = new w.Image();
+    img.onload = function () {
+      var c = d.createElement("canvas"); c.width = 50; c.height = 50; (d.body || d.documentElement).appendChild(c);
+      out[name] = attempt(function () { var x = c.getContext("2d"); x.drawImage(img, 0, 0, 50, 50); var p = x.getImageData(0, 0, 50, 50).data, n = 0; for (var i = 3; i < p.length; i += 4) if (p[i] !== 0) n++; return "read " + n; }) + " origin " + w.origin;
+      ok();
+    };
+    img.onerror = function () { out[name] = "load-error"; ok(); };
+    img.src = location.href.replace(/[^/]*$/, "") + "frame_canvas_shape.png";
+  });
+}
+function frame(make) { return new Promise(function (ok) { var f = document.createElement("iframe"); make(f); f.onload = function () { ok(f); }; document.body.appendChild(f); setTimeout(function () { ok(f); }, 1000); }); }
+(async function () {
+  await probe("about_blank", await frame(function (f) { f.src = "about:blank"; }));
+  await probe("no_src", await frame(function () {}));
+  await probe("srcdoc", await frame(function (f) { f.srcdoc = "<!doctype html><body>inner</body>"; }));
+  out.page_origin = location.origin.replace(/:\d+$/, ":<port>");
+  for (var k in out) out[k] = String(out[k]).replace(/:\d+$/, ":<port>");
+  window.__out = JSON.stringify({ blank: out }); console.log("PROBE " + window.__out);
+})();
+</script></body></html>
