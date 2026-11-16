@@ -595,7 +595,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
         Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
-        Q.frameTl = 0; Q.taskFrom = 0;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.fakeReal = -1;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -658,6 +658,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (the bindings give a frame's realm the page's), captured here in each realm; nothing of one
     // realm's is kept on the record.
     var hostClock = window.performance && typeof window.performance.now === 'function' ? window.performance.now : null;
+    // The real clock's reading: the host clock, or, when a test sets `Q.fakeReal` (a number on the
+    // tree's own record, which no page script reaches), that value, so a test drives real time as a
+    // value instead of waiting on it (CLOCK-INFLATE's property test).
+    function realMs() {
+        if (typeof Q.fakeReal === 'number' && Q.fakeReal >= 0) return Q.fakeReal;
+        return hostClock ? hostClock() : realNow() - Q.startedAt;
+    }
     var DET_STEP = 0.1;
     function treeNow() {
         var t;
@@ -669,7 +676,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         } else {
             // Without the host clock: elapsed since the tree's first script began, never an epoch
             // value (the never-backwards rule would pin it there).
-            var real = hostClock ? hostClock() : realNow() - Q.startedAt;
+            var real = realMs();
             t = real + Q.skew;
             // The timers' clock is ahead of real time at this reading (a load ran them ahead):
             // marked, so a frame of this time is stamped with its exact grid time.
@@ -692,6 +699,22 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         if (!Q.det && since > 0 && since < 5000 && since < base) base -= since;
     }
     function perfNow() { return treeNow() - base; }
+    // How far a turn has really got (CLOCK-INFLATE): the timers' time at its start plus the real
+    // time since, never less than the timers' clock. A long task in the turn is real time the
+    // timers' clock is given only on the next turn; measured against this, a frame the turn runs
+    // after the task is as late as it really is, and is stamped its grid time, as Chrome's is
+    // ("held": T0 + 16.7 after a 100 ms task). Frames are still scheduled on the timers' clock
+    // alone. The deterministic clock has no real time in it.
+    function turnNow() {
+        if (Q.det || Q.turnReal < 0) return Q.now;
+        var real = realMs();
+        var t = Q.turnAt + (real - Q.turnReal);
+        return t > Q.now ? t : Q.now;
+    }
+    function turnBegins() {
+        Q.turnAt = Q.now;
+        Q.turnReal = realMs();
+    }
     // The previous frame's stamp and virtual time: each frame is at least the virtual step after it,
     // whatever the real clock did (a load runs frames back to back in microseconds), and the page
     // clock is never behind a frame stamp it handed out (`Q.prevFrameTs`, `Q.prevFrameAt`).
@@ -806,7 +829,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var at = Q.frameDue;
             if (Q.frameTsAt !== at) {
                 Q.frameTsAt = at;
-                var ts = treeNow() - (Q.now - at);
+                var ts = treeNow() - (turnNow() - at);
                 // TIMELINE1: when the timers' clock ran ahead of real time at this time (a load, a
                 // stepped capture), the stamp is the grid time itself, with no real time in it, so
                 // a capture that steps the clock reads the same stamps and the same animation
@@ -816,7 +839,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 var grid = !Q.det && Q.gridStamps;
                 if (!Q.det && Q.aheadAt === Q.now) ts = at;
                 if (!grid && Q.tlAt === at) ts = Q.tlTs;
-                if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + (at - Q.prevFrameAt)) ts = Q.prevFrameTs + (at - Q.prevFrameAt);
+                // At least the grid distance from the last frame, but at most one grid step from it
+                // (16 or 17; CLOCK-INFLATE): a larger distance is the timers' clock catching up after a long
+                // task, real time the reading above already has (it is never behind the timers'
+                // clock) and, when the last frame ran in the task's turn, the last stamp had too;
+                // counted again, the page clock ran a task ahead of real time from then on (the
+                // app: 3202 ms after a 3000 ms task; Chrome 0-1 ms, `long_task_clock_cft148.json`).
+                var step = at - Q.prevFrameAt;
+                var one = frameAt(gridAtOrBefore(Q.prevFrameAt) + 1) - Q.prevFrameAt;
+                if (step > one) step = one;
+                if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + step) ts = Q.prevFrameTs + step;
                 if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
                 // Nor below a timeline time a task was handed (`__rk.timelineNow`).
                 if (!grid && ts < Q.tlHigh) ts = Q.tlHigh;
@@ -955,6 +987,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
+        turnBegins();
         var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
@@ -982,6 +1015,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
     __rk.advanceTimersFramed = function (delta, max, frameMs) {
+        turnBegins();
         var target = Q.now + delta;
         var start = realNow();
         var ran = 0;
@@ -1029,8 +1063,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             var g = frameAt(gridAtOrBefore(Q.now));
             if (g > Q.prevFrameAt || Q.prevFrameTs < 0) {
                 if (Q.tlAt !== g) {
+                    // The stamp a frame of grid point `g` would get now: the clock less how far
+                    // the timers' clock is past `g` (with grid stamps, `g` itself), never below
+                    // the last frame's. Not the last frame's stamp plus the grid distance since:
+                    // after a long task that stamp already had the task's real time, and the
+                    // timers' clock catching up would count it again (CLOCK-INFLATE). Read once
+                    // per grid point, so a task reads one value.
                     Q.tlAt = g;
-                    Q.tlTs = (Q.prevFrameTs < 0 ? 0 : Q.frameTl) + (g - Q.prevFrameAt);
+                    var v = !Q.det && Q.gridStamps ? g : treeNow() - (turnNow() - g);
+                    Q.tlTs = Q.prevFrameTs >= 0 && v < Q.frameTl ? Q.frameTl : v;
                 }
                 ts = Q.tlTs;
             }
