@@ -683,6 +683,8 @@ mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod layout_per_frame_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat22_forced_read_build_tests;
@@ -47401,6 +47403,17 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
+/// LPF1, tests only: turn the script-write restyle path off on this thread (`false`) or back on.
+#[cfg(test)]
+pub(crate) fn set_script_restyle_for_test(on: bool) {
+    SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
+}
+
+#[allow(dead_code)]
+fn script_restyle_enabled() -> bool {
+    !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
+}
+
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
@@ -47473,6 +47486,8 @@ struct RestyleBuild {
 }
 
 thread_local! {
+    /// LPF1, tests only: script style writes take the full rebuild (the cross-check's other arm).
+    static SCRIPT_RESTYLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
