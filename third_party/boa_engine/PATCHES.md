@@ -942,3 +942,25 @@ Pin: `crates/rustkit-js/tests/ic_set_dedupe.rs` counts vm-stats misses for a rea
 site reached through eight levels of accessor recursion and then used for 4000 accesses of two
 shapes: 4012 read and 4009 write misses before, under 200 after (two levels of recursion miss 31
 times in the same script).
+
+## Patch: an ArrayBuffer made by the host can carry a detach key (`arraybuffer-detach-key`)
+
+`JsArrayBuffer::from_byte_block` always makes a buffer whose `[[ArrayBufferDetachKey]]` is
+undefined, so script can `transfer()` or `transferToFixedLength()` any buffer the host hands it,
+and a host that keeps pointing at that buffer's storage (the WebAssembly memory plan, W0/W2) would
+be left pointing at freed memory. The spec's answer is a detach key (the string
+"WebAssembly.Memory" for a wasm memory): with one set, script's `transfer()` throws a TypeError and
+only the host, holding the key, can detach. The slot and `JsArrayBuffer::detach(&key)` already
+existed; only a constructor was missing.
+
+**Change.** `JsArrayBuffer::from_byte_block_with_detach_key(block, key, context)` (the TODO in
+`jsarraybuffer.rs` asked for it) and a `pub(crate)` setter on the data struct. `from_byte_block` is
+unchanged (undefined key).
+
+**Cost.** None on any existing path (a new constructor).
+
+Pin: `crates/rustkit-js/tests/arraybuffer_detach_key.rs` (Chrome for Testing 148.0.7778.216, a
+`WebAssembly.Memory`'s buffer: `transfer()`, `transferToFixedLength()`, `structuredClone` with a
+transfer list and `postMessage` with one all throw a TypeError and leave the buffer attached;
+`memory.grow()` detaches it; a plain buffer's `transfer()` works). Red on develop (the constructor
+stub ignoring the key): script's `transfer()` succeeded.

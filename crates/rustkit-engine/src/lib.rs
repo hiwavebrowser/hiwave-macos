@@ -416,6 +416,8 @@ mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
 #[cfg(test)]
+mod frame_sandbox_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -6493,7 +6495,8 @@ impl Engine {
     /// view's runtime; its classic scripts run in document order, then its
     /// `DOMContentLoaded` and `load`, then `load` at the iframe element.
     /// A cross-origin `src` is not fetched: the frame stays blank and the
-    /// element hears `load`. A frame whose element left, or that is
+    /// element hears `load`; so does a frame with a `sandbox` attribute
+    /// (`frame_sandbox_tests`). A frame whose element left, or that is
     /// navigated again, is dropped first. Not here yet (later stages):
     /// layout and paint of the frame, the child's timers and network
     /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
@@ -6529,7 +6532,11 @@ impl Engine {
             fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
                 engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
             }
-            if !blank && !same_origin {
+            // A frame with a `sandbox` attribute (as it was when the page
+            // asked for this navigation) takes the same path, whatever the
+            // attribute's tokens: `allow-scripts` and `allow-same-origin`
+            // are not acted on in this stage.
+            if request.sandbox.is_some() || (!blank && !same_origin) {
                 // The cross-origin floor: no request, no document, one `load`.
                 if let Some(parent) = parent_of(self, id) {
                     let _ = parent.frame_loaded(request.node);

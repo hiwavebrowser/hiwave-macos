@@ -6,7 +6,8 @@
 // iframe's `contentWindow`/`contentDocument` stay `null` (web_reflect.js).
 //
 // What it does: tells the engine which frame to load what (an iframe going
-// into the document, its `src` set while it is in, it leaving), and answers
+// into the document, by a node insertion or as parsed markup (`innerHTML`),
+// its `src` set while it is in, it leaving), and answers
 // `contentWindow` / `contentDocument` with the window the engine attached.
 // The engine does the fetching, the origin check, the child realm, the
 // child's scripts and the `load` event (`__rk.frames.loaded`).
@@ -18,12 +19,16 @@
 // at the insertion, where Chrome fires it: a handler set after the
 // insertion never hears the blank `load` (`navigate`). A cross-origin frame is
 // left blank: `contentWindow` and `contentDocument` stay `null`, and `load`
-// fires. `srcdoc`, `name` targeting and `window.frames[i]` are not here.
+// fires. A frame with a `sandbox` attribute is left blank the same way: the
+// engine reads the attribute itself when the request below is made
+// (`FrameRequest::sandbox`), nothing here does.
+// `srcdoc`, `name` targeting and `window.frames[i]` are not here.
 (function (g) {
     var HOOKS = __rk.domHooks;
     var request = g.__rustkit_frame_request;
-    if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || __rk.frames) return;
+    // Taken off the window first, whatever follows.
     delete g.__rustkit_frame_request;
+    if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || __rk.frames) return;
     // Taken now, before page script: the engine's side below (the scan,
     // a frame's size) calls only these and plain loops.
     var URL_ = g.URL, doc = g.document;
@@ -82,12 +87,37 @@
         request(id, null);
     }
 
+    // A frame that is in the document and has not been asked for yet.
+    // `inserted` as for `navigate`.
+    function fresh(f, inserted) {
+        var id = HOOKS.nodeId(f);
+        if (id >= 0 && !frames[id] && isConnected(f)) navigate(f, inserted);
+    }
+    // The same, for a frame a script's insertion just put in (a fragment's
+    // children, parsed markup).
+    function arrived(f) { fresh(f, true); }
+    // The frames whose element is no longer in the document have left.
+    function sweep() {
+        for (var id in frames) {
+            if (!isConnected(frames[id].el)) { delete frames[id]; request(+id, null); }
+        }
+    }
     HOOKS.frames = Object.setPrototypeOf({
-        tree: function (op, node) {
-            if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f, true); });
+        // `parent`: where `node` went. A fragment's children are under it
+        // by now, the fragment empty.
+        tree: function (op, node, parent) {
+            if (op === 'insert' && node != null && node.nodeType === 11) each(parent, arrived);
+            else if (op === 'insert') each(node, function (f) { if (isConnected(f)) navigate(f, true); });
             else if (op === 'remove') each(node, gone);
         },
         changed: function (node, op, name) {
+            // An element's children replaced by parsed markup or by text:
+            // the frames that left, then the frames that came.
+            if (op === 'setHTML' || op === 'setText' || op === 'setInnerText') {
+                sweep();
+                if (op === 'setHTML') each(node, arrived);
+                return;
+            }
             if (isFrame(node) && isConnected(node) && op === 'setAttr' && String(name).toLowerCase() === 'src') navigate(node);
         }
     }, null);

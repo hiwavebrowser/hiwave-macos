@@ -138,6 +138,34 @@ fn a_blank_frame_nothing_listens_to_is_asked_for_quietly() {
     );
 }
 
+/// A frame that arrives inside a fragment or as parsed markup
+/// (`innerHTML`) was inserted by a script too: its blank `load` is asked
+/// for quietly unless something could hear it then. A removed frame is
+/// still reported when its parent's children are replaced.
+#[test]
+fn a_blank_frame_from_a_fragment_or_parsed_markup_is_asked_for_quietly() {
+    let (parent, _doc) = parent();
+    parent.scan_frames().unwrap();
+    let _ = parent.take_frame_requests();
+    ev(
+        &parent,
+        "var none = function () {}; \
+         var frag = document.createDocumentFragment(); \
+         frag.appendChild(document.createElement('iframe')); \
+         var heard = document.createElement('iframe'); heard.onload = none; frag.appendChild(heard); \
+         document.body.appendChild(frag); \
+         var box = document.createElement('div'); document.body.appendChild(box); \
+         box.innerHTML = '<iframe></iframe><iframe onload=\"0\"></iframe>'; \
+         box.innerHTML = ''; 0",
+    );
+    let got: Vec<String> = parent
+        .take_frame_requests()
+        .into_iter()
+        .map(|r| format!("{}:{}", r.url.as_deref().unwrap_or("-"), r.quiet))
+        .collect();
+    assert_eq!(got.join(" "), "about:blank:true about:blank:false about:blank:true about:blank:false -:false -:false");
+}
+
 /// A frame's `top` is the tree's top window, whatever the parent's page
 /// has defined as its own `top`, and attaching runs no page function.
 #[test]

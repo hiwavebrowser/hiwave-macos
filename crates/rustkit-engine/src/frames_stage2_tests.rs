@@ -172,6 +172,30 @@ window.done = function () { return seen.late.length >= 1 && seen.early.length >=
     );
 }
 
+/// A frame with a `sandbox` attribute keeps this stage's floor whatever
+/// listened at its insertion (`frame_sandbox_tests`: no document, one
+/// `load`): the quiet rule is for a blank document that is made, and never
+/// takes the floor's `load` away. A handler set after the insertion hears
+/// it. (Chrome fires this frame's blank `load` inside the insertion as for
+/// any other, so there the late handler hears none: a difference of the
+/// floor, kept as #1201 landed it.)
+#[test]
+fn a_sandboxed_frames_floor_load_is_not_made_quiet() {
+    let page = "<!doctype html><body><script>
+window.loads = 0;
+var f = document.createElement('iframe');
+f.setAttribute('sandbox', '');
+document.body.appendChild(f);
+f.onload = function () { loads++; };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.loads >= 1", Duration::from_secs(5));
+    for _ in 0..5 {
+        page.rt.block_on(page.engine.pump_live(page.view, 20));
+    }
+    assert_eq!(page.js("loads + '|' + String(f.contentDocument)"), r#"String("1|null")"#);
+}
+
 /// A frame's linked stylesheet is applied before `load` fires at its
 /// element (docs/diagnostics/2026-11-15/frame_style_*; Chrome 148:
 /// `400x300 relative`). MotionMark's runner builds each test's stage in the

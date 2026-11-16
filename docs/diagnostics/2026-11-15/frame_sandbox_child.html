@@ -1,0 +1,14 @@
+<!doctype html>
+<title>child</title>
+<p id=c>child text</p>
+<script>
+// What a frame's own script sees; reported to the page by message (which reaches it whatever the frame's origin).
+(function () {
+  function kind(e) { return e instanceof DOMException ? "DOMException" : e.name; }
+  var name = location.search.slice(3), r = { ran: true };
+  try { r.frameElement = window.frameElement === null ? "null" : typeof window.frameElement; } catch (e) { r.frameElement = "throws " + kind(e); }
+  try { parent.marks[name] = (parent.marks[name] || 0) + 1; r.parentWrite = "ok"; } catch (e) { r.parentWrite = "throws " + kind(e); }
+  try { r.origin = String(window.origin); } catch (e) { r.origin = "throws " + kind(e); }
+  parent.postMessage(JSON.stringify({ name: name, r: r }), "*");
+})();
+</script>
