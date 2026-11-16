@@ -287,7 +287,11 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
     }
     let page = file.then(|| crate::console_file::Page::new(inspector.view_id(), &bindings.location().href));
     for report in bindings.take_error_reports() {
-        if let Some(page) = &page {
+        // An error the page cancelled is in no console (Chrome prints none):
+        // not in the console file, not in the Inspector. The engine's own
+        // log has it, marked.
+        let shown = !report.canceled;
+        if let Some(page) = page.as_ref().filter(|_| shown) {
             crate::console_file::page_error(page, &report);
         }
         if mirror {
@@ -296,7 +300,7 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
             });
             crate::console_log::page_error(inspector.view_id(), &report, source, window);
         }
-        if listening {
+        if listening && shown {
             script_error(inspector, &report, source);
         }
     }

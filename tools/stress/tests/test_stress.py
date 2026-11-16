@@ -622,6 +622,16 @@ def test_the_engines_own_uncaught_errors_are_read_from_its_log(tmp_path):
     assert run.log_uncaught(tmp_path / "missing.log") == []
 
 
+def test_an_error_the_page_cancelled_is_among_the_engines_uncaught_errors_with_its_mark(tmp_path):
+    # The engine writes an error the page cancelled (window.onerror returned true, or a listener called
+    # preventDefault) with a mark after the word the reader matches on: a page cannot keep it out of the record.
+    log = tmp_path / "app.log"
+    log.write_text("2026-11-16T17:00:00.0Z  INFO hiwave::console: uncaught (cancelled by the page) Error: boom at inline#2:1:7\n"
+                   "2026-11-16T17:00:00.1Z  INFO hiwave::console: uncaught RangeError: left alone at inline#3:1:7\n")
+    assert run.log_uncaught(log) == ["uncaught (cancelled by the page) Error: boom at inline#2:1:7",
+                                     "uncaught RangeError: left alone at inline#3:1:7"]
+
+
 def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
     progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
                 {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]

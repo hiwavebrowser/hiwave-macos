@@ -254,7 +254,14 @@ pub(crate) fn page_error(view: u64, report: &ErrorReport, script: &str, window: 
     if !enabled() {
         return;
     }
-    let kind = if report.rejection { "unhandled rejection" } else { "uncaught" };
+    // An error the page cancelled is written all the same, and says so: a
+    // page must not be able to keep its errors out of a run's record. The
+    // line still starts with `uncaught`, which is what readers match on.
+    let kind = match (report.rejection, report.canceled) {
+        (true, _) => "unhandled rejection",
+        (false, true) => "uncaught (cancelled by the page)",
+        (false, false) => "uncaught",
+    };
     let name = report.name.unwrap_or("Error");
     let (message, _) = cap(report.message.as_deref().unwrap_or(""), MAX_MESSAGE_CHARS);
     let (url, line, column) = report.frames.first().map(|frame| (resolve(view, &frame.path), frame.line, frame.column)).unwrap_or_else(
@@ -573,6 +580,7 @@ mod tests {
                 located: true,
                 rejection: false,
                 module: None,
+                canceled: false,
             },
             "inline#console-log-unit",
             None,
@@ -589,6 +597,7 @@ mod tests {
                 located: true,
                 rejection: true,
                 module: None,
+                canceled: false,
             },
             "inline#console-log-unit",
             None,
@@ -613,6 +622,7 @@ mod tests {
                 located: true,
                 rejection: false,
                 module: None,
+                canceled: false,
             },
             "inline#console-log-unit",
             Some(window),
@@ -655,6 +665,7 @@ mod tests {
                 located: false,
                 rejection: false,
                 module: None,
+                canceled: false,
             },
             "inline#1",
             None,

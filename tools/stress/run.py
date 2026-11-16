@@ -815,7 +815,8 @@ def log_uncaught(path):
     """What the engine itself logged as uncaught (the app's console log: exceptions and rejections nothing
     handled, with where). The page-side reporter hears these only through the window's `error` and
     `unhandledrejection` events, so an engine that does not fire one for an exception leaves `errors`
-    empty: this is the engine's own account, read from its log. The first 20, 300 characters each."""
+    empty: this is the engine's own account, read from its log. An error the page cancelled is there too,
+    as `uncaught (cancelled by the page) ...`. The first 20, 300 characters each."""
     try:
         text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
     except OSError:
