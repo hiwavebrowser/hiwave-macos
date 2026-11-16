@@ -304,3 +304,23 @@ fn canvas_origin_checks_follow_the_response_urls() {
         assert_eq!(ours, expected, "hops {hops:?}");
     }
 }
+
+/// Reading a canvas back and writing it runs no script loop over its
+/// pixels: the bytes cross to and from the host whole (IMG-F2). Counted,
+/// not timed: with at most 64 turns allowed to any one loop, a 50x50
+/// canvas (10,000 bytes) is read, changed and written, and the same for
+/// a canvas a frame's document owns.
+#[test]
+fn a_canvas_is_read_and_written_without_a_loop_over_its_pixels() {
+    let script = "var x = document.getElementById('c').getContext('2d'); x.canvas.width = 50; x.canvas.height = 50; \
+                  x.fillStyle = 'rgb(1, 2, 3)'; x.fillRect(0, 0, 50, 50); \
+                  var i = x.getImageData(0, 0, 50, 50); i.data[0] = 9; x.putImageData(i, 0, 0); \
+                  var made = x.createImageData(50, 50), own = new ImageData(50, 50), j = x.getImageData(0, 0, 1, 1).data; \
+                  [j[0], j[1], j[2], j[3], i.data.length, made.data.length, own.data.length, i.data instanceof Uint8ClampedArray].join()";
+    let b = bound();
+    b.set_loop_iteration_limit(64);
+    assert_eq!(ev(&b, script), "9,2,3,255,10000,10000,10000,true");
+    let child = b.new_child().unwrap();
+    child.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    assert_eq!(ev(&child, script), "9,2,3,255,10000,10000,10000,true");
+}
