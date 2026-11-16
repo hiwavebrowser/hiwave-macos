@@ -812,10 +812,17 @@ def log_findings(path):
 
 
 # A record of the engine's console log: a physical line that starts with the engine's own prefix (a
-# timestamp, a level, then the console target), and what follows. The same words later on a line, or
+# timestamp, a level, the engine's open spans if any, then the console target), and what follows. The same words later on a line, or
 # after another target, are text of that other line.
+# Between the level and the target the engine's logger writes the spans that were open, `name{fields}:`
+# each. Only the engine's own spans are allowed there, by name, with the fields they have (a view id, a
+# count): a span this does not know, or one with any other text in its braces, is not the engine's prefix.
+ENGINE_SPAN = (r"(?:relayout|render|build_display_list|build_layout_tree|layout_compute|renderer_execute|"
+               r"get_surface_size|get_surface_texture|get_headless_texture_view)"
+               r"(?:\{[a-z_]+=(?:EngineViewId\(\d+\)|\d+)(?: [a-z_]+=(?:EngineViewId\(\d+\)|\d+))*\})?")
 ENGINE_CONSOLE_RECORD = re.compile(
-    r"(?m)^\d{4}-\d\d-\d\dT[0-9:.]+Z[ \t]+(?:TRACE|DEBUG|INFO|WARN|ERROR)[ \t]+hiwave::console: "
+    r"(?m)^\d{4}-\d\d-\d\dT[0-9:.]+Z[ \t]+(?:TRACE|DEBUG|INFO|WARN|ERROR)[ \t]+"
+    r"(?:" + ENGINE_SPAN + r"(?::" + ENGINE_SPAN + r")*: )?hiwave::console: "
     r"((?:uncaught|unhandled rejection) .*)$")
 
 
