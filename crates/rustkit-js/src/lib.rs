@@ -1058,13 +1058,17 @@ impl JsRuntime {
     /// An error the VM never raised (a script that does not parse) is its
     /// script's: `evaluated`, as registered. With neither, no detail.
     pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool, evaluated: Option<&str>) {
-        let unraised = evaluated.is_none_or(|name| self.diag.compiles_withheld(name, self.current_realm.0));
+        let unraised = evaluated.map(|name| self.diag.compiles_withheld(name, self.current_realm.0));
         self.uncaught_error_or(error, announce, unraised);
     }
 
     /// [`uncaught_error`](Self::uncaught_error), with the answer for an
     /// error the VM never raised given outright.
-    pub(crate) fn uncaught_error_or(&mut self, error: &boa_engine::JsError, announce: bool, unraised: bool) {
+    ///
+    /// With no answer at all (no page script threw it, and it is no page
+    /// script's own failure) the error is the host's: reported, with no
+    /// event at the page.
+    pub(crate) fn uncaught_error_or(&mut self, error: &boa_engine::JsError, announce: bool, unraised: Option<bool>) {
         let events = announce && self.diag.error_events.get() && !self.deadline.hit.get();
         if !events && !self.diag.on.get() {
             return;
@@ -1079,8 +1083,10 @@ impl JsRuntime {
                 let host = self.entered_host();
                 self.context.reset_recursion_max();
                 self.diag.realm.set(self.current_realm.0);
-                let withheld = error.detail_withheld().unwrap_or(unraised);
-                let canceled = self.diag.announce(&host, &value, &report, withheld, &mut self.context);
+                let canceled = match error.detail_withheld().or(unraised) {
+                    Some(withheld) => self.diag.announce(&host, &value, &report, withheld, &mut self.context),
+                    None => false,
+                };
                 self.consume_interrupt();
                 let _ = self.context.run_jobs();
                 self.consume_interrupt();
@@ -1188,7 +1194,8 @@ impl JsRuntime {
         // detail fires no event (HTML HostPromiseRejectionTracker, the
         // script's muted errors): the reason is not the page's to read.
         // Decided by the code that rejected it (the promise keeps its
-        // flag); a rejection no code can be named for is not announced.
+        // flag). A rejection no page script made is the host's: not
+        // announced to the page, and so always reported.
         let withheld = promise
             .downcast_ref::<boa_engine::builtins::promise::Promise>()
             .and_then(|promise| promise.rejection_detail_withheld())
@@ -2310,18 +2317,21 @@ fn host_object(
             // Whose code threw it. Handed over from a `catch` (the usual
             // caller): the flag the VM noted for the value it caught. Handed
             // over for the page (`reportError(e)`, second argument `true`):
-            // the page script calling that function. Unknown: not told in
-            // detail.
+            // the page script calling that function.
             let for_the_page = args.get(1).and_then(boa_engine::JsValue::as_boolean) == Some(true);
             let withheld = if for_the_page {
                 context.running_error_detail_withheld(0)
             } else {
                 context.take_error_detail_note(&value)
+            };
+            match withheld {
+                // Called on the host object (`__rk.reportError(e)`): the
+                // realm's `error` event comes first, and can cancel the report.
+                Some(withheld) => reporter.uncaught(this.as_object().as_ref(), &value, withheld, context),
+                // No page script threw it: the host's own. Reported to the
+                // host, with no event the page could hear or cancel.
+                None => reporter.reported(&value, context),
             }
-            .unwrap_or(true);
-            // Called on the host object (`__rk.reportError(e)`): the realm's
-            // `error` event comes first, and can cancel the report.
-            reporter.uncaught(this.as_object().as_ref(), &value, withheld, context);
             Ok(boa_engine::JsValue::undefined())
         })
     };
@@ -2352,13 +2362,15 @@ fn host_object(
             return Err(boa_engine::JsNativeError::typ().with_message("document text must be a string").into());
         };
         let text = text.to_std_string_escaped();
+        // A failure before any of the text's code ran (it does not parse,
+        // it declares a name again) is the document's own, as its code is.
         let script = {
             let _detail = ErrorDetailScope::enter(ErrorDetail::Full);
-            let script = boa_engine::Script::parse(boa_engine::Source::from_bytes(text.as_bytes()), None, context)?;
-            script.codeblock(context)?;
-            script
+            boa_engine::Script::parse(boa_engine::Source::from_bytes(text.as_bytes()), None, context)
+                .and_then(|script| script.codeblock(context).map(|_| script))
+                .map_err(|error| error.or_detail_withheld(false))?
         };
-        script.evaluate(context)
+        script.evaluate(context).map_err(|error| error.or_detail_withheld(false))
     });
     let compile_document_function = NativeFunction::from_fn_ptr(|_this, args, context| {
         let (Some(parameters), Some(body)) =
@@ -2373,6 +2385,7 @@ fn host_object(
             context,
         )
         .map(Into::into)
+        .map_err(|error| error.or_detail_withheld(false))
     });
     host.function(report_error, js_string!("reportError"), 1)
         .function(unsupported, js_string!("unsupported"), 2)

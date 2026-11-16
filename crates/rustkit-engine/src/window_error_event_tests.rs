@@ -214,3 +214,41 @@ fn a_markup_modules_exception_fires_the_event() {
     );
     assert_eq!(seen, r#"String("Uncaught Error: from a module|window_error_module.js|true|Error")"#);
 }
+
+/// Classic scripts share one global scope, whoever runs them: scripts in the markup, inline
+/// scripts a script inserts, and string timers. A top-level `let` or `const` is a global lexical
+/// binding (later scripts see it, it is not a property of `window`, declaring it again is a
+/// SyntaxError); a top-level `var` is a property of `window`. The probe page against Chrome's
+/// record (`docs/diagnostics/2026-11-16/script_scope{.html,_a.js,_b.js,_cft148.json}`).
+#[test]
+fn classic_scripts_share_one_global_scope_as_in_chrome() {
+    const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-16/script_scope.html");
+    const A: &str = include_str!("../../../docs/diagnostics/2026-11-16/script_scope_a.js");
+    const B: &str = include_str!("../../../docs/diagnostics/2026-11-16/script_scope_b.js");
+    const PIN: &str = include_str!("../../../docs/diagnostics/2026-11-16/script_scope_cft148.json");
+    let server = serve_routes(vec![
+        ("/", "text/html", PAGE.to_string()),
+        ("/script_scope_a.js", "text/javascript", A.to_string()),
+        ("/script_scope_b.js", "text/javascript", B.to_string()),
+    ]);
+    let mut engine = Engine::new(EngineConfig { post_load_requests_live: true, ..EngineConfig::default() }).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).expect("load_url");
+    let mut out = String::new();
+    for _ in 0..200 {
+        std::thread::sleep(Duration::from_millis(5));
+        rt.block_on(engine.pump_live(view, 20));
+        out = engine.execute_script(view, "window.__out || ''").unwrap();
+        if out.len() > "String(\"\")".len() {
+            break;
+        }
+    }
+    let text: String = serde_json::from_str(out.trim_start_matches("String(").trim_end_matches(')')).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let got: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let pin: serde_json::Value = serde_json::from_str(PIN).unwrap();
+    assert_eq!(pin["browser"], "148.0.7778.216");
+    for field in ["external", "inline", "timer", "errors"] {
+        assert_eq!(got[field], pin[field], "{field}: {got}");
+    }
+}

@@ -467,12 +467,11 @@ impl JsRuntime {
 
     /// The reason a module's promise was rejected with, reported once.
     /// What the page is told is the answer of the code that rejected it
-    /// (the promise keeps it); with none, nothing.
+    /// (the promise keeps it); with none, the page hears nothing.
     fn report_rejection(&mut self, promise: &boa_engine::object::builtins::JsPromise, value: &JsValue) {
         let withheld = JsObject::from(promise.clone())
             .downcast_ref::<boa_engine::builtins::promise::Promise>()
-            .and_then(|promise| promise.rejection_detail_withheld())
-            .unwrap_or(true);
+            .and_then(|promise| promise.rejection_detail_withheld());
         self.uncaught_error_or(&boa_engine::JsError::from_opaque(value.clone()), true, withheld);
     }
 

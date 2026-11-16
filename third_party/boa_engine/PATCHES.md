@@ -989,6 +989,8 @@ That is a property of the code that is running when an error is thrown, so it is
   frames. `JsError::detail_withheld()` is that script's answer where the error was first raised,
   stamped once in `handle_error`, `handle_throw` and the `Throw` opcode; it stays with the error
   through `finally` blocks and native callers. An error raised with no page script running has none.
+  `JsError::or_detail_withheld(bool)` gives one to an error that has none (a host's compile of a
+  known script's text that fails before any of its code ran).
 - When a raised error becomes a value (`JsError::into_opaque`: a `catch`, a rejection) the VM
   notes the value and its answer (`Vm::error_detail_note`); `Context::take_error_detail_note(&value)`
   gives it to whoever is handed that value next.

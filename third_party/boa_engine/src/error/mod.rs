@@ -529,6 +529,19 @@ impl JsError {
     }
     // END HIWAVE PATCH
 
+    /// This error with `withheld` as its answer if the VM gave it none: for
+    /// a host that compiles or runs text for a script whose answer it
+    /// knows, when the text fails before any of its code ran.
+    #[must_use]
+    pub fn or_detail_withheld(mut self, withheld: bool) -> Self {
+        if self.detail_withheld.is_none() {
+            self.detail_withheld = Some(withheld);
+        }
+        self
+    }
+    // END HIWAVE PATCH
+
+    // HIWAVE PATCH (error-detail)
     fn into_opaque_inner(self, context: &mut Context) -> JsResult<JsValue> {
         match self.inner {
             Repr::Native(e) => {
