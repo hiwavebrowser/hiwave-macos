@@ -133,10 +133,9 @@ const CHILD: &str = "<!doctype html><style>@keyframes fade{from{opacity:0}to{opa
     #a{width:10px;height:10px;animation:fade 10s linear}#s{width:10px;height:10px}</style>\
     <div id=a></div><div id=s></div><script>function tl(){return document.timeline.currentTime}\
     window.go = function () { var a = document.getElementById('a'), s = document.getElementById('s');\
-      var c = a.getAnimations()[0]; window.rows = []; window.paint = []; window.start0 = c.startTime;\
+      var c = a.getAnimations()[0]; window.rows = []; window.start0 = c.startTime;\
       (function f() { requestAnimationFrame(function () {\
         rows.push(c.startTime + c.currentTime - tl(), c.startTime - tl());\
-        paint.push(c.currentTime - parseFloat(getComputedStyle(a).opacity) * 10000);\
         if (rows.length < 6) f(); else sync(); }); })();\
       function sync() { var sa = s.animate({opacity:[0,1]}, {duration:10000}); sa.startTime = c.startTime;\
         (function f() { requestAnimationFrame(function () {\
@@ -174,9 +173,17 @@ fn in_a_frame_document_a_css_animation_is_on_the_frames_own_timeline() {
     let start = read(&mut engine, view, "f.contentWindow.start0");
     let start: f64 = start.parse().unwrap_or_else(|_| panic!("{start}"));
     assert!((0.0..50.0).contains(&start), "the CSS start time on the frame's timeline: {start} (Chrome 11-15)");
-    // ... and the frame paints the value for that time (was: its start was the tree's clock zero,
-    // before the frame was made, so it painted ~400 ms in at 183 ms on its timeline).
-    let paint = numbers(&read(&mut engine, view, "f.contentWindow.paint"));
+    // ... and after each turn the frame shows the value for the time its animation reports (was:
+    // its start was the tree's clock zero, before the frame was made, so it painted ~200 ms
+    // ahead). Read after the turn, as a capture paints it: inside a frame callback a computed read
+    // answers from the last turn's layout here (Chrome updates animations before the callbacks).
+    let paint_expr = "f.contentWindow.document.getElementById('a').getAnimations()[0].currentTime - \
+        parseFloat(f.contentWindow.getComputedStyle(f.contentDocument.getElementById('a')).opacity) * 10000";
+    let mut paint = Vec::new();
+    for _ in 0..3 {
+        pump(&mut engine, view, 20, 20);
+        paint.push(read(&mut engine, view, paint_expr).parse::<f64>().unwrap());
+    }
     for p in &paint {
         assert!(p.abs() < 0.5, "currentTime - the painted opacity's time: {paint:?} (Chrome: 0)");
     }
