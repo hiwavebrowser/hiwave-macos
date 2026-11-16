@@ -194,3 +194,68 @@ fn a_frames_page_reaches_none_of_the_engines_names() {
     // And from the parent, through the frame's window.
     assert_eq!(ev(&parent, internal_names_tests::WALK), "");
 }
+
+/// The names a page could watch for on its window while a lazily
+/// installed interface installs.
+const WATCHED: &[&str] = &["__rustkit_canvas", "__rustkit_canvas_slot", "__rustkit_animated_style", "__rustkit_likely_subtags", "__rustkit_lazy_sources"];
+
+/// Nothing of the engine's is on a frame's window at any moment a page
+/// could look: before, during and after the first use of each lazily
+/// installed interface, with the page watching `globalThis`, `window` and
+/// every name of the kind.
+#[test]
+fn a_lazy_interfaces_install_puts_nothing_on_the_window() {
+    let (parent, _doc) = parent();
+    let child = child_of(&parent);
+    let names = serde_json::to_string(WATCHED).unwrap();
+    let watch = format!(
+        "var seen = [], names = {names}, real = globalThis, gOPD = Object.getOwnPropertyDescriptor, gOPN = Object.getOwnPropertyNames, apply = Reflect.apply; \
+         function look(when) {{ \
+           var own = gOPN(real); \
+           for (var i = 0; i < own.length; i++) if (own[i].slice(0, 2) === '__' && names.indexOf(own[i]) < 0) seen.push(when + ' own ' + own[i]); \
+           for (var j = 0; j < names.length; j++) {{ var d = gOPD(real, names[j]); if (!d || !d.get || d.get.mine !== true) seen.push(when + ' ' + names[j] + ' is not the page\\'s'); }} \
+         }} \
+         names.forEach(function (name) {{ \
+           var get = function () {{ seen.push('read ' + name); return undefined; }}; get.mine = true; \
+           Object.defineProperty(real, name, {{ get: get, set: function (v) {{ seen.push('written ' + name + ' ' + typeof v); }}, configurable: true }}); \
+         }}); \
+         ['globalThis', 'window', 'self'].forEach(function (name) {{ \
+           try {{ Object.defineProperty(real, name, {{ get: function () {{ look('in ' + name); return real; }}, configurable: true }}); }} catch (e) {{}} \
+         }}); \
+         look('before'); 'watching'"
+    );
+    assert_eq!(ev(&child, &watch), "watching");
+    for (what, first_use) in [
+        ("canvas", "var x = document.getElementById('v').getContext('2d'); x.fillRect(0, 0, 1, 1); String(x.getImageData(0, 0, 1, 1).data[3])"),
+        ("animate", "typeof document.getElementById('c').animate([{ opacity: 0 }, { opacity: 1 }], 100).play"),
+        ("Intl", "new Intl.NumberFormat('en-US').format(1234.5)"),
+        ("streams", "typeof new ReadableStream().getReader"),
+    ] {
+        let answer = ev(&child, first_use);
+        assert!(!answer.starts_with("ERROR"), "{what}: {answer}");
+        assert_eq!(ev(&child, &format!("look('after {what}'); seen.join('; ')")), "", "{what}");
+    }
+    assert_eq!(ev(&child, "String(x.getImageData(0, 0, 1, 1).data[3])"), "255");
+}
+
+/// The canvas script's own records are kept with the built-ins of realm
+/// creation, also when the script installs later: a frame's page that
+/// replaced `WeakMap.prototype`'s methods, `Object.defineProperty` and
+/// `Object.create` before its first canvas use is handed nothing.
+#[test]
+fn a_lazy_canvas_keeps_its_records_with_the_built_ins_of_realm_creation() {
+    let (parent, _doc) = parent();
+    let child = child_of(&parent);
+    assert_eq!(
+        ev(
+            &child,
+            "var got = [], proto = WeakMap.prototype, real = { get: proto.get, set: proto.set, has: proto.has, delete: proto.delete }, apply = Reflect.apply; \
+             ['get', 'set', 'has', 'delete'].forEach(function (k) { proto[k] = function () { got.push('WeakMap.' + k); return apply(real[k], this, arguments); }; }); \
+             var x = document.getElementById('v').getContext('2d'); x.fillStyle = 'rgb(1, 2, 3)'; x.fillRect(0, 0, 2, 2); \
+             var i = x.getImageData(0, 0, 1, 1); i.data[0] = 9; x.putImageData(i, 0, 0); var made = new ImageData(1, 1), again = x.createImageData(i); \
+             var g2 = x.createLinearGradient(0, 0, 1, 1); g2.addColorStop(0, 'red'); x.fillStyle = g2; x.save(); x.restore(); \
+             [x.getImageData(0, 0, 1, 1).data[0], i.width, made.data.length, again.height, document.getElementById('v').getContext('2d') === x, got.join()].join('|')"
+        ),
+        "9|1|4|1|true|"
+    );
+}
