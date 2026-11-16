@@ -83,6 +83,43 @@ fn serve(b: &DomBindings, source: &str) {
 
 /// Turn the page's timer pump until `done` holds (the page drains its
 /// workers' messages there), for at most three seconds.
+/// Until every worker the page started has returned (its script ended in `self.close()`), so what it
+/// posted is all queued for the page. Bounded by progress, not a fixed wait: it fails only when no
+/// worker has ended for 30 s (WFLK1: a fixed 500 ms sleep assumed every worker thread had started and
+/// posted by then, which a loaded machine did not do).
+fn until_workers_return(b: &DomBindings) {
+    let (mut running, mut moved) = (b.worker_threads_running(), Instant::now());
+    while running > 0 {
+        assert!(moved.elapsed() < Duration::from_secs(30), "{running} workers still running after 30 s");
+        std::thread::sleep(Duration::from_millis(5));
+        let now = b.worker_threads_running();
+        if now < running {
+            (running, moved) = (now, Instant::now());
+        }
+    }
+}
+
+/// Turns until `done`, while `progress` (a page expression for a count) still moves: fails only when a
+/// turn has delivered nothing new for 5 s. A fixed deadline failed on a loaded machine with the
+/// messages still arriving (WFLK1: 8000 in 3 s).
+fn pump_while_progressing(b: &DomBindings, done: &str, progress: &str) -> bool {
+    let read = |b: &DomBindings| ev(b, &format!("String({progress})"));
+    let (mut last, mut moved) = (read(b), Instant::now());
+    loop {
+        b.run_timers(0, 100).unwrap();
+        if ev(b, &format!("String(!!({done}))")) == "true" {
+            return true;
+        }
+        let now = read(b);
+        if now != last {
+            (last, moved) = (now, Instant::now());
+        } else if moved.elapsed() > Duration::from_secs(5) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn pump_until(b: &DomBindings, done: &str) -> bool {
     let end = Instant::now() + Duration::from_secs(3);
     while Instant::now() < end {
@@ -557,13 +594,17 @@ fn a_flooding_worker_cannot_hold_a_page_turn() {
     let b = bound();
     b.evaluate("var got = [], w = new Worker('http://a.test/flood.js'); w.onmessage = function (e) { got.push(e.data); };")
         .unwrap();
-    serve(&b, "for (var i = 0; i < 5000; i++) postMessage(i);");
-    // Let the worker send everything before the page's first turn.
-    std::thread::sleep(Duration::from_millis(500));
+    serve(&b, "for (var i = 0; i < 5000; i++) postMessage(i); self.close();");
+    // The worker has sent everything before the page's first turn.
+    until_workers_return(&b);
     b.run_timers(0, 100).unwrap();
     let first: usize = ev(&b, "String(got.length)").parse().unwrap();
-    assert!(first > 0 && first <= 256, "one page turn delivered {first} messages");
-    assert!(pump_until(&b, "got.length === 5000"), "only {} arrived", ev(&b, "String(got.length)"));
+    assert_eq!(first, 256, "one page turn delivered {first} of the 5000 queued messages");
+    assert!(
+        pump_while_progressing(&b, "got.length === 5000", "got.length"),
+        "only {} arrived",
+        ev(&b, "String(got.length)")
+    );
     assert_eq!(ev(&b, "String(got.every(function (v, i) { return v === i; }))"), "true", "out of order");
 }
 
@@ -594,12 +635,13 @@ fn flooding_workers_share_one_turns_budget_and_each_is_served() {
            w.onmessage = function (e) { got[k].push(e.data); }; })(k);",
     )
     .unwrap();
-    serve(&b, "for (var i = 0; i < 2000; i++) postMessage(i);");
-    std::thread::sleep(Duration::from_millis(500));
+    serve(&b, "for (var i = 0; i < 2000; i++) postMessage(i); self.close();");
+    // Every worker has sent all 2000 before the page's first turn.
+    until_workers_return(&b);
     let total = "String(got[0].length + got[1].length + got[2].length + got[3].length)";
     b.run_timers(0, 100).unwrap();
     let first: usize = ev(&b, total).parse().unwrap();
-    assert!(first > 0 && first <= 256, "one page turn delivered {first} messages from four workers");
+    assert_eq!(first, 256, "one page turn delivered {first} of the 8000 queued messages from four workers");
     for _ in 0..4 {
         b.run_timers(0, 100).unwrap();
     }
@@ -609,7 +651,15 @@ fn flooding_workers_share_one_turns_budget_and_each_is_served() {
         "a worker was starved: {}",
         ev(&b, "JSON.stringify(got.map(function (g) { return g.length; }))")
     );
-    assert!(pump_until(&b, "got.every(function (g) { return g.length === 2000; })"), "not all arrived");
+    assert!(
+        pump_while_progressing(
+            &b,
+            "got.every(function (g) { return g.length === 2000; })",
+            "got[0].length + got[1].length + got[2].length + got[3].length"
+        ),
+        "not all arrived: {}",
+        ev(&b, "JSON.stringify(got.map(function (g) { return g.length; }))")
+    );
     assert_eq!(
         ev(&b, "String(got.every(function (g) { return g.every(function (v, i) { return v === i; }); }))"),
         "true",

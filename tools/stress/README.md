@@ -85,8 +85,29 @@ One JSON file per run in `--out` (default `~/zg-measure/stress-runs`):
 `score`, `sub_scores`, `wall_s`, `load_avg_before`/`after`, `errors` (what
 the page threw or logged with `console.error`), `last_progress`,
 `log_findings` (lines of the app's log that say a script was stopped or the
-process died), `off_machine`, `offline_checks` and, when the run did not
-finish, `log_tail`.
+process died), `off_machine`, `offline_checks`, `engine_flags` and, when the
+run did not finish, `log_tail`.
+
+`engine_flags` is every `HIWAVE_` variable the engine process was started
+with: the suite's own (below), what `--env` asked for, what the offline
+checks force, and whatever the shell had. `{}` for Chrome. A score is read
+with its flags: two runs whose `engine_flags` differ did not measure the
+same engine. Records from before 2026-11-15 have no such key. (The harness's
+own `HIWAVE_STRESS_TURN_BUDGET_MS` is not listed there; it is
+`live_turn_budget_ms`.)
+
+### What a suite's engine is started with
+
+`SUITE[...]["env"]` in `run.py` holds the engine variables a suite cannot
+run without; `run.py` passes them to both HiWave engines for that suite,
+under `--env` (so `--env NAME=0` still switches one off for a run that looks
+at the suite without it) and under the offline checks' own settings.
+
+| suite | variable | why |
+|---|---|---|
+| motionmark | `HIWAVE_NESTED_CONTEXTS=1` | MotionMark's runner loads each test in an iframe and waits for its `load` event. The engine issues no request for a frame unless nested browsing contexts are on (off by default), so without the flag the suite never starts. |
+
+The other suites get none.
 
 `status`: `ok` (a score was read), `invalid` (the run was not offline), `failed` (the suite itself reported a
 failure), `hung` (nothing from the page for `--stall` seconds), `timeout`,
