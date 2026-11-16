@@ -678,8 +678,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     }
     function perfNow() { return treeNow() - base; }
     // The previous frame's stamp and virtual time: each frame is at least the virtual step after it,
+    // up to one frame's (`FRAME_STEP`, what requestAnimationFrame asks of the timers' clock),
     // whatever the real clock did (a load runs frames back to back in microseconds), and the page
     // clock is never behind a frame stamp it handed out (`Q.prevFrameTs`, `Q.prevFrameAt`).
+    var FRAME_STEP = 16;
     __rk.perfNow = perfNow;
     // The capture switch is the tree's: thrown from any document, it is every document's, and a
     // frame made later finds it set.
@@ -738,12 +740,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             if (Q.frameTsAt !== Q.now) {
                 Q.frameTsAt = Q.now;
                 Q.frameTs = treeNow();
-                if (Q.prevFrameTs >= 0 && Q.frameTs < Q.prevFrameTs + (Q.now - Q.prevFrameAt)) Q.frameTs = Q.prevFrameTs + (Q.now - Q.prevFrameAt);
+                // The floor is one frame, however far the timers' clock moved: a larger move is real
+                // time the reading above has (it is never behind the timers' clock), and after a long
+                // task it is the clock catching up with time the previous stamp already had.
+                var floor = Q.now - Q.prevFrameAt;
+                if (floor > FRAME_STEP) floor = FRAME_STEP;
+                if (Q.prevFrameTs >= 0 && Q.frameTs < Q.prevFrameTs + floor) Q.frameTs = Q.prevFrameTs + floor;
                 if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = Q.now;
             }
             cb(Q.frameTs - base);
-        }, 16, rest(arguments, 1), false, true);
+        }, FRAME_STEP, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
