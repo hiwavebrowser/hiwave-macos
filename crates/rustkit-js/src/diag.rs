@@ -157,6 +157,10 @@ pub(crate) struct Diagnostics {
     /// An announcement is under way: an exception thrown by what it calls is
     /// reported and not announced.
     announcing_error: Cell<bool>,
+    /// The URL behind each name the embedder evaluates an external script
+    /// under ([`crate::JsRuntime::alias_script`]): what an announced
+    /// exception's position names.
+    script_urls: RefCell<std::collections::HashMap<String, String>>,
     reports: RefCell<VecDeque<ErrorReport>>,
     /// What listeners and timers threw, as the script log has always had it
     /// (`describe::text`), whether or not reports are on.
@@ -460,7 +464,10 @@ impl Diagnostics {
         };
         let text = crate::describe::text(value, context);
         let (path, line, column) = match report.frames.first() {
-            Some(at) if report.located => (at.path.clone(), at.line, at.column),
+            Some(at) if report.located => {
+                let path = self.script_urls.borrow().get(&at.path).cloned().unwrap_or_else(|| at.path.clone());
+                (path, at.line, at.column)
+            }
             _ => (String::new(), 0, 0),
         };
         let args = [
@@ -474,6 +481,14 @@ impl Diagnostics {
         let result = fire.call(&JsValue::undefined(), &args, context);
         self.announcing_error.set(false);
         matches!(result, Ok(answer) if answer.as_boolean() == Some(false))
+    }
+
+    /// `name` (a script the embedder evaluates) is the script at `url`.
+    pub(crate) fn alias_script(&self, name: &str, url: &str) {
+        let mut urls = self.script_urls.borrow_mut();
+        if urls.len() < MAX_KNOWN_PATHS || urls.contains_key(name) {
+            urls.insert(name.to_string(), url.to_string());
+        }
     }
 
     /// A listener or timer threw `value` (the bindings' reporter, called on

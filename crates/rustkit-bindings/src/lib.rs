@@ -2793,6 +2793,13 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// The page script evaluated as `name` is the one at `url` (see
+    /// [`JsRuntime::alias_script`]): an `error` event for an exception
+    /// thrown in it has `url` as its `filename`.
+    pub fn alias_script(&self, name: &str, url: &str) {
+        self.runtime.borrow_mut().alias_script(name, url);
+    }
+
     /// Evaluate a page script as `path` (see
     /// [`JsRuntime::evaluate_script_named`]).
     pub fn evaluate_named(&self, script: &str, path: &str) -> Result<JsValue, BindingError> {

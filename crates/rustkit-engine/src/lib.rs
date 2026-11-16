@@ -416,6 +416,8 @@ mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
 #[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
 mod inspector_tests;
@@ -9274,6 +9276,8 @@ impl Engine {
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
                 crate::console_log::alias(inspector.view_id(), &name, &label);
+                // An `error` event's `filename` is the script's URL.
+                bindings.alias_script(&name, &label);
                 Some(name)
             };
             let began = std::time::Instant::now();

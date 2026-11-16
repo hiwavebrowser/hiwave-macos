@@ -1016,6 +1016,18 @@ impl JsRuntime {
         let _ = on;
     }
 
+    /// The script evaluated as `name`
+    /// ([`evaluate_script_named`](Self::evaluate_script_named)) is the one
+    /// at `url`: an announced exception thrown in it names `url` as its
+    /// file ([`set_error_events`](Self::set_error_events)). For an embedder
+    /// that evaluates external scripts under names of its own.
+    pub fn alias_script(&mut self, name: &str, url: &str) {
+        #[cfg(feature = "boa")]
+        self.diag.alias_script(name, url);
+        #[cfg(not(feature = "boa"))]
+        let _ = (name, url);
+    }
+
     /// A page script or module ended with `error`: announce it
     /// ([`set_error_events`](Self::set_error_events)), then report it
     /// unless a listener canceled the event.

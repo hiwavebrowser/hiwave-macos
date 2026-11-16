@@ -192,3 +192,24 @@ fn what_the_page_replaced_does_not_change_the_event() {
     assert!(matches!(b2.evaluate("ran"), Ok(JsValue::Number(n)) if n == 0.0), "page functions ran");
     assert!(matches!(b2.evaluate("got[0]"), Ok(JsValue::String(s)) if s == "[object ErrorEvent]|true|Uncaught Error: still an event|true"));
 }
+
+/// Chrome rows `other origin top level` and `other origin function`: an exception thrown in a
+/// script of another origin is muted for the page: "Script error.", no file, no position, no
+/// value. The script's origin is its URL's, also when the engine evaluates it under a name of
+/// its own (`alias_script`); the same origin under such a name is not muted.
+#[test]
+fn another_origins_script_is_muted() {
+    let b = page();
+    assert!(b.evaluate_named("function theirs() { throw new Error('theirs'); } throw new Error('top');", "https://other.test/lib.js").is_err());
+    b.alias_script("script#7", "https://cdn.other.test/x.js");
+    b.alias_script("script#8", "https://example.test/own.js");
+    assert!(b.evaluate_named("throw new Error('aliased');", "script#7").is_err());
+    assert!(b.evaluate_named("throw new Error('ours');", "script#8").is_err());
+    b.evaluate_named("setTimeout(function () { theirs(); }, 0);", "inline#2").unwrap();
+    b.advance_timers(20, 10).unwrap();
+    let muted = "[object ErrorEvent]|Script error.||0|0|null|true|true|false|true";
+    assert_eq!(
+        ev(&b, "seen.join(' ; ')"),
+        format!("{muted} ; {muted} ; [object ErrorEvent]|Uncaught Error: ours|https://example.test/own.js|1|7|Error|true|true|false|true ; {muted}")
+    );
+}
