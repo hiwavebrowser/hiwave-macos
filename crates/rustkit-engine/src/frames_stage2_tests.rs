@@ -41,6 +41,12 @@ impl Page {
             ("/other.html", "text/html", "<!doctype html><title>other-title</title><p id=o>other</p>".to_string()),
             ("/child.js", "text/javascript", "window.externalRan = true;".to_string()),
             ("/noscript.html", "text/html", "<!doctype html><body><noscript><strong>x</strong></noscript><p>c</p></body>".to_string()),
+            (
+                "/styled.html",
+                "text/html",
+                "<!doctype html><html><head><link rel=stylesheet href=/styled.css></head><body><div id=stage></div></body></html>".to_string(),
+            ),
+            ("/styled.css", "text/css", "html { height: 100%; } body { height: 100%; margin: 0; } #stage { position: relative; width: 100%; height: 100%; }".to_string()),
         ];
         let server = serve_routes(routes);
         let mut engine = Engine::new(config).expect("engine");
@@ -164,6 +170,29 @@ window.done = function () { return seen.late.length >= 1 && seen.early.length >=
         page.js("[seen.late.join(), seen.early.join(), seen.both.join(), seen.capture.join()].join(' | ')"),
         r#"String("/child.html:function | blank:undefined | blank:undefined,/child.html:function | blank:undefined")"#
     );
+}
+
+/// A frame's linked stylesheet is applied before `load` fires at its
+/// element (docs/diagnostics/2026-11-15/frame_style_*; Chrome 148:
+/// `400x300 relative`). MotionMark's runner builds each test's stage in the
+/// frame's `load` handler from the size the frame's stylesheet gives it; an
+/// unstyled stage is 0 high and the test holds nothing to draw.
+#[test]
+fn a_frames_stylesheet_is_applied_before_its_load() {
+    let page = "<!doctype html><body><script>
+var f = document.createElement('iframe');
+f.style.width = '400px'; f.style.height = '300px'; f.style.border = '0';
+f.onload = function () {
+  var s = f.contentDocument.getElementById('stage'), r = s.getBoundingClientRect();
+  window.atLoad = Math.round(r.width) + 'x' + Math.round(r.height) + ' ' + f.contentWindow.getComputedStyle(s).position;
+};
+f.src = '/styled.html';
+document.body.appendChild(f);
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("typeof window.atLoad === 'string'", Duration::from_secs(5));
+    assert_eq!(page.js("window.atLoad"), r#"String("400x300 relative")"#);
+    assert_eq!(page.served("/styled.css"), 1);
 }
 
 /// A cross-origin `src` is never requested in this stage (the plan's
