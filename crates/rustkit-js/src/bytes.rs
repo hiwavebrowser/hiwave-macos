@@ -23,17 +23,52 @@
 //! - `base64Encode(bytes)`: padded standard base64.
 //!
 //! `bytes` is an `ArrayBuffer` or a view on one.
+//!
+//! Canvas pixels cross the same way, through one slot the embedder holds
+//! ([`PixelSlot`]):
+//!
+//! - `pixelsOut(length, fresh)`: a new `Uint8ClampedArray` of `length`
+//!   bytes, the realm's own intrinsic whatever the page did to its
+//!   globals, holding what the embedder left in the slot (zeros with
+//!   `fresh`, or when it left nothing of that length). The slot is emptied
+//!   either way.
+//! - `pixelsIn(array, keep)`: `array`'s length in bytes when it is a
+//!   `Uint8ClampedArray` on a live `ArrayBuffer`, `-1` when its buffer is
+//!   detached, `-2` for anything else. With `keep`, a copy of its bytes is
+//!   left in the slot for the embedder. No property of `array` is read.
 
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 use base64::engine::DecodePaddingMode;
 use base64::Engine as _;
-use boa_engine::object::builtins::{JsArray, JsArrayBuffer, JsTypedArray, JsUint8Array};
+use boa_engine::object::builtins::{JsArray, JsArrayBuffer, JsTypedArray, JsUint8Array, JsUint8ClampedArray};
 use boa_engine::object::ObjectInitializer;
 use boa_engine::string::{JsStr, JsStrVariant};
 use boa_engine::{js_string, Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+/// One run of canvas pixels on its way between the embedder and script
+/// (`__rk.pixelsOut`, `__rk.pixelsIn`): whoever fills it has it emptied by
+/// the very next step of the same call, so one slot serves a runtime.
+#[derive(Clone, Default)]
+pub struct PixelSlot(Rc<RefCell<Option<Vec<u8>>>>);
+
+impl PixelSlot {
+    /// Leave `bytes` for the script's next `pixelsOut`.
+    pub fn put(&self, bytes: Vec<u8>) {
+        *self.0.borrow_mut() = Some(bytes);
+    }
+
+    /// What the script's last `pixelsIn(array, true)` left, once.
+    pub fn take(&self) -> Option<Vec<u8>> {
+        self.0.borrow_mut().take()
+    }
+}
+
+/// The most `pixelsOut` makes in one array: the bytes of the largest
+/// bitmap a canvas keeps (16384 x 16384, RGBA).
+const MAX_PIXEL_BYTES: usize = 16384 * 16384 * 4;
 
 /// Bytes waiting for script to take them, by key.
 pub(crate) type Stash = Rc<RefCell<HashMap<u64, Vec<u8>>>>;
@@ -310,7 +345,7 @@ fn string_arg(args: &[JsValue]) -> JsResult<JsString> {
 }
 
 /// Add the byte natives to the host object under construction.
-pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &Blobs) {
+pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &Blobs, pixels: &PixelSlot) {
     let make = blobs.clone();
     // SAFETY: the closures below hold an `Rc` of plain bytes and strings:
     // nothing the collector would need to trace.
@@ -443,6 +478,49 @@ pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &B
         let text = with_bytes(args.first(), context, |bytes| BASE64.encode(bytes))?;
         Ok(JsString::from(JsStr::latin1(text.as_bytes())).into())
     });
+    let slot = pixels.clone();
+    // SAFETY: the closure holds an `Rc` of plain bytes, no GC handle.
+    let pixels_out = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let held = slot.take();
+            let length = args.first().and_then(JsValue::as_number).unwrap_or(-1.0);
+            if !(length >= 0.0 && length <= MAX_PIXEL_BYTES as f64 && length.fract() == 0.0) {
+                return Err(JsNativeError::range().with_message("not a pixel length").into());
+            }
+            let length = length as usize;
+            let buffer = JsArrayBuffer::new(length, context)?;
+            let fresh = args.get(1).is_some_and(JsValue::to_boolean);
+            if let (Some(held), Some(mut data)) = (held.filter(|held| !fresh && held.len() == length), buffer.data_mut()) {
+                data.copy_from_slice(&held);
+            }
+            Ok(JsUint8ClampedArray::from_array_buffer(buffer, context)?.into())
+        })
+    };
+    let slot = pixels.clone();
+    // SAFETY: as above.
+    let pixels_in = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let keep = args.get(1).is_some_and(JsValue::to_boolean);
+            let Some(view) = args.first().and_then(JsValue::as_object).and_then(|o| JsUint8ClampedArray::from_object(o.clone()).ok()) else {
+                return Ok(JsValue::from(-2));
+            };
+            let Some(buffer) = view.buffer(context)?.as_object().and_then(|o| JsArrayBuffer::from_object(o.clone()).ok()) else {
+                return Ok(JsValue::from(-2));
+            };
+            let Some(data) = buffer.data() else {
+                return Ok(JsValue::from(-1));
+            };
+            let start = view.byte_offset(context)?;
+            let end = start.saturating_add(view.byte_length(context)?).min(data.len());
+            let bytes = &data[start.min(end)..end];
+            if keep {
+                slot.put(bytes.to_vec());
+            }
+            Ok(JsValue::from(bytes.len() as f64))
+        })
+    };
+    host.function(pixels_out, js_string!("pixelsOut"), 2)
+        .function(pixels_in, js_string!("pixelsIn"), 2);
     host.function(take_bytes, js_string!("takeBytes"), 1)
         .function(decode, js_string!("utf8Decode"), 2)
         .function(encode, js_string!("utf8Encode"), 1)

@@ -3237,11 +3237,8 @@ const WRAPPERS_JS: &str = r#"
         // that out the way it asks: a media element is one with nothing to
         // play. Without the methods the question itself threw (github.com's
         // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
-        // which takes this way to a canvas's node and deletes it.
-        Object.defineProperty(g, '__rustkit_canvas_slot', {
-            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
-            configurable: true, writable: true, enumerable: false
-        });
+        // which takes this way to a canvas's node from the host object.
+        __rk.canvasSlot = function (el) { var s = slotOf(el); return [s.gen, s.id]; };
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;
@@ -4349,11 +4346,11 @@ const WRAPPERS_JS: &str = r#"
         byId: function (id) { return wrap(id); }
     };
     // What web_animations.js drives the engine's animated-style layer
-    // with; it takes this and deletes it. write: the element's entries,
+    // with, kept on the host object. write: the element's entries,
     // `[[property, value, composite], ...]`, or null for none. css: the
     // engine's CSS animations and transitions as of the last layout.
     // control: pause/play/cancel/finish one of them.
-    g.__rustkit_animated_style = {
+    __rk.animatedStyle = {
         write: function (el, entries) {
             var s = slotOf(el);
             N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
