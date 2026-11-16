@@ -523,17 +523,28 @@ impl Diagnostics {
     /// when the code is in no frame at all (a thrown value with no stack),
     /// when any such script was ever registered here, since it may be its.
     pub(crate) fn told(&self, report: &ErrorReport, evaluated: Option<&str>) -> Told {
-        // Not decided yet (the next commit): every exception is told in
-        // full, under the URL the table has for its script.
-        let _ = (evaluated, Told::Nothing, self.any_muted.get(), self.scripts_full.get());
         let realm = self.realm.get();
-        let url = |name: &str| {
-            let scripts = self.scripts.borrow();
-            scripts.get(name).and_then(|entries| entries.first()).map(|entry| entry.url.clone()).unwrap_or_else(|| name.to_string())
+        let document = || self.documents.borrow().get(&realm).cloned().unwrap_or_default();
+        let evaluated = match evaluated {
+            Some(name) => match self.script_url(name, realm) {
+                Some(url) => Some(url),
+                None => return Told::Nothing,
+            },
+            None => None,
         };
         match report.frames.first() {
-            Some(at) if report.located => Told::At { file: url(&at.path), line: at.line, column: at.column },
-            _ => Told::At { file: self.documents.borrow().get(&realm).cloned().unwrap_or_default(), line: 0, column: 0 },
+            Some(at) => match self.script_url(&at.path, realm) {
+                None => Told::Nothing,
+                Some(url) if report.located => Told::At { file: url, line: at.line, column: at.column },
+                // Code with no script of its own (`eval`, a handler
+                // attribute) called from that script: the document's.
+                Some(_) => Told::At { file: document(), line: 0, column: 0 },
+            },
+            None => match evaluated {
+                Some(url) => Told::At { file: url, line: 0, column: 0 },
+                None if self.any_muted.get() || self.scripts_full.get() => Told::Nothing,
+                None => Told::At { file: document(), line: 0, column: 0 },
+            },
         }
     }
 
@@ -541,7 +552,6 @@ impl Diagnostics {
     /// `None` for a name never registered, and for one that is, in any
     /// realm, a script whose errors are reported without detail (two
     /// documents of a tree can evaluate different scripts under one name).
-    #[allow(dead_code)]
     fn script_url(&self, name: &str, realm: usize) -> Option<String> {
         let scripts = self.scripts.borrow();
         let entries = scripts.get(name)?;
