@@ -3108,7 +3108,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -3320,6 +3320,8 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute.
+        var ar = HOOKS.attrs && (op === 'setAttr' || op === 'removeAttr') && HOOKS.attrs(o, op, a);
         // Removing an absent attribute runs no attribute-change steps (DOM
         // "remove an attribute by name"), so it must not drop an assigned
         // on<type> handler. N.attr matches the name as the write does.
@@ -3333,6 +3335,7 @@ const WRAPPERS_JS: &str = r#"
         if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        if (ar) ar();
         return r;
     }
     function create(kind, data, method) {
@@ -4121,13 +4124,15 @@ const WRAPPERS_JS: &str = r#"
     // is that serialization when the caller has it already.
     // setData for the one attribute name `class`, without the steps that only act on another
     // name: `attributeChanged` (on<type> attributes), `HOOKS.scripts.changed` (`async`, `src`)
-    // and `HOOKS.frames.changed` (`src`). Same write, same mutation record, same errors.
+    // and `HOOKS.frames.changed` (`src`). It keeps the custom-element reaction (`HOOKS.attrs`). Same write, same mutation record, same errors.
     function putClass(el, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
+        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', 'class');
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
         if (m) m();
+        if (ar) ar();
     }
     function store(st, ts, text) {
         if (text === undefined) text = tlJoin(ts, ' ');
@@ -4202,6 +4207,8 @@ const WRAPPERS_JS: &str = r#"
             ts = tokens(st);
         }
     };
+    // The iterator walks the cached token array itself. Safe only while that array is never
+    // mutated after it is stored: every update builds a new array (tlWith/tlWithout/tlParse).
     DOMTokenList.prototype[Symbol.iterator] = function () { return tlValues(tokens(tlOf(this))); };
     var classLists = new WeakMap();
     getter(Element.prototype, 'classList', function () {
@@ -4215,7 +4222,7 @@ const WRAPPERS_JS: &str = r#"
                 get: function (t, p, r) {
                     if (typeof p === 'string') {
                         var c = tlCode(p, 0);
-                        if (c >= 48 && c <= 57 && tlTest(TL_INDEX, p)) return tokens(st)[Number(p)];
+                        if (c >= 48 && c <= 57 && tlTest(TL_INDEX, p)) return tokens(st)[+p];
                     }
                     return tlGet(t, p, r);
                 }
@@ -4701,7 +4708,7 @@ const WRAPPERS_JS: &str = r#"
             get: function (t, p, r) {
                 if (typeof p !== 'string') return Reflect.get(t, p, r);
                 var c0 = p.charCodeAt(0);
-                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[+p];
                 if (p in t) return Reflect.get(t, p, r);
                 var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
                 return p === 'cssFloat' ? (m['float'] || '') : read(n);

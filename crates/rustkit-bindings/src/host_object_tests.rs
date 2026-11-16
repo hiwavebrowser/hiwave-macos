@@ -366,7 +366,7 @@ fn the_host_object_inherits_nothing() {
                  if (proto(__rk) !== null) out.push('host');
                  [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
                  ['domHooks', 'net', 'dragStore'].forEach(function (n) {{ if (proto(__rk[n]) !== null) out.push(n); }});
-                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener'].forEach(function (n) {{
+                 ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'attrs'].forEach(function (n) {{
                      if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
                  }});
                  return out.join(' ');"
@@ -511,7 +511,7 @@ fn a_frames_host_object_and_the_trees_shared_state_inherit_nothing() {
          if (proto(__rk) !== null) out.push('host');
          [{slots}].forEach(function (n) {{ if (!has.call(__rk, n)) out.push(n); }});
          ['domHooks', 'net', 'dragStore', 'frames', 'shared'].forEach(function (n) {{ if (!__rk[n] || proto(__rk[n]) !== null) out.push(n); }});
-         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'nodeId', 'byTag', 'frames'].forEach(function (n) {{
+         ['shadowParent', 'retarget', 'hostOf', 'mutation', 'scripts', 'windowNamed', 'hasListener', 'nodeId', 'byTag', 'frames', 'attrs'].forEach(function (n) {{
              if (!has.call(__rk.domHooks, n)) out.push('domHooks.' + n);
          }});
          if (__rk.domHooks.frames && proto(__rk.domHooks.frames) !== null) out.push('domHooks.frames');

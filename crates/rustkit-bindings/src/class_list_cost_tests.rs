@@ -139,7 +139,7 @@ fn class_list_does_not_run_page_replaceable_built_ins() {
         var keep = [String.prototype.split, String.prototype.slice, String.prototype.charCodeAt, Array.prototype.indexOf, Array.prototype.join, Array.prototype.forEach, Array.prototype.values, RegExp.prototype.test, Function.prototype.call, Reflect.get, Element.prototype.setAttribute, Element.prototype.getAttribute, Element.prototype.hasAttribute];
         String.prototype.split = mkb('split'); String.prototype.slice = mkb('slice');
         Array.prototype.indexOf = mkb('indexOf'); Array.prototype.join = mkb('join'); Array.prototype.forEach = mkb('forEach'); Array.prototype.values = mkb('values');
-        RegExp.prototype.test = mkb('test'); Function.prototype.call = mkb('call'); Reflect.get = mkb('Reflect.get');
+        RegExp.prototype.test = mkb('test'); var NumKeep = Number; Number = mkb('Number'); Function.prototype.call = mkb('call'); Reflect.get = mkb('Reflect.get');
         Element.prototype.setAttribute = mkb('setAttribute'); Element.prototype.getAttribute = mkb('getAttribute'); Element.prototype.hasAttribute = mkb('hasAttribute');
         fl.add('z'); fl.remove('x'); fl.toggle('w'); fl.replace('y', 'v');
         var seen = []; fl.forEach(function (v) { seen.push(v); });
@@ -147,7 +147,7 @@ fn class_list_does_not_run_page_replaceable_built_ins() {
         Element.prototype.setAttribute = keep[10]; Element.prototype.getAttribute = keep[11]; Element.prototype.hasAttribute = keep[12];
         String.prototype.split = keep[0]; String.prototype.slice = keep[1]; Array.prototype.indexOf = keep[3];
         Array.prototype.join = keep[4]; Array.prototype.forEach = keep[5]; Array.prototype.values = keep[6]; RegExp.prototype.test = keep[7];
-        Function.prototype.call = keep[8]; Reflect.get = keep[9];
+        Function.prototype.call = keep[8]; Reflect.get = keep[9]; Number = NumKeep;
         var before = [f.getAttribute('class'), has, len, zero, seen.length, e.getAttribute('class'), n + ':' + names.join(',')];
         before.join('|')"#);
     assert_eq!(got, "v z w|true|3|v|3|a b|0:");
