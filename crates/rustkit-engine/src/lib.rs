@@ -415,6 +415,7 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
 #[cfg(test)]
@@ -2216,7 +2217,7 @@ impl ScriptFeed {
             0,
             Err(ScriptOutcome::Skipped("script fetch lost")),
             false,
-            ScriptFetched { kind, fetch: None, arrived: None },
+            ScriptFetched { kind, fetch: None, arrived: None, without_detail: false },
         ))
     }
 
@@ -2263,6 +2264,10 @@ struct ScriptFetched {
     fetch: Option<std::time::Duration>,
     /// When its body or failure arrived; `None` for an inline script.
     arrived: Option<std::time::Instant>,
+    /// Its errors are reported to the page without detail
+    /// (`script_error_detail`): every fetched script until its response
+    /// says otherwise; never an inline one.
+    without_detail: bool,
 }
 
 impl ScriptFetched {
@@ -6655,11 +6660,12 @@ impl Engine {
                 frame.announced_viewport = Some((bounds.width, bounds.height));
             }
             // The child's classic scripts, in document order.
-            let listed = child.evaluate_named(
+            // The engine's own question (not a page script: nothing of it
+            // is announced to the frame's page).
+            let listed = child.evaluate(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
                    return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
-                "rustkit#frames",
             );
             let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
@@ -6680,12 +6686,20 @@ impl Engine {
                         }
                         let fetched = loader.fetch(referrer.get_for(url.clone(), RequestDestination::Script)).await;
                         match fetched {
-                            Ok(response) if response.ok() => (response.text().await.unwrap_or_default(), url.to_string()),
+                            Ok(response) if response.ok() => {
+                                // What its `error` events may say, from where it was served in the end.
+                                child.register_script(url.as_str(), url.as_str(), script_error_detail::of_response(Some(&target), &response));
+                                (response.text().await.unwrap_or_default(), url.to_string())
+                            }
                             _ => continue,
                         }
                     }
-                    None if is_module => (text, format!("{target}#inline-module-{}", index + 1)),
-                    None => (text, format!("frame-inline#{}", index + 1)),
+                    None => {
+                        let name = if is_module { format!("{target}#inline-module-{}", index + 1) } else { format!("frame-inline#{}", index + 1) };
+                        // The frame's own code.
+                        child.register_script(&name, target.as_str(), false);
+                        (text, name)
+                    }
                 };
                 if is_module {
                     modules.push((name, source));
@@ -8284,6 +8298,8 @@ impl Engine {
         policy: Option<Arc<FetchPolicy>>,
     ) -> Option<ScriptFeed> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
+        // The document's own URL, for what each fetched script's errors may say.
+        let page_url = self.views.get(&id).and_then(|v| v.url.clone());
 
         // Collect in document order.
         enum Body {
@@ -8442,6 +8458,7 @@ impl Engine {
                     }
                     _ => None,
                 };
+                let page_url = page_url.clone();
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -8450,6 +8467,10 @@ impl Engine {
                         _ => None,
                     };
                     let fetch_started = std::time::Instant::now();
+                    // An inline script's errors are the page's; a fetched
+                    // one's are until its response is known to be the
+                    // document's origin all the way.
+                    let mut without_detail = external;
                     let result = match entry {
                         Err(outcome) => Err(outcome),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
@@ -8460,6 +8481,10 @@ impl Engine {
                         // One fetch per module URL (see `module_fetches`).
                         Ok((timing, Body::External(_))) if is_module => match shared_module {
                             Some(shared) => shared.await.map(|(final_url, source)| {
+                                without_detail = match Url::parse(&final_url) {
+                                    Ok(landed) => script_error_detail::without_detail(page_url.as_ref(), requested.iter(), &landed),
+                                    Err(_) => true,
+                                };
                                 label = final_url;
                                 (timing, source)
                             }),
@@ -8478,6 +8503,7 @@ impl Engine {
                                 .await;
                                 match fetched {
                                     Ok(Ok(response)) if response.ok() => {
+                                        without_detail = script_error_detail::of_response(page_url.as_ref(), &response);
                                         let received = guard.map(|g| g.received(&response));
                                         match response.text().await {
                                             Ok(text) => {
@@ -8516,6 +8542,7 @@ impl Engine {
                         kind,
                         fetch: external.then(|| fetch_started.elapsed()),
                         arrived: external.then(std::time::Instant::now),
+                        without_detail,
                     };
                     // A module's source is in: its imports start now. An
                     // external module's imports resolve against the URL it
@@ -8967,7 +8994,7 @@ impl Engine {
                     Some((label, _, _, _, facts)) => facts.cancelled(&inspector, &label),
                     None => {
                         let (label, kind, _) = &feed.entries[position];
-                        ScriptFetched { kind, fetch: None, arrived: None }.cancelled(&inspector, label);
+                        ScriptFetched { kind, fetch: None, arrived: None, without_detail: true }.cancelled(&inspector, label);
                     }
                 }
             }
@@ -9130,6 +9157,12 @@ impl Engine {
                 if module_url != label {
                     inspector.alias_script(&module_url, &label);
                 }
+                // An inline module is the page's own code; an external one
+                // is what its fetch found it to be.
+                match (label.starts_with("inline#"), &document_url) {
+                    (true, Some(document)) => bindings.register_script(&module_url, document.as_str(), false),
+                    _ => bindings.register_script(&module_url, &module_url, facts.without_detail),
+                }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
                 let (begun, begin_stopped) = with_script_js(bindings, || {
@@ -9277,12 +9310,16 @@ impl Engine {
                 if let Some(url) = document_url.as_ref() {
                     crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
+                // The page's own code: its `error` events name the document.
+                bindings.register_script(&label, document_url.as_ref().map_or("", |url| url.as_str()), false);
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
                 crate::console_log::alias(inspector.view_id(), &name, &label);
+                // What its `error` events may say was decided at its fetch.
+                bindings.register_script(&name, &label, facts.without_detail);
                 Some(name)
             };
             let began = std::time::Instant::now();
@@ -10919,6 +10956,8 @@ impl Engine {
             info!(source = %label, bytes = text.len(), "Running inline script of an HTML load");
             let record = run(label.clone(), text.len(), &|| {
                 let _ = bindings.set_current_script(Some(node_id));
+                // An inline script of markup the host loaded: the page's own.
+                bindings.register_script(&label, bindings.document_url().as_ref().map_or("", |url| url.as_str()), false);
                 let result = bindings.evaluate_named(&text, &label).map(|_| ()).map_err(strip);
                 let _ = bindings.set_current_script(None);
                 result

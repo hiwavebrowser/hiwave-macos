@@ -1495,6 +1495,26 @@ impl Drop for InRealm<'_> {
     }
 }
 
+/// Whether the errors of a script fetched for the document at `document`
+/// are reported to the page without detail (the HTML standard's muted
+/// errors): `redirects` are the URLs that redirected on the way, `landed`
+/// the URL of the response that was read. In full only when the document
+/// has an origin of its own and every one of those URLs is of it.
+pub fn script_without_detail<'a>(
+    document: Option<&Url>,
+    redirects: impl IntoIterator<Item = &'a Url>,
+    landed: &'a Url,
+) -> bool {
+    let Some(document) = document else {
+        return true;
+    };
+    let origin = document.origin();
+    if !origin.is_tuple() {
+        return true;
+    }
+    redirects.into_iter().chain(std::iter::once(landed)).any(|url| url.origin() != origin)
+}
+
 /// What a page asked of its frames (web_frames.js): show `url` in the
 /// iframe element `node` (`Some`), or that element left the document
 /// (`None`). `sandbox` is the element's `sandbox` attribute for this
@@ -3474,9 +3494,25 @@ impl DomBindings {
         self.runtime.borrow_mut().take_dynamic_import_failures()
     }
 
-    /// Supply one requested module's source, or why there is none.
+    /// Supply one requested module's source, or why there is none. The
+    /// module is registered as the script it is ([`Self::register_script`]):
+    /// reported in full only when the URL asked for and the URL it was
+    /// served from are both of this document's origin.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
+        if let Ok(fetched) = &outcome {
+            let document = self.document_url();
+            let muted = match (Url::parse(requested), Url::parse(&fetched.final_url)) {
+                (Ok(asked), Ok(landed)) => script_without_detail(document.as_ref(), [&asked], &landed),
+                _ => true,
+            };
+            self.register_script(&fetched.final_url, &fetched.final_url, muted);
+        }
         self.runtime.borrow_mut().supply_module(requested, outcome);
+    }
+
+    /// This document's URL, as [`Self::set_location`] last gave it.
+    pub fn document_url(&self) -> Option<Url> {
+        Url::parse(&self.window.borrow().location.href).ok()
     }
 
     /// Advance a started module and say where it is.

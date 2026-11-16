@@ -1222,6 +1222,9 @@ enum FetchedInserted {
 
 struct InsertedSource {
     text: String,
+    /// The URLs that redirected on the way and the URL the body was read
+    /// from; `None` for a blob the page made (the page's own).
+    served: Option<(Vec<Url>, Url)>,
     status: u16,
     mime: Option<String>,
     encoded_size: Option<u64>,
@@ -1587,6 +1590,7 @@ fn enqueue_inserted(
         let fetched = match text {
             Some(text) => FetchedInserted::Source(InsertedSource {
                 text,
+                served: None,
                 status: 200,
                 mime: None,
                 encoded_size: None,
@@ -1754,6 +1758,7 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
         encoded_size: response.encoded_body_size,
         from_cache: response.from_cache,
     };
+    let served = (response.redirect_chain.iter().map(|(url, _)| url.clone()).collect::<Vec<_>>(), response.url.clone());
     let text = tokio::select! {
         biased;
         _ = cancel.cancelled() => return cancelled_fetch(),
@@ -1762,6 +1767,7 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
     match text {
         Ok(Ok(text)) => FetchedInserted::Source(InsertedSource {
             text,
+            served: Some(served),
             status: http.status,
             mime: http.mime,
             encoded_size: http.encoded_size,
@@ -1826,12 +1832,24 @@ fn run_inserted(
     let waited = job.arrived_at.map(|at| taken_at.saturating_duration_since(at));
     let mut began = false;
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
+    let mut without_detail = true;
     let text = match fetched {
         FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
             record.bytes = source.text.len();
             Err(ScriptOutcome::Skipped("too large to run inside the script budget"))
         }
-        FetchedInserted::Source(source) => Ok(source.text),
+        FetchedInserted::Source(source) => {
+            // What this script's `error` events may say: a blob the page
+            // made is the page's own; a fetched one is reported in full
+            // only if it was the document's origin all the way.
+            without_detail = match &source.served {
+                None => false,
+                Some((redirects, landed)) => {
+                    crate::script_error_detail::without_detail(bindings.document_url().as_ref(), redirects.iter(), landed)
+                }
+            };
+            Ok(source.text)
+        }
         FetchedInserted::Http(http) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(http.status))),
         FetchedInserted::Transport { detail, .. } => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(detail))),
     };
@@ -1855,6 +1873,7 @@ fn run_inserted(
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
             crate::console_log::alias(inspector.view_id(), &name, &record.source);
+            bindings.register_script(&name, &record.source, without_detail);
             began = true;
             let started = std::time::Instant::now();
             let (ran, stopped) = super::with_script_js(bindings, || {

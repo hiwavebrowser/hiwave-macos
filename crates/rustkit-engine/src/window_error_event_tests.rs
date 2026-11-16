@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::script_net_tests::serve_routes;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const PIN: &str = include_str!("../../../docs/diagnostics/2026-11-16/window_error_cft148.json");
 const PAGE_JS: &str = include_str!("../../../docs/diagnostics/2026-11-16/window_error_page.js");
@@ -40,10 +40,11 @@ fn run_probe() -> serde_json::Value {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt.block_on(engine.load_url(view, url)).expect("load_url");
-    let started = Instant::now();
+    // A count of turns, not a clock: the probe's steps are 250 ms of the page's time apart and
+    // each turn gives it 20 ms (the sleep only lets the loopback fetches land).
     let mut out = String::new();
-    while started.elapsed() < Duration::from_secs(30) {
-        std::thread::sleep(Duration::from_millis(20));
+    for _ in 0..1500 {
+        std::thread::sleep(Duration::from_millis(5));
         rt.block_on(engine.pump_live(view, 20));
         out = engine.execute_script(view, "window.__out || ''").unwrap();
         if out.len() > "String(\"\")".len() {
@@ -111,8 +112,9 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
     // the next test.)
     differ(&format!("Uncaught Error: from a module | window_error_module.js | error Error | positioned true | {own}"), None);
     // Another origin's script cannot be loaded in a test: the loader refuses a second loopback
-    // origin ("Address not permitted"), so the two `Script error.` rows (one row in a set) are
-    // not reached here. The muting rule itself is held by the bindings test, on the script's URL.
+    // origin ("Address not permitted"), so Chrome's four `Script error.` rows (one row in a set)
+    // are not reached here. That rule is held by the bindings tests, on scripts registered as
+    // the engine registers them, and by `script_error_detail`'s own tests.
     differ(&format!("Script error. | (the document, or none) | error null | positioned false | {own}"), None);
     assert_eq!(rows(&got), want);
 
@@ -147,9 +149,8 @@ fn seen_after(scripts: &str, routes: Vec<(&'static str, &'static str, String)>) 
     let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).expect("load_url");
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(20));
+    for _ in 0..400 {
+        std::thread::sleep(Duration::from_millis(5));
         rt.block_on(engine.pump_live(view, 20));
         if engine.execute_script(view, "window.seen.length > 0").unwrap() == "Boolean(true)" {
             break;
