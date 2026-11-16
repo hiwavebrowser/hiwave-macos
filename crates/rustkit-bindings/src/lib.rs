@@ -1177,6 +1177,27 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var t = ts - base;
         return t < 0 ? 0 : t;
     };
+    // TIMELINE2: the timeline's time on the tree's clock, the clock the engine's CSS animations and
+    // transitions run on (`Animations::clock_ms`, read after each turn's timers and before a frame
+    // document's first layout), so they paint and report the time script animations read (Chrome
+    // `css_timeline_probe_cft148.json`: `startTime + currentTime` is the timeline in every frame
+    // and task). Once the frame of the turn's grid point has run, that frame's time, so a frame
+    // the turn ran late paints the time its callbacks read; with no frame of it run, the timers'
+    // clock as before (a page with no animation frame still moves every turn, the engine's
+    // frame). Taken without a reading of its own (the deterministic clock counts reads), and never
+    // below a time already handed out.
+    __rk.animationNow = function () {
+        var ts = Q.frameTl;
+        if (!Q.inFrame && !heldFrame()) {
+            var g = frameAt(gridAtOrBefore(Q.now));
+            if (g > Q.prevFrameAt || Q.prevFrameTs < 0) ts = Q.now;
+        }
+        if (ts < Q.frameTl) ts = Q.frameTl;
+        return ts < Q.tlHigh ? Q.tlHigh : ts;
+    };
+    // This document's time origin on the tree's clock: a CSS animation's start time, which the
+    // engine keeps on the tree's clock, is `start - origin` on this document's timeline (TIMELINE2).
+    __rk.timeOrigin = function () { return base; };
     // The animation-frame round of a frame tree's turn that stopped for
     // its time with timers still due (`Engine::pump_live`): the frame
     // callbacks due now run once, as a turn's round does.
@@ -3940,6 +3961,18 @@ impl DomBindings {
             JsValue::Number(n) => n as u32,
             _ => 0,
         })
+    }
+
+    /// The document timeline's time on the tree's clock (`__rk.animationNow`): the clock the
+    /// engine's CSS animations and transitions run on (TIMELINE2). The timers' clock where the
+    /// page clock is not installed.
+    pub fn animation_clock_ms(&self) -> f64 {
+        match self.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "return typeof __rk.animationNow === 'function' ? __rk.animationNow() : __rk.now()",
+        ) {
+            Ok(JsValue::Number(n)) if n.is_finite() => n,
+            _ => 0.0,
+        }
     }
 
     pub fn clock_now_ms(&self) -> f64 {

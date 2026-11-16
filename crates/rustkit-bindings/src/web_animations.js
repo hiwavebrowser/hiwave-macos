@@ -402,7 +402,7 @@
     };
 
     // ------------------------------------------------------------- timeline
-    var timeNow = 0;          // the engine's clock at the last frame: CSS animations' and transitions' time
+    var timeNow = 0;          // the timers' clock at the last frame: the timeline without the page clock
     var all = [];             // script animations, oldest first (composite order)
     var frameQueued = false;
     var timeline = {};
@@ -410,14 +410,17 @@
     // `timeline_probe_cft148.json`): in a frame its callbacks' timestamp; in a task the time of the
     // frame of the task's time, the same for the whole task (`__rk.timelineNow`, the timer block).
     // Script animations compute from it, so `a.currentTime === t - a.startTime` in every frame and
-    // a start time set from the timeline reads 0 at once. CSS animations and transitions keep the
-    // engine's clock (`timeNow`), which their start times come from.
+    // a start time set from the timeline reads 0 at once. CSS animations and transitions are on it
+    // too (TIMELINE2): the engine runs them on the timeline's time (`__rk.animationNow`), and keeps
+    // their start times on the tree's clock, which this document's timeline counts from its origin.
     function tnow() {
         if (typeof __rk.timelineNow === 'function') return __rk.timelineNow();
         return timeNow;
     }
-    Object.defineProperty(timeline, 'currentTime', { get: tnow, enumerable: true });
-    function AnimationTimeline() { throw new TypeError('Illegal constructor'); }
+    function origin() { return typeof __rk.timeOrigin === 'function' ? __rk.timeOrigin() : 0; }
+    // A CSS animation's or transition's start time on this document's timeline.
+    function cssStart(info) { return info.start - origin(); }
+    Object.defineProperty(timeline, 'currentTime', { get: tnow, enumerable: true });    function AnimationTimeline() { throw new TypeError('Illegal constructor'); }
     function DocumentTimeline() { return timeline; }
     DocumentTimeline.prototype = Object.create(AnimationTimeline.prototype);
     Object.setPrototypeOf(timeline, DocumentTimeline.prototype);
@@ -429,9 +432,9 @@
     }
     function frame(ts) {
         frameQueued = false;
-        // CSS animations and transitions run on the engine's clock (`timeNow`, their start
-        // times'); script animations on the timeline, the frame's stamp (`ft`), which a load-only
+        // Script animations run on the timeline, the frame's stamp (`ft`), which a load-only
         // capture stamps on the exact grid (`EngineConfig::grid_frame_stamps`), so it reproduces.
+        // `timeNow` is the timers' clock, the timeline's stand-in without the page clock.
         var vt = typeof __rk.now === 'function' ? __rk.now() : ts;
         if (typeof vt === 'number' && vt > timeNow) timeNow = vt;
         var ft = tnow();
@@ -823,7 +826,7 @@
                  direction: info.direction, fill: info.fill, easing: info.easing };
     }
     function cssCurrentTime(info) {
-        return info.paused != null ? info.paused : timeNow - info.start;
+        return info.paused != null ? info.paused : tnow() - cssStart(info);
     }
     function cssPlayState(info) {
         return info.ended ? 'finished' : info.paused != null ? 'paused' : 'running';
@@ -876,7 +879,7 @@
         keys.forEach(function (key) {
             var w = cssWrappers[key];
             if (!w || live[key]) return;
-            var c = w._css, over = c.ended || (c.paused == null && timeNow - c.start >= c.delay + c.duration * (c.iterations == null ? Infinity : c.iterations));
+            var c = w._css, over = c.ended || (c.paused == null && tnow() - cssStart(c) >= c.delay + c.duration * (c.iterations == null ? Infinity : c.iterations));
             if (over && !w._finishedState) { w._finishedState = true; w._finRes(w); microtask(function () { w._dispatch('finish'); }); }
             cssGone(w, !over);
         });
@@ -888,7 +891,7 @@
             set: function () { __rk.unsupported('CSSAnimation', 'currentTime'); }
         });
         Object.defineProperty(proto, 'startTime', {
-            get: function () { return this._gone ? null : this._css.start; },
+            get: function () { return this._gone ? null : cssStart(this._css); },
             set: function () { __rk.unsupported('CSSAnimation', 'currentTime'); }
         });
         Object.defineProperty(proto, 'playbackRate', {

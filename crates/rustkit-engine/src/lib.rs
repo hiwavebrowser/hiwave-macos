@@ -6819,6 +6819,9 @@ impl Engine {
                 }
             }
             if let Some(frame) = self.views.get_mut(&fid) {
+                // The frame's first layout starts its animations: at the timeline's time now,
+                // not at the tree clock's zero, before the frame was made (TIMELINE2).
+                frame.doc.lay.animations.borrow_mut().clock_ms = child.animation_clock_ms();
                 frame.doc.bindings = Some(child);
             }
             if let Err(e) = self.relayout_for(fid, RelayoutCause::InitialLoad) {
@@ -7099,10 +7102,11 @@ impl Engine {
             timer_stopped
         };
         out.yielded_for_frame = frame_yield.get();
-        // The animation clock is the timer clock as the timers left it, so
-        // the layout below (and the one `settle_animations` makes) reads
-        // the transitions at this turn's time.
-        view.doc.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
+        // The animation clock is the document timeline as the timers left
+        // it (TIMELINE2: the frame's time once this turn's frame ran), so
+        // the layout below (and the one `settle_animations` makes) reads the
+        // transitions at the time script animations read.
+        view.doc.lay.animations.borrow_mut().clock_ms = bindings.animation_clock_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
