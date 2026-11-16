@@ -1,0 +1,23 @@
+# CLOCK3 R1: measure_live_pages_on_each_clock (rustkit-engine, --ignored), Windows, 2026-11-15.
+# real=false: pump_live (the stepped clock, every live turn before CLOCK3).
+# real=true at cd9aaeee (timers set in a turn count from when they are set; the turn's horizon fixed):
+CLOCK3-MEASURE chunked_dom_work real=true turns=42 relayouts=41 timers=77 wall_ms=1016 rec={"links":41,"rows":820,"frames":34,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=true turns=42 relayouts=41 timers=77 wall_ms=1014 rec={"links":41,"rows":820,"frames":34,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=true turns=42 relayouts=41 timers=77 wall_ms=1009 rec={"links":41,"rows":820,"frames":34,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=189 relayouts=0 timers=563 wall_ms=497 rec={"links":505,"firstGapsMs":[0.1,2.4,2.6,0.1,2.4,0,2.5,0],"medianGapMs":0.1,"frames":28,"linksPerFrameMax":24,"fromFrameMs":2.5,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=191 relayouts=0 timers=542 wall_ms=512 rec={"links":482,"firstGapsMs":[0,0,0.1,2.8,0,0,0,0.1],"medianGapMs":0.1,"frames":29,"linksPerFrameMax":28,"fromFrameMs":2.5,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=188 relayouts=0 timers=539 wall_ms=498 rec={"links":481,"firstGapsMs":[2.5,0,0,2.7,2.7,2.4,0,0],"medianGapMs":0.1,"frames":28,"linksPerFrameMax":24,"fromFrameMs":2.5,"done":true}
+# real=false (unchanged by the R1 round):
+CLOCK3-MEASURE chunked_dom_work real=false turns=13 relayouts=12 timers=148 wall_ms=1121 rec={"links":135,"rows":2700,"frames":11,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=false turns=13 relayouts=12 timers=147 wall_ms=1069 rec={"links":134,"rows":2680,"frames":11,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=false turns=13 relayouts=12 timers=150 wall_ms=1120 rec={"links":137,"rows":2740,"frames":11,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=false turns=28 relayouts=0 timers=25692 wall_ms=538 rec={"links":25654,"firstGapsMs":[0.1,0,0,0,0,0.1,0,0],"medianGapMs":0,"frames":18,"linksPerFrameMax":2821,"fromFrameMs":2.7,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=false turns=28 relayouts=0 timers=25683 wall_ms=537 rec={"links":25651,"firstGapsMs":[0,0.1,0,0,0,0,0.1,0],"medianGapMs":0,"frames":15,"linksPerFrameMax":2826,"fromFrameMs":2.8,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=false turns=28 relayouts=0 timers=25692 wall_ms=541 rec={"links":25654,"firstGapsMs":[0.1,0,0,0,0,0.1,0,0],"medianGapMs":0,"frames":18,"linksPerFrameMax":2840,"fromFrameMs":2.8,"done":true}
+# real=true at the R1 round (the turn's horizon also moves with real time):
+CLOCK3-MEASURE chunked_dom_work real=true turns=13 relayouts=12 timers=146 wall_ms=1065 rec={"links":133,"rows":2660,"frames":11,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=true turns=13 relayouts=12 timers=150 wall_ms=1084 rec={"links":137,"rows":2740,"frames":11,"done":true}
+CLOCK3-MEASURE chunked_dom_work real=true turns=13 relayouts=12 timers=146 wall_ms=1056 rec={"links":133,"rows":2660,"frames":11,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=28 relayouts=0 timers=21623 wall_ms=533 rec={"links":21569,"firstGapsMs":[0,0.1,0,0,0,0,0.1,0],"medianGapMs":0,"frames":26,"linksPerFrameMax":1720,"fromFrameMs":2.7,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=28 relayouts=0 timers=21560 wall_ms=534 rec={"links":21506,"firstGapsMs":[0,0.1,0,0,0,0.1,0,0],"medianGapMs":0,"frames":26,"linksPerFrameMax":1688,"fromFrameMs":2.8,"done":true}
+CLOCK3-MEASURE zero_delay_chain real=true turns=28 relayouts=0 timers=21505 wall_ms=532 rec={"links":21451,"firstGapsMs":[0,0,0,0,0.1,0,0,0],"medianGapMs":0,"frames":26,"linksPerFrameMax":1646,"fromFrameMs":2.7,"done":true}

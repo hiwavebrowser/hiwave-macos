@@ -235,6 +235,7 @@
         byName[name] = def;
         if (byCtor) byCtor.set(ctor, def);
         names.push(name);
+        if (HOOKS && !HOOKS.attrs) HOOKS.attrs = attrHook;
         selector = names.join(',');
         if (shadowHost) shadowHost.call('define', document, name);
         // Every connected element of that name that already exists upgrades,
@@ -373,26 +374,21 @@
         Object.defineProperty(proto, 'insertAdjacentHTML', { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(proto, 'insertAdjacentHTML') });
     });
 
-    // Attributes: attributeChangedCallback for the observed ones.
-    function wrapAttribute(name, newValue) {
-        var native = g.Element.prototype[name];
-        if (typeof native !== 'function' || WRAPPED.has(native)) return;
-        var wrapped = function (attr) {
-            if (!names.length) return native.apply(this, arguments);
-            var st = stateOf(this);
-            var key = String(attr);
-            var watched = st && !st.failed && st.def.attributeChanged && st.def.observed.indexOf(key) >= 0;
-            var old = watched ? this.getAttribute(key) : null;
-            var result = native.apply(this, arguments);
-            if (watched) {
-                var now = this.getAttribute(key);
-                if (name !== 'removeAttribute' || old !== null) call(st.def.attributeChanged, this, [key, old, now]);
-            }
-            return result;
+    // Attributes: attributeChangedCallback for the observed ones. The DOM's one native
+    // attribute write path asks `__rk.domHooks.attrs` before each write and runs the closure
+    // it answers after it, so every writer reacts alike: setAttribute, removeAttribute,
+    // classList, el.id, el.className. Nothing is installed until the first define.
+    var HOOKS = __rk.domHooks;
+    var getAttr = Function.prototype.call.bind(g.Element.prototype.getAttribute);
+    var lower = Function.prototype.call.bind(String.prototype.toLowerCase);
+    function attrHook(el, op, key) {
+        key = lower(key);
+        var st = stateOf(el);
+        if (!st || st.failed || !st.def.attributeChanged || st.def.observed.indexOf(key) < 0) return undefined;
+        var old = getAttr(el, key);
+        return function () {
+            if (op === 'removeAttr' && old === null) return;
+            call(st.def.attributeChanged, el, [key, old, getAttr(el, key)]);
         };
-        WRAPPED.add(wrapped);
-        Object.defineProperty(g.Element.prototype, name, { value: wrapped, writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(g.Element.prototype, name) });
     }
-    wrapAttribute('setAttribute');
-    wrapAttribute('removeAttribute');
 })(typeof globalThis === 'object' ? globalThis : this);
