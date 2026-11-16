@@ -1070,7 +1070,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var yielded = false;
         // A real turn's time is `target` (its delta is real time already passed): the frames' turn
         // clock (`turnNow`) starts there too, as the timers' (`liveNow`) does.
-        if (real) { Q.liveAt = target; Q.liveReal = realMs(); Q.turnAt = target; Q.turnReal = Q.liveReal; }
+        // The turn's instant (`before` ms of its own work ago): its timers count from there.
+        if (real) {
+            var b4 = toNumber(before);
+            Q.liveAt = target; Q.liveReal = realMs() - (b4 > 0 ? b4 : 0);
+            Q.turnAt = target; Q.turnReal = Q.liveReal;
+        }
         try {
             while (ran < max) {
                 var n = runTimers(target, 1, true);
