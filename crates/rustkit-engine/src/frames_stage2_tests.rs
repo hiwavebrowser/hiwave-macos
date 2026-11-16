@@ -47,6 +47,13 @@ impl Page {
                 "text/html",
                 "<!doctype html><html><head><link rel=stylesheet href=/styled.css></head><body><div id=stage></div></body></html>".to_string(),
             ),
+            (
+                "/late.html",
+                "text/html",
+                "<!doctype html><html><head><link rel=stylesheet href='/held.css'></head><body><div id=stage></div></body></html>".to_string(),
+            ),
+            // `/held...` answers after 300 ms (the test server's rule).
+            ("/held.css", "text/css", "#stage { position: relative; }".to_string()),
             ("/styled.css", "text/css", "html { height: 100%; } body { height: 100%; margin: 0; } #stage { position: relative; width: 100%; height: 100%; }".to_string()),
         ];
         let server = serve_routes(routes);
@@ -201,6 +208,28 @@ fn markup_frames_and_replaced_handlers_hear_the_loads_chrome_fires() {
     assert_eq!(want["attrSrcdoc"], serde_json::json!(["srcdoc"]));
     want["attrSrcdoc"] = serde_json::json!(["blank"]);
     assert_eq!(got, want);
+}
+
+/// A frame's stylesheet that is still out at the subresource budget does
+/// not hold the frame's `load` past the budget, and is applied when it
+/// arrives, on the frame's live turns (as a page's late sheet is).
+#[test]
+fn a_frames_late_stylesheet_does_not_hold_its_load_and_lands_on_a_live_turn() {
+    let page = "<!doctype html><body><script>
+var f = document.createElement('iframe');
+f.style.width = '400px'; f.style.height = '300px'; f.style.border = '0';
+function position() { return f.contentWindow.getComputedStyle(f.contentDocument.getElementById('stage')).position; }
+f.onload = function () { window.atLoad = position(); };
+f.src = '/late.html';
+document.body.appendChild(f);
+</script></body>";
+    let config = EngineConfig { subresource_budget_ms: 100, ..config(true) };
+    let mut page = Page::load_with(config, page);
+    page.turns_until("typeof window.atLoad === 'string'", Duration::from_secs(5));
+    assert_eq!(page.js("window.atLoad"), r#"String("static")"#, "`load` waited for the sheet past the budget");
+    page.turns_until("position() === 'relative'", Duration::from_secs(5));
+    assert_eq!(page.js("position()"), r#"String("relative")"#);
+    assert_eq!(page.served("/held.css"), 1);
 }
 
 /// A frame with a `sandbox` attribute keeps this stage's floor whatever

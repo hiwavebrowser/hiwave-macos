@@ -6650,13 +6650,21 @@ impl Engine {
             // `load` handler measures in the frame is styled (Chrome 148,
             // docs/diagnostics/2026-11-15/frame_style_cft148.json). A sheet
             // over the subresource budget lands on a live turn, as a page's.
-            if let Ok((links, fetched, late)) = self.load_external_stylesheets_slotted(fid).await {
-                if let Some(frame) = self.views.get_mut(&fid) {
-                    frame.sheet_links = links;
-                    frame.fetched_sheets = fetched;
-                    frame.live_sheets = late;
-                    frame.rebuild_link_sheets();
+            // Nothing of the page runs during this wait (the tree's one
+            // loop is here), so the frame cannot be navigated under it; a
+            // later request for the element drops this view and its sheets
+            // with it. The wait ends at the subresource budget.
+            match self.load_external_stylesheets_slotted(fid).await {
+                Ok((links, fetched, late)) => {
+                    if let Some(frame) = self.views.get_mut(&fid) {
+                        frame.sheet_links = links;
+                        frame.fetched_sheets = fetched;
+                        frame.live_sheets = late;
+                        frame.rebuild_link_sheets();
+                    }
                 }
+                // The live turn's link check asks for them again.
+                Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
             }
             // The child's classic scripts, in document order.
             let listed = child.evaluate_named(
