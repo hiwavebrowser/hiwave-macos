@@ -2758,10 +2758,11 @@ impl Array {
         let len = obj.length_of_array_like(context)?;
 
         // 4. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
+        let diff = comparefn.as_ref().and_then(numeric_difference_comparator);
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<Ordering> {
                 // a. Return ? CompareArrayElements(x, y, comparefn).
-                compare_array_elements(x, y, comparefn.as_ref(), context)
+                compare_array_elements(x, y, comparefn.as_ref(), diff, context)
             };
 
         // 5. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, skip-holes).
@@ -2824,10 +2825,11 @@ impl Array {
         let arr = Array::array_create(len, None, context)?;
 
         // 5. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
+        let diff = comparefn.as_ref().and_then(numeric_difference_comparator);
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<Ordering> {
                 // a. Return ? CompareArrayElements(x, y, comparefn).
-                compare_array_elements(x, y, comparefn.as_ref(), context)
+                compare_array_elements(x, y, comparefn.as_ref(), diff, context)
             };
 
         // 6. Let sortedList be ? SortIndexedProperties(O, len, SortCompare, read-through-holes).
@@ -3374,10 +3376,23 @@ impl Array {
 /// [`CompareArrayElements ( x, y, comparefn )`][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-comparearrayelements
+/// HIWAVE PATCH (sort-diff): `Some(swapped)` when `comparefn` is an ordinary function whose whole body is
+/// `return a - b` (`swapped`: `return b - a`) over its two plain parameters (see the bytecompiler).
+fn numeric_difference_comparator(comparefn: &JsObject) -> Option<bool> {
+    let f = comparefn.downcast_ref::<crate::builtins::function::OrdinaryFunction>()?;
+    let flags = f.code.flags.get();
+    if flags.contains(crate::vm::CodeBlockFlags::NUMERIC_DIFF) {
+        Some(flags.contains(crate::vm::CodeBlockFlags::NUMERIC_DIFF_SWAPPED))
+    } else {
+        None
+    }
+}
+
 fn compare_array_elements(
     x: &JsValue,
     y: &JsValue,
     comparefn: Option<&JsObject>,
+    diff: Option<bool>,
     context: &mut Context,
 ) -> JsResult<Ordering> {
     match (x.is_undefined(), y.is_undefined()) {
@@ -3392,6 +3407,12 @@ fn compare_array_elements(
 
     // 4. If comparefn is not undefined, then
     if let Some(cmp) = comparefn {
+        // HIWAVE PATCH (sort-diff): for `(a, b) => a - b` over two Numbers the call computes exactly this
+        // difference and has no other effect, so it is not made. Any other pair of values calls the function.
+        if let (Some(swapped), Some(a), Some(b)) = (diff, x.as_number(), y.as_number()) {
+            let v = if swapped { b - a } else { a - b };
+            return Ok(v.partial_cmp(&0.0).unwrap_or(Ordering::Equal));
+        }
         let args = [x.clone(), y.clone()];
         //     a. Let v be ? ToNumber(? Call(comparefn, undefined, « x, y »)).
         let v = cmp
