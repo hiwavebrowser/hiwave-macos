@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use tokio::time::Instant;
+use std::time::Instant;
 
 use crate::page_protocol::{content_turn_wait, LiveClock};
 
@@ -44,6 +44,29 @@ fn the_next_turn_is_due_from_when_this_turn_began() {
     assert_eq!(clock.turn(t0 + us(16_600)), 16);
     let deadline = clock.deadline(t0 + us(19_600), Duration::from_millis(10));
     assert_eq!(deadline, t0 + Duration::from_millis(26));
+}
+
+/// A page whose next timer is always due (a turn left work held back, or a `setTimeout(0)` chain)
+/// is not turned in a spin: a cheap turn (0.1 ms) still waits until 2 ms after it began, so 1000 ms
+/// is at most 500 turns (#1190 R1 follow-up). Only turns that each take 2 ms or more of the page's
+/// own work follow one another at once: 3 ms turns come every 3 ms, the loop's commands drained
+/// before each.
+#[test]
+fn an_always_due_page_is_turned_at_most_every_2_ms() {
+    let turns_in_a_second = |work: Duration| {
+        let t0 = Instant::now();
+        let mut clock = LiveClock::new(t0);
+        let (mut real, mut turns) = (t0, 0u32);
+        while real - t0 < Duration::from_millis(1000) {
+            clock.turn(real);
+            turns += 1;
+            let after = real + work;
+            real = clock.deadline(after, content_turn_wait(Some(0))).max(after);
+        }
+        turns
+    };
+    assert_eq!(turns_in_a_second(us(100)), 500);
+    assert_eq!(turns_in_a_second(us(3000)), 334);
 }
 
 /// The probe's loop on the model above, 3000 ms of it: the page's clock keeps up with real time

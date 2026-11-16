@@ -1,0 +1,214 @@
+<!doctype html><title>timeline probe</title><div id=box style="width:10px;height:10px;background:#08f"></div><script>
+// TIMELINE1: document.timeline and Web Animations on the page clock. Pinned on Chrome for Testing
+// 148.0.7778.216, HEADLESS (timeline_probe_chrome.mjs); not checked against a headed run (row
+// FRAMEPIN-HEADED). Records (all times ms, 0.01):
+//   frames     5 frames: [t, timeline.currentTime inside, performance.now() inside]
+//   task       a task right after a frame: [that frame's t, timeline.currentTime in the task,
+//              performance.now() in the task]: is the timeline live or the last frame's time?
+//   twoTasks   two reads of timeline.currentTime in one task, 5 ms of work apart: [first, second]
+//   startFrom  in a task: a = animate(1000 ms); a.startTime = timeline.currentTime; then
+//              [a.currentTime at once, a.startTime - timeline.currentTime] and, for 4 frames,
+//              [t, a.currentTime, t - a.startTime]: no jump, and progress counted from the frame
+//   paused     a 1000 ms animation paused after ~100 ms: [currentTime at pause, playState,
+//              currentTime 3 frames later, playState, startTime]
+//   finished   a 50 ms animation 200 ms later: [currentTime, playState, finished promise settled,
+//              startTime !== null]
+//   inFrame    in 4 frames of a running animation: a.currentTime === t - a.startTime
+//   idle       5 times: after 300 ms with no frame asked for, in a timer task: [performance.now(),
+//              timeline.currentTime, the same 5 ms of work later, then in the frame the task asks
+//              for: t, timeline.currentTime]: does an idle timeline stay at the last frame's time?
+//   stalled    5 times: a frame whose own callback works W = 40 or 100 ms asks for the next frame:
+//              [W, the next frame's t - this t, perf in it - this t]
+//   held       5 times: a frame asks for the next and posts a task that works 100 ms; in the late
+//              frame: [t - T0, timeline.currentTime - T0, a running animation's currentTime -
+//              (t - its startTime)], and the frame its own callback asks for: [t2 - T0]
+//   overdue    5 times: a frame at T0 asks for the next frame and posts a task that works 100 ms,
+//              then a task that reads the timeline: [order the read task and the late frame ran
+//              ('task,frame' or 'frame,task'), the task's timeline - T0, its perf - T0, the late
+//              frame's t - T0, its timeline - T0]: does a task see the timeline past an overdue frame?
+//   pauseRate  3 times: a 1000 ms animation paused at ~100 ms and given playbackRate 2 in the same
+//              task: [currentTime after pause, after the rate change, 3 frames later, playState,
+//              playbackRate]
+//   idleStart  5 times: after 300 ms with no frame, in a timer task: [timeline, then
+//              a = animate(1000 ms); timeline again (the same?); a.startTime = timeline.currentTime;
+//              a.currentTime at once], and for 2 frames [t - a.startTime, a.currentTime], playState
+// When done it sets rec.done and logs REC <json>.
+// Everything starts in go(): at the window's load event, or, with #manual in the URL, when the
+// harness calls it (RustKit runs a load's timers up to 5 s ahead of real time, its load horizon).
+window.rec = { frames: [], task: null, twoTasks: null, startFrom: null, paused: null, finished: null, inFrame: [], idle: [], stalled: [], held: [], overdue: [], pauseRate: [], idleStart: [], done: false };
+var box = document.getElementById('box');
+function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
+function spin(ms) { var t0 = performance.now(); while (performance.now() - t0 < ms) {} }
+function framesPart(next) {
+  (function f() {
+    requestAnimationFrame(function (t) {
+      rec.frames.push([r2(t), r2(document.timeline.currentTime), r2(performance.now())]);
+      if (rec.frames.length < 5) f(); else next();
+    });
+  })();
+}
+function taskPart(next) {
+  requestAnimationFrame(function (t) {
+    setTimeout(function () {
+      rec.task = [r2(t), r2(document.timeline.currentTime), r2(performance.now())];
+      var a = document.timeline.currentTime; spin(5); var b = document.timeline.currentTime;
+      rec.twoTasks = [r2(a), r2(b)];
+      next();
+    }, 0);
+  });
+}
+function startFromPart(next) {
+  setTimeout(function () {
+    var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+    a.startTime = document.timeline.currentTime;
+    var s = { atOnce: [r2(a.currentTime), r2(a.startTime - document.timeline.currentTime)], frames: [] };
+    (function f() {
+      requestAnimationFrame(function (t) {
+        s.frames.push([r2(t), r2(a.currentTime), r2(t - a.startTime)]);
+        if (s.frames.length < 4) f(); else { a.cancel(); rec.startFrom = s; next(); }
+      });
+    })();
+  }, 30);
+}
+function pausedPart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+  setTimeout(function () {
+    a.pause();
+    var at = [r2(a.currentTime), a.playState];
+    var n = 0;
+    (function f() {
+      requestAnimationFrame(function () {
+        if (++n < 3) { f(); return; }
+        rec.paused = at.concat([r2(a.currentTime), a.playState, a.startTime]);
+        a.cancel();
+        next();
+      });
+    })();
+  }, 100);
+}
+function finishedPart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 50 });
+  var settled = false;
+  a.finished.then(function () { settled = true; });
+  setTimeout(function () {
+    rec.finished = [r2(a.currentTime), a.playState, settled, a.startTime !== null];
+    a.cancel();
+    next();
+  }, 200);
+}
+function inFramePart(next) {
+  var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+  var n = 0;
+  (function f() {
+    requestAnimationFrame(function (t) {
+      if (a.startTime !== null) rec.inFrame.push(Math.abs(a.currentTime - (t - a.startTime)) < 0.01);
+      if (++n < 6) f(); else { a.cancel(); next(); }
+    });
+  })();
+}
+function idlePart(n, next) {
+  if (n >= 5) { next(); return; }
+  setTimeout(function () {
+    var p = performance.now(), a = document.timeline.currentTime; spin(5); var b = document.timeline.currentTime;
+    requestAnimationFrame(function (t) {
+      rec.idle.push([r2(p), r2(a), r2(b), r2(t), r2(document.timeline.currentTime)]);
+      idlePart(n + 1, next);
+    });
+  }, 300);
+}
+function stalledPart(n, next) {
+  if (n >= 5) { next(); return; }
+  var W = n % 2 ? 100 : 40;
+  requestAnimationFrame(function (t) {
+    spin(W);
+    requestAnimationFrame(function (t2) {
+      rec.stalled.push([W, r2(t2 - t), r2(performance.now() - t)]);
+      setTimeout(function () { stalledPart(n + 1, next); }, 50);
+    });
+  });
+}
+function heldPart(n, next) {
+  if (n >= 5) { next(); return; }
+  var a = box.animate({ opacity: [0, 1] }, { duration: 5000 });
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function (T0) {
+      requestAnimationFrame(function (t) {
+        var row = [r2(t - T0), r2(document.timeline.currentTime - T0), r2(a.currentTime - (t - a.startTime))];
+        requestAnimationFrame(function (t2) {
+          row.push(r2(t2 - T0));
+          rec.held.push(row);
+          a.cancel();
+          setTimeout(function () { heldPart(n + 1, next); }, 50);
+        });
+      });
+      setTimeout(function () { spin(100); }, 0);
+    });
+  });
+}
+function overduePart(n, next) {
+  if (n >= 5) { next(); return; }
+  requestAnimationFrame(function (T0) {
+    var order = [], task = null, frame = null;
+    requestAnimationFrame(function (t) {
+      order.push('frame'); frame = [r2(t - T0), r2(document.timeline.currentTime - T0)];
+      if (order.length === 2) done();
+    });
+    setTimeout(function () { spin(100); }, 0);
+    setTimeout(function () {
+      order.push('task'); task = [r2(document.timeline.currentTime - T0), r2(performance.now() - T0)];
+      if (order.length === 2) done();
+    }, 0);
+    function done() {
+      rec.overdue.push([order.join()].concat(task, frame));
+      setTimeout(function () { overduePart(n + 1, next); }, 50);
+    }
+  });
+}
+function pauseRatePart(n, next) {
+  if (n >= 3) { next(); return; }
+  var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+  setTimeout(function () {
+    a.pause(); var p = r2(a.currentTime);
+    a.playbackRate = 2; var q = r2(a.currentTime);
+    var k = 0;
+    (function f() {
+      requestAnimationFrame(function () {
+        if (++k < 3) { f(); return; }
+        rec.pauseRate.push([p, q, r2(a.currentTime), a.playState, a.playbackRate]);
+        a.cancel();
+        setTimeout(function () { pauseRatePart(n + 1, next); }, 30);
+      });
+    })();
+  }, 100);
+}
+function idleStartPart(n, next) {
+  if (n >= 5) { next(); return; }
+  setTimeout(function () {
+    var before = document.timeline.currentTime;
+    var a = box.animate({ opacity: [0, 1] }, { duration: 1000 });
+    var after = document.timeline.currentTime;
+    a.startTime = document.timeline.currentTime;
+    var row = [r2(after - before), r2(a.currentTime)], k = 0;
+    (function f() {
+      requestAnimationFrame(function (t) {
+        row.push([r2(t - a.startTime), r2(a.currentTime)]);
+        if (++k < 2) { f(); return; }
+        row.push(a.playState);
+        rec.idleStart.push(row);
+        a.cancel();
+        idleStartPart(n + 1, next);
+      });
+    })();
+  }, 300);
+}
+function go() {
+  framesPart(function () { taskPart(function () { startFromPart(function () { pausedPart(function () {
+    finishedPart(function () { inFramePart(function () { idlePart(0, function () { stalledPart(0, function () {
+      heldPart(0, function () { overduePart(0, function () { pauseRatePart(0, function () {
+        idleStartPart(0, function () { rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+      }); }); });
+    }); }); }); });
+  }); }); }); });
+}
+if (location.hash !== '#manual') addEventListener('load', go);
+</script>
