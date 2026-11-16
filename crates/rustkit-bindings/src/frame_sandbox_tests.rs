@@ -186,3 +186,149 @@ fn a_removed_frames_request_carries_nothing() {
     assert_eq!(requests.len(), 2);
     assert_eq!((requests[1].url.clone(), requests[1].sandbox.clone()), (None, None));
 }
+
+// ── Frames that come into the document as markup, as copies, or from elsewhere ──
+//
+// Chrome (`inserted.*`): the navigation is asked for when the frame goes into the document,
+// with the attribute as it is then; taking the attribute off in the next statement changes
+// nothing (`*_removed` rows are as `*_empty`).
+
+/// Three frames by `put(id, markup)`: without the attribute, with it, and with it taken off in
+/// the next statement.
+const THREE: &str = "function markup(id, sandbox) { return '<iframe id=' + id + (sandbox ? ' sandbox' : '') + ' src=\"/' + id + '.html\"></iframe>'; } \
+    function holder() { return document.body.appendChild(document.createElement('div')); } \
+    function three(put) { [['none', false, false], ['empty', true, false], ['removed', true, true]].forEach(function (c) { \
+        var f = put(c[0], markup(c[0], c[1])) || document.getElementById(c[0]); \
+        if (c[2]) f.removeAttribute('sandbox'); }); }";
+
+/// What the three frames' requests carried, and Chrome's rows for the same three.
+fn three(put: &str, pinned: &str) -> Vec<Option<String>> {
+    let (b, _) = page("");
+    b.scan_frames().unwrap();
+    run(&b, &format!("{THREE} three({put});"));
+    assert!(chrome_has_document("inserted", &format!("{pinned}_none")));
+    assert!(!chrome_has_document("inserted", &format!("{pinned}_empty")) && !chrome_has_document("inserted", &format!("{pinned}_removed")));
+    asked(&b)
+}
+
+fn none_empty_empty() -> Vec<Option<String>> {
+    vec![None, some(""), some("")]
+}
+
+#[test]
+fn a_frame_set_as_inner_html_is_asked_for_with_its_attribute() {
+    assert_eq!(three("function (id, m) { holder().innerHTML = m; }", "inner"), none_empty_empty());
+}
+
+#[test]
+fn a_frame_inserted_as_adjacent_html_is_asked_for_with_its_attribute() {
+    assert_eq!(three("function (id, m) { holder().insertAdjacentHTML('beforeend', m); }", "adjacent"), none_empty_empty());
+}
+
+#[test]
+fn a_frame_set_as_outer_html_is_asked_for_with_its_attribute() {
+    assert_eq!(
+        three("function (id, m) { holder().appendChild(document.createElement('p')).outerHTML = m; }", "outer"),
+        none_empty_empty()
+    );
+}
+
+#[test]
+fn a_frame_inserted_through_a_fragment_is_asked_for_with_its_attribute() {
+    assert_eq!(
+        three("function (id, m) { var t = document.createElement('template'); t.innerHTML = m; holder().appendChild(t.content); }", "fragment"),
+        none_empty_empty()
+    );
+}
+
+/// Made in a subtree outside the document: asked for when the subtree goes in.
+#[test]
+fn a_frame_is_asked_for_when_its_subtree_goes_into_the_document() {
+    assert_eq!(
+        three("function (id, m) { var d = document.createElement('div'); d.innerHTML = m; document.body.appendChild(d); }", "connected"),
+        none_empty_empty()
+    );
+    // The attribute taken off before the subtree goes in: Chrome `inserted.connected_before`.
+    let (b, _) = page("");
+    run(
+        &b,
+        "var d = document.createElement('div'); d.innerHTML = '<iframe sandbox src=/x.html></iframe>'; \
+         window.before = 0; d.firstChild.removeAttribute('sandbox');",
+    );
+    assert_eq!(b.take_frame_requests(), vec![], "asked for before it was in the document");
+    run(&b, "document.body.appendChild(d);");
+    assert!(chrome_has_document("inserted", "connected_before"));
+    assert_eq!(asked(&b), vec![None]);
+}
+
+#[test]
+fn a_deep_copy_of_a_frame_is_asked_for_with_the_copys_attribute() {
+    assert_eq!(
+        three(
+            "function (id, m) { var d = document.createElement('div'); d.innerHTML = m; \
+               var c = d.cloneNode(true); document.body.appendChild(c); return c.firstChild; }",
+            "copy"
+        ),
+        none_empty_empty()
+    );
+}
+
+#[test]
+fn a_frame_adopted_from_another_document_is_asked_for_with_its_attribute() {
+    assert_eq!(
+        three(
+            "function (id, m) { var other = document.implementation.createHTMLDocument(''); other.body.innerHTML = m; \
+               var f = document.adoptNode(other.body.firstChild); document.body.appendChild(f); return f; }",
+            "adopted"
+        ),
+        none_empty_empty()
+    );
+}
+
+/// Markup set before the engine's first scan is asked for when set, not at the scan.
+#[test]
+fn a_frame_set_as_inner_html_before_the_scan_is_asked_for_then() {
+    let (b, _) = page("<div id=p></div>");
+    run(&b, "document.getElementById('p').innerHTML = '<iframe id=f sandbox src=/x.html></iframe>'; document.getElementById('f').removeAttribute('sandbox');");
+    b.scan_frames().unwrap();
+    assert_eq!(asked(&b), vec![some("")]);
+}
+
+/// A frame that markup replaced has left the document: its request says so.
+#[test]
+fn a_frame_replaced_by_inner_html_has_left() {
+    let (b, doc) = page("<div id=p><iframe id=f></iframe></div>");
+    b.scan_frames().unwrap();
+    let node = doc.get_element_by_id("f").unwrap().id.raw();
+    let _ = b.take_frame_requests();
+    run(&b, "document.getElementById('p').innerHTML = '<b>x</b>';");
+    assert_eq!(b.take_frame_requests(), vec![FrameRequest { node, url: None, sandbox: None }]);
+}
+
+/// A request that was not kept (too many are parked) does not spend the attribute as parsed.
+#[test]
+fn a_request_that_was_not_kept_does_not_spend_the_attribute_as_parsed() {
+    let (b, _) = page("<iframe id=r sandbox></iframe>");
+    run(
+        &b,
+        "for (var i = 0; i < 256; i++) document.body.appendChild(document.createElement('iframe')); \
+         document.getElementById('r').removeAttribute('sandbox');",
+    );
+    b.scan_frames().unwrap();
+    assert_eq!(b.take_frame_requests().len(), 256);
+    run(&b, "document.getElementById('r').src = '/x.html';");
+    assert_eq!(asked(&b), vec![some("")]);
+}
+
+/// Known difference, recorded: `document.write` inserts nothing in this engine yet, so a frame
+/// written that way does not exist and nothing is asked for. Chrome (`inserted.write_*`) makes
+/// the frame and treats its attribute as for any other.
+#[test]
+fn known_difference_document_write_makes_no_frame() {
+    let (b, _) = page("");
+    b.scan_frames().unwrap();
+    run(&b, "document.write('<iframe id=w sandbox src=/x.html></iframe>'); window.made = String(document.getElementById('w'));");
+    assert!(chrome_has_document("inserted", "write_none") && !chrome_has_document("inserted", "write_empty"));
+    assert!(matches!(b.evaluate("made"), Ok(JsValue::String(s)) if s == "null"), "document.write made an element: ask for its frame");
+    assert_eq!(b.take_frame_requests(), vec![]);
+}

@@ -14,6 +14,12 @@ document.getElementById("mk_removed").removeAttribute("sandbox");
 document.getElementById("mk_added").setAttribute("sandbox", "");
 document.getElementById("mk_added_src").setAttribute("sandbox", "");
 document.getElementById("mk_added_src").src = "frame_sandbox_child.html?c=mk_added_src";
+// Written by the parser's script, with the attribute taken off the last one at once.
+document.write('<iframe id=write_none src="frame_sandbox_child.html?c=write_none"></iframe>' +
+  '<iframe id=write_empty sandbox src="frame_sandbox_child.html?c=write_empty"></iframe>' +
+  '<iframe id=write_removed sandbox src="frame_sandbox_child.html?c=write_removed"></iframe>');
+["write_none", "write_empty", "write_removed"].forEach(function (id) { count(document.getElementById(id)); });
+document.getElementById("write_removed").removeAttribute("sandbox");
 </script>
 <script src="frame_sandbox_page.js"></script>
 </body>

@@ -8,12 +8,12 @@
 //!
 //! The expected answers are the pinned Chrome's (CfT 148.0.7778.216, headless, recorded
 //! 2026-11-15) on `docs/diagnostics/2026-11-15/frame_sandbox_{parent.html,child.html,page.js}`,
-//! in `frame_sandbox_cft148.json`: per frame, the `load`s its element heard, whether its script
-//! wrote to the page (`marked`), and `contentDocument` from the page. Rows this stage does not
+//! in `frame_sandbox_cft148.json`: per frame, the `load`s its element heard, the page's field
+//! for the frame (`marked`), and `contentDocument` from the page. Rows this stage does not
 //! match are asserted as known differences, each against Chrome's row, so that a change of
 //! either side shows:
-//!   - `allow-same-origin` (alone or with `allow-scripts`): Chrome gives the page the frame's
-//!     document, and with both tokens the frame's script runs and reaches the page;
+//!   - `allow-same-origin`: Chrome's row is `1|0|object`, and with `allow-scripts` too
+//!     `1|1|object` (loads | parent field | contentDocument); here both are `1|0|null`;
 //!   - `contentWindow` of a frame without a document is an object in Chrome and `null` here
 //!     (as for a cross-origin frame in this stage);
 //!   - in Chrome a frame with `allow-scripts` alone runs its script in its own origin; here
@@ -32,7 +32,10 @@ const PIN: &str = include_str!("../../../docs/diagnostics/2026-11-15/frame_sandb
 const CHILD: &str = "<!doctype html><title>child</title><p id=c>child text</p><script>\
 var name = location.pathname.slice(1).replace('.html', ''); parent.marks[name] = (parent.marks[name] || 0) + 1;</script>";
 
-const CHILDREN: [&str; 14] = [
+const CHILDREN: [&str; 17] = [
+    "/inner_none.html",
+    "/inner_empty.html",
+    "/inner_removed.html",
     "/src_none.html",
     "/src_empty.html",
     "/src_scripts.html",
@@ -143,8 +146,9 @@ fn the_pin_is_the_pinned_chromes() {
     assert_eq!(chrome("src", "empty"), FLOOR);
 }
 
-/// The frame's script would count itself on the page: with the attribute it does not, the
-/// element hears one `load`, `contentDocument` is `null`, and nothing was requested.
+/// Chrome's rows (loads | parent field | contentDocument): no attribute `1|1|object`,
+/// `sandbox=""` and `allow-scripts` `1|0|null`. Here a frame with the attribute is `1|0|null`
+/// and nothing of it is requested.
 #[test]
 fn a_frame_with_the_attribute_gets_no_document_and_one_load() {
     let body = format!("<script>{PRELUDE} for (var k in VALUES) make('src_' + k, VALUES[k], 'src');</script>");
@@ -191,9 +195,10 @@ fn a_srcdoc_frame_with_the_attribute_gets_no_document_and_one_load() {
     assert_eq!(page.row("srcdoc_both"), FLOOR);
 }
 
-/// An about:blank frame with the attribute: the page has no document to write a script into.
+/// An about:blank frame the page then writes into. Chrome `blank.empty`: `contentDocument` is
+/// `null`, so the write throws a TypeError; `1|0|null`.
 #[test]
-fn the_page_cannot_write_into_a_blank_frame_with_the_attribute() {
+fn a_blank_frame_with_the_attribute_matches_the_pinned_write_result() {
     let body = format!(
         "<script>{PRELUDE} window.wrote = {{}};
 ['empty', 'both'].forEach(function (k) {{
@@ -213,7 +218,7 @@ window.again = function () {{ ['empty', 'both'].forEach(function (k) {{
     assert_eq!(page.js("again()"), "throws TypeError,throws TypeError throws TypeError,throws TypeError");
     assert_eq!(page.row("blank_empty"), chrome("blank", "empty"));
     assert_eq!(page.row("blank_empty"), FLOOR);
-    // Known difference: with both tokens Chrome's page writes and the script runs.
+    // Known difference: with both tokens Chrome's row is `2|1|object`, the write `ok`.
     assert_eq!((chrome("blank", "both"), pin["blank"]["both"]["write"].as_str()), ("2|1|object".to_string(), Some("ok")));
     assert_eq!(page.row("blank_both"), FLOOR);
 }
@@ -275,6 +280,27 @@ document.getElementById('mk_added_src').src = '/mk_added_src.html';</script>"
     for path in ["/mk_removed.html", "/mk_added.html", "/mk_added_src_first.html", "/mk_added_src.html"] {
         assert_eq!(page.served(path), 0, "{path} was requested");
     }
+}
+
+/// Frames set as `innerHTML` after the page's load: asked for when set, with the attribute as
+/// it is then. Chrome `inserted.inner_*`: without the attribute the frame loads and the page
+/// has its document; with it, also when it is taken off in the next statement, `1|0|null`.
+#[test]
+fn a_frame_set_as_inner_html_loads_and_takes_its_attribute() {
+    let body = format!("<div id=a></div><div id=b></div><div id=c></div><script>{PRELUDE}</script>");
+    let mut page = Page::load(true, &body);
+    page.settle("true");
+    page.js(
+        "function put(at, id, sandbox) {            document.getElementById(at).innerHTML = '<iframe id=' + id + (sandbox ? ' sandbox' : '') + ' src=\"/' + id + '.html\"></iframe>';            return count(document.getElementById(id)); }          put('a', 'inner_none', false); put('b', 'inner_empty', true); put('c', 'inner_removed', true).removeAttribute('sandbox'); 0",
+    );
+    page.settle("all(['inner_none', 'inner_empty', 'inner_removed'], 1)");
+    for name in ["inner_none", "inner_empty", "inner_removed"] {
+        assert_eq!(page.row(name), chrome("inserted", name), "{name}");
+    }
+    assert_eq!(page.row("inner_none"), "1|1|object");
+    assert_eq!(page.row("inner_empty"), FLOOR);
+    assert_eq!(page.row("inner_removed"), FLOOR);
+    assert_eq!((page.served("/inner_none.html"), page.served("/inner_empty.html"), page.served("/inner_removed.html")), (1, 0, 0));
 }
 
 /// What the page does around the request does not change the answer: built-ins it replaced,
