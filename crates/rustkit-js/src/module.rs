@@ -246,11 +246,13 @@ impl JsRuntime {
                 self.diag.know_path(url);
                 self.sources.remember(url, source);
                 let path = Path::new(url);
+                // Compiled carrying what was registered for it.
+                let _detail = boa_engine::vm::ErrorDetailScope::enter(self.diag.compiles_withheld(url, self.current_realm.0));
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
                     Ok(module) => module,
                     Err(e) => {
-                        self.report_error(&e);
+                        self.report_error_of(url, &e);
                         return Err(describe(&e, &mut self.context));
                     }
                 }
@@ -317,6 +319,9 @@ impl JsRuntime {
                             self.sources.remember(requested, &fetched.source);
                         }
                         let path = Path::new(fetched.final_url.as_str());
+                        let _detail = boa_engine::vm::ErrorDetailScope::enter(
+                            self.diag.compiles_withheld(&fetched.final_url, self.current_realm.0),
+                        );
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
                             None,
@@ -382,7 +387,8 @@ impl JsRuntime {
             match entry.load.state() {
                 PromiseState::Pending => return ModuleState::Loading,
                 PromiseState::Rejected(reason) => {
-                    self.report_value(&reason);
+                    let load = entry.load.clone();
+                    self.report_rejection(&load, &reason);
                     let message = describe_value(&reason, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                         entry.failed = Some(message.clone());
@@ -393,7 +399,7 @@ impl JsRuntime {
             }
             let module = entry.module.clone();
             if let Err(e) = module.link(&mut self.context) {
-                self.report_error(&e);
+                self.report_error_of(&handle.0, &e);
                 let message = describe(&e, &mut self.context);
                 if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                     entry.failed = Some(message.clone());
@@ -407,7 +413,7 @@ impl JsRuntime {
                     p
                 }
                 Err(e) => {
-                    self.report_error(&e);
+                    self.report_error_of(&handle.0, &e);
                     let message = describe(&e, &mut self.context);
                     if let Some(entry) = self.modules.entries.get_mut(&handle.0) {
                         entry.failed = Some(message.clone());
@@ -439,20 +445,28 @@ impl JsRuntime {
             PromiseState::Fulfilled(_) => ModuleState::Done,
             PromiseState::Rejected(reason) => {
                 if first_outcome {
-                    self.report_value(&reason);
+                    self.report_rejection(&evaluation, &reason);
                 }
                 ModuleState::Threw(self.thrown_text(&reason))
             }
         }
     }
 
-    /// A module's error, reported once (with reports on).
-    fn report_error(&mut self, error: &boa_engine::JsError) {
-        self.uncaught_error(error, true, None);
+    /// A module's error before it ran (it does not parse or link),
+    /// reported once: the module `url`'s own, as registered.
+    fn report_error_of(&mut self, url: &str, error: &boa_engine::JsError) {
+        self.uncaught_error(error, true, Some(url));
     }
 
-    fn report_value(&mut self, value: &JsValue) {
-        self.uncaught_error(&boa_engine::JsError::from_opaque(value.clone()), true, None);
+    /// The reason a module's promise was rejected with, reported once.
+    /// What the page is told is the answer of the code that rejected it
+    /// (the promise keeps it); with none, nothing.
+    fn report_rejection(&mut self, promise: &boa_engine::object::builtins::JsPromise, value: &JsValue) {
+        let withheld = JsObject::from(promise.clone())
+            .downcast_ref::<boa_engine::builtins::promise::Promise>()
+            .and_then(|promise| promise.rejection_detail_withheld())
+            .unwrap_or(true);
+        self.uncaught_error_or(&boa_engine::JsError::from_opaque(value.clone()), true, withheld);
     }
 
     /// A module evaluation's rejection as the module's error text, the

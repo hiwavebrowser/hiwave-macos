@@ -83,6 +83,7 @@ pub(crate) use code_block::GlobalFunctionBinding;
 
 mod call_frame;
 mod code_block;
+pub use code_block::ErrorDetailScope; // HIWAVE PATCH (error-detail)
 mod completion_record;
 mod inline_cache;
 mod runtime_limits;
@@ -123,6 +124,12 @@ pub struct Vm {
     /// This eliminates the conversion between [`crate::JsNativeError`] and [`crate::JsValue`] if not needed.
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) runtime_limits: RuntimeLimits,
+
+    // HIWAVE PATCH (error-detail): the last raised error that became a
+    // value (a `catch`, a rejection), with the error-detail flag of the
+    // code that threw it. See PATCHES.md.
+    pub(crate) error_detail_note: Option<(JsValue, bool)>,
+    // END HIWAVE PATCH
 
     // HIWAVE PATCH (interrupt): a word another thread may set to stop the
     // running script, and the turn it is compared with. See PATCHES.md.
@@ -519,6 +526,7 @@ impl Vm {
             stack: Stack::new(1024),
             return_value: JsValue::undefined(),
             pending_exception: None,
+            error_detail_note: None, // HIWAVE PATCH (error-detail)
             runtime_limits: RuntimeLimits::default(),
             interrupt: None,              // HIWAVE PATCH (interrupt)
             interrupt_turn: 0,            // HIWAVE PATCH (interrupt)
@@ -913,6 +921,11 @@ impl Context {
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (error-detail): raised here first, by this frame's code.
+        if err.detail_withheld.is_none() {
+            err.detail_withheld = Some(self.vm.frame().code_block.error_detail_withheld());
+        }
+        // END HIWAVE PATCH
         // Capture the backtrace early, before any exception handler check,
         // so that errors caught by internal handlers (e.g. async module
         // evaluation) still carry source position information.
@@ -1045,6 +1058,15 @@ impl Context {
     }
 
     fn handle_throw(&mut self) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (error-detail): as `handle_error`, for a throw that
+        // came here directly.
+        let withheld = self.vm.frame().code_block.error_detail_withheld();
+        if let Some(err) = self.vm.pending_exception.as_mut()
+            && err.detail_withheld.is_none()
+        {
+            err.detail_withheld = Some(withheld);
+        }
+        // END HIWAVE PATCH
         if self
             .vm
             .pending_exception

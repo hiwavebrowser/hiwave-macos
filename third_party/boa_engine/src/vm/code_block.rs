@@ -51,11 +51,51 @@ bitflags! {
         /// If the function requires a function scope.
         const HAS_FUNCTION_SCOPE = 0b1_0000_0000;
 
+        // HIWAVE PATCH (error-detail): the code is of a script whose errors
+        // the host reports without detail. See PATCHES.md.
+        const ERROR_DETAIL_WITHHELD = 0b10_0000_0000;
+        // END HIWAVE PATCH
+
         /// Trace instruction execution to `stdout`.
         #[cfg(feature = "trace")]
         const TRACEABLE = 0b1000_0000_0000_0000;
     }
 }
+
+// HIWAVE PATCH (error-detail): every code block compiled while a scope is
+// entered carries the scope's flag: a script's top-level code and every
+// function compiled from its source. Code made at run time (`eval`, the
+// `Function` constructors) is compiled under the flag of the code that is
+// running. See PATCHES.md.
+thread_local! {
+    static ERROR_DETAIL_WITHHELD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, code blocks are compiled with the error-detail flag it
+/// was entered with; the flag before it is put back when it is dropped.
+#[derive(Debug)]
+pub struct ErrorDetailScope(bool);
+
+impl ErrorDetailScope {
+    /// Compile with `withheld` from here on.
+    #[must_use]
+    pub fn enter(withheld: bool) -> Self {
+        Self(ERROR_DETAIL_WITHHELD.with(|flag| flag.replace(withheld)))
+    }
+
+    /// The flag code blocks are compiled with now.
+    #[must_use]
+    pub fn current() -> bool {
+        ERROR_DETAIL_WITHHELD.with(Cell::get)
+    }
+}
+
+impl Drop for ErrorDetailScope {
+    fn drop(&mut self) {
+        ERROR_DETAIL_WITHHELD.with(|flag| flag.set(self.0));
+    }
+}
+// END HIWAVE PATCH
 
 impl CodeBlockFlags {
     /// Check if the [`CodeBlock`] has a function scope.
@@ -198,6 +238,15 @@ pub struct CodeBlock {
 
 /// ---- `CodeBlock` public API ----
 impl CodeBlock {
+    // HIWAVE PATCH (error-detail)
+    /// Whether this code is of a script whose errors the host reports
+    /// without detail.
+    #[must_use]
+    pub fn error_detail_withheld(&self) -> bool {
+        self.flags.get().contains(CodeBlockFlags::ERROR_DETAIL_WITHHELD)
+    }
+    // END HIWAVE PATCH
+
     /// Creates a new `CodeBlock`.
     #[must_use]
     pub fn new(name: JsString, length: u32, strict: bool) -> Self {

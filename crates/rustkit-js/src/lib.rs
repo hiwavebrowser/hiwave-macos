@@ -1026,7 +1026,10 @@ impl JsRuntime {
     /// ([`set_error_events`](Self::set_error_events)) names `url` as its
     /// file; one thrown by a `muted` script, or by a script never
     /// registered, is announced as "Script error." with no file, position
-    /// or value. At most 4096 scripts are kept; past that a script is an
+    /// or value. The script's code carries that from when it is compiled,
+    /// and code it makes at run time carries it too: what an event says is
+    /// decided by the code that was running where the error was thrown.
+    /// At most 4096 scripts are kept; past that a script is an
     /// unregistered one.
     pub fn register_script(&mut self, name: &str, url: &str, muted: bool) {
         #[cfg(feature = "boa")]
@@ -1049,7 +1052,19 @@ impl JsRuntime {
     /// ([`set_error_events`](Self::set_error_events)), then report it
     /// unless a listener canceled the event.
     #[cfg(feature = "boa")]
+    ///
+    /// What the page is told is decided by the code that was running where
+    /// the error was thrown (the flag its code block was compiled with).
+    /// An error the VM never raised (a script that does not parse) is its
+    /// script's: `evaluated`, as registered. With neither, no detail.
     pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool, evaluated: Option<&str>) {
+        let unraised = evaluated.is_none_or(|name| self.diag.compiles_withheld(name, self.current_realm.0));
+        self.uncaught_error_or(error, announce, unraised);
+    }
+
+    /// [`uncaught_error`](Self::uncaught_error), with the answer for an
+    /// error the VM never raised given outright.
+    pub(crate) fn uncaught_error_or(&mut self, error: &boa_engine::JsError, announce: bool, unraised: bool) {
         let events = announce && self.diag.error_events.get() && !self.deadline.hit.get();
         if !events && !self.diag.on.get() {
             return;
@@ -1064,7 +1079,8 @@ impl JsRuntime {
                 let host = self.entered_host();
                 self.context.reset_recursion_max();
                 self.diag.realm.set(self.current_realm.0);
-                let canceled = self.diag.announce(&host, &value, &report, evaluated, &mut self.context);
+                let withheld = error.detail_withheld().unwrap_or(unraised);
+                let canceled = self.diag.announce(&host, &value, &report, withheld, &mut self.context);
                 self.consume_interrupt();
                 let _ = self.context.run_jobs();
                 self.consume_interrupt();
@@ -1171,8 +1187,13 @@ impl JsRuntime {
         // A rejection made by a script whose errors are reported without
         // detail fires no event (HTML HostPromiseRejectionTracker, the
         // script's muted errors): the reason is not the page's to read.
-        let report = self.diag.describe(reason, None, true, &mut self.context);
-        if matches!(self.diag.told(&report, None), diag::Told::Nothing) {
+        // Decided by the code that rejected it (the promise keeps its
+        // flag); a rejection no code can be named for is not announced.
+        let withheld = promise
+            .downcast_ref::<boa_engine::builtins::promise::Promise>()
+            .and_then(|promise| promise.rejection_detail_withheld())
+            .unwrap_or(true);
+        if withheld {
             self.enter_realm(outer);
             return false;
         }
@@ -1534,6 +1555,11 @@ impl JsRuntime {
             // below. The live counters are not touched: a stop already
             // unwinds them.
             self.context.reset_recursion_max();
+            // The script's code is compiled carrying what was registered
+            // for it (`register_script`); the embedder's own carries none.
+            let _detail = boa_engine::vm::ErrorDetailScope::enter(
+                path.is_some_and(|path| self.diag.compiles_withheld(path, self.current_realm.0)),
+            );
             let result = match path {
                 Some(path) => {
                     self.diag.know_path(path);
@@ -2266,9 +2292,21 @@ fn host_object(
     let report_error = unsafe {
         NativeFunction::from_closure(move |this, args, context| {
             let value = args.first().cloned().unwrap_or_default();
+            // Whose code threw it. Handed over from a `catch` (the usual
+            // caller): the flag the VM noted for the value it caught. Handed
+            // over for the page (`reportError(e)`, second argument `true`):
+            // the code calling that function, two frames up. Unknown: not
+            // told in detail.
+            let for_the_page = args.get(1).and_then(boa_engine::JsValue::as_boolean) == Some(true);
+            let withheld = if for_the_page {
+                context.running_error_detail_withheld(1)
+            } else {
+                context.take_error_detail_note(&value)
+            }
+            .unwrap_or(true);
             // Called on the host object (`__rk.reportError(e)`): the realm's
             // `error` event comes first, and can cancel the report.
-            reporter.uncaught(this.as_object().as_ref(), &value, context);
+            reporter.uncaught(this.as_object().as_ref(), &value, withheld, context);
             Ok(boa_engine::JsValue::undefined())
         })
     };

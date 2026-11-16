@@ -207,6 +207,11 @@ macro_rules! js_error {
 pub struct JsError {
     inner: Repr,
     pub(crate) backtrace: Option<Backtrace>,
+    // HIWAVE PATCH (error-detail): the error-detail flag of the code that
+    // was running where this was thrown; `None` until the VM raises it.
+    // See PATCHES.md.
+    pub(crate) detail_withheld: Option<bool>,
+    // END HIWAVE PATCH
 }
 
 impl Eq for JsError {}
@@ -426,6 +431,7 @@ impl JsError {
         Self {
             inner: Repr::Native(Box::new(err)),
             backtrace: None,
+            detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -473,6 +479,7 @@ impl JsError {
         Self {
             inner: Repr::Opaque(value),
             backtrace,
+            detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -503,6 +510,26 @@ impl JsError {
     /// assert!(error.into_opaque(context).is_err());
     /// ```
     pub fn into_opaque(self, context: &mut Context) -> JsResult<JsValue> {
+        // HIWAVE PATCH (error-detail): the flag does not travel in a value;
+        // the VM notes it beside the value this becomes (a `catch`, a
+        // rejection), for whoever is handed that value next.
+        let detail = self.detail_withheld;
+        let value = self.into_opaque_inner(context)?;
+        if let Some(withheld) = detail {
+            context.vm.error_detail_note = Some((value.clone(), withheld));
+        }
+        Ok(value)
+    }
+
+    /// The error-detail flag of the code that was running where this was
+    /// thrown; `None` for an error the VM has not raised.
+    #[must_use]
+    pub fn detail_withheld(&self) -> Option<bool> {
+        self.detail_withheld
+    }
+    // END HIWAVE PATCH
+
+    fn into_opaque_inner(self, context: &mut Context) -> JsResult<JsValue> {
         match self.inner {
             Repr::Native(e) => {
                 let obj = e.into_opaque(context);
@@ -850,6 +877,7 @@ impl From<JsNativeError> for JsError {
         Self {
             inner: Repr::Native(Box::new(error)),
             backtrace: None,
+            detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 }
@@ -859,6 +887,7 @@ impl From<EngineError> for JsError {
         Self {
             inner: Repr::Engine(value),
             backtrace: None,
+            detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 }

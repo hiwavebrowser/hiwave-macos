@@ -86,6 +86,12 @@ pub struct Promise {
     fulfill_reactions: Vec<ReactionRecord>,
     reject_reactions: Vec<ReactionRecord>,
     handled: bool,
+    // HIWAVE PATCH (error-detail): for a rejected promise, the error-detail
+    // flag of the code that rejected it; `None` when no code can be named.
+    // See PATCHES.md.
+    #[unsafe_ignore_trace]
+    rejection_detail_withheld: Option<bool>,
+    // END HIWAVE PATCH
 }
 
 /// The operation type of the [`HostPromiseRejectionTracker`][fn] abstract operation.
@@ -473,6 +479,17 @@ impl BuiltInConstructor for Promise {
 }
 
 impl Promise {
+    // HIWAVE PATCH (error-detail)
+    /// For a rejected promise: the error-detail flag of the code that
+    /// rejected it (the code that threw, or that called the reject
+    /// function; for a rejection passed on, the first promise's). `None`
+    /// when no code can be named.
+    #[must_use]
+    pub fn rejection_detail_withheld(&self) -> Option<bool> {
+        self.rejection_detail_withheld
+    }
+    // END HIWAVE PATCH
+
     // HIWAVE PATCH (interrupt)
     /// Creates a `Promise` already fulfilled with `value`, without the calls
     /// `Promise.resolve` makes (which the interrupt can stop).
@@ -482,6 +499,7 @@ impl Promise {
             fulfill_reactions: Vec::default(),
             reject_reactions: Vec::default(),
             handled: false,
+            rejection_detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -534,6 +552,7 @@ impl Promise {
             fulfill_reactions: Vec::default(),
             reject_reactions: Vec::default(),
             handled: false,
+            rejection_detail_withheld: None, // HIWAVE PATCH (error-detail)
         }
     }
 
@@ -2293,10 +2312,10 @@ impl Promise {
             handler: on_rejected_job_callback,
         };
 
-        let (state, handled) = {
+        let (state, handled, rejection_detail) = {
             let promise = promise.borrow_mut();
             let promise = promise.data();
-            (promise.state.clone(), promise.handled)
+            (promise.state.clone(), promise.handled, promise.rejection_detail_withheld) // HIWAVE PATCH (error-detail)
         };
 
         match state {
@@ -2316,7 +2335,7 @@ impl Promise {
             PromiseState::Fulfilled(ref value) => {
                 //   b. Let fulfillJob be NewPromiseReactionJob(fulfillReaction, value).
                 let fulfill_job =
-                    new_promise_reaction_job(fulfill_reaction, value.clone(), context);
+                    new_promise_reaction_job(fulfill_reaction, value.clone(), None, context);
 
                 //   c. Perform HostEnqueuePromiseJob(fulfillJob.[[Job]], fulfillJob.[[Realm]]).
                 context
@@ -2338,7 +2357,7 @@ impl Promise {
                 }
 
                 //   d. Let rejectJob be NewPromiseReactionJob(rejectReaction, reason).
-                let reject_job = new_promise_reaction_job(reject_reaction, reason.clone(), context);
+                let reject_job = new_promise_reaction_job(reject_reaction, reason.clone(), rejection_detail, context);
 
                 //   e. Perform HostEnqueuePromiseJob(rejectJob.[[Job]], rejectJob.[[Realm]]).
                 context
@@ -2410,10 +2429,20 @@ impl Promise {
             argument: &JsValue,
             context: &mut Context,
         ) {
+            trigger_promise_reactions_with(reactions, argument, None, context);
+        }
+
+        // HIWAVE PATCH (error-detail): `detail` is the rejected promise's flag.
+        fn trigger_promise_reactions_with(
+            reactions: Vec<ReactionRecord>,
+            argument: &JsValue,
+            detail: Option<bool>,
+            context: &mut Context,
+        ) {
             // 1. For each element reaction of reactions, do
             for reaction in reactions {
                 // a. Let job be NewPromiseReactionJob(reaction, argument).
-                let job = new_promise_reaction_job(reaction, argument.clone(), context);
+                let job = new_promise_reaction_job(reaction, argument.clone(), detail, context);
 
                 // b. Perform HostEnqueuePromiseJob(job.[[Job]], job.[[Realm]]).
                 context.job_executor().enqueue_job(job.into(), context);
@@ -2496,8 +2525,18 @@ impl Promise {
                 // 4. Set promise.[[PromiseFulfillReactions]] to undefined.
                 promise.fulfill_reactions.clear();
 
+                // HIWAVE PATCH (error-detail): which code rejected it. A
+                // reason that was just thrown (a reaction or an async body
+                // that threw) or passed on from another promise carries its
+                // note; otherwise it is the code calling the reject function.
+                let detail = context
+                    .take_error_detail_note(&reason)
+                    .or_else(|| context.running_error_detail_withheld(0));
+                promise.rejection_detail_withheld = detail;
+                // END HIWAVE PATCH
+
                 // 8. Perform TriggerPromiseReactions(reactions, reason).
-                trigger_promise_reactions(reactions, &reason, context);
+                trigger_promise_reactions_with(reactions, &reason, detail, context);
 
                 // 3. Set promise.[[PromiseResult]] to reason.
                 // 6. Set promise.[[PromiseState]] to rejected.
@@ -2692,9 +2731,13 @@ impl Promise {
 const INTERRUPTED_JOB: &str = "promise job was interrupted";
 // END HIWAVE PATCH
 
+// HIWAVE PATCH (error-detail): `detail` is, for a reject reaction, the flag
+// of the promise that was rejected: a reaction with no handler passes the
+// reason on, and the promise it rejects takes the same flag.
 fn new_promise_reaction_job(
     mut reaction: ReactionRecord,
     argument: JsValue,
+    detail: Option<bool>,
     context: &mut Context,
 ) -> PromiseJob {
     // Inverting order since `job` captures `reaction` by value.
@@ -2729,6 +2772,9 @@ fn new_promise_reaction_job(
                 // ii. Else,
                 //   1. Assert: type is Reject.
                 ReactionType::Reject => {
+                    // HIWAVE PATCH (error-detail)
+                    context.vm.error_detail_note = detail.map(|withheld| (argument.clone(), withheld));
+                    // END HIWAVE PATCH
                     // 2. Let handlerResult be ThrowCompletion(argument).
                     Err(argument.clone())
                 }

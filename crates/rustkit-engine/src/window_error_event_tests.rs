@@ -76,8 +76,15 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
     let pin: serde_json::Value = serde_json::from_str(PIN).unwrap();
     assert_eq!(pin["browser"], "148.0.7778.216");
     let got = run_probe();
+    // The steps that need the other origin's script are left out on both sides (see below).
     let rows = |record: &serde_json::Value| -> std::collections::BTreeSet<String> {
-        record["events"].as_array().unwrap().iter().map(row).collect()
+        record["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| !event["where"].as_str().is_some_and(|step| step.contains("other origin")))
+            .map(row)
+            .collect()
     };
     let mut want = rows(&pin);
     let mut differ = |chrome: &str, here: Option<&str>| {
@@ -89,7 +96,12 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
     let own = "\"[object ErrorEvent]\",true,false,true";
     // A thrown value that is not an error, an attribute handler's code and an inserted inline
     // script have no position here (Chrome gives each one).
-    for (message, error) in [("Uncaught a string", "string"), ("Uncaught [object Object]", "object"), ("Uncaught null", "null")] {
+    for (message, error) in [
+        ("Uncaught a string", "string"),
+        ("Uncaught [object Object]", "object"),
+        ("Uncaught null", "null"),
+        ("Uncaught the page's string", "string"),
+    ] {
         differ(
             &format!("{message} | window_error_page.js | error {error} | positioned true | {own}"),
             Some(&format!("{message} | (the document, or none) | error {error} | positioned false | {own}")),
@@ -112,10 +124,10 @@ fn the_probe_page_records_what_the_pinned_chrome_records() {
     // the next test.)
     differ(&format!("Uncaught Error: from a module | window_error_module.js | error Error | positioned true | {own}"), None);
     // Another origin's script cannot be loaded in a test: the loader refuses a second loopback
-    // origin ("Address not permitted"), so Chrome's four `Script error.` rows (one row in a set)
-    // are not reached here. That rule is held by the bindings tests, on scripts registered as
-    // the engine registers them, and by `script_error_detail`'s own tests.
-    differ(&format!("Script error. | (the document, or none) | error null | positioned false | {own}"), None);
+    // origin ("Address not permitted"), so the probe's `other origin` steps are not reached here
+    // and are left out of both sides above. Chrome's rows for them are the expectations of the
+    // bindings tests, on scripts registered as the engine registers them; the fetch-time rule
+    // has `script_error_detail`'s own tests.
     assert_eq!(rows(&got), want);
 
     // `onerror`: five arguments, `this` the Window, for every event it was called for.

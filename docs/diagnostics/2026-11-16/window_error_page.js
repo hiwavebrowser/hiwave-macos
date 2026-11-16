@@ -31,7 +31,7 @@ window.addEventListener("error", function (ev) {
     if (out.inHandler.calls < 5) throw new Error("from the handler");
   }
 });
-window.addEventListener("unhandledrejection", function (ev) { out.rejections.push(String(ev.reason && ev.reason.message)); });
+window.addEventListener("unhandledrejection", function (ev) { var r = ev.reason; out.rejections.push(r instanceof Error ? r.message : typeof r === "object" && r !== null ? JSON.stringify(r) : String(r)); });
 
 var steps = [
   ["listener", function () { var b = document.createElement("button"); document.body.appendChild(b);
@@ -56,8 +56,21 @@ var steps = [
   ["frame", function () { var f = document.createElement("iframe"); f.src = "window_error_child.html"; document.body.appendChild(f); }],
   ["other origin top level", function () { var s = document.createElement("script"); s.src = window.OTHER + "/window_error_other.js"; document.body.appendChild(s); }],
   ["other origin function", function () { setTimeout(function () { if (typeof otherOriginThrows === "function") otherOriginThrows(); else out.otherMissing = true; }, 0); }],
-  ["other origin eval", function () { setTimeout(function () { if (typeof otherOriginEvals === "function") otherOriginEvals(); }, 0); }],
-  ["other origin string", function () { setTimeout(function () { if (typeof otherOriginThrowsAString === "function") otherOriginThrowsAString(); }, 0); }],
+  ["other origin eval", function () { setTimeout(function () { otherOriginEvals(); }, 0); }],
+  ["other origin string", function () { setTimeout(function () { otherOriginThrowsAString(); }, 0); }],
+  ["other origin object", function () { setTimeout(function () { otherOriginThrowsAnObject(); }, 0); }],
+  ["other origin made function", function () { setTimeout(function () { otherOriginMade(); }, 0); }],
+  ["other origin eval-made function", function () { setTimeout(function () { otherOriginEvalMade(); }, 0); }],
+  ["other origin timer", function () { setTimeout(otherOriginThrows, 0); }],
+  ["other origin rejection in a callback", function () { setTimeout(otherOriginRejects, 0); }],
+  ["other origin resource that is no script", function () { var s = document.createElement("script"); s.src = window.OTHER + "/window_error_child.html"; document.body.appendChild(s); }],
+  // The page's own code, with another origin's script on the page.
+  ["page function called by the other origin", function () { setTimeout(function () { otherOriginCalls(function () { throw new Error("the page's, called by the other origin"); }); }, 0); }],
+  ["page-made function called by the other origin", function () { var made = new Function("throw new Error('in a function the page made')"); setTimeout(function () { otherOriginCalls(made); }, 0); }],
+  ["page string after", function () { setTimeout(function () { throw "the page's string"; }, 0); }],
+  ["page object after", function () { setTimeout(function () { throw { ours: 1 }; }, 0); }],
+  ["page rejections after", function () { setTimeout(function () { Promise.reject({ status: 404 }); Promise.reject("the page's string reason"); Promise.reject(undefined);
+    Promise.reject(new Error("the page's error reason")).then(function () {}); }, 0); }],
   ["dispatched by the page", function () { var before = out.onerror.length; window.dispatchEvent(new ErrorEvent("error", { message: "made by the page", filename: "f.js", lineno: 3, colno: 4, error: null, cancelable: true }));
     out.pageDispatchCallsOnerror = out.onerror.length - before; }]
 ];

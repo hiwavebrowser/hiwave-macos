@@ -964,3 +964,40 @@ Pin: `crates/rustkit-js/tests/arraybuffer_detach_key.rs` (Chrome for Testing 148
 transfer list and `postMessage` with one all throw a TypeError and leave the buffer attached;
 `memory.grow()` detaches it; a plain buffer's `transfer()` works). Red on develop (the constructor
 stub ignoring the key): script's `transfer()` succeeded.
+
+## Patch: code blocks carry their script's error-detail flag (`error-detail`)
+
+A host reports some scripts' errors to the page without detail (HTML's "muted errors" of a script).
+That is a property of the code that is running when an error is thrown, so it is kept on the code.
+
+**Change.**
+- `CodeBlockFlags::ERROR_DETAIL_WITHHELD`, set in `ByteCompiler::finish` on every code block
+  compiled while an `ErrorDetailScope` (new, `vm::ErrorDetailScope`, a thread-local flag with a
+  guard) is entered with `true`: a script's top-level code and every function compiled from its
+  source. `CodeBlock::error_detail_withheld()` reads it.
+- Code made at run time is compiled under the flag of the code that is running: `eval`
+  (`builtins/eval`) and the `Function` constructors (`create_dynamic_function`) enter the scope with
+  the current frame's flag. A module keeps the flag it was parsed under (`ModuleCode`) and its code
+  is compiled with it at link time.
+- `JsError::detail_withheld()`: the flag of the frame whose code was running where the error was
+  first raised, stamped once in `handle_error`, `handle_throw` and the `Throw` opcode. It stays
+  with the error through `finally` blocks and native callers.
+- When a raised error becomes a value (`JsError::into_opaque`: a `catch`, a rejection) the VM
+  notes the value and its flag (`Vm::error_detail_note`); `Context::take_error_detail_note(&value)`
+  gives it to whoever is handed that value next.
+- `Context::running_error_detail_withheld(depth)`: the flag of the script frame `depth` below the
+  innermost.
+- `Promise::rejection_detail_withheld()`: set when a promise is rejected, from the reason's note
+  (the code that threw) or else the code calling the reject function; a reaction with no handler
+  passes the flag on to the promise it rejects.
+
+**Cost.** One thread-local read per compiled code block; a flag test where an error is first
+raised; a clone of the value where a raised error becomes a value. Nothing on a path that does not
+throw.
+
+Pin: `crates/rustkit-bindings/src/window_error_event_tests.rs` (which code decides, by family:
+plain and bound functions, `eval` and `Function` code, accessors, a proxy trap, `valueOf` and
+`toString`, a class constructor, a resumed generator, built-in errors, a microtask, an async function
+resumed after `await`, promise reactions, another document's code), against Chrome for Testing
+148.0.7778.216 (`docs/diagnostics/2026-11-16/window_error_cft148.json`).
+

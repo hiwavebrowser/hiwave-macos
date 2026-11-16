@@ -19,6 +19,9 @@
 //!
 //! The engine says what each script it evaluates is (`register_script`: its URL, and whether its
 //! errors are reported without detail); a script it never registered is reported without detail.
+//! A script's code carries that, and so does code it makes at run time. What an event says is
+//! decided by the code that was running where the exception was thrown, as in Chrome (rows
+//! `other origin made function`, `page-made function called by the other origin`, `page ... after`).
 
 use super::*;
 
@@ -299,7 +302,8 @@ fn another_origins_syntax_error_is_reported_without_detail() {
 }
 
 /// A script the engine did not register is one nothing is known of: without detail. So is every
-/// script past the table's room (4096), and from then on code that is in no script's frame.
+/// script past the table's room (4096), its callbacks included; the page's own code, registered
+/// before, is still reported in full.
 #[test]
 fn an_unregistered_script_is_reported_without_detail() {
     let b = page();
@@ -312,20 +316,23 @@ fn an_unregistered_script_is_reported_without_detail() {
     }
     // In the table: reported in full. Past it: not.
     assert!(b.evaluate_named("throw new Error('early');", "script#7").is_err());
-    assert!(b.evaluate_named("function late() { throw 'late string'; } throw new Error('late');", "script#4999").is_err());
-    b.evaluate_named("setTimeout(function () { late(); }, 0); setTimeout(function () { throw 'the page, no frame'; }, 1);", "inline#2").unwrap();
+    assert!(b.evaluate_named("function late() { throw new Error('late, later'); } function lateString() { throw 'late string'; } throw new Error('late');", "script#4999").is_err());
+    b.evaluate_named("setTimeout(function () { late(); }, 0); setTimeout(function () { lateString(); }, 1); setTimeout(function () { throw 'the page'; }, 2);", "inline#2").unwrap();
     b.advance_timers(20, 10).unwrap();
     assert_eq!(
         ev(&b, "seen.join(' ; ')"),
-        format!("[object ErrorEvent]|Uncaught Error: early|https://example.test/7.js|1|7|Error|true|true|false|true ; {MUTED} ; {MUTED} ; {MUTED}")
+        format!(
+            "[object ErrorEvent]|Uncaught Error: early|https://example.test/7.js|1|7|Error|true|true|false|true ; {MUTED} ; {MUTED} ; {MUTED} ; \
+             [object ErrorEvent]|Uncaught the page|{DOC}|0|0|the page|true|true|false|true"
+        )
     );
 }
 
 /// Two documents of one tree evaluate different scripts under one name (`script#1` counts from
-/// each document's start). Neither answers for the other: with the name another origin's in
-/// either document, an exception under it is reported without detail in both.
+/// each document's start). Each document's code carries its own script's answer: the parent's
+/// `script#1` is another origin's, the frame's `script#1` is the frame's own.
 #[test]
-fn a_script_name_shared_by_two_documents_of_a_tree_is_reported_without_detail() {
+fn a_script_name_shared_by_two_documents_of_a_tree_is_each_documents_own() {
     let parent = page();
     let child = parent.new_child().unwrap();
     child
@@ -334,17 +341,22 @@ fn a_script_name_shared_by_two_documents_of_a_tree_is_reported_without_detail() 
     child.set_location(&Url::parse("https://example.test/frame.html").unwrap()).unwrap();
     child.register_script("frame-inline#1", "https://example.test/frame.html", false);
     child.evaluate_named(WATCH, "frame-inline#1").unwrap();
-    // The parent's `script#1` is another origin's; the frame's own `script#1` is the frame's.
     parent.register_script("script#1", "https://other.test/lib.js", true);
     child.register_script("script#1", "https://example.test/frame-own.js", false);
     assert!(child.evaluate_named("throw new Error('the frame own script');", "script#1").is_err());
-    assert!(parent.evaluate_named("throw new Error('theirs');", "script#1").is_err());
+    assert!(parent.evaluate_named("function theirError() { throw new Error('theirs'); } throw new Error('theirs');", "script#1").is_err());
     assert_eq!(ev(&parent, "seen.join(' ; ')"), MUTED);
+    assert_eq!(
+        ev(&child, "seen.join(' ; ')"),
+        "[object ErrorEvent]|Uncaught Error: the frame own script|https://example.test/frame-own.js|1|7|Error|true|true|false|true"
+    );
+    // The other origin's function, called by the frame's code across the tree: reported to the
+    // frame, without detail.
+    parent.expose_window("child", &child).unwrap();
+    child.expose_window("up", &parent).unwrap();
+    child.evaluate_named("seen.length = 0; setTimeout(function () { up.theirError(); }, 0);", "frame-inline#1").unwrap();
+    child.advance_timers(20, 10).unwrap();
     assert_eq!(ev(&child, "seen.join(' ; ')"), MUTED);
-    // The frame gone, its names go with it; the parent's stays another origin's.
-    parent.drop_child(child);
-    assert!(parent.evaluate_named("throw new Error('theirs again');", "script#1").is_err());
-    assert_eq!(ev(&parent, "seen.join(' ; ')"), format!("{MUTED} ; {MUTED}"));
 }
 
 /// A document with no origin of its own to compare (about:blank here; the engine registers an
@@ -361,37 +373,138 @@ fn a_document_without_an_origin_reports_an_external_script_without_detail() {
     assert_eq!(ev(&b, "seen.join(' ; ')"), MUTED);
 }
 
-/// The controls: the page's own scripts stay reported in full while another origin's script is
-/// on the page: an external script of the page's origin (by the URL it ended at), inline code,
-/// and their callbacks. One cost is stated: once such a script is registered, a thrown value
-/// that is not an error and comes from a callback (no frame to place it in) is reported without
-/// detail, whoever threw it.
+/// Another origin's script, as the families below use it: each name is code of that script
+/// that throws when the page's own callback runs it.
+const THEIR_FAMILIES: &str = "
+function theirError() { throw new Error('theirs'); }
+var theirMade = new Function(\"throw new Error('in a function they made')\");
+var theirEvalMade = eval(\"(function () { throw new Error('in a function they made with eval'); })\");
+var theirAccessor = { get x() { throw new Error('their getter'); }, set y(v) { throw new Error('their setter'); } };
+var theirProxy = new Proxy({}, { get: function () { throw new Error('their trap'); } });
+var theirValue = { valueOf: function () { throw new Error('their valueOf'); }, toString: function () { throw new Error('their toString'); } };
+var theirBound = theirError.bind(null);
+class TheirClass { constructor() { throw new Error('their constructor'); } }
+function* theirGenerator() { yield 1; throw new Error('their generator, resumed'); }
+function theirNull() { return null.x; }
+function theirJson() { return JSON.parse('{'); }
+function theirMicrotask() { queueMicrotask(function () { throw new Error('their microtask'); }); }
+async function theirAsync() { await null; throw new Error('their async, resumed'); }
+function theirReaction() { Promise.resolve().then(function () { throw new Error('their reaction'); }); }
+function theirReject() { Promise.reject({ theirs: 1 }); }
+function theirCalls(f) { return f(); }
+function theirCallsAsync(f) { return Promise.resolve().then(f); }
+";
+
+/// The code that was running where the exception was thrown decides, whatever called it. Each
+/// of another origin's functions here is run by the page's own timer: its exception is reported
+/// without detail (Chrome rows `other origin function`, `... made function`, `... eval-made
+/// function`, `... string`, `... object`), by family: plain and bound functions, code made with
+/// `Function` and `eval`, accessors, a proxy trap, `valueOf` / `toString`, a class constructor,
+/// a resumed generator, the built-ins' own errors raised in their code, a microtask.
 #[test]
-fn the_pages_own_scripts_stay_reported_in_full() {
-    let (b, _) = page_with_theirs("var theirs = 1;");
-    b.register_script("script#2", "https://example.test/own.js", false);
-    assert!(b.evaluate_named("function ours() { throw new TypeError('ours, later'); } throw new Error('ours');", "script#2").is_err());
-    assert!(b.evaluate_named("throw new RangeError('inline');", "inline#2").is_err());
-    b.evaluate_named("setTimeout(ours, 0); setTimeout(function () { throw 'a string of ours'; }, 1);", "inline#3").unwrap();
-    b.advance_timers(20, 10).unwrap();
+fn the_code_that_threw_decides_family_by_family() {
+    for call in [
+        "theirError()",
+        "theirMade()",
+        "theirEvalMade()",
+        "theirAccessor.x",
+        "theirAccessor.y = 1",
+        "theirProxy.anything",
+        "+theirValue",
+        "'' + { toString: theirValue.toString }",
+        "theirBound()",
+        "new TheirClass()",
+        "Reflect.construct(TheirClass, [])",
+        "var g = theirGenerator(); g.next(); g.next()",
+        "theirNull()",
+        "theirJson()",
+        "[1].forEach(theirError)",
+        "theirMicrotask()",
+    ] {
+        let (b, threw) = page_with_theirs(THEIR_FAMILIES);
+        assert!(!threw);
+        b.evaluate_named(&format!("setTimeout(function () {{ {call}; }}, 0);"), "inline#2").unwrap();
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.join(' ; ') + ' / ' + rejected"), format!("{MUTED} / 0"), "{call}");
+    }
+}
+
+/// The same for rejections (Chrome `rejections`: none of the other origin's): their async
+/// function resumed after an `await`, their reaction that throws, their own `Promise.reject`,
+/// each started by the page's timer, fire no `unhandledrejection`; nor does `rejectionhandled`
+/// fire later for one that was never announced.
+#[test]
+fn a_rejection_is_decided_by_the_code_that_rejected() {
+    for call in ["theirAsync()", "theirReaction()", "theirReject()"] {
+        let (b, _) = page_with_theirs(THEIR_FAMILIES);
+        b.evaluate_named(
+            &format!("var handled = 0; window.addEventListener('rejectionhandled', function () {{ handled++; }}); \
+                      var kept; setTimeout(function () {{ kept = {call}; }}, 0);"),
+            "inline#2",
+        )
+        .unwrap();
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.length + ' ' + rejected"), "0 0", "{call}");
+        b.evaluate_named("if (kept && kept.catch) kept.catch(function () {});", "inline#3").unwrap();
+        b.advance_timers(20, 10).unwrap();
+        assert_eq!(ev(&b, "seen.length + ' ' + rejected + ' ' + handled"), "0 0 0", "{call}, handled later");
+    }
+}
+
+/// The controls, with another origin's script on the page (Chrome rows `page function called by
+/// the other origin`, `page-made function called by the other origin`, `page string after`,
+/// `page object after`, and its `rejections`): the page's own code is reported in full when the
+/// other origin's code calls it, when it throws a value that is not an error, and when it
+/// rejects with an object, a string, `undefined`, or through a chain with no handler.
+#[test]
+fn the_pages_own_code_stays_reported_in_full_beside_another_origins() {
     let full = |message: &str, file: &str, line: u32, column: u32, error: &str| {
         format!("[object ErrorEvent]|Uncaught {message}|{file}|{line}|{column}|{error}|true|true|false|true")
     };
+    let (b, _) = page_with_theirs(THEIR_FAMILIES);
+    b.register_script("script#2", "https://example.test/own.js", false);
+    assert!(b.evaluate_named("function ours() { throw new TypeError('ours, later'); } throw new Error('ours');", "script#2").is_err());
+    assert!(b.evaluate_named("throw new RangeError('inline');", "inline#2").is_err());
+    b.evaluate_named(
+        "var made = new Function(\"throw new Error('in a function the page made')\"); \
+         setTimeout(ours, 0); \
+         setTimeout(function () { theirCalls(ours); }, 1); \
+         setTimeout(function () { theirCalls(made); }, 2); \
+         setTimeout(function () { throw 'a string of ours'; }, 3); \
+         setTimeout(function () { throw { ours: 1 }; }, 4);",
+        "inline#3",
+    )
+    .unwrap();
+    b.advance_timers(20, 10).unwrap();
     assert_eq!(
         ev(&b, "seen.join(' ; ')"),
         [
             full("Error: ours", "https://example.test/own.js", 1, 63, "Error"),
             full("RangeError: inline", DOC, 1, 7, "RangeError"),
             full("TypeError: ours, later", "https://example.test/own.js", 1, 25, "TypeError"),
-            MUTED.to_string(),
+            full("TypeError: ours, later", "https://example.test/own.js", 1, 25, "TypeError"),
+            full("Error: in a function the page made", DOC, 0, 0, "Error"),
+            full("a string of ours", DOC, 0, 0, "a string of ours"),
+            full("[object Object]", DOC, 0, 0, "[object Object]"),
         ]
         .join(" ; ")
     );
-    // With no such script on the page, the same string is reported in full.
-    let b = page();
-    b.evaluate_named("setTimeout(function () { throw 'a string of ours'; }, 0);", "inline#2").unwrap();
+    // Rejections: each fires, with its reason.
+    b.evaluate_named(
+        "var reasons = []; window.addEventListener('unhandledrejection', function (ev) { \
+             var r = ev.reason; reasons.push(r instanceof Error ? r.message : typeof r === 'object' && r !== null ? JSON.stringify(r) : String(r)); }); \
+         setTimeout(function () { Promise.reject({ status: 404 }); Promise.reject('a string reason'); Promise.reject(undefined); \
+             Promise.reject(new Error('through a chain')).then(function () {}); \
+             theirCallsAsync(function () { throw new Error('ours, in a reaction they queued'); }); \
+             (async function () { await null; throw new Error('ours, resumed'); })(); }, 0);",
+        "inline#3",
+    )
+    .unwrap();
     b.advance_timers(20, 10).unwrap();
-    assert_eq!(ev(&b, "seen.join(' ; ')"), full("a string of ours", DOC, 0, 0, "a string of ours"));
+    assert_eq!(
+        ev(&b, "reasons.join(' | ')"),
+        "{\"status\":404} | a string reason | undefined | through a chain | ours, in a reaction they queued | ours, resumed"
+    );
 }
 
 /// What an `error` listener rejects after a script failed is announced in the same turn.

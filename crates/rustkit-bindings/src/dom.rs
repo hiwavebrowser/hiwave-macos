@@ -6862,7 +6862,8 @@ const WRAPPERS_JS: &str = r#"
             if (arguments.length < 1) {
                 throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
             }
-            __rk.reportError(e);
+            // `true`: reported for the page, by the code that called this.
+            __rk.reportError(e, true);
         },
         writable: true, enumerable: true, configurable: true
     });

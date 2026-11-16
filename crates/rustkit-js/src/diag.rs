@@ -178,16 +178,13 @@ pub(crate) struct Diagnostics {
     /// What the embedder said of each page script it evaluates
     /// ([`crate::JsRuntime::register_script`]), by the name it is evaluated
     /// under: per realm, its URL and whether its errors are reported
-    /// without detail.
+    /// without detail. Read when a script is compiled (its code carries the
+    /// answer from then on) and for the file an event names; never to
+    /// decide what an error event says.
     scripts: RefCell<std::collections::HashMap<String, Vec<ScriptEntry>>>,
-    /// How many entries `scripts` holds, and whether one was ever refused
-    /// for want of room: from then on a script not in the table is one
-    /// nothing is known of.
+    /// How many entries `scripts` holds. A script past its room is one
+    /// nothing was said of: compiled as reported without detail.
     script_count: Cell<usize>,
-    scripts_full: Cell<bool>,
-    /// A script whose errors are reported without detail was registered:
-    /// code that cannot be placed in any script may be its.
-    any_muted: Cell<bool>,
     /// Each realm's document URL, as the embedder gave it.
     documents: RefCell<std::collections::HashMap<usize, String>>,
     /// The realm entered (the runtime keeps it in step).
@@ -486,7 +483,7 @@ impl Diagnostics {
         host: &JsObject,
         value: &JsValue,
         report: &ErrorReport,
-        evaluated: Option<&str>,
+        withheld: bool,
         context: &mut Context,
     ) -> bool {
         use boa_engine::{js_string, JsString};
@@ -501,7 +498,7 @@ impl Diagnostics {
             return false;
         };
         let string = |s: &str| JsValue::from(JsString::from(s));
-        let args = match self.told(report, evaluated) {
+        let args = match self.told(report, withheld) {
             Told::Nothing => [JsValue::null(), string("Script error."), string(""), JsValue::from(0), JsValue::from(0)],
             Told::At { file, line, column } => {
                 let text = format!("Uncaught {}", crate::describe::text(value, context));
@@ -514,61 +511,46 @@ impl Diagnostics {
         matches!(result, Ok(answer) if answer.as_boolean() == Some(false))
     }
 
-    /// What the page may be told of the exception `report` describes,
-    /// thrown while the script `evaluated` was being evaluated (`None`: in
-    /// a callback). The script that decides is the one whose code threw:
-    /// the innermost of the page's frames, and the evaluated script itself.
-    /// The page is told nothing when either is a script whose errors are
-    /// reported without detail, or one the embedder never registered; and,
-    /// when the code is in no frame at all (a thrown value with no stack),
-    /// when any such script was ever registered here, since it may be its.
-    pub(crate) fn told(&self, report: &ErrorReport, evaluated: Option<&str>) -> Told {
+    /// What the page is told of the exception `report` describes.
+    /// `withheld` is the answer of the code that was running where it was
+    /// thrown (the code block's own flag, set when its script was
+    /// compiled): nothing. Otherwise the exception, and where: the
+    /// innermost of the page's frames under the URL its script was
+    /// registered with, or the document for code with no script of its own.
+    pub(crate) fn told(&self, report: &ErrorReport, withheld: bool) -> Told {
+        if withheld {
+            return Told::Nothing;
+        }
         let realm = self.realm.get();
         let document = || self.documents.borrow().get(&realm).cloned().unwrap_or_default();
-        let evaluated = match evaluated {
-            Some(name) => match self.script_url(name, realm) {
-                Some(url) => Some(url),
-                None => return Told::Nothing,
-            },
-            None => None,
-        };
         match report.frames.first() {
-            Some(at) => match self.script_url(&at.path, realm) {
-                None => Told::Nothing,
-                Some(url) if report.located => Told::At { file: url, line: at.line, column: at.column },
-                // Code with no script of its own (`eval`, a handler
-                // attribute) called from that script: the document's.
-                Some(_) => Told::At { file: document(), line: 0, column: 0 },
-            },
-            None => match evaluated {
-                Some(url) => Told::At { file: url, line: 0, column: 0 },
-                None if self.any_muted.get() || self.scripts_full.get() => Told::Nothing,
+            Some(at) if report.located => match self.script(&at.path, realm) {
+                Some((url, _)) => Told::At { file: url, line: at.line, column: at.column },
                 None => Told::At { file: document(), line: 0, column: 0 },
             },
+            _ => Told::At { file: document(), line: 0, column: 0 },
         }
     }
 
-    /// The URL of the script evaluated as `name`, as `realm` knows it;
-    /// `None` for a name never registered, and for one that is, in any
-    /// realm, a script whose errors are reported without detail (two
-    /// documents of a tree can evaluate different scripts under one name).
-    fn script_url(&self, name: &str, realm: usize) -> Option<String> {
+    /// What `realm` registered for the script evaluated as `name`: its URL
+    /// and whether its errors are reported without detail.
+    pub(crate) fn script(&self, name: &str, realm: usize) -> Option<(String, bool)> {
         let scripts = self.scripts.borrow();
-        let entries = scripts.get(name)?;
-        if entries.is_empty() || entries.iter().any(|entry| entry.muted) {
-            return None;
-        }
-        let entry = entries.iter().find(|entry| entry.realm == realm).unwrap_or(&entries[0]);
-        Some(entry.url.clone())
+        let entry = scripts.get(name)?.iter().find(|entry| entry.realm == realm)?;
+        Some((entry.url.clone(), entry.muted))
+    }
+
+    /// Whether the script `realm` is about to compile as `name` is one
+    /// whose errors are reported without detail: what was registered for
+    /// it, and so for a script nothing was registered for.
+    pub(crate) fn compiles_withheld(&self, name: &str, realm: usize) -> bool {
+        self.script(name, realm).is_none_or(|(_, muted)| muted)
     }
 
     /// The script `realm` evaluates as `name` is the one at `url`; `muted`:
     /// its errors are reported to the page without detail. With the table
     /// full nothing is added, and scripts not in it are unknown ones.
     pub(crate) fn register_script(&self, realm: usize, name: &str, url: &str, muted: bool) {
-        if muted {
-            self.any_muted.set(true);
-        }
         let mut scripts = self.scripts.borrow_mut();
         if let Some(entry) = scripts.get_mut(name).and_then(|entries| entries.iter_mut().find(|entry| entry.realm == realm)) {
             entry.url = url.to_string();
@@ -576,7 +558,6 @@ impl Diagnostics {
             return;
         }
         if self.script_count.get() >= MAX_SCRIPTS {
-            self.scripts_full.set(true);
             return;
         }
         self.script_count.set(self.script_count.get() + 1);
@@ -588,8 +569,7 @@ impl Diagnostics {
         self.documents.borrow_mut().insert(realm, url.to_string());
     }
 
-    /// `realm` is gone: its scripts and document go with it. (That a
-    /// script reported without detail was ever registered stays known.)
+    /// `realm` is gone: its scripts and document go with it.
     pub(crate) fn drop_realm(&self, realm: usize) {
         let mut scripts = self.scripts.borrow_mut();
         let mut dropped = 0;
@@ -605,10 +585,11 @@ impl Diagnostics {
 
     /// A listener or timer threw `value` (the bindings' reporter, called on
     /// `host`): announced, then reported unless a listener canceled it.
-    pub(crate) fn uncaught(&self, host: Option<&JsObject>, value: &JsValue, context: &mut Context) {
+    /// `withheld`: the answer of the code that threw it.
+    pub(crate) fn uncaught(&self, host: Option<&JsObject>, value: &JsValue, withheld: bool, context: &mut Context) {
         if let Some(host) = host.filter(|_| self.error_events.get() && !self.announcing_error.get()) {
             let report = self.describe(value, None, false, context);
-            if self.announce(host, value, &report, None, context) {
+            if self.announce(host, value, &report, withheld, context) {
                 return;
             }
         }

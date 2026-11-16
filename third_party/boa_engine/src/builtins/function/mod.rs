@@ -664,6 +664,11 @@ impl BuiltInFunctionObject {
         let in_with = context.vm.frame().environments.has_object_environment();
         let spanned_source_text = SpannedSourceText::new_empty();
 
+        // HIWAVE PATCH (error-detail): as `eval`.
+        let _detail = crate::vm::ErrorDetailScope::enter(
+            context.vm.frame().code_block.error_detail_withheld(),
+        );
+        // END HIWAVE PATCH
         let code = FunctionCompiler::new(spanned_source_text)
             .name(js_string!("anonymous"))
             .generator(generator)
