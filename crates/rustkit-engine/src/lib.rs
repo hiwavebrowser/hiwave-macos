@@ -728,6 +728,8 @@ mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
+mod clock_chain_live_tests;
+#[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
@@ -6496,6 +6498,22 @@ impl Engine {
         Ok(())
     }
 
+    /// One live turn that steps the page's clock by `elapsed_ms` of virtual time the page has not
+    /// lived through yet (a capture's settle, a test): every timer due inside it runs on that clock,
+    /// and what it sets counts from its own due time. The app's loops, whose `elapsed_ms` is real time
+    /// that has passed, use [`Self::pump_live_real`].
+    pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, false).await
+    }
+
+    /// One live turn after `elapsed_ms` of real time: a timer due inside it was held back (a long
+    /// task, a late turn), so it runs once, and what it sets (a chain's next link, an interval's next
+    /// run) counts from the turn's time, as in Chrome, not from the due time it was held back from
+    /// (CLOCK3: a 10 ms chain replayed every link it had missed in one turn).
+    pub async fn pump_live_real(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, true).await
+    }
+
     /// Nested browsing contexts, Stage 2: take what this view's document
     /// asked of its iframes and do it. A same-origin `src` (or none:
     /// about:blank) is fetched, parsed and bound in a new realm of the
@@ -6775,7 +6793,7 @@ impl Engine {
     /// frame's timers, animation frames, script network and relayouts. The
     /// parent is laid out again when a frame was (its paint includes the
     /// frame's).
-    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         let frames: Vec<EngineViewId> = self
             .views
             .get(&id)
@@ -6783,7 +6801,7 @@ impl Engine {
             .unwrap_or_default();
         let mut all = LivePump::default();
         for fid in frames {
-            let turn = Box::pin(self.pump_live(fid, elapsed_ms)).await;
+            let turn = Box::pin(self.pump_live_on(fid, elapsed_ms, real_clock)).await;
             all.relaid_out |= turn.relaid_out;
             all.in_flight += turn.in_flight;
             all.next_timer_ms = match (all.next_timer_ms, turn.next_timer_ms) {
@@ -6806,18 +6824,19 @@ impl Engine {
     /// loop for them: a frame's next timer, its requests that are out, and a
     /// frame request the page made during this turn (a `load` handler that
     /// sets `src` again: Speedometer's runner between workloads) ask for the
-    /// next turn at once.
-    pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+    /// next turn at once. `real_clock`: see [`Self::pump_live_real`]; the
+    /// tree's turn is on one clock, so its frames' turns take the same.
+    async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         if !self.config.nested_contexts {
-            return self.pump_live_turn(id, elapsed_ms).await;
+            return self.pump_live_turn(id, elapsed_ms, real_clock).await;
         }
         self.drive_frames(id).await;
         let has_frames = self.views.get(&id).is_some_and(|v| !v.frames.is_empty());
         // A frame's own frames are the tree's: only its top runs the timers.
         let is_frame = self.views.values().any(|v| v.frames.values().any(|f| f.view == id));
         if !has_frames || is_frame {
-            let frames = self.pump_frames(id, elapsed_ms).await;
-            let mut out = self.pump_live_turn(id, elapsed_ms).await;
+            let frames = self.pump_frames(id, elapsed_ms, real_clock).await;
+            let mut out = self.pump_live_turn(id, elapsed_ms, real_clock).await;
             out.relaid_out |= frames.relaid_out;
             out.in_flight += frames.in_flight;
             out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
@@ -6835,16 +6854,16 @@ impl Engine {
         // turn's time is the tree's.
         let started = std::time::Instant::now();
         self.live_timer_cap = 0;
-        let mut frames = self.pump_frames(id, 0).await;
+        let mut frames = self.pump_frames(id, 0, real_clock).await;
         self.live_timer_cap = 1;
-        let mut out = self.pump_live_turn(id, elapsed_ms).await;
+        let mut out = self.pump_live_turn(id, elapsed_ms, real_clock).await;
         let mut stopped = false;
         while out.timers_ran > 0 && out.next_timer_ms == Some(0) {
             if started.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
                 stopped = true;
                 break;
             }
-            let turn = self.pump_live_turn(id, 0).await;
+            let turn = self.pump_live_turn(id, 0, real_clock).await;
             out.timers_ran += turn.timers_ran;
             out.requests += turn.requests;
             out.in_flight = turn.in_flight;
@@ -6867,7 +6886,7 @@ impl Engine {
         }
         // The frames lay out and send what this turn's tasks wrote and asked.
         self.live_timer_cap = 0;
-        let after = self.pump_frames(id, 0).await;
+        let after = self.pump_frames(id, 0, real_clock).await;
         self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
         merge_live(&mut frames, after);
         out.relaid_out |= frames.relaid_out;
@@ -6893,8 +6912,11 @@ impl Engine {
         out
     }
 
-    async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+    async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
+        // The turn's instant: on the real clock its timers count from here, not from when the
+        // timer slice begins after the turn's own work (CLOCK3 R1).
+        let turn_began = std::time::Instant::now();
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -6977,11 +6999,16 @@ impl Engine {
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (ran, yielded) = bindings.advance_timers_for_frame(
-                        elapsed_ms,
-                        live_timer_cap,
-                        LIVE_FRAME_MS,
-                    )?;
+                    let (ran, yielded) = if real_clock {
+                        bindings.advance_real_timers_for_frame_since(
+                            elapsed_ms,
+                            live_timer_cap,
+                            LIVE_FRAME_MS,
+                            turn_began.elapsed().as_secs_f64() * 1000.0,
+                        )?
+                    } else {
+                        bindings.advance_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
+                    };
                     frame_yield.set(yielded);
                     Ok::<_, rustkit_bindings::BindingError>(ran)
                 }))

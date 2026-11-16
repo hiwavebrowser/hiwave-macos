@@ -357,7 +357,7 @@ fn an_animation_started_from_the_timeline_after_idle_has_no_jump() {
 /// values move with real time, while the properties hold for every run.
 #[test]
 fn the_page_never_reads_time_going_back() {
-    fn run(seed: u64, det: bool, grid: bool) -> Result<(), String> {
+    fn run(seed: u64, det: bool, grid: bool, real: bool) -> Result<(), String> {
         let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         b.set_document(Rc::new(
             Document::parse_html("<html><body><div id=box></div></body></html>").unwrap(),
@@ -381,6 +381,15 @@ fn the_page_never_reads_time_going_back() {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 33) % m
         };
+        // A turn on the stepped clock, or a live turn on the real clock (CLOCK3: its delta is real
+        // time that has passed, and timers set in it count from when they are set).
+        let step = |b: &DomBindings, ms: u64| {
+            if real {
+                b.advance_real_timers_for_frame(ms, 1000, 0).unwrap();
+            } else {
+                turn(b, ms);
+            }
+        };
         for _ in 0..120 {
             match next(8) {
                 0 => {
@@ -388,7 +397,14 @@ fn the_page_never_reads_time_going_back() {
                 }
                 1 => {
                     let d = next(60);
-                    let what = ["R('t')", "R('t'); F()", "R('t'); A()", "A(); R('t'); F()"][next(4) as usize];
+                    let what = [
+                        "R('t')",
+                        "R('t'); F()",
+                        "R('t'); A()",
+                        "A(); R('t'); F()",
+                        // A timer set in a timer's task, mid-turn (CLOCK3 on the real clock).
+                        "R('t'); setTimeout(function () { R('n'); F(); }, 5)",
+                    ][next(5) as usize];
                     b.evaluate(&format!("setTimeout(function () {{ {what}; }}, {d})")).unwrap();
                 }
                 2 => {
@@ -397,13 +413,13 @@ fn the_page_never_reads_time_going_back() {
                 3 => {
                     b.evaluate("A()").unwrap();
                 }
-                4 | 5 => turn(&b, next(40)),
-                6 => turn(&b, 100 + next(300)),
+                4 | 5 => step(&b, next(40)),
+                6 => step(&b, 100 + next(300)),
                 _ => {
                     if next(2) == 0 {
                         std::thread::sleep(std::time::Duration::from_millis(next(8)));
                     }
-                    turn(&b, 1000 + next(2000));
+                    step(&b, 1000 + next(2000));
                 }
             }
         }
@@ -431,13 +447,20 @@ fn the_page_never_reads_time_going_back() {
     }
     let mut failed = Vec::new();
     for seed in 1..=12u64 {
-        for (det, grid) in [(true, false), (false, false), (false, true), (true, true)] {
-            if let Err(e) = run(seed, det, grid) {
-                failed.push(format!("seed {seed} det {det} grid {grid}: {e}"));
+        for (det, grid, real) in [
+            (true, false, false),
+            (false, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (false, true, true),
+        ] {
+            if let Err(e) = run(seed, det, grid, real) {
+                failed.push(format!("seed {seed} det {det} grid {grid} real {real}: {e}"));
             }
         }
     }
-    assert!(failed.is_empty(), "{} of 48 runs:\n{}", failed.len(), failed.join("\n"));
+    assert!(failed.is_empty(), "{} of 72 runs:\n{}", failed.len(), failed.join("\n"));
 }
 
 /// A worker's message delivered at the top of a late turn is a task of its own (#1200 R1
