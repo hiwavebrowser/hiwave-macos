@@ -70,6 +70,24 @@ pub(crate) struct CanvasStore {
     /// The document's origin (`DomBindings::set_location`): an image of
     /// any other origin leaves a canvas that draws it not origin-clean.
     pub(crate) origin: Option<url::Origin>,
+    /// The image each `<img>` shows, by NodeId, as the engine reported it
+    /// (`DomBindings::fire_image_load`): what a canvas draws for that
+    /// element. Nothing script can write reaches this.
+    pub(crate) loaded: HashMap<usize, LoadedImage>,
+    /// The images patterns were made from, by the index script holds.
+    pattern_sources: Vec<LoadedImage>,
+}
+
+/// An `<img>`'s loaded resource: the response's URL and the image's own
+/// size, with the `src` and `srcset` the element had when it loaded (it
+/// stands for the element only while they are unchanged).
+#[derive(Clone, PartialEq)]
+pub(crate) struct LoadedImage {
+    pub(crate) src: Option<String>,
+    pub(crate) srcset: Option<String>,
+    pub(crate) url: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 pub(crate) type SharedCanvases = Rc<RefCell<CanvasStore>>;
@@ -113,6 +131,8 @@ impl CanvasStore {
     /// a mark left here would list and present that same frame again at the
     /// next settle (#905 batch 22: an extra frame after every load).
     pub(crate) fn clear(&mut self) {
+        self.loaded.clear();
+        self.pattern_sources.clear();
         self.contexts.clear();
         self.painted = false;
     }
@@ -266,6 +286,34 @@ pub(crate) fn install(
                 Some(node) => node,
                 None => return JsValue::Undefined,
             };
+            // What an element is as an image source, from the engine's own
+            // record of it: "w,h" (its image's size) once its image is in,
+            // "" before that, "TypeError" for anything that is not an `<img>`.
+            // `imagePattern` also keeps the resource for a pattern and
+            // answers "w,h,index".
+            if op == "imageSource" || op == "imagePattern" {
+                let Some((src, srcset)) = h.borrow().img_sources(node) else {
+                    return JsValue::String("TypeError".into());
+                };
+                let Some(image) = store.loaded.get(&node).filter(|image| image.src == src && image.srcset == srcset).cloned() else {
+                    return JsValue::String(String::new());
+                };
+                if image.width == 0 || image.height == 0 {
+                    return JsValue::String(String::new());
+                }
+                let size = format!("{},{}", image.width, image.height);
+                if op == "imageSource" {
+                    return JsValue::String(size);
+                }
+                let index = match store.pattern_sources.iter().position(|kept| *kept == image) {
+                    Some(index) => index,
+                    None => {
+                        store.pattern_sources.push(image);
+                        store.pattern_sources.len() - 1
+                    }
+                };
+                return JsValue::String(format!("{size},{index}"));
+            }
             if op == "create" {
                 let (w, hgt) = (dimension(args, 3, 300), dimension(args, 4, 150));
                 store
@@ -293,17 +341,36 @@ pub(crate) fn install(
             // fetch, so a crossorigin image counts as another origin.
             let mut tainted = false;
             let source = if matches!(op, "drawImage" | "fillPattern" | "strokePattern") {
-                tainted = match (text(args, 3), args.get(4)) {
-                    (Some("canvas"), Some(JsValue::Number(n))) => {
+                // An image source is ("image", the element's NodeId) for a
+                // draw and ("pattern", the index `imagePattern` gave) for a
+                // pattern: its URL is the engine's record, never an argument.
+                let image: Option<LoadedImage> = match (text(args, 3), args.get(4)) {
+                    (Some("image"), Some(JsValue::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => {
+                        let element = *n as usize;
+                        let now = h.borrow().img_sources(element);
+                        store.loaded.get(&element).filter(|image| now.as_ref().is_some_and(|(src, srcset)| image.src == *src && image.srcset == *srcset)).cloned()
+                    }
+                    (Some("pattern"), Some(JsValue::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => store.pattern_sources.get(*n as usize).cloned(),
+                    _ => None,
+                };
+                let is_image = matches!(text(args, 3), Some("image" | "pattern"));
+                if is_image && image.is_none() {
+                    return JsValue::Undefined;
+                }
+                // Decided on the URL, before its pixels are looked for: the
+                // answer does not depend on what the image store holds.
+                tainted = match (text(args, 3), args.get(4), &image) {
+                    (Some("canvas"), Some(JsValue::Number(n)), _) => {
                         store.contexts.get(&(*n as usize)).is_some_and(|c| !c.is_origin_clean())
                     }
-                    (Some("image"), Some(JsValue::String(url))) => match url::Url::parse(url) {
+                    (_, _, Some(image)) => match url::Url::parse(&image.url) {
                         Ok(u) if u.scheme() == "data" => false,
                         Ok(u) => store.origin.as_ref() != Some(&u.origin()) || !u.origin().is_tuple(),
                         Err(_) => true,
                     },
                     _ => false,
                 };
+                let url = image.as_ref().map(|image| image.url.clone());
                 let found = match (text(args, 3), args.get(4)) {
                     (Some("canvas"), Some(JsValue::Number(n))) => {
                         let (w, hh) = store.contexts.get(&(*n as usize)).map(|c| (c.width, c.height)).unwrap_or((0, 0));
@@ -312,7 +379,8 @@ pub(crate) fn install(
                             CanvasBitmap::from_rgba(w, hh, &vec![0; w as usize * hh as usize * 4])
                         })
                     }
-                    (Some("image"), Some(JsValue::String(url))) => {
+                    (Some("image" | "pattern"), _) => {
+                        let url = url.as_deref().unwrap_or_default();
                         // drawImage: the size the whole image is drawn at, from
                         // the dest/source ratio and the transform's scale.
                         let size = match (op, number_list::<8>(text(args, 5)), number_list::<2>(text(args, 6))) {
@@ -339,6 +407,13 @@ pub(crate) fn install(
                     _ => None,
                 };
                 if found.is_none() {
+                    // Nothing to draw; a canvas asked to draw another
+                    // origin's image is not origin-clean all the same.
+                    if tainted {
+                        if let Some(ctx) = store.contexts.get_mut(&node) {
+                            ctx.taint();
+                        }
+                    }
                     return JsValue::Undefined;
                 }
                 found

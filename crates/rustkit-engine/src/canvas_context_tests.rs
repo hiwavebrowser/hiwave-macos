@@ -508,7 +508,7 @@ fn draw_image_of_an_svg_img_matches_chrome() {
 
 /// A tiny HTTP server for the redirect cases: `routes` maps a path to
 /// (status, extra header lines, content type, body), made from its port.
-fn serve_with_redirects(routes: impl FnOnce(u16) -> Vec<(String, u16, String, &'static str, Vec<u8>)>) -> u16 {
+pub(crate) fn serve_with_redirects(routes: impl FnOnce(u16) -> Vec<(String, u16, String, &'static str, Vec<u8>)>) -> u16 {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
