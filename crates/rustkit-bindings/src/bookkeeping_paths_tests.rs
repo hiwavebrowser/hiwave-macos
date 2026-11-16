@@ -386,10 +386,12 @@ fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() 
 /// The load-listener check made when a frame goes into the document reads
 /// the tree and the handler attribute from the engine's own records: an
 /// ancestor lookup or attribute read the page has replaced is not asked,
-/// the check ends, and its answers are the same.
+/// the check ends, and its answers are the same. (The check is called
+/// here as web_frames.js calls it; an insertion made with these accessors
+/// replaced has other readers of the tree.)
 #[test]
 fn the_load_listener_check_asks_nothing_of_the_page() {
-    let (ran, quiet) = bounded(|| {
+    let (ran, heard) = bounded(|| {
         let (b, _) = bindings(false);
         b.enable_frames().unwrap();
         b.evaluate(
@@ -397,17 +399,22 @@ fn the_load_listener_check_asks_nothing_of_the_page() {
              var box = document.createElement('div'); box.addEventListener('load', none, true); document.body.appendChild(box);
              var marked = document.createElement('iframe'); marked.setAttribute('onload', '0');
              var plain = document.createElement('iframe'), inner = document.createElement('iframe');
+             document.body.appendChild(plain); document.body.appendChild(marked); box.appendChild(inner);
              Object.defineProperty(Node.prototype, 'parentNode', { get: function () { ran++; return this; }, configurable: true });
              Object.defineProperty(Node.prototype, 'parentElement', { get: function () { ran++; return this; }, configurable: true });
              Element.prototype.getAttribute = function () { ran++; return null; };
-             Element.prototype.hasAttribute = function () { ran++; return false; };
-             Node.prototype.appendChild.call(document.body, plain);
-             Node.prototype.appendChild.call(document.body, marked);
-             Node.prototype.appendChild.call(box, inner);",
+             Element.prototype.hasAttribute = function () { ran++; return false; };",
         )
         .unwrap();
-        let quiet: Vec<bool> = b.take_frame_requests().into_iter().map(|r| r.quiet).collect();
-        (text(b.evaluate("String(ran)").unwrap()), quiet)
+        let heard = b
+            .host_turn(
+                "var H = __rk.domHooks, d = document; \
+                 return [H.loadHeard(d.querySelectorAll('iframe')[0]), H.loadHeard(d.querySelectorAll('iframe')[1]), \
+                         H.loadHeard(d.querySelectorAll('iframe')[2])].join();",
+                &[],
+            )
+            .unwrap();
+        (text(b.evaluate("String(ran)").unwrap()), text(heard))
     });
-    assert_eq!((ran.as_str(), quiet), ("0", vec![true, false, false]), "page functions run, and which requests are quiet");
+    assert_eq!((ran.as_str(), heard.as_str()), ("0", "true,false,true"), "page functions run; the check for the frame under a capturing listener, a plain frame, a frame with the attribute");
 }

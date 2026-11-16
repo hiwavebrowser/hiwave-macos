@@ -6742,17 +6742,25 @@ const WRAPPERS_JS: &str = r#"
     // own listener or handler, or a capturing listener above it (`load`
     // does not bubble and stops at the document)? For web_frames.js, which
     // decides at an iframe's insertion whether its blank `load` is heard.
+    // Read from the engine's own records: the handler as assigned or as
+    // the `onload` attribute's presence (the node store's), the listener
+    // registry, and the node store's parent, in a walk with an end.
     HOOKS.loadHeard = function (target) {
-        var t = thisTarget(target);
-        if (typeof handlerOf(t, 'load') === 'function') return true;
-        for (var n = t; n && n !== g; n = n === doc || !n[SLOT] ? null : n.parentNode) {
+        var t = thisTarget(target), s = t[SLOT], a = ASSIGNED.get(t);
+        if (a && 'load' in a) { if (typeof a.load === 'function') return true; }
+        else if (s && s.gen === gen && N.attr(s.gen, s.id, 'onload') !== null) return true;
+        for (var n = t, steps = 0; n && n !== g; steps++) {
+            // Deeper than any tree the parser builds: say it is heard.
+            if (steps >= LOAD_WALK_MAX) return true;
             var all = LISTENERS.get(n), list = all && all.load;
             for (var i = 0; list && i < list.length; i++) {
                 if (n === t || list[i].capture) return true;
             }
+            n = n === doc || !n[SLOT] ? null : related(n, 'parent');
         }
         return false;
     };
+    var LOAD_WALK_MAX = 65536;
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
     // checkbox before its listeners run and clicks a label's control after.
