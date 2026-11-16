@@ -25365,6 +25365,15 @@ impl Engine {
         self.script_turn(id, |bindings| bindings.evaluate(script))
     }
 
+    /// [`Self::execute_script`] with `script` run as a script of the
+    /// page's own, not as the host's (`DomBindings::evaluate_as_page_script`):
+    /// what it rejects is announced to the page. For tests whose script
+    /// stands for a page's.
+    #[doc(hidden)]
+    pub fn execute_as_page_script(&mut self, id: EngineViewId, script: &str) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.evaluate_as_page_script(script))
+    }
+
     /// [`Self::execute_script`] for one of the engine's own entry points:
     /// `body` is a function body whose `__rk` is the host object, which no
     /// page script reaches (`return __rk.fragmentNavigation(__a[0]);`), and
