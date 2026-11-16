@@ -2323,6 +2323,12 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     // The stepped clock only when asked for, and only for a stepped capture; a live run reads a clock
     // that flows.
     config.deterministic_page_clock = args.deterministic_clock && args.live_ms.is_none();
+    // Grid frame stamps whenever there is no --live-ms (TIMELINE1): the timeline, and so every script
+    // animation, reads exact grid times, the same every run. That includes the live turns of an
+    // --animations settle and of a prelude, which run on the real clock: there too only the
+    // timeline is on the grid; frame callbacks' timestamps and performance.now() flow as in a
+    // --live-ms run.
+    config.grid_frame_stamps = args.live_ms.is_none();
     config.replay_proxy = replay_proxy;
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
@@ -2625,6 +2631,10 @@ mod tests {
         assert!(!capture_config(&parsed(&["--animations"]), None).deterministic_page_clock);
         assert!(capture_config(&parsed(&["--deterministic-clock"]), None).deterministic_page_clock);
         assert!(!capture_config(&parsed(&["--deterministic-clock", "--live-ms", "1000"]), None).deterministic_page_clock);
+        // Grid frame stamps in every load-only capture (script animations reproduce), never in a
+        // live-ms run (TIMELINE1).
+        assert!(capture_config(&parsed(&[]), None).grid_frame_stamps);
+        assert!(!capture_config(&parsed(&["--live-ms", "1000"]), None).grid_frame_stamps);
     }
 
     /// LAT14: the prelude page and how long it runs live before the

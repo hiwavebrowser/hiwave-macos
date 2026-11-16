@@ -1901,6 +1901,11 @@ pub struct EngineConfig {
     /// that steps the timers reproduces every `t`-driven frame. Off by default: a live page reads a
     /// clock that flows. Its own switch, not a side effect of `disable_animations`.
     pub deterministic_page_clock: bool,
+    /// The document timeline reads each animation frame's exact grid time, with no real time in it
+    /// (TIMELINE1): script animations compute from it, so a capture reads the same animation times
+    /// every run, however long its turns take in real time. Frame callbacks' timestamps and
+    /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
+    pub grid_frame_stamps: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -2002,6 +2007,7 @@ impl Default for EngineConfig {
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
             deterministic_page_clock: false,
+            grid_frame_stamps: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -2970,6 +2976,7 @@ impl EngineConfig {
         Self {
             disable_animations: true,
             deterministic_page_clock: true,
+            grid_frame_stamps: true,
             ..Default::default()
         }
     }
@@ -10210,6 +10217,7 @@ impl Engine {
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
             // A capture (animations disabled for determinism) reads a page clock with no real time in it.
             bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
@@ -10683,6 +10691,7 @@ impl Engine {
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
             bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
