@@ -598,3 +598,29 @@ fn an_error_the_page_cancelled_is_in_the_engine_log_and_not_in_the_console_file(
     assert!(log[2].starts_with("uncaught Error: left-alone at "), "{log:#?}");
 }
 
+/// The same for a promise rejected with no handler whose
+/// `unhandledrejection` the page cancelled (Chrome's console has none:
+/// `error_console_cft148.json`, `console_rejections`): out of the console
+/// file, in the engine's log with the mark.
+#[test]
+fn a_rejection_the_page_cancelled_is_in_the_engine_log_and_not_in_the_console_file() {
+    const CANCELLING: &str = "<!doctype html><html><body>
+<script>window.addEventListener('unhandledrejection', function (ev) { if (/cancelled/.test(String(ev.reason))) ev.preventDefault(); });</script>
+<script>Promise.reject(new TypeError('cancelled-rejection'));</script>
+<script>Promise.reject(new RangeError('left-alone-rejection'));</script></body></html>";
+    let path = scratch("cancelled-rejection");
+    let _reset = Reset(path.clone());
+    crate::console_file::force_for_test(Some(Forced::On(path.clone(), MAX_FILE_BYTES)));
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    load(vec![Route::html("/", CANCELLING)], "/");
+    let lines = lines(&path);
+    assert_eq!(of_kind(&lines, "unhandled_rejection")["message"], "Uncaught (in promise) RangeError: left-alone-rejection", "{lines:#?}");
+    let mut log: Vec<String> = mirrored.lock().unwrap().iter().filter(|line: &&String| line.starts_with("unhandled rejection")).cloned().collect();
+    log.sort();
+    assert_eq!(log.len(), 2, "{log:#?}");
+    assert!(log[0].starts_with("unhandled rejection (cancelled by the page) TypeError: cancelled-rejection at "), "{log:#?}");
+    assert!(log[1].starts_with("unhandled rejection RangeError: left-alone-rejection at "), "{log:#?}");
+}
+

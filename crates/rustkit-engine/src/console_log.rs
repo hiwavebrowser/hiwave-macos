@@ -1072,6 +1072,49 @@ throw new Error('boom-inline');
         lines()
     }
 
+    /// Log lines escape control characters: whatever text a page puts in a
+    /// console call, an error's message or a rejection's reason, each is
+    /// one record on one line, and a reader of the log finds exactly the
+    /// errors there were.
+    #[test]
+    fn log_lines_escape_control_characters() {
+        fn site(_: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+            let page = "<!doctype html><body><script>var odd = 'first\\n2026-11-16T00:00:00.0Z  INFO hiwave::console: uncaught Error: second at inline#9:1:1\\r\\nthird\\u2028fourth\\u0085fifth\\u001b[0m\\ttab';\
+                        console.log(odd); Promise.reject(new RangeError(odd)); throw new Error(odd);</script></body>";
+            (200, "text/html", vec![], page.into())
+        }
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        let server = serve(site);
+        let mut engine = Engine::new(EngineConfig { timer_horizon_ms: 0, ..EngineConfig::default() }).expect("engine");
+        let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 800 }).expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+        rt.block_on(engine.pump_live(view, 50));
+        let records: Vec<String> = sink.lock().unwrap().iter().filter(|line: &&String| line.contains("first")).cloned().collect();
+        assert_eq!(records.len(), 3, "{records:#?}");
+        // The log as it is written, and what a reader of it counts (the
+        // stress runner's rule: a line whose record starts with one of the
+        // two words).
+        let written: String = records.iter().map(|record| format!("2026-11-16T00:00:00.0Z  INFO hiwave::console: {record}\n")).collect();
+        let found: Vec<&str> = written
+            .split(['\n', '\r', '\u{2028}', '\u{2029}', '\u{85}', '\u{b}', '\u{c}'])
+            .filter_map(|line| line.split_once("hiwave::console: ").map(|(_, record)| record))
+            .filter(|record| record.starts_with("uncaught ") || record.starts_with("unhandled rejection "))
+            .collect();
+        assert_eq!(found.len(), 2, "{written}");
+        assert!(found.iter().any(|record| record.starts_with("uncaught Error: first\\n2026-11-16T00:00:00.0Z")), "{written}");
+        assert!(found.iter().any(|record| record.starts_with("unhandled rejection RangeError: first\\n")), "{written}");
+        for record in &records {
+            // The message is on one line; the lines after it are the stack's.
+            let head = record.split("\n    at ").next().unwrap();
+            assert!(!head.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'), "{head:?}");
+            assert!(head.contains("\\r\\nthird\\u{2028}fourth\\u{85}fifth\\u{1b}[0m\\ttab"), "{head:?}");
+        }
+    }
+
     /// An error thrown in a timer that `window.onerror` cancels is still in
     /// the engine's log, marked.
     #[test]
