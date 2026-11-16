@@ -297,20 +297,31 @@ fn a_frame_after_a_long_tasks_catch_up_is_not_stamped_the_task_twice() {
 }
 
 /// CLOCK-INFLATE, as a property: in a live loop whose turns give the timers' clock the real time
-/// that passed (the app's `LiveClock`), long tasks of random lengths between turns, with frame
-/// loops and timer tasks reading the clock and the timeline, never leave `performance.now()`, a
-/// frame's stamp or the timeline more than two frames ahead of real time, whatever the task's
-/// length (Chrome: 0-1 ms, `long_task_clock_cft148.json`). Before the fix a task was counted twice
-/// after its catch-up (as far ahead as the tasks were long). What is left is at most about one
-/// frame: consecutive frames are kept a frame apart (Chrome's spacing), so a frame run straight
-/// after the one before can be stamped up to a frame past the clock's reading.
+/// that passed (the app's `LiveClock`), long tasks of random lengths inside turns, with frame loops
+/// and timer tasks reading the clock and the timeline, never leave `performance.now()`, a frame's
+/// stamp or the timeline ahead of real time by more than one grid step, whatever the task's length
+/// (Chrome: 0-1 ms, `long_task_clock_cft148.json`). Before the fix a task was counted twice after
+/// its catch-up (311 to 2688 ms ahead here). What is left is one grid step at most: consecutive
+/// frames are kept at least the grid distance apart (Chrome's spacing), so a frame run straight
+/// after the one before can be stamped up to a step past the clock.
+///
+/// Real time is a value here, not the wall clock (`Q.fakeReal`): a callback's work and the time
+/// between turns advance it, each turn is given what passed since the last, and the bound is exact.
 #[test]
 fn long_tasks_never_leave_the_page_clock_ahead_of_real_time() {
     fn run(seed: u64) -> Result<(), String> {
         let b = page();
+        b.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(
+                "var Q = __rk.shared.timerQueue; Q.fakeReal = 0; \
+                 window.__work = function (ms) { Q.fakeReal += ms; }; \
+                 window.__real = function () { return Q.fakeReal; }; return 0",
+            )
+            .unwrap();
         b.evaluate(
             "var L = []; function R() { L.push(performance.now(), document.timeline ? document.timeline.currentTime : 0); } \
-             function F() { requestAnimationFrame(function (t) { L.push(t); R(); F(); }); } F();",
+             function F() { requestAnimationFrame(function (t) { L.push(t); R(); __work(1); F(); }); } F();",
         )
         .unwrap();
         let mut s = seed;
@@ -318,38 +329,44 @@ fn long_tasks_never_leave_the_page_clock_ahead_of_real_time() {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 33) % m
         };
-        let ev_f = |b: &DomBindings, v: &str| -> f64 { ev(b, &format!("String({v})")).parse().unwrap() };
+        let num = |b: &DomBindings, v: &str| -> f64 { ev(b, &format!("String({v})")).parse().unwrap() };
         // The page clock and real time agree at the start (a turn to settle the first reading).
         b.advance_timers(0, 10).unwrap();
-        let p0 = ev_f(&b, "performance.now()");
-        let began = std::time::Instant::now();
-        let mut last = std::time::Instant::now();
-        for _ in 0..40 {
+        let (p0, r0) = (num(&b, "performance.now()"), num(&b, "__real()"));
+        let mut turn_began = r0;
+        let mut worst = f64::MIN;
+        for _ in 0..200 {
             if next(3) == 0 {
-                // A long task inside the next turn (a timer callback that works): real time passes
-                // in the turn that the timers' clock is given only on the turn after.
-                b.evaluate(&format!(
-                    "setTimeout(function () {{ var s = Date.now(); while (Date.now() - s < {}) {{}} }}, 0)",
-                    100 + next(300)
-                ))
-                .unwrap();
+                // A long task inside the next turn: a timer callback that works.
+                let ms = 100 + next(2900);
+                b.evaluate(&format!("setTimeout(function () {{ __work({ms}); }}, 0)")).unwrap();
             }
             if next(4) == 0 {
                 b.evaluate(&format!("setTimeout(function () {{ R(); }}, {})", next(40))).unwrap();
             }
-            // A turn: the timers' clock gets the real time since the last turn, whole ms.
-            let elapsed = last.elapsed().as_millis() as u64;
-            last += std::time::Duration::from_millis(elapsed);
-            b.advance_timers(elapsed, 100).unwrap();
-            let real = began.elapsed().as_secs_f64() * 1000.0;
-            let reads: Vec<f64> = ev(&b, "L.join()").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect();
-            let top = reads.iter().cloned().fold(f64::MIN, f64::max).max(ev_f(&b, "performance.now()"));
-            if top - p0 > real + 34.0 {
+            // Time between turns (the loop's wait), then a turn given the real time since the last
+            // turn began, whole ms, as the app's loop is.
+            b.evaluate(&format!("__work({})", next(20))).unwrap();
+            let now = num(&b, "__real()");
+            let elapsed = (now - turn_began).floor();
+            turn_began += elapsed;
+            b.advance_timers(elapsed as u64, 100).unwrap();
+            let real = num(&b, "__real()") - r0;
+            let reads: Vec<f64> = ev(&b, "L.join()")
+                .split(',')
+                .filter(|x| !x.is_empty())
+                .map(|x| x.parse().unwrap())
+                .collect();
+            let top = reads.iter().cloned().fold(f64::MIN, f64::max).max(num(&b, "performance.now()"));
+            worst = worst.max(top - p0 - real);
+            // One grid step (at most 17 ms) and 1 ms for where the starting reading sits.
+            if top - p0 > real + 18.0 {
                 return Err(format!("{:.1} ms ahead of real time ({:.1} ms real)", top - p0 - real, real));
             }
         }
+        eprintln!("seed {seed}: at most {worst:.2} ms ahead of real time");
         Ok(())
     }
-    let failed: Vec<String> = (1..=6u64).filter_map(|seed| run(seed).err().map(|e| format!("seed {seed}: {e}"))).collect();
+    let failed: Vec<String> = (1..=12u64).filter_map(|seed| run(seed).err().map(|e| format!("seed {seed}: {e}"))).collect();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
