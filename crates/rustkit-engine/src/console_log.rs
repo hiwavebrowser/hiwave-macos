@@ -952,6 +952,27 @@ mod tests {
         assert!(!brief.contains('\t') && !brief.contains('S'), "{brief:?}");
     }
 
+    /// Log lines escape control characters: the source excerpt of an
+    /// error's line and the names in a host-stack line are on one line
+    /// whatever separators the page's text holds.
+    #[test]
+    fn a_source_excerpt_and_a_host_stack_line_stay_on_one_line() {
+        let breaks = |text: &str| text.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}');
+        let window = excerpt("var s = 'a\u{2028}b\u{2029}c\u{85}d'; throw new Error('x');", 1, 22).expect("an excerpt");
+        assert!(!breaks(&window.snippet), "{:?}", window.snippet);
+        assert!(window.snippet.contains("throw new Error"), "{:?}", window.snippet);
+
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        on_host_stack(256, "set a\nb=255\u{2028}set c=1", "set a\nb > 2026-11-16T00:00:00.0Z  INFO hiwave::console: uncaught Error: named\r > set c\u{2029}");
+        let lines = sink.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(!breaks(&lines[0]), "{:?}", lines[0]);
+        assert!(lines[0].starts_with("host stack depth=256 histogram=\"set a\\nb=255\\u{2028}set c=1\" frames=\"set a\\nb > 2026"), "{:?}", lines[0]);
+    }
+
     #[test]
     fn plain_writes_control_characters_as_escapes() {
         assert_eq!(plain("a b\u{e9}\u{4e2d} \"'\\"), "a b\u{e9}\u{4e2d} \"'\\");
