@@ -1,6 +1,7 @@
 {
  "browser": "148.0.7778.216",
  "cases": {
+  "no host names on the window": "0",
   "data is a Uint8ClampedArray": "true [object Uint8ClampedArray] true",
   "data is the same object each read": "true",
   "length is w*h*4": "2,3,24,24,0,24",
@@ -54,6 +55,10 @@
   "put with fractions": "4x4:9 100 101 9 9 102 103 9 9 9 9 9 9 9 9 9",
   "put with NaN": "threw TypeError",
   "put with Infinity": "threw TypeError",
+  "put with a NaN dirty width": "threw TypeError",
+  "put with an Infinity dirty origin": "threw TypeError",
+  "put with six arguments": "threw TypeError",
+  "put with eight arguments": "4x4:9 9 9 9 9 100 101 9 9 102 103 9 9 9 9 9",
   "put with five arguments": "threw TypeError",
   "put with two arguments": "threw TypeError",
   "put of a plain object": "threw TypeError",

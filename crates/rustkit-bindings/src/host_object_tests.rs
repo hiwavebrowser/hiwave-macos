@@ -318,7 +318,7 @@ fn net_bookkeeping_calls_nothing_a_page_replaced() {
 /// The natives the runtime puts on the host object itself (rustkit-js).
 const HOST_NATIVES: &[&str] = &[
     "reportError", "unsupported", "base64Decode", "base64Encode", "binaryDecode", "binaryEncode", "blobGet",
-    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode",
+    "blobRevoke", "blobUrl", "takeBytes", "utf8Decode", "utf8Encode", "pixelsIn", "pixelsOut",
 ];
 
 /// Every name this crate's sources read or write on the host object is a

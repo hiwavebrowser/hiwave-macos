@@ -340,100 +340,140 @@
     method(P, 'clip', function clip(r) { var d = data(this); call(d, 'clip', rule(r)); });
 
     // ---- Pixels: the bitmap rasterized behind the recording (STR-7).
+    // An ImageData's bytes are a real Uint8ClampedArray that the host fills
+    // and reads whole (`pixelsOut`, `pixelsIn`): no loop over pixels runs
+    // here. What these paths use is taken when this script installs, and
+    // nothing is read from the array itself, so a page that replaced
+    // Uint8ClampedArray, its prototype or WeakMap's methods changes nothing.
+    var pixelsOut = __rk.pixelsOut, pixelsIn = __rk.pixelsIn;
     var IMG = new WeakMap();
-    function sizeError(member, which) {
+    var rApply = Reflect.apply, wmGet = WeakMap.prototype.get, wmSet = WeakMap.prototype.set;
+    var trunc = Math.trunc, absOf = Math.abs, finite = isFinite, Text = String, TypeErr = TypeError, RangeErr = RangeError,
+        newRecord = Object.create;
+    // The bytes of the largest bitmap a canvas keeps (16384 x 16384, RGBA).
+    var MAX_BYTES = 16384 * 16384 * 4;
+    function imgOf(o) { return o !== null && typeof o === 'object' ? rApply(wmGet, IMG, [o]) : undefined; }
+    function keepImg(o, w, h, bytes) {
+        var v = newRecord(null);
+        v.width = w; v.height = h; v.data = bytes;
+        rApply(wmSet, IMG, [o, v]);
+        return o;
+    }
+    function sizeError(which) {
         return domError('IndexSizeError', "Failed to construct 'ImageData': The " + which + ' is zero or not a number.');
     }
-    // new ImageData(width, height) or new ImageData(data, width[, height]).
-    var Image = function ImageData(a, b, c) {
-        if (!new.target) throw new TypeError("Failed to construct 'ImageData': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
-        if (arguments.length < 2) throw new TypeError("Failed to construct 'ImageData': 2 arguments required, but only " + arguments.length + ' present.');
-        var w, h, bytes;
-        if (a instanceof Uint8ClampedArray) {
+    // A new array of `n` zero bytes; past what a canvas can hold, a RangeError.
+    function zeros(n, member) {
+        if (!(n <= MAX_BYTES)) throw new RangeErr("Failed to " + member + ": Out of memory at ImageData creation.");
+        return pixelsOut(n, true);
+    }
+    // ImageDataSettings: only sRGB pixels are kept, so `colorSpace` is
+    // checked and the answer is always 'srgb'.
+    function settings(s, member) {
+        if (s === undefined || s === null) return;
+        if (typeof s !== 'object' && typeof s !== 'function') throw new TypeErr("Failed to " + member + ": The provided value is not of type 'ImageDataSettings'.");
+        var space = s.colorSpace;
+        if (space === undefined) return;
+        space = Text(space);
+        if (space !== 'srgb' && space !== 'display-p3') {
+            throw new TypeErr("Failed to " + member + ": The provided value '" + space + "' is not a valid enum value of type PredefinedColorSpace.");
+        }
+    }
+    // new ImageData(width, height[, settings]) or
+    // new ImageData(data, width[, height[, settings]]).
+    var Image = function ImageData(a, b, c, e) {
+        if (!new.target) throw new TypeErr("Failed to construct 'ImageData': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        if (arguments.length < 2) throw new TypeErr("Failed to construct 'ImageData': 2 arguments required, but only " + arguments.length + ' present.');
+        var w, h, bytes, n = pixelsIn(a, false);
+        if (n !== -2) {
+            // A Uint8ClampedArray, kept as it is: the page's writes to it are this ImageData's.
+            if (n <= 0 || n % 4) {
+                throw domError('InvalidStateError', "Failed to construct 'ImageData': The input data has zero elements or its length is not a multiple of 4.");
+            }
             w = b >>> 0;
-            if (!w) throw sizeError('ImageData', 'source width');
-            if (!a.length || a.length % 4 || (a.length / 4) % w) {
+            if (!w) throw sizeError('source width');
+            if ((n / 4) % w) {
                 throw domError('IndexSizeError', "Failed to construct 'ImageData': The input data length is not a multiple of (4 * width).");
             }
-            h = a.length / 4 / w;
+            h = n / 4 / w;
             if (c !== undefined && (c >>> 0) !== h) {
                 throw domError('IndexSizeError', "Failed to construct 'ImageData': The input data length is not equal to (4 * width * height).");
             }
+            settings(e, "construct 'ImageData'");
             bytes = a;
         } else {
             w = a >>> 0; h = b >>> 0;
-            if (!w) throw sizeError('ImageData', 'source width');
-            if (!h) throw sizeError('ImageData', 'source height');
-            bytes = new Uint8ClampedArray(w * h * 4);
+            if (!w) throw sizeError('source width');
+            if (!h) throw sizeError('source height');
+            settings(c, "construct 'ImageData'");
+            bytes = zeros(w * h * 4, "construct 'ImageData'");
         }
-        IMG.set(this, { width: w, height: h, data: bytes });
+        keepImg(this, w, h, bytes);
     };
     Object.defineProperty(Image.prototype, Symbol.toStringTag, { value: 'ImageData', configurable: true });
     Object.defineProperty(g, 'ImageData', { value: Image, writable: true, configurable: true, enumerable: false });
-    function imageData(w, h, bytes) {
-        var o = Object.create(Image.prototype);
-        IMG.set(o, { width: w, height: h, data: bytes });
-        return o;
-    }
+    var imageProto = Image.prototype;
+    function imageData(w, h, bytes) { return keepImg(newRecord(imageProto), w, h, bytes); }
     function img(o) {
-        var v = o != null ? IMG.get(o) : undefined;
-        if (!v) throw new TypeError('Illegal invocation');
+        var v = imgOf(o);
+        if (!v) throw new TypeErr('Illegal invocation');
         return v;
     }
     accessor(Image.prototype, 'width', function () { return img(this).width; });
     accessor(Image.prototype, 'height', function () { return img(this).height; });
     accessor(Image.prototype, 'data', function () { return img(this).data; });
-    method(P, 'getImageData', function getImageData(sx, sy, sw, sh) {
+    accessor(Image.prototype, 'colorSpace', function () { img(this); return 'srgb'; });
+    method(P, 'getImageData', function getImageData(sx, sy, sw, sh, s) {
         need(4, arguments, 'CanvasRenderingContext2D', 'getImageData');
         var d = data(this);
-        var a = [+sx, +sy, +sw, +sh];
-        for (var i = 0; i < 4; i++) {
-            if (!isFinite(a[i])) throw new TypeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+        sx = +sx; sy = +sy; sw = +sw; sh = +sh;
+        if (!finite(sx) || !finite(sy) || !finite(sw) || !finite(sh)) {
+            throw new TypeErr("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
         }
-        var w = Math.trunc(a[2]), h = Math.trunc(a[3]);
+        var w = trunc(sw), h = trunc(sh);
         if (w === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source width is 0.");
         if (h === 0) throw domError('IndexSizeError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source height is 0.");
-        var x = Math.trunc(a[0]), y = Math.trunc(a[1]);
+        settings(s, "execute 'getImageData' on 'CanvasRenderingContext2D'");
+        var x = trunc(sx), y = trunc(sy);
         if (w < 0) { x += w; w = -w; }
         if (h < 0) { y += h; h = -h; }
-        var hex = String(call(d, 'getImageData', x, y, w, h) || '');
-        if (hex === 'SecurityError') throw domError('SecurityError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.");
-        if (hex === 'RangeError') throw new RangeError("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation");
-        var bytes = new Uint8ClampedArray(w * h * 4);
-        for (var k = 0, n = Math.min(bytes.length, hex.length >> 1); k < n; k++) {
-            bytes[k] = parseInt(hex.substr(k * 2, 2), 16);
-        }
-        return imageData(w, h, bytes);
+        // The host leaves the bytes for `pixelsOut` and answers how many.
+        var out = call(d, 'getImageData', x, y, w, h);
+        if (out === 'SecurityError') throw domError('SecurityError', "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.");
+        if (out !== w * h * 4) throw new RangeErr("Failed to execute 'getImageData' on 'CanvasRenderingContext2D': Out of memory at ImageData creation");
+        return imageData(w, h, pixelsOut(out, false));
     });
-    method(P, 'createImageData', function createImageData(a, b) {
+    method(P, 'createImageData', function createImageData(a, b, s) {
         need(1, arguments, 'CanvasRenderingContext2D', 'createImageData');
         data(this);
-        if (a !== null && typeof a === 'object' && IMG.get(a)) {
-            var v = IMG.get(a);
-            return imageData(v.width, v.height, new Uint8ClampedArray(v.width * v.height * 4));
-        }
+        var v = imgOf(a);
+        if (v) return imageData(v.width, v.height, zeros(v.width * v.height * 4, "execute 'createImageData' on 'CanvasRenderingContext2D'"));
         need(2, arguments, 'CanvasRenderingContext2D', 'createImageData');
-        var w = Math.abs(Math.trunc(+a)), h = Math.abs(Math.trunc(+b));
+        var w = absOf(trunc(+a)), h = absOf(trunc(+b));
         if (!w || !h) throw domError('IndexSizeError', "Failed to execute 'createImageData' on 'CanvasRenderingContext2D': The source " + (!w ? 'width' : 'height') + ' is 0.');
-        return imageData(w, h, new Uint8ClampedArray(w * h * 4));
+        settings(s, "execute 'createImageData' on 'CanvasRenderingContext2D'");
+        return imageData(w, h, zeros(w * h * 4, "execute 'createImageData' on 'CanvasRenderingContext2D'"));
     });
-    function hexOf(bytes) {
-        var parts = new Array(bytes.length);
-        for (var i = 0; i < bytes.length; i++) { var v = bytes[i]; parts[i] = (v < 16 ? '0' : '') + v.toString(16); }
-        return parts.join('');
-    }
     // putImageData(data, dx, dy[, dirtyX, dirtyY, dirtyWidth, dirtyHeight])
-    // (HTML §4.12.5.1.15): the dirty rect normalised and cut to the image here.
-    method(P, 'putImageData', function putImageData(img, dx, dy, x, y, w, h) {
+    // (HTML §4.12.5.1.15): the dirty rect normalised and cut to the image
+    // here, the bytes read by the host from the array as it is now.
+    method(P, 'putImageData', function putImageData(image, dx, dy, x, y, w, h) {
         need(3, arguments, 'CanvasRenderingContext2D', 'putImageData');
-        var d = data(this);
-        var v = img !== null && typeof img === 'object' ? IMG.get(img) : undefined;
-        if (!v) throw new TypeError("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': parameter 1 is not of type 'ImageData'.");
-        dx = Math.trunc(+dx); dy = Math.trunc(+dy);
-        if (!isFinite(dx) || !isFinite(dy)) return;
-        if (arguments.length < 7) { x = 0; y = 0; w = v.width; h = v.height; }
-        else { x = Math.trunc(+x); y = Math.trunc(+y); w = Math.trunc(+w); h = Math.trunc(+h); }
-        if (![x, y, w, h].every(isFinite)) return;
+        var d = data(this), n = arguments.length;
+        if (n > 3 && n < 7) throw new TypeErr("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': Valid arities are: [3, 7], but " + n + ' arguments provided.');
+        var v = imgOf(image);
+        if (!v) throw new TypeErr("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': parameter 1 is not of type 'ImageData'.");
+        dx = +dx; dy = +dy;
+        if (n < 7) { x = 0; y = 0; w = v.width; h = v.height; }
+        else { x = +x; y = +y; w = +w; h = +h; }
+        if (!finite(dx) || !finite(dy) || !finite(x) || !finite(y) || !finite(w) || !finite(h)) {
+            throw new TypeErr("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': The provided long value is non-finite.");
+        }
+        var held = pixelsIn(v.data, false);
+        if (held !== v.width * v.height * 4) {
+            throw domError('InvalidStateError', "Failed to execute 'putImageData' on 'CanvasRenderingContext2D': The source data has been detached.");
+        }
+        dx = trunc(dx); dy = trunc(dy); x = trunc(x); y = trunc(y); w = trunc(w); h = trunc(h);
         if (w < 0) { x += w; w = -w; }
         if (h < 0) { y += h; h = -h; }
         if (x < 0) { w += x; x = 0; }
@@ -441,7 +481,8 @@
         if (x + w > v.width) w = v.width - x;
         if (y + h > v.height) h = v.height - y;
         if (w <= 0 || h <= 0) return;
-        call(d, 'putImageData', hexOf(v.data), v.width, v.height, dx, dy, [x, y, w, h].join(','));
+        pixelsIn(v.data, true);
+        call(d, 'putImageData', v.width, v.height, dx, dy, x, y, w, h);
     });
     // An image source as [kind, id or URL, width, height]; null when it
     // has nothing to draw yet (an image still loading).

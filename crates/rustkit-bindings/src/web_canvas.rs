@@ -206,17 +206,6 @@ fn number_list<const N: usize>(s: Option<&str>) -> Option<[f32; N]> {
     Some(out)
 }
 
-fn unhex(hex: &str) -> Vec<u8> {
-    let b = hex.as_bytes();
-    let val = |c: u8| match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    };
-    b.chunks_exact(2).map(|p| val(p[0]) << 4 | val(p[1])).collect()
-}
-
 fn flag(args: &[JsValue], i: usize) -> bool {
     matches!(args.get(i), Some(JsValue::Boolean(true)))
 }
@@ -242,6 +231,8 @@ pub(crate) fn install(
     script: bool,
 ) -> Result<(), JsError> {
     let (s, h) = (store.clone(), host.clone());
+    // Pixels cross in the runtime's slot, not as arguments.
+    let pixels = runtime.pixel_slot();
     runtime.register_host_function(
         "__rustkit_canvas",
         12,
@@ -473,12 +464,20 @@ pub(crate) fn install(
                     }
                 }
                 "putImageData" => {
-                    // hex, width, height, dx, dy, then "x,y,w,h" (the dirty rect, cut to the image).
-                    if let (Some(hex), Some([w, hh, dx, dy])) = (text(args, 3), nums::<4>(args, 4)) {
-                        if let Some([x, y, dw, dh]) = number_list::<4>(text(args, 8)) {
-                            let data = ImageData { width: w as u32, height: hh as u32, data: unhex(hex) };
+                    // width, height, dx, dy, then the dirty rect (cut to the
+                    // image); the bytes are what the script's `pixelsIn`
+                    // left in the slot, and must be the image's size.
+                    let data = pixels.take();
+                    if let (Some(data), Some([w, hh, dx, dy]), Some([x, y, dw, dh])) = (data, nums::<4>(args, 3), nums::<4>(args, 7)) {
+                        let whole = |v: f32| v >= 1.0 && v <= 16384.0 && v.fract() == 0.0;
+                        if whole(w) && whole(hh) && rustkit_canvas::rgba_len(w as u32, hh as u32) == Some(data.len()) {
+                            let data = ImageData { width: w as u32, height: hh as u32, data };
                             ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]);
+                        } else {
+                            drew = false;
                         }
+                    } else {
+                        drew = false;
                     }
                 }
                 "lineWidth" => {
@@ -651,13 +650,11 @@ pub(crate) fn install(
                         if rustkit_canvas::rgba_len(w as u32, hh as u32).is_none() || w > u32::MAX as f32 || hh > u32::MAX as f32 {
                             return JsValue::String("RangeError".into());
                         }
+                        // The bytes wait in the slot for the script's
+                        // `pixelsOut`; the answer is how many.
                         let d = ctx.get_image_data(x as i32, y as i32, w as u32, hh as u32);
-                        let mut hex = String::with_capacity(d.data.len() * 2);
-                        for b in &d.data {
-                            use std::fmt::Write;
-                            let _ = write!(hex, "{b:02x}");
-                        }
-                        result = JsValue::String(hex);
+                        result = JsValue::Number(d.data.len() as f64);
+                        pixels.put(d.data);
                     }
                 }
                 "fill" => ctx.fill_with_rule(text(args, 3) == Some("evenodd")),
@@ -700,5 +697,5 @@ pub(crate) fn install(
     if !script {
         return Ok(());
     }
-    runtime.evaluate_script(SCRIPT).map(|_| ())
+    runtime.evaluate_with_host(SCRIPT).map(|_| ())
 }

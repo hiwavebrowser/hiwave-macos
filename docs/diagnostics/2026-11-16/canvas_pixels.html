@@ -9,6 +9,9 @@ function px(d, i) { i = (i || 0) * 4; return [d[i], d[i + 1], d[i + 2], d[i + 3]
 function t(name, f) { try { out[name] = String(f()); } catch (e) { out[name] = "threw " + e.name; } }
 function filled(w, h) { var x = ctx(w, h); x.fillStyle = "rgb(10, 20, 30)"; x.fillRect(0, 0, w || 8, h || 8); return x; }
 
+// Before any canvas is used: nothing of the engine's own is on the window.
+t("no host names on the window", function () { return Object.getOwnPropertyNames(window).filter(function (n) { return /^__/.test(n); }).length; });
+
 // The object.
 t("data is a Uint8ClampedArray", function () { var d = ctx().getImageData(0, 0, 2, 3).data; return (d instanceof Uint8ClampedArray) + " " + Object.prototype.toString.call(d) + " " + (Object.getPrototypeOf(d) === Uint8ClampedArray.prototype); });
 t("data is the same object each read", function () { var i = ctx().getImageData(0, 0, 2, 3); return i.data === i.data; });
@@ -68,6 +71,10 @@ t("put with an empty dirty rect", function () { var x = target(); x.putImageData
 t("put with fractions", function () { var x = target(); x.putImageData(two(), 1.9, 0.5); return reds(x.getImageData(0, 0, 4, 4)); });
 t("put with NaN", function () { var x = target(); x.putImageData(two(), NaN, 0); return reds(x.getImageData(0, 0, 4, 4)); });
 t("put with Infinity", function () { var x = target(); x.putImageData(two(), Infinity, 0); return reds(x.getImageData(0, 0, 4, 4)); });
+t("put with a NaN dirty width", function () { var x = target(); x.putImageData(two(), 0, 0, 0, 0, NaN, 2); return reds(x.getImageData(0, 0, 4, 4)); });
+t("put with an Infinity dirty origin", function () { var x = target(); x.putImageData(two(), 0, 0, Infinity, 0, 2, 2); return reds(x.getImageData(0, 0, 4, 4)); });
+t("put with six arguments", function () { var x = target(); x.putImageData(two(), 0, 0, 0, 0, 1); return "ok"; });
+t("put with eight arguments", function () { var x = target(); x.putImageData(two(), 1, 1, 0, 0, 2, 2, 9); return reds(x.getImageData(0, 0, 4, 4)); });
 t("put with five arguments", function () { var x = target(); x.putImageData(two(), 0, 0, 0, 0); return reds(x.getImageData(0, 0, 4, 4)); });
 t("put with two arguments", function () { target().putImageData(two(), 0); return "ok"; });
 t("put of a plain object", function () { target().putImageData({ width: 1, height: 1, data: new Uint8ClampedArray(4) }, 0, 0); return "ok"; });

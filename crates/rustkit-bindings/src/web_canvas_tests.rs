@@ -318,9 +318,12 @@ fn a_canvas_is_read_and_written_without_a_loop_over_its_pixels() {
                   var made = x.createImageData(50, 50), own = new ImageData(50, 50), j = x.getImageData(0, 0, 1, 1).data; \
                   [j[0], j[1], j[2], j[3], i.data.length, made.data.length, own.data.length, i.data instanceof Uint8ClampedArray].join()";
     let b = bound();
-    b.set_loop_iteration_limit(64);
-    assert_eq!(ev(&b, script), "9,2,3,255,10000,10000,10000,true");
     let child = b.new_child().unwrap();
     child.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    // First use installs the canvas script, which has loops of its own.
+    ev(&b, "document.getElementById('d').getContext('2d'); 'installed'");
+    ev(&child, "document.getElementById('d').getContext('2d'); 'installed'");
+    b.set_loop_iteration_limit(64);
+    assert_eq!(ev(&b, script), "9,2,3,255,10000,10000,10000,true");
     assert_eq!(ev(&child, script), "9,2,3,255,10000,10000,10000,true");
 }

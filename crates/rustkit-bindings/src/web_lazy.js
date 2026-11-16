@@ -25,15 +25,25 @@
     var reporting = create(null);
     reporting.reportError = __rk.reportError;
     reporting.unsupported = __rk.unsupported;
-    // The natives a script takes from the window when it installs.
-    var NATIVES = { animations: '__rustkit_animated_style', intl: '__rustkit_likely_subtags' };
+    // The natives a script takes from the window when it installs: off
+    // the window from now, put back only while that script installs.
+    var NATIVES = bare({ animations: bare(['__rustkit_animated_style']), intl: bare(['__rustkit_likely_subtags']),
+                         canvas: bare(['__rustkit_canvas', '__rustkit_canvas_slot']) });
     var held = create(null);
-    ['animations', 'intl'].forEach(function (key) {
-        var name = NATIVES[key];
-        held[key] = bare(gOPD(g, name));
-        delete g[name];
+    ['animations', 'intl', 'canvas'].forEach(function (key) {
+        var names = NATIVES[key], had = bare([]);
+        for (var i = 0; i < names.length; i++) {
+            had[i] = bare(gOPD(g, names[i]));
+            delete g[names[i]];
+        }
+        held[key] = had;
     });
     var REPORTS = bare({ animations: true, streams: true });
+    // The host natives the canvas script moves pixels with.
+    var pixels = create(null);
+    pixels.pixelsOut = __rk.pixelsOut;
+    pixels.pixelsIn = __rk.pixelsIn;
+    var HOSTS = bare({ canvas: pixels });
 
     function lazy(key, globals, methods, accessors) {
         var src = SOURCES[key], done = false, undo = [];
@@ -42,9 +52,9 @@
             if (done) return;
             done = true;
             for (var i = undo.length - 1; i >= 0; i--) undo[i]();
-            var run = Fn('__rk', src), native = held[key], name = NATIVES[key], args = bare([REPORTS[key] ? reporting : undefined]);
-            if (native) dP(g, name, native);
-            try { apply(run, g, args); } finally { if (native) delete g[name]; }
+            var run = Fn('__rk', src), had = held[key], names = NATIVES[key], args = bare([REPORTS[key] ? reporting : HOSTS[key]]), i;
+            if (had) for (i = 0; i < names.length; i++) if (had[i]) dP(g, names[i], had[i]);
+            try { apply(run, g, args); } finally { if (had) for (i = 0; i < names.length; i++) delete g[names[i]]; }
         }
         function keep(obj, name) {
             var had = bare(gOPD(obj, name));

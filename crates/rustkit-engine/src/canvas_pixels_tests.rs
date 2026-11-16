@@ -12,7 +12,13 @@ const PIN: &str = include_str!("../../../docs/diagnostics/2026-11-16/canvas_pixe
 
 /// Cases where the engine is known to differ, with what it answers. Each
 /// is asserted, so a fix turns the test red until its line goes.
-const KNOWN: &[(&str, &str)] = &[];
+const KNOWN: &[(&str, &str)] = &[
+    // Only sRGB pixels are kept: a colour space asked for is checked (an
+    // unknown one is a TypeError, as in Chrome) and the answer is `srgb`.
+    ("colorSpace asked for", "srgb srgb"),
+    // `ImageData.pixelFormat` (Chrome 148) is not there yet.
+    ("ImageData members", "[object ImageData] colorSpace,constructor,data,height,width"),
+];
 
 #[test]
 fn canvas_pixels_behave_as_in_chrome() {
@@ -25,7 +31,7 @@ fn canvas_pixels_behave_as_in_chrome() {
     let text: String = serde_json::from_str(out.trim_start_matches("String(").trim_end_matches(')')).unwrap_or_else(|e| panic!("{e}: {out}"));
     let ours: serde_json::Value = serde_json::from_str(&text).unwrap();
     let cases = pin["cases"].as_object().unwrap();
-    assert!(cases.len() >= 90);
+    assert!(cases.len() >= 95);
     let mut failures = Vec::new();
     for (name, chrome) in cases {
         let expected = KNOWN.iter().find(|(known, _)| known == name).map(|(_, answer)| serde_json::Value::from(*answer));
