@@ -370,3 +370,18 @@ fn a_hover_between_script_writes_paints_as_the_full_rebuild() {
 fn the_production_switch_is_read_from_the_environment() {
     assert!(script_restyle_enabled() || std::env::var_os("RUSTKIT_SCRIPT_RESTYLE").is_some_and(|v| v == "0"));
 }
+
+/// R1 delta hold: a control's selection moved by script (`setSelectionRange` on the focused field)
+/// in the same task as a paint write. The selection move is in no `MutationLog` record, so the
+/// task is not all in the set the short path trusts: the highlight is painted as the full rebuild
+/// paints it. Trusted as logged (a `form` mark inferred as logged from its kind), only the
+/// colour was repainted and the highlight was not.
+#[test]
+fn a_selection_move_in_the_task_is_painted() {
+    let html = "<!doctype html><style>body{margin:0}#st{width:20px;height:20px;background:#08f}</style>\
+                <input id=f value=\"hello world\"><div id=st></div>\
+                <script>var f = document.getElementById('f'), st = document.getElementById('st'), n = 0; f.focus(); \
+                requestAnimationFrame(function g() { n++; if (window.go === 1) { window.go = 2; f.setSelectionRange(0, 3); } \
+                st.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(g); });</script>";
+    assert!(cross_check_go(html, 6, "String(f.selectionStart) + ',' + f.selectionEnd", 3) >= 2);
+}
