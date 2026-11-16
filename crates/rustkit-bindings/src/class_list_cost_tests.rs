@@ -14,7 +14,6 @@ fn grab_total(rep: &str) -> u64 {
 
 /// Opcodes one execution of `op` costs, net of the empty loop, over `iters` iterations.
 fn per_op(op: &str, setup: &str) -> f64 {
-    std::env::set_var("RUSTKIT_VM_STATS", "1");
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     b.set_document(Rc::new(
         Document::parse_html("<html><body><div id=root><p id=a class='row r1' data-i=5>hello</p><p id=b>two</p></div></body></html>").unwrap(),
@@ -32,26 +31,48 @@ fn per_op(op: &str, setup: &str) -> f64 {
     (cost as f64 - empty as f64) / iters as f64
 }
 
+const OPS: &[(&str, &str, f64)] = &[
+    ("add of a token that is there", "r2.classList.add('r1')", 410.0),
+    ("add then remove a token", "r2.classList.add('zz'); r2.classList.remove('zz')", 920.0),
+    ("remove of a token that is not there", "r2.classList.remove('nope')", 410.0),
+    ("toggle on then off", "r2.classList.toggle('t')", 440.0),
+    ("contains", "x = r2.classList.contains('r1')", 235.0),
+    ("add of two tokens", "r2.classList.add('r1', 'r2')", 500.0),
+];
+
+/// The measuring half: run in a child process, because the VM's counter switch (`RUSTKIT_VM_STATS`) is read
+/// once per process and the other tests here start runtimes first.
+#[test]
+#[ignore]
+fn class_list_cost_child() {
+    for (name, op, _) in OPS {
+        println!("COST|{name}|{:.1}", per_op(op, ""));
+    }
+}
+
 /// Budgets are the measured cost after the change, with a little room; the same operations cost 771 / 1707 /
 /// 888 / 772 / 271 / 849 opcodes before (develop 9f5cfca4).
 #[test]
 fn class_list_operations_stay_cheap() {
-    let budgets: &[(&str, &str, f64)] = &[
-        ("add of a token that is there", "r2.classList.add('r1')", 410.0),
-        ("add then remove a token", "r2.classList.add('zz'); r2.classList.remove('zz')", 920.0),
-        ("remove of a token that is not there", "r2.classList.remove('nope')", 410.0),
-        ("toggle on then off", "r2.classList.toggle('t')", 440.0),
-        ("contains", "x = r2.classList.contains('r1')", 235.0),
-        ("add of two tokens", "r2.classList.add('r1', 'r2')", 500.0),
-    ];
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "class_list_cost_tests::class_list_cost_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("RUSTKIT_VM_STATS", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
     let mut over = Vec::new();
-    for (name, op, budget) in budgets {
-        let n = per_op(op, "");
+    let mut seen = 0;
+    for l in text.lines().filter_map(|l| l.find("COST|").map(|i| &l[i + 5..])) {
+        let (name, n) = l.split_once('|').unwrap();
+        let n: f64 = n.parse().unwrap();
+        let budget = OPS.iter().find(|o| o.0 == name).unwrap().2;
         println!("COST {name:<38} {n:>8.1} (budget {budget})");
-        if n > *budget {
+        seen += 1;
+        if n > budget {
             over.push(format!("{name}: {n:.1} > {budget}"));
         }
     }
+    assert_eq!(seen, OPS.len(), "child output: {text}{}", String::from_utf8_lossy(&out.stderr));
     assert!(over.is_empty(), "{over:?}");
 }
 
