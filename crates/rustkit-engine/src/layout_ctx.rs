@@ -655,12 +655,12 @@ pub(crate) struct ViewLayout {
     /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
     /// not pay for a kept copy of its tree every frame.
     pub(crate) script_cooldown: Cell<u32>,
-    /// LPF3: the cooldown the next miss sets: 0 for a one-off miss (it costs only its own full
-    /// build, which keeps the tree for the next frame), doubling with each miss in a row (one at
-    /// the first relayout after the last one's cooldown), up to `SCRIPT_RESTYLE_COOLDOWN`.
-    pub(crate) script_backoff: Cell<u32>,
-    /// LPF3: relayouts since the short path's last miss.
-    pub(crate) script_since_miss: Cell<u32>,
+    /// LPF3: the cooldown the short path's last miss set, while its run of misses goes on; `None`
+    /// once it has ended (a hit, `SCRIPT_RESTYLE_IDLE` relayouts with no script paint write, a
+    /// navigation). A miss with a run going is one in a row: it sits out twice the last cooldown
+    /// (at least 1, at most `SCRIPT_RESTYLE_COOLDOWN`); a one-off miss sits out none. A relayout
+    /// the path refuses leaves the run as it is (R1: a scroll between two misses ended it).
+    pub(crate) script_last_cooldown: Cell<Option<u32>>,
     /// A window or element scroll happened in the task that dirtied the page: the short path,
     /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
     pub(crate) scrolled_in_task: Cell<bool>,
@@ -683,6 +683,18 @@ pub(crate) struct ViewLayout {
     pub(crate) failed_images: RefCell<FailedImages>,
     /// E54: which `<img>` elements have heard `load`, and for which image.
     pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+impl ViewLayout {
+    /// A navigation committed: the script restyle path starts the new document afresh. No kept
+    /// tree (its node ids were the old document's), no cooldown, and no run of misses (LPF3 R1).
+    pub(crate) fn forget_script_restyle(&self) {
+        self.script_unlaid.borrow_mut().take();
+        self.want_script_unlaid.set(false);
+        self.script_cooldown.set(0);
+        self.script_last_cooldown.set(None);
+        self.script_idle.set(0);
+    }
 }
 
 /// The current document's loaded images, as its script has been told of
