@@ -40,7 +40,21 @@ impl Page {
             ("/child.html", "text/html", CHILD.to_string()),
             ("/other.html", "text/html", "<!doctype html><title>other-title</title><p id=o>other</p>".to_string()),
             ("/child.js", "text/javascript", "window.externalRan = true;".to_string()),
+            ("/frame_load_child.html", "text/html", "<!doctype html><title>c</title><div id=stage></div>".to_string()),
             ("/noscript.html", "text/html", "<!doctype html><body><noscript><strong>x</strong></noscript><p>c</p></body>".to_string()),
+            (
+                "/styled.html",
+                "text/html",
+                "<!doctype html><html><head><link rel=stylesheet href=/styled.css></head><body><div id=stage></div></body></html>".to_string(),
+            ),
+            (
+                "/late.html",
+                "text/html",
+                "<!doctype html><html><head><link rel=stylesheet href='/held.css'></head><body><div id=stage></div></body></html>".to_string(),
+            ),
+            // `/held...` answers after 300 ms (the test server's rule).
+            ("/held.css", "text/css", "#stage { position: relative; }".to_string()),
+            ("/styled.css", "text/css", "html { height: 100%; } body { height: 100%; margin: 0; } #stage { position: relative; width: 100%; height: 100%; }".to_string()),
         ];
         let server = serve_routes(routes);
         let mut engine = Engine::new(config).expect("engine");
@@ -123,6 +137,150 @@ f.src = '/child.html';
         page.js("[loads, first, f.contentDocument.title, typeof f.contentWindow.mark].join()"),
         r#"String("2,child-title,other-title,undefined")"#
     );
+}
+
+/// The initial about:blank's `load` (docs/diagnostics/2026-11-15/frame_load_*,
+/// Chrome 148 in frame_load_cft148.json). Chrome fires it inside the
+/// insertion, so a handler set after the insertion never hears it: a runner
+/// that inserts the frame, then sets `onload`, then `src` (MotionMark's)
+/// hears one `load`, the document's. A listener added before the insertion
+/// hears the blank one, and the document's too when `src` follows.
+#[test]
+fn a_handler_set_after_the_insertion_does_not_hear_the_blank_load() {
+    let page = "<!doctype html><body><div id=host></div><script>
+window.seen = { late: [], early: [], both: [], capture: [] };
+function see(list) { return function (ev) { var w = ev.target.contentWindow; list.push(w.location.pathname + ':' + typeof w.childFn); }; }
+var host = document.getElementById('host');
+var late = document.createElement('iframe');
+host.appendChild(late);
+late.onload = see(seen.late);
+late.src = '/child.html';
+var early = document.createElement('iframe');
+early.addEventListener('load', see(seen.early));
+host.appendChild(early);
+var both = document.createElement('iframe');
+both.addEventListener('load', see(seen.both));
+host.appendChild(both);
+both.src = '/child.html';
+var box = document.createElement('div');
+box.addEventListener('load', see(seen.capture), true);
+host.appendChild(box);
+box.appendChild(document.createElement('iframe'));
+window.done = function () { return seen.late.length >= 1 && seen.early.length >= 1 && seen.both.length >= 2 && seen.capture.length >= 1; };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.done()", Duration::from_secs(5));
+    // A few more turns: a second `load` at `late` would arrive by now.
+    for _ in 0..5 {
+        page.rt.block_on(page.engine.pump_live(page.view, 20));
+    }
+    assert_eq!(
+        page.js("[seen.late.join(), seen.early.join(), seen.both.join(), seen.capture.join()].join(' | ')"),
+        r#"String("/child.html:function | blank:undefined | blank:undefined,/child.html:function | blank:undefined")"#
+    );
+}
+
+/// Frames in the markup and a handler replaced after the insertion: the
+/// probe page itself, against the pinned Chrome's record of it
+/// (docs/diagnostics/2026-11-15/frame_load_markup{.html,_cft148.json}).
+/// Chrome fires a blank frame's `load` inside its insertion (the parser's
+/// too), so it reaches only what was on the frame by then: the `onload`
+/// attribute of a markup frame, a handler set before a script's insertion;
+/// never a listener added or a handler put in its place afterwards.
+#[test]
+fn markup_frames_and_replaced_handlers_hear_the_loads_chrome_fires() {
+    const PROBE: &str = include_str!("../../../docs/diagnostics/2026-11-15/frame_load_markup.html");
+    const PIN: &str = include_str!("../../../docs/diagnostics/2026-11-15/frame_load_markup_cft148.json");
+    let mut page = Page::load(true, PROBE);
+    page.turns_until("out.cases.scanThenOnloadThenSrc.length >= 1 && out.cases.attrSrc.length >= 1", Duration::from_secs(5));
+    for _ in 0..10 {
+        page.rt.block_on(page.engine.pump_live(page.view, 20));
+    }
+    let got = page.js("JSON.stringify(out.cases)");
+    let got: serde_json::Value = serde_json::from_str(got.trim_start_matches("String(").trim_end_matches(')')).ok()
+        .and_then(|v: serde_json::Value| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+        .unwrap_or_else(|| panic!("cases: {got}"));
+    let pin: serde_json::Value = serde_json::from_str(PIN).unwrap();
+    assert_eq!(pin["browser"], "148.0.7778.216");
+    let mut want = pin["cases"].clone();
+    // Known difference: `srcdoc` is not in this stage, so the frame shows
+    // about:blank where Chrome shows its srcdoc document. One `load` each.
+    assert_eq!(want["attrSrcdoc"], serde_json::json!(["srcdoc"]));
+    want["attrSrcdoc"] = serde_json::json!(["blank"]);
+    // Known difference: a listener removed between the insertion and the replay is not called.
+    // Chrome fired the `load` inside the insertion, while the listener was still on.
+    assert_eq!(want["removedAfterInsertion"], serde_json::json!(["blank"]));
+    want["removedAfterInsertion"] = serde_json::json!([]);
+    assert_eq!(got, want);
+}
+
+/// A frame's stylesheet that is still out at the subresource budget does
+/// not hold the frame's `load` past the budget, and is applied when it
+/// arrives, on the frame's live turns (as a page's late sheet is).
+#[test]
+fn a_frames_late_stylesheet_does_not_hold_its_load_and_lands_on_a_live_turn() {
+    let page = "<!doctype html><body><script>
+var f = document.createElement('iframe');
+f.style.width = '400px'; f.style.height = '300px'; f.style.border = '0';
+function position() { return f.contentWindow.getComputedStyle(f.contentDocument.getElementById('stage')).position; }
+f.onload = function () { window.atLoad = position(); };
+f.src = '/late.html';
+document.body.appendChild(f);
+</script></body>";
+    let config = EngineConfig { subresource_budget_ms: 100, ..config(true) };
+    let mut page = Page::load_with(config, page);
+    page.turns_until("typeof window.atLoad === 'string'", Duration::from_secs(5));
+    assert_eq!(page.js("window.atLoad"), r#"String("static")"#, "`load` waited for the sheet past the budget");
+    page.turns_until("position() === 'relative'", Duration::from_secs(5));
+    assert_eq!(page.js("position()"), r#"String("relative")"#);
+    assert_eq!(page.served("/held.css"), 1);
+}
+
+/// A frame with a `sandbox` attribute keeps this stage's floor whatever
+/// listened at its insertion (`frame_sandbox_tests`: no document, one
+/// `load`): the quiet rule is for a blank document that is made, and never
+/// takes the floor's `load` away. A handler set after the insertion hears
+/// it. (Chrome fires this frame's blank `load` inside the insertion as for
+/// any other, so there the late handler hears none: a difference of the
+/// floor, kept as #1201 landed it.)
+#[test]
+fn a_sandboxed_frames_floor_load_is_not_made_quiet() {
+    let page = "<!doctype html><body><script>
+window.loads = 0;
+var f = document.createElement('iframe');
+f.setAttribute('sandbox', '');
+document.body.appendChild(f);
+f.onload = function () { loads++; };
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("window.loads >= 1", Duration::from_secs(5));
+    for _ in 0..5 {
+        page.rt.block_on(page.engine.pump_live(page.view, 20));
+    }
+    assert_eq!(page.js("loads + '|' + String(f.contentDocument)"), r#"String("1|null")"#);
+}
+
+/// A frame's linked stylesheet is applied before `load` fires at its
+/// element (docs/diagnostics/2026-11-15/frame_style_*; Chrome 148:
+/// `400x300 relative`). MotionMark's runner builds each test's stage in the
+/// frame's `load` handler from the size the frame's stylesheet gives it; an
+/// unstyled stage is 0 high and the test holds nothing to draw.
+#[test]
+fn a_frames_stylesheet_is_applied_before_its_load() {
+    let page = "<!doctype html><body><script>
+var f = document.createElement('iframe');
+f.style.width = '400px'; f.style.height = '300px'; f.style.border = '0';
+f.onload = function () {
+  var s = f.contentDocument.getElementById('stage'), r = s.getBoundingClientRect();
+  window.atLoad = Math.round(r.width) + 'x' + Math.round(r.height) + ' ' + f.contentWindow.getComputedStyle(s).position;
+};
+f.src = '/styled.html';
+document.body.appendChild(f);
+</script></body>";
+    let mut page = Page::load(true, page);
+    page.turns_until("typeof window.atLoad === 'string'", Duration::from_secs(5));
+    assert_eq!(page.js("window.atLoad"), r#"String("400x300 relative")"#);
+    assert_eq!(page.served("/styled.css"), 1);
 }
 
 /// A cross-origin `src` is never requested in this stage (the plan's

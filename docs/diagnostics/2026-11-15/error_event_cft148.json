@@ -1,0 +1,65 @@
+{
+ "heard": [
+  {
+   "message": "Uncaught Error: from a listener",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  },
+  {
+   "message": "Uncaught Error: from a script's top level",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  },
+  {
+   "message": "Uncaught Error: from a timer",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  },
+  {
+   "message": "Uncaught Error: from an animation frame",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  },
+  {
+   "message": "Uncaught Error: from an xhr handler",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  },
+  {
+   "message": "Uncaught Error: from a frame load listener",
+   "hasError": true,
+   "type": "[object ErrorEvent]",
+   "file": "error_event_page.js",
+   "line": "number",
+   "cancelable": true
+  }
+ ],
+ "onerror": [
+  "Uncaught Error: from a listener",
+  "Uncaught Error: from a script's top level",
+  "Uncaught Error: from a timer",
+  "Uncaught Error: from an animation frame",
+  "Uncaught Error: from an xhr handler",
+  "Uncaught Error: from a frame load listener"
+ ],
+ "rejections": [
+  "from a promise job"
+ ],
+ "afterDispatch": 1,
+ "browser": "148.0.7778.216"
+}
