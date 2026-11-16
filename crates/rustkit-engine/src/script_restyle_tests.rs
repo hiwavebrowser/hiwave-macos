@@ -317,10 +317,11 @@ fn a_miss_then_paint_writes_again_paint_as_the_full_rebuild() {
                 <div class=t id=w></div><div class=t></div><script>var w = document.getElementById('w'), n = 0; \
                 requestAnimationFrame(function f() { n++; if (window.go === 1) { window.go = 2; w.style.width = '40px'; } \
                 w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
-    // The width write misses and the path sits out its cooldown: fewer short-path frames than
-    // frames, and still some after (it came back).
+    // The width write misses; its full build keeps the tree, and the next frame's paint write
+    // takes the short path again (LPF3: a one-off miss sits out no relayouts). The count includes
+    // the load's own frames; the frame-for-frame check is the cross-check's.
     let took = cross_check_go(html, 80, "", 5);
-    assert!(took < 70 && took > 10, "the short path ran {took} times of 80 frames");
+    assert!(took >= 75, "the short path ran {took} times of 80 frames");
 }
 
 /// A geometry read between two paint writes in one task (a forced layout) leaves the frame
@@ -459,4 +460,132 @@ fn opacity_reaching_zero_paints_and_hits_as_the_full_rebuild() {
                 <div id=w></div><script>var w = document.getElementById('w'), n = 0; requestAnimationFrame(function f() { n++; \
                 w.style.opacity = String([0.5, 0.2, 0, 0, 0.3][n % 5]); requestAnimationFrame(f); });</script>";
     assert!(cross_check(html, 7, "getComputedStyle(w).opacity + ',' + (document.elementFromPoint(25, 25) || {}).id") >= 4);
+}
+
+/// LPF3 (MotionMark Multiply on the Mac: the short path took about half the frames; each
+/// `a box came or went` miss was followed by a run of full-build `cooling` relayouts and a
+/// `no kept tree` miss): `tiles` tiles with colour and transform writes on 3 tiles a frame, and
+/// every `every` frames `change` runs (a tile hidden or shown, appended or removed). Returns the
+/// relayouts of the `count` frames after the path settles and how many of them took the short
+/// path (relayouts, not frames: a slow load runs the page's frames ahead, and the first pumped
+/// frames then write nothing), the path's misses by name, and checks every frame paints as the
+/// full rebuild does.
+fn tiles_that_come_and_go(tiles: usize, every: usize, change: &str, count: usize) -> (u32, u32, Vec<String>) {
+    let write = "el.style.backgroundColor = 'hsl(' + (n * 37 % 360) + ',60%,50%)'; \
+                 el.style.transform = 'rotate(' + (n * 7 % 360) + 'deg)';";
+    let mut html = page(tiles, write);
+    html = html.replace(
+        "requestAnimationFrame(f); });</script>",
+        &format!("if (n % {every} === 0) {{ {change} }} requestAnimationFrame(f); }});</script>"),
+    );
+    // The path-on arm warms up until the path has settled after the load (a short-path frame with
+    // no cooldown left: the load runs the page's frames ahead with few relayouts between, and its
+    // misses count as in a row); the path-off arm runs as many frames, so the arms stay aligned.
+    let settle = std::cell::Cell::new(0usize);
+    let run = |on: bool| {
+        set_script_restyle_for_test(on);
+        let (mut engine, view, _server) = load(&html);
+        if on {
+            for i in 0..100 {
+                let hits = engine.relayout_stats(view).expect("view").script_restyles;
+                frame(&mut engine, view);
+                settle.set(i + 1);
+                if engine.relayout_stats(view).expect("view").script_restyles > hits
+                    && engine.views[&view].lay.script_cooldown.get() == 0
+                {
+                    break;
+                }
+            }
+        } else {
+            for _ in 0..settle.get() {
+                frame(&mut engine, view);
+            }
+        }
+        let stats = engine.relayout_stats(view).expect("view").clone();
+        let (before, relaid_before) = (stats.script_restyles, stats.relayouts);
+        let (mut lists, mut misses) = (Vec::new(), Vec::new());
+        for _ in 0..count {
+            frame(&mut engine, view);
+            lists.push(format!("{:?}", engine.views[&view].display_list.as_ref().expect("display list").commands));
+            let miss = last_restyle_miss_for_test();
+            if misses.last() != Some(&miss) {
+                misses.push(miss);
+            }
+        }
+        set_script_restyle_for_test(true);
+        let stats = engine.relayout_stats(view).expect("view");
+        (lists, stats.script_restyles - before, stats.relayouts - relaid_before, misses)
+    };
+    let ((short, took, relaid, misses), (full, none, _, _)) = (run(true), run(false));
+    assert_eq!(none, 0, "the path was off in the other arm");
+    for (i, (a, b)) in short.iter().zip(&full).enumerate() {
+        assert!(a == b, "frame {i}: the display list differs from the full rebuild's (short path ran {took} times)");
+    }
+    eprintln!(
+        "LPF3 {change}: settled after {} frames; short path {took} of {relaid} relayouts in {count} frames, misses {misses:?}",
+        settle.get()
+    );
+    (took, relaid, misses)
+}
+
+/// The relayouts that took the full build, of `relaid`, when one in `every` frames changes the
+/// tree: no more than those frames (and the first, which may come before a kept tree).
+fn assert_one_full_build_per_change(took: u32, relaid: u32, every: u32, what: &str) {
+    assert!(relaid >= 15, "only {relaid} relayouts ran: the page wrote too little to judge");
+    let full = relaid - took;
+    assert!(
+        full <= relaid / every + 2,
+        "{full} of {relaid} relayouts took the full build with {what} one frame in {every}"
+    );
+}
+
+/// A written tile hidden and shown again every 10 frames (`display`): the frame that hides or shows
+/// it is a full build (a box came or went), and the next frame's paint-only writes take the short
+/// path again: the full build re-establishes the kept tree, and nothing else needs sitting out.
+#[test]
+fn a_written_box_that_comes_or_goes_costs_one_full_build() {
+    let change = "var h = tiles[(n * 7) % tiles.length]; h.style.display = h.style.display === 'none' ? '' : 'none';";
+    let (took, relaid, _) = tiles_that_come_and_go(300, 10, change, 60);
+    assert_one_full_build_per_change(took, relaid, 10, "a box coming or going");
+}
+
+/// A tile appended, then removed, every 10 frames (the tile list does not change, so the writes
+/// stay on the old tiles): only the frame that changes the tree is a full build.
+#[test]
+fn a_tile_appended_or_removed_costs_one_full_build() {
+    let change = "var s = document.getElementById('stage'); if (window.extra) { extra.remove(); window.extra = null; } \
+                  else { window.extra = document.createElement('div'); extra.className = 't'; s.appendChild(extra); }";
+    let (took, relaid, _) = tiles_that_come_and_go(300, 10, change, 60);
+    assert_one_full_build_per_change(took, relaid, 10, "a tile appended or removed");
+}
+
+/// LPF3: a page whose writes change layout every frame still sits out relayouts: misses in a row
+/// back off (1, 2, 4, ... up to the cap), so it does not pay a short-path attempt on top of a full
+/// build each frame. Painted as the full rebuild throughout.
+#[test]
+fn misses_in_a_row_back_off() {
+    let html = "<!doctype html><style>body{margin:0}.t{width:20px;height:20px;background:#08f}</style>\
+                <div class=t id=w></div><div class=t></div><script>var w = document.getElementById('w'), n = 0; \
+                requestAnimationFrame(function f() { n++; if (window.go === 1) w.style.width = (20 + n % 30) + 'px'; \
+                w.style.backgroundColor = 'hsl(' + (n * 40 % 360) + ',60%,50%)'; requestAnimationFrame(f); });</script>";
+    cross_check_go(html, 70, "", 5);
+    // Counted directly: after `go`, how many relayouts attempted the path (a miss each).
+    let (mut engine, view, _server) = load(html);
+    for _ in 0..5 {
+        frame(&mut engine, view);
+    }
+    engine.execute_script(view, "window.go = 1").unwrap();
+    let mut attempts = 0;
+    let mut last = String::new();
+    for _ in 0..64 {
+        crate::LAST_RESTYLE_MISS.with(|m| m.borrow_mut().clear());
+        frame(&mut engine, view);
+        let miss = last_restyle_miss_for_test();
+        if !miss.is_empty() {
+            attempts += 1;
+            last = miss;
+        }
+    }
+    // 0+1+2+4+8+16+32 sat out: about seven attempts in 64 frames, not 64.
+    assert!(attempts <= 10, "{attempts} misses in 64 frames whose writes all change layout (last {last:?})");
 }
