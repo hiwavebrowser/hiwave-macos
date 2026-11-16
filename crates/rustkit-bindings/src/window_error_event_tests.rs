@@ -590,26 +590,16 @@ fn a_handler_attribute_an_inline_script_and_a_string_timer_are_the_documents() {
     );
 }
 
-/// Text the engine compiles for the document that does not compile, or whose text is produced by
-/// page code, leaves nothing behind: an engine module first used afterwards (a stream here, which
-/// the engine installs on first use) is still the engine's own code, and an error it raises for
-/// another origin's call is reported without detail.
+/// Document text that fails to compile leaves later engine code unchanged.
 #[test]
 fn document_text_that_fails_leaves_the_engines_later_code_its_own() {
     const THEIR_STREAM: &str = "function theirLocked() { var s = new ReadableStream(); s.getReader(); s.getReader(); }";
     for before in [
-        // A string timer that does not parse.
         "setTimeout('((', 0);",
-        // A timer whose text is made by the page's own `toString`.
         "setTimeout({ toString: function () { window.asked = true; return ''; } }, 0);",
-        // A handler attribute that does not parse.
         "var d = document.createElement('div'); d.setAttribute('onclick', '(('); document.body.appendChild(d); d.dispatchEvent(new Event('click'));",
-        // An inline script that does not parse.
         "var s = document.createElement('script'); s.textContent = '(('; document.body.appendChild(s);",
     ] {
-        // The module is installed on first use in a frame's document: the page fails first, then
-        // the frame uses a stream for the first time, then the other origin's code in the frame
-        // makes the module raise.
         let parent = page();
         let child = parent.new_child().unwrap();
         child
@@ -630,19 +620,24 @@ fn document_text_that_fails_leaves_the_engines_later_code_its_own() {
     }
 }
 
-/// A script the host runs in the page (`evaluate`: the app's own scripts, a console's input) is
-/// neither the page's nor another origin's: what it rejects is not announced to the page, and an
-/// exception from a callback it set is reported to the page without detail.
+/// Errors from host-run script (`evaluate`: the app's own scripts, a console's input) are reported
+/// to the host only: no `error` or `unhandledrejection` event at the page, and the host's own
+/// report whatever the page's handlers do.
 #[test]
-fn a_hosts_own_script_is_not_the_pages() {
+fn errors_from_host_run_script_are_reported_to_the_host_only() {
     let b = page();
+    b.evaluate_named("window.onerror = function () { return true; }; \
+                      window.addEventListener('unhandledrejection', function (ev) { ev.preventDefault(); });", "inline#2").unwrap();
+    let _ = b.take_reported_errors();
     b.evaluate("Promise.reject(new Error('the host rejects')); setTimeout(function () { throw new Error('the host callback'); }, 0);").unwrap();
     b.advance_timers(20, 10).unwrap();
-    assert_eq!(ev(&b, "seen.join(' ; ') + ' / ' + rejected"), format!("{MUTED} / 0"));
-    // The page's own code beside it is unchanged.
-    b.evaluate_named("setTimeout(function () { throw new Error('the page'); }, 0); Promise.reject(new Error('the page rejects'));", "inline#2").unwrap();
+    assert_eq!(ev(&b, "seen.length + ' / ' + rejected"), "0 / 0");
+    assert_eq!(b.take_reported_errors(), vec!["Error: the host callback".to_string()]);
+    // The page's own code beside it is unchanged (and its handler does cancel its own).
+    b.evaluate_named("setTimeout(function () { throw new Error('the page'); }, 0);", "inline#3").unwrap();
     b.advance_timers(20, 10).unwrap();
-    assert_eq!(ev(&b, "seen.length + ' ' + seen[1].split('|')[1] + ' / ' + rejected"), "2 Uncaught Error: the page / 1");
+    assert_eq!(ev(&b, "seen.length + ' ' + seen[0].split('|')[1]"), "1 Uncaught Error: the page");
+    assert!(b.take_reported_errors().is_empty());
 }
 
 /// The engine's compile of document text takes a string and nothing else, and keeps no state:
