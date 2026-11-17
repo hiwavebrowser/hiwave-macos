@@ -245,10 +245,10 @@ impl Scope {
             .count() as u32
     }
 
-    /// HIWAVE PATCH (eval-var-per-call): how many non-local bindings an activation of this scope starts
-    /// with: the count when its first activation started. A sloppy direct eval adds its `var`s to the
-    /// scope every call shares, but they belong to the call that ran it, which grows its own
-    /// environment for them (`extend_from_compile`); a later call must not start with them.
+    /// HIWAVE PATCH (eval-var-per-call): how many non-local bindings the scope had when its first
+    /// activation started, before a direct eval in any call could add a `var`. A sloppy direct eval
+    /// adds its `var`s to the scope every call shares, but they belong to the call that ran it; the
+    /// bindings from this count on are eval-added in every later call's environment.
     #[must_use]
     pub fn activation_bindings(&self) -> u32 {
         if let Some(n) = self.inner.first_activation.0.get() {

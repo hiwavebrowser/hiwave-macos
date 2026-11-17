@@ -235,9 +235,12 @@ impl EnvironmentStack {
         function_slots: FunctionSlots,
         global: &Gc<DeclarativeEnvironment>,
     ) {
-        // HIWAVE PATCH (eval-var-per-call): not the scope's current count, which includes the `var`s
-        // other calls' direct evals declared.
-        let num_bindings = scope.activation_bindings();
+        // HIWAVE PATCH (eval-var-per-call): sized from the scope's current count, so every index code
+        // compiled against the shared scope (eval code included) is in range. The slots past the count
+        // at the first activation are other calls' eval `var`s: marked as eval-added, so a lookup
+        // takes them only once this call's own eval declares them (`holds_binding`).
+        let num_bindings = scope.num_bindings_non_local();
+        let first_activation = scope.activation_bindings();
 
         let (poisoned, with) = self.compute_poisoned_with(global);
 
@@ -245,6 +248,7 @@ impl EnvironmentStack {
             DeclarativeEnvironment::new(
                 DeclarativeEnvironmentKind::Function(FunctionEnvironment::new(
                     num_bindings,
+                    first_activation,
                     function_slots,
                     scope,
                 )),

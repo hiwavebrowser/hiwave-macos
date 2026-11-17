@@ -20,10 +20,17 @@ pub(crate) struct FunctionEnvironment {
 
 impl FunctionEnvironment {
     /// Creates a new `FunctionEnvironment`.
-    pub(crate) fn new(bindings_count: u32, slots: FunctionSlots, scope: Scope) -> Self {
+    ///
+    /// HIWAVE PATCH (eval-var-per-call): the bindings from `compiled_count` on were added to the
+    /// shared scope by other calls' direct evals: they start as eval-added (deletable), as
+    /// `extend_from_compile` marks them, so `holds_binding` does not take them for this call's.
+    pub(crate) fn new(bindings_count: u32, compiled_count: u32, slots: FunctionSlots, scope: Scope) -> Self {
+        let compiled = (compiled_count as usize).min(bindings_count as usize);
+        let mut deletable = vec![false; bindings_count as usize];
+        deletable[compiled..].fill(true);
         Self {
             bindings: GcRefCell::new(vec![None; bindings_count as usize]),
-            deletable_bindings: RefCell::new(vec![false; bindings_count as usize]),
+            deletable_bindings: RefCell::new(deletable),
             deleted_bindings: RefCell::new(vec![false; bindings_count as usize]),
             slots: Box::new(slots),
             scope,

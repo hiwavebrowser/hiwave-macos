@@ -1182,20 +1182,22 @@ before, 2 / 6 / 12 ms after; `split` 116 / 471 / 1871 ms before, 1 / 1 / 3 ms af
 
 **Files.** `third_party/boa_ast/src/scope.rs` (`Scope::activation_bindings`),
 `third_party/boa_engine/src/environments/runtime/mod.rs` (`push_function`, `find_runtime_binding`),
-`third_party/boa_engine/src/environments/runtime/declarative/function.rs` (`holds_binding`).
+`third_party/boa_engine/src/environments/runtime/declarative/function.rs` (`new`, `holds_binding`).
 
 **What.** A sloppy direct eval adds its `var`s to the function's compile-time scope, which every call
 of the function shares, and grows only the calling environment for them (`extend_from_compile`).
-Two consequences are fixed:
 
-- **Environment size:** a later call sized its environment from the scope's current count, so it
-  started with uninitialized slots for names it never declared. It now starts with the count the
-  scope had at its first activation.
-- **Name lookup:** a name lookup in a function holding a direct eval found the name in the shared
-  scope and used that slot. That happened even when this call's eval never declared it, including
-  a slot past the end of this call's environment. It now takes the slot only when this call holds
-  it: a binding the function was compiled with, or one its own eval declared, which initializes it.
-  Otherwise it looks further out.
+- **Name lookup:** a lookup in a function holding a direct eval found the name in the shared scope
+  and used that slot, whether or not this call's eval had declared it. That included a slot past
+  the end of this call's environment. It now takes the slot only when this call holds it: a binding
+  the function was compiled with, or one its own eval declared, which initializes it. Otherwise it
+  looks further out.
+- **Environment sizing (unchanged):** a call's environment is still sized from the scope's current
+  count, so every index that code compiled against the shared scope uses, eval code included, is in
+  range.
+- **New slots:** the slots past the count at the scope's first activation start marked as
+  eval-added (deletable), as `extend_from_compile` marks them, so the lookup above can tell them
+  apart.
 
 **Pin.** `crates/rustkit-js/tests/eval_var_per_call.rs`: 10 cases (reads, writes, `typeof`, `delete`,
 calls before and after the declaring call), each against Chrome for Testing 148.0.7778.216
