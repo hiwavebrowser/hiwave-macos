@@ -9610,9 +9610,11 @@ impl Engine {
             // `src`): that one gets one more wait of the same length, and
             // no further round, so the window's `load` is at most two
             // budgets behind the scripts whatever the handlers do.
-            let mut round = 0;
-            while source == "event:load" {
-                round += 1;
+            // Only before `load`, at most two rounds (`source` does not change in the loop: the
+            // condition was a `while` on it, which clippy refuses as a loop condition that never
+            // changes).
+            let rounds = if source == "event:load" { 2 } else { 0 };
+            for _round in 1..=rounds {
                 self.note_image_writes_of(id, bindings);
                 if after_load && !leaving {
                     match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
@@ -9646,9 +9648,6 @@ impl Engine {
                     return;
                 }
                 self.refresh_layout_for_script(id, bindings);
-                if round == 2 {
-                    break;
-                }
             }
             info!(%source, "Running page lifecycle step");
             load_phase(source);
