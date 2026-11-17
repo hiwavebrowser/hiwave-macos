@@ -204,6 +204,11 @@ fn op_index(t: &mut Table, slot: usize, op: &str) -> Option<usize> {
 }
 
 impl HostCall {
+    /// Whether this call is timed (the thread's timing was on when it began).
+    pub(crate) fn timed(&self) -> bool {
+        self.open.is_some()
+    }
+
     /// Names the call's operation (see [`op_key`]); a call never named is
     /// its function's row with no operation.
     pub(crate) fn op(&mut self, op: &str) {

@@ -2223,7 +2223,8 @@ impl JsRuntime {
                     // SCRIPT-SPLIT: timed from here (conversions included) when on.
                     let mut call = host_calls::enter(slot);
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
-                    if let Some(i) = op_arg {
+                    // The operation key only for a timed call: off, nothing more than the flag.
+                    if let Some(i) = op_arg.filter(|_| call.timed()) {
                         call.op(host_calls::op_key(match args.get(i) {
                             Some(JsValue::String(op)) => Some(op.as_str()),
                             _ => None,
