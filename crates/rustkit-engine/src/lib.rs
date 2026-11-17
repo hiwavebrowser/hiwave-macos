@@ -48004,9 +48004,17 @@ pub(crate) fn last_restyle_miss_for_test() -> String {
 
 #[cfg(test)]
 thread_local! {
+    /// Replays a verifying retained build found wrong, over all builds on this thread, for tests.
+    static RETAINED_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Element cascades run on this thread (`compute_style_for_element`), for tests.
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Replays verifying retained builds on this thread have found wrong so far (tests).
+#[cfg(test)]
+pub(crate) fn retained_mismatches_for_test() -> usize {
+    RETAINED_MISMATCHES.with(std::cell::Cell::get)
 }
 
 /// Element cascades this thread has run so far (tests).
@@ -48927,6 +48935,8 @@ fn memoized_element_style(
                     // A verifying build counts the elements a replay would have got wrong.
                     if memo.verify && differs && had && !was_stale {
                         memo.mismatches += 1;
+                        #[cfg(test)]
+                        RETAINED_MISMATCHES.with(|c| c.set(c.get() + 1));
                         warn!(?node, "Retained styles: a replay would differ from a fresh cascade");
                     }
                     memo.recomputed.insert(node);

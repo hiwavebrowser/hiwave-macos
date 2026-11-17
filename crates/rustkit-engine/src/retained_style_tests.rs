@@ -172,6 +172,56 @@ fn tiles_shown_hidden_and_moved_keep_a_full_cascades_styles() {
     assert_same_as_a_full_cascade("tiles", &tiles(200, 10, TUNE));
 }
 
+/// R1 item 1: a parent whose inherited colour is mid-transition re-cascades to the same end value
+/// every frame. Its children inherit the interpolated colour, which moves each frame, so they must
+/// not replay last frame's. Another element is written each frame, so every relayout is script's.
+#[test]
+fn a_running_transition_on_an_inherited_property_reaches_the_children() {
+    assert_same_as_a_full_cascade(
+        "transition",
+        &page(
+            "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
+            "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
+            "document.getElementById('p').className = 'on'; \
+             document.getElementById('w').style.width = (10 + n % 50) + 'px';",
+        ),
+    );
+}
+
+/// The same for an `@keyframes` animation of an inherited property on an ancestor.
+#[test]
+fn a_running_animation_on_an_inherited_property_reaches_the_children() {
+    assert_same_as_a_full_cascade(
+        "keyframes",
+        &page(
+            "@keyframes pulse{from{color:rgb(255,0,0)} to{color:rgb(0,0,255)}} \
+             #p{animation:pulse 1s linear infinite} #w{width:10px}",
+            "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
+            "document.getElementById('w').style.width = (10 + n % 50) + 'px';",
+        ),
+    );
+}
+
+/// R1 item 2: verify mode counts only replays that would have served an element. On a page whose
+/// writes change an inherited value (children re-cascade because their parent changed, not because
+/// a replay was wrong) it reports nothing.
+#[test]
+fn verify_counts_only_replays_that_would_have_served() {
+    let page = page(
+        ".a{color:rgb(200,0,0);font-size:12px} .b{color:rgb(0,0,200);font-size:20px}",
+        "<div id=p class=a><p id=q>x<span id=s>y<em id=e>z</em></span></p></div><p id=r>w</p>",
+        "document.getElementById('p').className = n % 2 ? 'b' : 'a';",
+    );
+    let before = retained_mismatches_for_test();
+    let (_, cascades, _) = run(&page, 8, RetainedStyles::Verify);
+    assert!(cascades > 0, "the verify run built");
+    assert_eq!(
+        retained_mismatches_for_test() - before,
+        0,
+        "replays a verify run reported wrong"
+    );
+}
+
 #[test]
 fn an_inherited_change_reaches_the_descendants() {
     assert_same_as_a_full_cascade(
