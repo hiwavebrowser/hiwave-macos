@@ -7063,8 +7063,6 @@ FAIL	test/language/statements/await-using/await-using-Symbol.asyncDispose-allows
 FAIL	test/language/statements/await-using/await-using-Symbol.asyncDispose-allows-promiselike-return-value.js	strict
 FAIL	test/language/statements/await-using/await-using-allows-null-initializer.js	sloppy
 FAIL	test/language/statements/await-using/await-using-allows-null-initializer.js	strict
-FAIL	test/language/statements/await-using/await-using-allows-undefined-initializer.js	sloppy
-FAIL	test/language/statements/await-using/await-using-allows-undefined-initializer.js	strict
 FAIL	test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js	sloppy
 FAIL	test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js	strict
 FAIL	test/language/statements/await-using/await-using-implies-await-if-evaluated.js	sloppy
@@ -7283,8 +7281,6 @@ FAIL	test/language/statements/try/tco-catch.js	strict
 FAIL	test/language/statements/try/tco-finally.js	strict
 FAIL	test/language/statements/using/Symbol.dispose-getter.js	sloppy
 FAIL	test/language/statements/using/Symbol.dispose-getter.js	strict
-FAIL	test/language/statements/using/function-local-closure-get-before-initialization.js	sloppy
-FAIL	test/language/statements/using/function-local-closure-get-before-initialization.js	strict
 FAIL	test/language/statements/using/gets-initializer-Symbol.dispose-property-once.js	sloppy
 FAIL	test/language/statements/using/gets-initializer-Symbol.dispose-property-once.js	strict
 FAIL	test/language/statements/using/initializer-disposed-at-end-of-asyncfunctionbody.js	sloppy
@@ -7326,10 +7322,6 @@ FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-casecla
 FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-caseclause.js	strict
 FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-defaultclause.js	sloppy
 FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-defaultclause.js	strict
-FAIL	test/language/statements/using/syntax/using-not-allowed-at-top-level-of-eval.js	sloppy
-FAIL	test/language/statements/using/syntax/using-not-allowed-at-top-level-of-eval.js	strict
-FAIL	test/language/statements/using/syntax/using-not-allowed-at-top-level-of-script.js	sloppy
-FAIL	test/language/statements/using/syntax/using-not-allowed-at-top-level-of-script.js	strict
 FAIL	test/language/statements/using/syntax/using-outer-inner-using-bindings.js	sloppy
 FAIL	test/language/statements/using/syntax/using-outer-inner-using-bindings.js	strict
 FAIL	test/language/statements/using/syntax/with-initializer-case-expression-statement-list.js	sloppy
@@ -7455,8 +7447,6 @@ FAIL	test/staging/explicit-resource-management/exception-handling.js	sloppy
 FAIL	test/staging/explicit-resource-management/exception-handling.js	strict
 FAIL	test/staging/explicit-resource-management/mixed-call-dispose-methods.js	sloppy
 FAIL	test/staging/explicit-resource-management/mixed-call-dispose-methods.js	strict
-FAIL	test/staging/explicit-resource-management/using-with-null-or-undefined.js	sloppy
-FAIL	test/staging/explicit-resource-management/using-with-null-or-undefined.js	strict
 FAIL	test/staging/sm/Array/toLocaleString-nointl.js	sloppy
 FAIL	test/staging/sm/Array/toLocaleString-nointl.js	strict
 FAIL	test/staging/sm/AsyncGenerators/create-function-parse-before-getprototype.js	sloppy

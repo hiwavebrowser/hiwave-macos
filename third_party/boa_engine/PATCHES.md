@@ -1149,3 +1149,24 @@ reserved from the length: `new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12))` as
 and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3"; the ICU list pattern
 gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
 its own every 65,536 units, so its memory follows the text's length, not the number of parts.
+
+## Patch: `using` declarations outside a block are bound (`using-bindings`)
+
+**Files.** `third_party/boa_ast/src/scope_analyzer.rs` (global, function and eval declaration
+instantiation), `third_party/boa_parser/src/parser/mod.rs` (`ScriptBody`).
+
+**What.** A `using` or `await using` declaration in a function, arrow, method, generator, async
+function, async generator or class static block body, or through `new Function`, now has its names
+bound in that body's lexical scope, as block declaration instantiation already bound them in a block.
+Before, those three instantiations skipped both kinds (`_ => {}`), so the declaration had no binding
+to initialize. A `using` or `await using` declaration directly in a script's statement list, which is
+also eval code's, is a SyntaxError (Explicit Resource Management early error), as Chrome 148 reports.
+Inside a block, a function or a module it is allowed.
+
+**Not changed.** Disposal: the bytecompiler still binds these names as `let` without adding the value
+to a disposal stack, so `Symbol.dispose` / `Symbol.asyncDispose` are not called and a non-object value
+is not refused. `for (using x of ...)` is not parsed yet. Both are separate rows.
+
+**Pin.** `crates/rustkit-js/tests/using_bindings.rs`: 19 cases against Chrome for Testing
+148.0.7778.216 (`docs/diagnostics/2026-11-17/using_binding_cases.json`); 18 held, the `for` head named
+as a row. Red without the patch: 17 of 19 gave no answer or the wrong one.
