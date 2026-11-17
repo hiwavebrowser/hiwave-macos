@@ -425,6 +425,8 @@ mod script_net_body_size_tests;
 mod frames_stage2_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_at_present_tests;
 mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
@@ -6961,6 +6963,14 @@ impl Engine {
     /// next turn at once. `real_clock`: see [`Self::pump_live_real`]; the
     /// tree's turn is on one clock, so its frames' turns take the same.
     async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
+        if one_animation_round() {
+            // The tree's late rounds are the frames of their turns' time (CLOCK-AT-PRESENT).
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.set_one_round(true) {
+                    debug!(error = %e, "the one-round mark failed");
+                }
+            }
+        }
         if !self.config.nested_contexts {
             return self.pump_live_turn(id, elapsed_ms, real_clock).await;
         }

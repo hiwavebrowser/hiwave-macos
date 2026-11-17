@@ -61,13 +61,18 @@ function w() { return document.getElementById('f').contentWindow; }
 
 impl Tree {
     fn load(page: &str, child: &str) -> Self {
+        Self::load_switched(page, child, true)
+    }
+
+    /// With the RAF-ONE-ROUND switch `on` on this thread from the start.
+    fn load_switched(page: &str, child: &str, on: bool) -> Self {
         let routes = vec![
             ("/", "text/html", page.to_string()),
             ("/child.html", "text/html", child.to_string()),
         ];
         let server = serve_routes(routes);
         let config = EngineConfig { nested_contexts: true, post_load_requests_live: true, ..EngineConfig::default() };
-        crate::set_one_animation_round(true);
+        crate::set_one_animation_round(on);
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
@@ -186,8 +191,7 @@ requestAnimationFrame(tick);
 /// a late turn of a frame tree still runs the loop twice: what `HIWAVE_RAF_ONE_ROUND=1` changes.
 #[test]
 fn with_the_switch_off_a_late_turn_of_a_frame_tree_runs_two_rounds() {
-    let mut tree = Tree::load(PAGE, LOOP_CHILD);
-    crate::set_one_animation_round(false);
+    let mut tree = Tree::load_switched(PAGE, LOOP_CHILD, false);
     tree.per_turn("w().ticks", 3, 50);
     let ticks = tree.per_turn("w().ticks", 8, 50);
     assert_eq!(ticks, vec![2; 8], "the frame's rAF loop per presented turn with the switch off");

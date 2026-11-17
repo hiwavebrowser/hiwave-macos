@@ -515,7 +515,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
-    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
+    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
     "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
@@ -627,6 +627,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // A frame tree's turn (`__rk.treeTurn`): while one is open, the grid time of the frame
         // whose round it has run (-1: none yet); -2 outside one (RAF-ONE-ROUND, below).
         Q.roundAt = -2;
+        // CLOCK-AT-PRESENT: a late round is the frame of the turn's time (`__rk.setOneRound`).
+        Q.oneRound = false;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -1036,6 +1038,21 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 if (timers[i].due > latest) latest = timers[i].due;
             }
         }
+        // CLOCK-AT-PRESENT (with one round a turn): a round a late turn runs is the frame of the
+        // turn's time, the latest grid point at or before it, not the grid point its callbacks were
+        // due at: they are stamped with it, the frame they ask for is the next one after it (not
+        // due already), and between turns the timeline and the CSS animation clock hold at it, as
+        // Chrome's late frame is stamped with its own time (`clock_at_present_probe_cft148.json`:
+        // the stamp is the timeline in the frame and in the task after it, the painted time the
+        // animation's). Without it the callback a late round asked for ran a turn later, stamped
+        // with that older grid point, a turn behind the frame presented with it.
+        if (latest >= 0 && Q.oneRound) {
+            var g = gridAtOrBefore(Q.now), at = frameAt(g);
+            if (at > latest) {
+                latest = at;
+                for (var r = 0; r < due; r++) if (round[r].k < g) round[r].k = g;
+            }
+        }
         // One frame: its time is the latest grid point among its callbacks.
         if (latest >= 0) Q.frameDue = latest;
         if (latest >= 0 && Q.roundAt === -1) Q.roundAt = latest;
@@ -1233,6 +1250,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // every call that runs a part of it (`Engine::pump_live_on`; RAF-ONE-ROUND, `frameRound`).
     __rk.treeTurn = function (open) {
         Q.roundAt = open ? -1 : -2;
+    };
+    // One animation round a turn is on for this tree (`Engine` RAF-ONE-ROUND switch): a late round
+    // is the frame of the turn's time (CLOCK-AT-PRESENT, `frameRound`).
+    __rk.setOneRound = function (on) {
+        Q.oneRound = !!on;
     };
     // A frame's document is going away: its timers go with it, and its
     // workers are no longer asked. Loops over the tables, nothing called.
@@ -3998,6 +4020,15 @@ impl DomBindings {
     /// A frame tree's live turn opens (`true`) or closes (`false`): while it is open the
     /// animation-frame callbacks run in one round, however many calls run the turn's parts
     /// (RAF-ONE-ROUND).
+    /// One animation round a turn is on for this view's frame tree: a round a late turn runs is
+    /// the frame of the turn's time (CLOCK-AT-PRESENT).
+    pub fn set_one_round(&self, on: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setOneRound({on}); return 0;"))?;
+        Ok(())
+    }
+
     pub fn set_tree_turn(&self, open: bool) -> Result<(), BindingError> {
         self.runtime
             .borrow_mut()
