@@ -26,11 +26,14 @@ Measured on MotionMark at 1000 elements (headless, the SCRIPT-SPLIT build of
 #1263; `docs/diagnostics/2026-11-17/motionmark_stage_split.md`, "Script split",
 on #1258/#1263):
 
-| subtest | script ms/frame | CPU raster ms/frame | raster share of script | other host ms | JS ms | Chrome script ms/frame |
-|---|---:|---:|---:|---:|---:|---:|
-| Canvas Arcs | 64.73 | 38.27 | 59% | 3.84 | 21.30 | 0.197 |
-| Canvas Lines | 41.76 | 13.97 | 33% | 3.31 | 24.34 | 0.248 |
-| Paths | 12.29 | 3.46 | 28% | 1.04 | 7.78 | 0.122 |
+| subtest | rAF ticks per presented frame | script ms/presented frame | CPU raster ms | raster share of script | other host ms | JS ms | script ms per tick | Chrome script ms/frame |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Canvas Arcs | 1.94 | 64.73 | 38.27 | 59% | 3.84 | 21.30 | 33.4 | 0.197 |
+| Canvas Lines | 1.92 | 41.76 | 13.97 | 33% | 3.31 | 24.34 | 21.8 | 0.248 |
+| Paths | 1.00 | 12.29 | 3.46 | 28% | 1.04 | 7.78 | 12.3 | 0.122 |
+
+(A presented HiWave frame on the heavy cells carries ~2 of MotionMark's
+frames; per tick is what compares with Chrome's per-frame column.)
 
 Per draw: a stroke is 21.7 µs on Arcs (7.2-7.5 µs on Lines and Paths), a fill
 16.3 µs; every other canvas call is 0.21-0.46 µs of host. A scratch
@@ -54,8 +57,8 @@ each hot canvas call; the JS column above is before it.
   (0.2-0.5 µs a call), the recording, and the CPU side of a GPU draw: building
   the path, stroking it to an outline (0.9 µs per arc), tessellating or
   encoding it, and recording the GPU commands. Even with the raster at zero,
-  Arcs would be ~26 ms of script per frame against Chrome's 0.2 ms: the gap
-  is 130x, not 330x. The canvas subtests need both this and the JS work.
+  Arcs would be ~13.7 ms of script per MotionMark frame against Chrome's
+  0.2 ms: the gap is ~70x, not ~170x. The canvas subtests need both this and the JS work.
 
 ## Ways to do it
 
