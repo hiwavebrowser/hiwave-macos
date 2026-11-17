@@ -532,6 +532,47 @@ fn an_animation_that_ended_since_the_kept_build_leaves_no_value_behind() {
     );
 }
 
+/// #1247 delta R1: a script animation (`element.animate`) is applied in the build from the view's
+/// script layer, and can start, run and fill in frames no build sees. `#a` is animated once to
+/// opacity 0 (filled, 100 ms) in a frame with no other write, and `#w`, written every frame before,
+/// is written again only 15 frames later: every splice must agree with a full build, and the frames
+/// after the animation has filled splice again.
+#[test]
+fn a_script_animation_started_after_the_kept_build_leaves_no_value_behind() {
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, _server) = load(&page(
+        "#a{width:50px;height:50px;background-color:rgb(0,0,255)} #w{width:10px;height:5px}",
+        "<div id=a></div><div id=w></div>",
+        "if (window.GO && !window.WENT) { document.getElementById('a').animate([{opacity:1},{opacity:0}], \
+         {duration:100, fill:'forwards'}); window.WENT = n; } \
+         if (!window.WENT || n - window.WENT > 15) { \
+         document.getElementById('w').style.width = (10 + n % 50) + 'px'; }",
+    ));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    engine.execute_script(view, "window.GO = true").expect("go");
+    let (mismatches, _) = (splice_mismatches_for_test(), ());
+    for _ in 0..20 {
+        frame(&mut engine, view);
+    }
+    let splices = splices_for_test().0;
+    for _ in 0..5 {
+        frame(&mut engine, view);
+    }
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "splices around a script animation differ from a full build"
+    );
+    assert!(
+        now > splices,
+        "the frames after the animation filled splice (last miss {miss:?})"
+    );
+}
+
 /// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes
 /// did not ask for, the view lets it go and records none; script writes start it again.
 #[test]
