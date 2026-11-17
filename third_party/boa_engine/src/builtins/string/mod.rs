@@ -1019,7 +1019,7 @@ impl String {
         // 10. Let index be ! StringIndexOf(S, searchStr, start).
         // 11. If index is not -1, return true.
         // 12. Return false.
-        Ok(string.index_of(search_str.as_str(), start).is_some().into())
+        Ok(index_of_from(&string, search_str.as_str(), start).is_some().into())
     }
 
     /// `String.prototype.replace( regexp|substr, newSubstr|function )`
@@ -1217,15 +1217,16 @@ impl String {
         let mut match_positions = Vec::new();
 
         // 10. Let position be ! StringIndexOf(string, searchString, 0).
-        let mut position = string.index_of(search_string.as_str(), 0);
+        let mut position = index_of_from(&string, search_string.as_str(), 0);
 
         // 11. Repeat, while position is not -1,
         while let Some(p) = position {
+            context.check_interrupt()?; // HIWAVE PATCH (native-loop-interrupt): the turn budget can stop a long loop.
             // a. Append position to the end of matchPositions.
             match_positions.push(p);
 
             // b. Set position to ! StringIndexOf(string, searchString, position + advanceBy).
-            position = string.index_of(search_string.as_str(), p + advance_by);
+            position = index_of_from(&string, search_string.as_str(), p + advance_by);
         }
 
         // 12. Let endOfLastMatch be 0.
@@ -1238,6 +1239,7 @@ impl String {
 
         // 14. For each element p of matchPositions, do
         for p in match_positions {
+            context.check_interrupt()?; // HIWAVE PATCH (native-loop-interrupt): the turn budget can stop a long loop.
             // a. Let preserved be the substring of string from endOfLastMatch to p.
             let preserved = string.get_expect(end_of_last_match..p);
 
@@ -1329,8 +1331,7 @@ impl String {
         let start = pos.clamp_finite(0, len) as usize;
 
         // 8. Return 𝔽(! StringIndexOf(S, searchStr, start)).
-        Ok(string
-            .index_of(search_str.as_str(), start)
+        Ok(index_of_from(&string, search_str.as_str(), start)
             .map_or(-1, |i| i as i64)
             .into())
     }
@@ -2070,10 +2071,11 @@ impl String {
         let mut i = 0;
 
         // 13. Let j be ! StringIndexOf(S, R, 0).
-        let mut j = this_str.index_of(separator_str.as_str(), 0);
+        let mut j = index_of_from(&this_str, separator_str.as_str(), 0);
 
         // 14. Repeat, while j is not -1
         while let Some(index) = j {
+            context.check_interrupt()?; // HIWAVE PATCH (native-loop-interrupt): the turn budget can stop a long loop.
             // a. Let T be the substring of S from i to j.
             // b. Append T as the last element of substrings.
             substrings.push(this_str.slice(i, index));
@@ -2090,7 +2092,7 @@ impl String {
             i = index + separator_length;
 
             // e. Set j to ! StringIndexOf(S, R, i).
-            j = this_str.index_of(separator_str.as_str(), i);
+            j = index_of_from(&this_str, separator_str.as_str(), i);
         }
 
         // 15. Let T be the substring of S from i.
@@ -3012,4 +3014,22 @@ impl Pieces {
             _ => JsString::concat_array(&self.parts.iter().map(JsString::as_str).collect::<Vec<_>>()),
         })
     }
+}
+
+/// HIWAVE PATCH (string-search): `StringIndexOf(string, searchValue, fromIndex)`. The string crate's
+/// `index_of` skips `fromIndex` positions one by one before it compares anything, so a loop that searches
+/// on from each match (`replaceAll`, `split`) was quadratic in the string's length. This takes the
+/// substring from `fromIndex` (no copy) and searches that.
+pub(crate) fn index_of_from(
+    string: &JsString,
+    search_value: crate::JsStr<'_>,
+    from_index: usize,
+) -> Option<usize> {
+    let len = string.len();
+    // 5. If searchValue is the empty String and fromIndex <= len, return fromIndex.
+    if search_value.is_empty() {
+        return (from_index <= len).then_some(from_index);
+    }
+    let rest = string.get(from_index..)?;
+    rest.index_of(search_value, 0).map(|i| i + from_index)
 }
