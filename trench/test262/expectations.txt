@@ -7533,8 +7533,6 @@ FAIL	test/staging/sm/Set/is-subset-of.js	sloppy
 FAIL	test/staging/sm/Set/is-subset-of.js	strict
 FAIL	test/staging/sm/String/matchAll.js	sloppy
 FAIL	test/staging/sm/String/matchAll.js	strict
-FAIL	test/staging/sm/String/replace-math.js	sloppy
-FAIL	test/staging/sm/String/replace-math.js	strict
 FAIL	test/staging/sm/String/string-upper-lower-mapping.js	sloppy
 FAIL	test/staging/sm/String/string-upper-lower-mapping.js	strict
 FAIL	test/staging/sm/Symbol/species.js	sloppy
