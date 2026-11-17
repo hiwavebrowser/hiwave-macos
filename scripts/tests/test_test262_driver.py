@@ -9,8 +9,11 @@ test_test262_driver.py: guard tests for scripts/test262.py.
 3. A listed failure that now takes the engine down is caught against the private list.
 4. The job count never puts more than the total budget in flight.
 
-The runner is a fake (a Python script), so no engine build is needed. Its runaway test stops by
-itself at 1.5 GB, so a broken cap fails the test without taking the machine's memory.
+The runner is a fake (a Python script), so no engine build is needed. Its runaway test takes memory
+past the cap and then holds it without finishing (it can never print a result of its own), so the
+only outcomes are "stopped at the cap" or the chunk's own deadline: the test cannot pass by racing
+the watchdog's sampling. It stops growing at 1.5 GB, so a broken cap fails the test without taking
+the machine's memory.
 """
 
 import os
@@ -30,7 +33,7 @@ import test262  # noqa: E402
 FAKE_RUNNER = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    import sys
+    import sys, time
     args = sys.argv[1:]
     listing = open(args[args.index("--list") + 1]).read().split()
     for path in listing:
@@ -39,6 +42,8 @@ FAKE_RUNNER = textwrap.dedent(
             hold = []
             for _ in range(30):  # 30 x 50 MB = 1.5 GB at most
                 hold.append(b"x" * (50 * 1024 * 1024))
+            while True:  # hold it until stopped: never print a result for this test
+                time.sleep(1)
         for mode in ("sloppy", "strict"):
             print("RESULT\\t%s\\t%s\\tPASS\\t" % (path, mode), flush=True)
     """
@@ -63,10 +68,12 @@ class DriverTests(unittest.TestCase):
 
     def run_files(self):
         files = ["test/a_grow.js", "test/b_ok.js"]
-        return test262.run_chunk(self.runner, files, 5000, 200, suite=self.suite)
+        # 1 s per run: the chunk's deadline is then about a minute, the bound on a broken cap.
+        return test262.run_chunk(self.runner, files, 1000, 200, suite=self.suite)
 
     def check_stopped(self, results):
         self.assertEqual(results[("test/a_grow.js", "sloppy")][0], "CRASH")
+        self.assertNotIn("time", results[("test/a_grow.js", "sloppy")][1], "stopped by the deadline, not the cap")
         self.assertEqual(results[("test/a_grow.js", "strict")][0], "CRASH")
         self.assertEqual(results[("test/b_ok.js", "sloppy")][0], "PASS")
         self.assertEqual(results[("test/b_ok.js", "strict")][0], "PASS")
