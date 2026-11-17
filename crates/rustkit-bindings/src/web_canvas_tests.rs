@@ -399,7 +399,8 @@ fn a_canvas_is_read_and_written_without_a_loop_over_its_pixels() {
 /// passed as undefined counts; a receiver that is not a context is an
 /// illegal invocation, for methods and setters alike; arguments convert left
 /// to right. Every expected value is Chrome for Testing 148.0.7778.216's on
-/// the same script.
+/// the same script (tools/parity_oracle/canvas_shim_log.mjs, its output in
+/// canvas_shim_chrome.json).
 #[test]
 fn canvas_members_keep_their_argument_and_receiver_checks() {
     let b = bound();
@@ -418,6 +419,11 @@ fn canvas_members_keep_their_argument_and_receiver_checks() {
         ("x.lineTo.call(5, 1, 2)", "TypeError: Illegal invocation"),
         ("Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'lineWidth').set.call({}, 3)", "TypeError: Illegal invocation"),
         ("Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'strokeStyle').set.call({}, 'red')", "TypeError: Illegal invocation"),
+        // The receiver is checked before the argument count.
+        ("CanvasRenderingContext2D.prototype.arc.call({})", "TypeError: Illegal invocation"),
+        ("CanvasRenderingContext2D.prototype.moveTo.call({}, 1)", "TypeError: Illegal invocation"),
+        ("CanvasRenderingContext2D.prototype.clearRect.call(null)", "TypeError: Illegal invocation"),
+        ("CanvasRenderingContext2D.prototype.translate.call({})", "TypeError: Illegal invocation"),
     ] {
         assert_eq!(ev(&b, &format!("msg(function () {{ {call}; }})")), want, "{call}");
     }
@@ -437,8 +443,9 @@ fn canvas_members_keep_their_argument_and_receiver_checks() {
 }
 
 /// CANVAS-SHIM: as WebIDL drops the arguments past a member's own before
-/// converting any (Chrome 148: `moveTo(1, 2, o)` never reads `o`), a path
-/// member converts only its own. Was: every path member converted six.
+/// converting any (Chrome 148: `moveTo(1, 2, o)` never reads `o`;
+/// canvas_shim_chrome.json), a path or transform member converts only its
+/// own. Was: every path member converted six, scale/rotate/translate six.
 #[test]
 fn a_canvas_path_member_converts_only_its_own_arguments() {
     let b = bound();
@@ -446,7 +453,8 @@ fn a_canvas_path_member_converts_only_its_own_arguments() {
         ev(&b, "var x = document.getElementById('c').getContext('2d'), read = 0; \
                 var o = { valueOf: function () { read++; return 1; } }; \
                 x.beginPath(o); x.closePath(o, o); x.moveTo(1, 2, o); x.lineTo(1, 2, o, o); x.rect(1, 2, 3, 4, o); \
-                x.quadraticCurveTo(1, 2, 3, 4, o); String(read)"),
+                x.quadraticCurveTo(1, 2, 3, 4, o); \
+                x.save(); x.scale(1, 1, o); x.rotate(0, o); x.translate(0, 0, o); x.restore(); String(read)"),
         "0"
     );
 }

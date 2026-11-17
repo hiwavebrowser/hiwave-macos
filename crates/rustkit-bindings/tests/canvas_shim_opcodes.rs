@@ -8,7 +8,7 @@
 
 use rustkit_bindings::DomBindings;
 use rustkit_dom::Document;
-use rustkit_js::{vm_stats_report, JsRuntime, JsValue};
+use rustkit_js::{vm_stats_opcode_count, vm_stats_report, JsRuntime, JsValue};
 use std::rc::Rc;
 
 /// The interpreter's opcode total so far (this thread).
@@ -18,15 +18,10 @@ fn opcodes() -> u64 {
     line["vm stats: ".len()..].split(' ').next().unwrap().parse().unwrap()
 }
 
-/// How many times opcode `name` ran so far (0 when it is not in the report's top list).
+/// How many times opcode `name` ran so far on this thread; fails when the counter has no such
+/// opcode (a misspelt name, or the counters off), never reading 0.
 fn opcode(name: &str) -> u64 {
-    vm_stats_report()
-        .lines()
-        .find_map(|l| {
-            let mut it = l.split_whitespace();
-            (it.next() == Some(name)).then(|| it.next().unwrap().parse().unwrap())
-        })
-        .unwrap_or(0)
+    vm_stats_opcode_count(name).unwrap_or_else(|| panic!("no opcode count for {name}"))
 }
 
 const N: u64 = 1000;
@@ -68,6 +63,7 @@ fn a_canvas_call_runs_few_opcodes_of_shim_and_makes_no_arguments_object() {
         }
         (opcodes() - ops, opcode("CreateMappedArgumentsObject") - mapped, opcode("CreateUnmappedArgumentsObject") - unmapped)
     };
+    assert_eq!(vm_stats_opcode_count("NotAnOpcode"), None, "a name that is no opcode must not read as a count");
     let (stub_ops, _, _) = run("stub");
     let (real_ops, mapped, unmapped) = run("ctx");
     let per_call = (real_ops - stub_ops) as f64 / (N * CALLS) as f64;
