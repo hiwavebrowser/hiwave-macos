@@ -1,0 +1,294 @@
+{
+ "chrome": "148.0.7778.216",
+ "property": "--x",
+ "cases": [
+  {
+   "css": "url(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url(ok.png)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(ok.png)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(ok.png)"
+  },
+  {
+   "css": "URL(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "none, url(a(b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75rl(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75 rl(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "u\\72l(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "ur\\6c(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\55 RL(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\55\\52\\4c(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75\\72\\6c(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\000075rl(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\00075 rl(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "u\\rl(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\u\\r\\l(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "U\\52 L(a b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75rl(ok.png)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75rl(ok.png)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75rl(ok.png)"
+  },
+  {
+   "css": "u\\72l(ok.png)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "u\\72l(ok.png)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "u\\72l(ok.png)"
+  },
+  {
+   "css": "\\75rx(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75rx(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75rx(a b)"
+  },
+  {
+   "css": "x\\75rl(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "x\\75rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "x\\75rl(a b)"
+  },
+  {
+   "css": "-\\75rl(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "-\\75rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "-\\75rl(a b)"
+  },
+  {
+   "css": "\\-url(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\-url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\-url(a b)"
+  },
+  {
+   "css": "f(\\75rl(a b))",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\"\\75rl(a b)\"",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\"\\75rl(a b)\"",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\"\\75rl(a b)\""
+  },
+  {
+   "css": "url(a\\ b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a\\ b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a\\ b)"
+  },
+  {
+   "css": "\\75rl(a\\ b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75rl(a\\ b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75rl(a\\ b)"
+  },
+  {
+   "css": "u\\\nrl(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "u\\\nrl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "u\\\nrl(a b)"
+  },
+  {
+   "css": "\\75rl(a\"b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "/* url(a b) */",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "",
+   "kept_via_attribute": true,
+   "value_via_attribute": ""
+  },
+  {
+   "css": "url(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a b)"
+  },
+  {
+   "css": "url( ok.png )",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url( ok.png )",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url( ok.png )"
+  },
+  {
+   "css": "url(ok.png",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(ok.png",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(ok.png"
+  },
+  {
+   "css": "url(a\\\nb)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url(a\u0001b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url(a\tb)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "#url(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "#url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "#url(a b)"
+  },
+  {
+   "css": "1url(a b)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "1url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "1url(a b)"
+  },
+  {
+   "css": "url(a b",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url(\ta b)",
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url( 'a b' )",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url( 'a b' )",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url( 'a b' )"
+  },
+  {
+   "css": "url(a)b(c d)",
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a)b(c d)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a)b(c d)"
+  }
+ ],
+ "replaced_builtins": "before"
+}
