@@ -169,11 +169,17 @@ fn important_bang(value: &[char]) -> Option<usize> {
     (k > 0 && value[k - 1] == '!').then_some(k - 1)
 }
 
+/// The most declarations one style attribute is read for: the pieces after it are not read. Far past
+/// any page's (an attribute this long is megabytes of text); it bounds what one host call does, which
+/// the script budget cannot interrupt.
+pub(crate) const MAX_DECLARATIONS: usize = 100_000;
+
 /// `parseDecls`: the declarations of a style attribute's text, the last of each name kept (moved to the
 /// end, as the JS filter-and-push does), with any declaration whose value holds a bad url left out.
+/// Linear in the text: each name's last position is looked up, not searched for (#1264 R1).
 pub(crate) fn parse_decls(text: &str) -> Vec<Decl> {
-    let mut out: Vec<Decl> = Vec::new();
-    for piece in split_decls(text) {
+    let mut all: Vec<Decl> = Vec::new();
+    for piece in split_decls(text).into_iter().take(MAX_DECLARATIONS) {
         let Some(colon) = piece.find(':') else {
             continue;
         };
@@ -193,14 +199,26 @@ pub(crate) fn parse_decls(text: &str) -> Vec<Decl> {
         if name.is_empty() || value.is_empty() || has_bad_url(&value) {
             continue;
         }
-        out.retain(|d| {
+        all.push(Decl { name, value, important });
+    }
+    // Where each name is last: the declarations kept, in the order of their last occurrence.
+    let mut last: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(all.len());
+    for (i, d) in all.iter().enumerate() {
+        #[cfg(test)]
+        DEDUP_COMPARISONS.with(|c| c.set(c.get() + 1));
+        last.insert(d.name.as_str(), i);
+    }
+    let keep: Vec<bool> = all
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
             #[cfg(test)]
             DEDUP_COMPARISONS.with(|c| c.set(c.get() + 1));
-            d.name != name
-        });
-        out.push(Decl { name, value, important });
-    }
-    out
+            last.get(d.name.as_str()) == Some(&i)
+        })
+        .collect();
+    drop(last);
+    all.into_iter().zip(keep).filter_map(|(d, k)| k.then_some(d)).collect()
 }
 
 #[cfg(test)]
@@ -330,9 +348,10 @@ fn non_printable(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{e}'..='\u{1f}' | '\u{7f}')
 }
 
-/// §4.3.8: a `\` that starts an escape (not one before a newline, nor at the end).
+/// §4.3.8: a `\` that starts an escape: any but one before a newline. One at the end of the value is an
+/// escape too (§4.3.7 reads it as U+FFFD), as #1266's check and Chrome read it.
 fn valid_escape(t: &[char], i: usize) -> bool {
-    t.get(i) == Some(&'\\') && t.get(i + 1).is_some_and(|&c| !newline(c))
+    t.get(i) == Some(&'\\') && t.get(i + 1).is_none_or(|&c| !newline(c))
 }
 
 /// §4.3.9: whether the code points at `i` would start an identifier.

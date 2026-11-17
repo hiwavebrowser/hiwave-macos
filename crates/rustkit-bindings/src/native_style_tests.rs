@@ -142,6 +142,46 @@ fn a_custom_element_watching_style_hears_native_writes_as_before() {
     );
 }
 
+/// #1266's values pinned against Chrome 148 (docs/diagnostics/2026-11-17/style_url_value_chrome148.json):
+/// both copies keep or refuse each as Chrome does, through `setProperty` and through the attribute.
+/// The native check (`inline_style::has_bad_url`, Rust) and #1266's (`hasBadUrl`, JS) are the same rule
+/// written twice; this is where they must agree.
+#[test]
+fn both_copies_keep_or_refuse_the_chrome_pinned_url_values() {
+    let doc: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/diagnostics/2026-11-17/style_url_value_chrome148.json")).unwrap();
+    assert_eq!(doc["chrome"].as_str(), Some("148.0.7778.216"));
+    let b = bound();
+    let mut wrong = Vec::new();
+    let cases = doc["cases"].as_array().unwrap();
+    for native in [true, false] {
+        set_native(&b, native);
+        for case in cases {
+            let css = case["css"].as_str().unwrap();
+            let lit = serde_json::to_string(css).unwrap();
+            let got = ev(
+                &b,
+                &format!(
+                    "var el = document.getElementById('t'); el.removeAttribute('style');
+                     el.style.setProperty('--x', 'before'); el.style.setProperty('--x', {lit});
+                     var viaSet = el.style.getPropertyValue('--x') !== 'before';
+                     el.setAttribute('style', '--x: ' + {lit});
+                     viaSet + '|' + (el.style.length > 0)"
+                ),
+            );
+            // As style_value_url_tests reads the file: a value that is only a comment is kept by Chrome
+            // with an empty value, and dropped here as an empty declaration (not the url rule).
+            let want_attr =
+                !css.trim_start().starts_with("/*") && case["kept_via_attribute"].as_bool().unwrap();
+            let want = format!("{}|{want_attr}", case["kept_via_setProperty"].as_bool().unwrap());
+            if got != want {
+                wrong.push(format!("{} {css:?}: {got}, Chrome {want}", if native { "native" } else { "js" }));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} differ:\n{}", wrong.len(), 2 * cases.len(), wrong.join("\n"));
+}
+
 /// The native path refuses a value holding a bad url as CSS's tokenizer reads it, escapes in the
 /// function name decoded: the declaration is not taken and the attribute is not written.
 #[test]
