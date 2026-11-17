@@ -2087,6 +2087,12 @@ pub fn set_one_animation_round(on: bool) {
     ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
 }
 
+thread_local! {
+    /// ANIM-UPDATE-ORDER: the frame time this thread's current turn updated its animations to
+    /// before its round (`Engine::presample_animations`), while one round a turn is on.
+    static PRESAMPLED_FRAME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
 fn one_animation_round() -> bool {
     ONE_ANIMATION_ROUND.with(|c| {
         c.get().unwrap_or_else(|| {
@@ -6951,6 +6957,8 @@ impl Engine {
                     debug!(error = %e, "the one-round mark failed");
                 }
             }
+            let at = self.presample_animations(id, elapsed_ms);
+            PRESAMPLED_FRAME.with(|p| p.set(at));
         }
         if !self.config.nested_contexts {
             return self.pump_live_turn(id, elapsed_ms, real_clock).await;
@@ -7026,6 +7034,49 @@ impl Engine {
             (a, b) => a.or(b),
         };
         self.frame_requests_wake(id, out)
+    }
+
+    /// ANIM-UPDATE-ORDER (one round a turn): when the turn `elapsed_ms` on will run an animation
+    /// frame, update the animations of `id` and of its frames to that frame's time first, as HTML's
+    /// update-the-rendering does before the animation frame callbacks, so a computed read in a
+    /// callback (or in a task of the turn, whose timeline is that frame's) is the frame's value.
+    /// The after-turn settle then has nothing left to draw unless script wrote. Returns the time.
+    fn presample_animations(&mut self, id: EngineViewId, elapsed_ms: u64) -> Option<f64> {
+        let at = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .and_then(|b| b.turn_frame_at(elapsed_ms))?;
+        let mut views = vec![id];
+        if let Some(v) = self.views.get(&id) {
+            views.extend(v.frames.values().map(|f| f.view));
+        }
+        for vid in views {
+            let needs_frame = {
+                let Some(view) = self.views.get(&vid) else { continue };
+                let mut anims = view.lay.animations.borrow_mut();
+                if !anims.active() {
+                    continue;
+                }
+                if at > anims.clock_ms {
+                    anims.clock_ms = at;
+                }
+                anims.last_build_clock != Some(anims.clock_ms)
+            };
+            if !needs_frame {
+                continue;
+            }
+            match self.paint_animation_frame(vid) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Err(e) = self.relayout_for(vid, RelayoutCause::Animation) {
+                        debug!(error = %e, "the turn's animation update failed");
+                    }
+                }
+                Err(e) => debug!(error = %e, "the turn's animation frame failed"),
+            }
+        }
+        Some(at)
     }
 
     /// Open or close the frame tree's turn on `id`'s timer queue (the tree's one).
@@ -7200,7 +7251,14 @@ impl Engine {
         // it (TIMELINE2: the frame's time once this turn's frame ran), so
         // the layout below (and the one `settle_animations` makes) reads the
         // transitions at the time script animations read.
-        view.doc.lay.animations.borrow_mut().clock_ms = bindings.animation_clock_ms();
+        // ANIM-UPDATE-ORDER: a turn whose animations were updated to its frame's time before its
+        // round keeps that time when the frame's stamp is within a millisecond of it (the stamp
+        // carries the clock's reads), so the settle below does not draw the same frame again.
+        let clock = bindings.animation_clock_ms();
+        view.doc.lay.animations.borrow_mut().clock_ms = match PRESAMPLED_FRAME.with(|p| p.get()) {
+            Some(at) if (clock - at).abs() < 1.0 => at,
+            _ => clock,
+        };
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;

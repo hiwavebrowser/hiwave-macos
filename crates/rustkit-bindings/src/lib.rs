@@ -512,7 +512,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -1251,6 +1251,18 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // is the frame of the turn's time (CLOCK-AT-PRESENT, `frameRound`).
     __rk.setOneRound = function (on) {
         Q.oneRound = !!on;
+    };
+    // ANIM-UPDATE-ORDER: the time of the frame a turn `delta` ms on will run (the frame of the
+    // turn's time, as `frameRound` makes it with one round a turn), or -1 when no animation frame
+    // callback is due by then. The engine updates the animations to it before the turn's timers
+    // and round run, so the callbacks read the frame's animated style (HTML update the rendering:
+    // animations are updated before the animation frame callbacks run). No clock is read.
+    __rk.turnFrameAt = function (delta) {
+        var target = Q.now + (toNumber(delta) || 0);
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame && timers[i].due <= target) return frameAt(gridAtOrBefore(target));
+        }
+        return -1;
     };
     // A frame's document is going away: its timers go with it, and its
     // workers are no longer asked. Loops over the tables, nothing called.
@@ -4023,6 +4035,19 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_host_bookkeeping(&format!("__rk.setOneRound({on}); return 0;"))?;
         Ok(())
+    }
+
+    /// The time of the frame a turn `delta_ms` on will run, on the tree's clock, when an
+    /// animation frame callback is due by then (ANIM-UPDATE-ORDER; `__rk.turnFrameAt`).
+    pub fn turn_frame_at(&self, delta_ms: u64) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("return __rk.turnFrameAt({delta_ms});"))
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() && n >= 0.0 => Some(n),
+            _ => None,
+        }
     }
 
     pub fn set_tree_turn(&self, open: bool) -> Result<(), BindingError> {
