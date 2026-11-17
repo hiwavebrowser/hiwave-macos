@@ -1165,7 +1165,10 @@ its own every 65,536 units, so its memory follows the text's length, not the num
 
 **What.** The UCS-2 copy of a Latin-1 input is kept, with the string it came from, and reused while the
 same string is matched (`LATIN1_INPUT`, one entry per thread; inputs under 256 units are copied each
-time). `String::index_of_from` takes the substring from `fromIndex` (no copy) and searches that; `indexOf`,
+time). The kept pair would pin a page's string after the page drops it, so `rustkit_js::JsRuntime::end_turn`
+releases it (`regexp::release_kept_input`), and an input over 2^24 units is never kept (copied for each
+match, as before): one match on a 2^29-unit string no longer holds 512 MiB plus a 1 GiB copy for the
+life of the thread (`crates/rustkit-js/tests/regexp_input_release.rs`, red before). `String::index_of_from` takes the substring from `fromIndex` (no copy) and searches that; `indexOf`,
 `includes`, `replaceAll` and `split` use it. The `replaceAll` and `split` loops read the interrupt word.
 
 **Pin.** `crates/rustkit-js/tests/native_loop_limits.rs`: bytes allocated on the thread during a global
