@@ -80,6 +80,21 @@ impl FunctionEnvironment {
             .resize(compile_bindings_len, false);
     }
 
+    /// HIWAVE PATCH (eval-var-per-call): whether this call's environment holds the binding at `index` of
+    /// the shared scope. A binding the function was compiled with is always held (it may still be
+    /// uninitialized). One a direct eval added is held only when this call's eval declared it, which
+    /// initializes it: a slot past this environment's end, or one `extend_from_compile` added
+    /// uninitialized for another call's name, is not held.
+    pub(crate) fn holds_binding(&self, index: u32) -> bool {
+        let i = index as usize;
+        let bindings = self.bindings.borrow();
+        let Some(slot) = bindings.get(i) else {
+            return false;
+        };
+        let added = self.deletable_bindings.borrow().get(i).copied().unwrap_or(false);
+        !added || slot.is_some()
+    }
+
     pub(crate) fn is_deleted_binding(&self, index: u32) -> bool {
         self.deleted_bindings
             .borrow()

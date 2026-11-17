@@ -7621,10 +7621,6 @@ FAIL	test/staging/sm/module/bug1488117.js	module
 FAIL	test/staging/sm/module/module-export-name-star.js	module
 FAIL	test/staging/sm/regress/regress-162392.js	sloppy
 FAIL	test/staging/sm/regress/regress-162392.js	strict
-FAIL	test/staging/sm/regress/regress-554955-1.js	sloppy
-FAIL	test/staging/sm/regress/regress-554955-2.js	sloppy
-FAIL	test/staging/sm/regress/regress-554955-3.js	sloppy
-FAIL	test/staging/sm/regress/regress-554955-5.js	sloppy
 FAIL	test/staging/sm/regress/regress-577648-1.js	sloppy
 FAIL	test/staging/sm/regress/regress-577648-2.js	sloppy
 FAIL	test/staging/sm/regress/regress-584355.js	sloppy

@@ -235,7 +235,9 @@ impl EnvironmentStack {
         function_slots: FunctionSlots,
         global: &Gc<DeclarativeEnvironment>,
     ) {
-        let num_bindings = scope.num_bindings_non_local();
+        // HIWAVE PATCH (eval-var-per-call): not the scope's current count, which includes the `var`s
+        // other calls' direct evals declared.
+        let num_bindings = scope.activation_bindings();
 
         let (poisoned, with) = self.compute_poisoned_with(global);
 
@@ -486,7 +488,9 @@ impl Context {
                         if let Some(env) = env.kind().as_function()
                             && let Some(b) = env.compile().get_binding(locator.name())
                         {
-                            if env.is_deleted_binding(b.binding_index()) {
+                            // HIWAVE PATCH (eval-var-per-call): a name another call's eval declared is not
+                            // this call's binding: look further out.
+                            if env.is_deleted_binding(b.binding_index()) || !env.holds_binding(b.binding_index()) {
                                 continue;
                             }
                             locator.set_scope(b.scope());
