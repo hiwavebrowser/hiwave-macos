@@ -6301,6 +6301,9 @@ impl Engine {
             if load_stopped {
                 log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(())));
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6325,7 +6328,8 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_ms);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -9651,7 +9655,11 @@ impl Engine {
             );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
+            // The step's time is recorded once: on its own record when it
+            // has one, else on the first error it reported (SCRIPT-TIME-DUP).
+            let mut step_ms = step_started.elapsed().as_millis() as u64;
             if record.outcome != ScriptOutcome::Ran {
+                step_ms = 0;
                 inspector_glue::log_script(log, &inspector, record);
             }
             if poisoned.get() {
@@ -9687,11 +9695,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: step_started.elapsed().as_millis() as u64,
+                    elapsed_ms: std::mem::take(&mut step_ms),
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_ms);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears

@@ -811,20 +811,54 @@ def log_findings(path):
     return hits[:20], text[-1500:]
 
 
+# A record of the engine's console log: a physical line that starts with the engine's own prefix (a
+# timestamp, a level, the engine's open spans if any, then the console target), and what follows. The same words later on a line, or
+# after another target, are text of that other line.
+# Between the level and the target the engine's logger writes the spans that were open, `name{fields}:`
+# each. Only the engine's own spans are allowed there, by name, with the fields they have (a view id, a
+# count): a span this does not know, or one with any other text in its braces, is not the engine's prefix.
+# The names are every span the engine's code opens (tests/test_stress.py reads them out of crates/ and
+# holds this list to them: a span missing here would drop the records written inside it).
+ENGINE_SPAN_NAMES = ("relayout", "render", "build_display_list", "build_layout_tree", "layout_compute",
+                     "renderer_execute", "get_surface_size", "get_surface_texture", "get_headless_texture_view")
+ENGINE_SPAN = (r"(?:" + "|".join(ENGINE_SPAN_NAMES) + r")"
+               r"(?:\{[a-z_]+=(?:EngineViewId\(\d+\)|\d+)(?: [a-z_]+=(?:EngineViewId\(\d+\)|\d+))*\})?")
+ENGINE_CONSOLE_RECORD = re.compile(
+    r"(?m)^\d{4}-\d\d-\d\dT[0-9:.]+Z[ \t]+(?:TRACE|DEBUG|INFO|WARN|ERROR)[ \t]+"
+    r"(?:" + ENGINE_SPAN + r"(?::" + ENGINE_SPAN + r")*: )?hiwave::console: "
+    r"((?:uncaught|unhandled rejection) .*)$")
+
+
 def log_uncaught(path):
     """What the engine itself logged as uncaught (the app's console log: exceptions and rejections nothing
     handled, with where). The page-side reporter hears these only through the window's `error` and
     `unhandledrejection` events, so an engine that does not fire one for an exception leaves `errors`
     empty: this is the engine's own account, read from its log. An error the page cancelled is there too,
-    as `uncaught (cancelled by the page) ...`. A line's record is what follows the first `hiwave::console: `
-    on it (the engine escapes line breaks in page text, so later ones are inside a message). The first 20,
-    300 characters each."""
+    as `uncaught (cancelled by the page) ...`. The reader matches the engine's line prefix
+    (ENGINE_CONSOLE_RECORD). The first 20, 300 characters each."""
     try:
         text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
     except OSError:
         return []
-    hits = [m.group(1).strip()[:300] for m in re.finditer(r"(?m)^.*?hiwave::console: ((?:uncaught|unhandled rejection) .*)$", text)]
+    hits = [m.group(1).strip()[:300] for m in ENGINE_CONSOLE_RECORD.finditer(text)]
     return hits[:20]
+
+
+# The console target followed by an uncaught record's words, anywhere on a line.
+CONSOLE_RECORD_WORDS = re.compile(r"hiwave::console: (?:uncaught|unhandled rejection) ")
+
+
+def log_console_refused(path):
+    """How many physical lines of the engine's log carry the console target and an uncaught record's
+    words but are not a record to `log_uncaught` (the line does not start with the engine's own prefix).
+    Such a line is a record written inside a span ENGINE_SPAN does not know, or other text that reads
+    like one; either way the run record shows that something was left out. 0 when the log is missing."""
+    try:
+        text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
+    except OSError:
+        return 0
+    return sum(1 for line in text.split("\n")
+               if CONSOLE_RECORD_WORDS.search(line) and not ENGINE_CONSOLE_RECORD.match(line))
 
 
 def frames_by_test(progress):
@@ -1078,6 +1112,9 @@ def main():
         "log_findings": findings,
         # Uncaught exceptions and rejections in the engine's own log (the app's console log).
         "engine_errors": log_uncaught(work / "app.log") if handle is not None else [],
+        # Console lines that read like such a record but not behind the engine's own prefix: left out
+        # of `engine_errors`, counted here. Not zero = a record was dropped or imitated; read the log.
+        "engine_errors_refused": log_console_refused(work / "app.log") if handle is not None else 0,
         # MotionMark: frames by complexity for each finished test.
         "frames": frames_by_test(record.progress),
         "off_machine": left,
@@ -1114,11 +1151,12 @@ def main():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
     shutil.rmtree(work, ignore_errors=True)
-    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d engine_errors=%d -> %s"
+    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d engine_errors=%d%s -> %s"
           % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0],
              "" if turn_budget is None else " (TURN BUDGET RAISED to %d ms: not a default-engine score)" % turn_budget,
              "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors),
-             len(run["engine_errors"]), path))
+             len(run["engine_errors"]),
+             " engine_errors_refused=%d" % run["engine_errors_refused"] if run["engine_errors_refused"] else "", path))
     return 0 if status == "ok" else 1
 
 
