@@ -211,9 +211,13 @@ fn band_clip(size: (u32, u32), clip: Option<&Mask>, band: Rect, t: Transform) ->
 }
 
 /// What this thread has rasterized so far (FRAME-STAGES): the draws that
-/// reached a bitmap and the milliseconds they took, never reset. The
-/// per-frame stage line reads the difference across a turn; draws run
-/// inside the page's script, so this is a breakdown of its script time.
+/// painted into a bitmap and the milliseconds the raster calls took (a
+/// draw that returned early, or a clip, adds its time but is not a draw),
+/// never reset. Kept only while [`set_raster_timing`] is on for the
+/// thread; off (the default) a draw reads one thread-local flag and no
+/// clock. The per-frame stage line reads the difference across a turn;
+/// draws run inside the page's script, so this is a breakdown of its
+/// script time.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RasterTotals {
     pub draws: u64,
@@ -222,6 +226,7 @@ pub struct RasterTotals {
 
 thread_local! {
     static TOTALS: std::cell::Cell<RasterTotals> = const { std::cell::Cell::new(RasterTotals { draws: 0, ms: 0.0 }) };
+    static TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// This thread's [`RasterTotals`].
@@ -229,23 +234,41 @@ pub fn raster_totals() -> RasterTotals {
     TOTALS.with(|t| t.get())
 }
 
-/// Red stub (FRAME-STAGES follow-up): not yet a switch.
-pub fn set_raster_timing(_on: bool) {}
+/// Keeps this thread's [`RasterTotals`] from now on (`on`), or stops.
+/// Per thread, as the totals are: the thread that reads them asks.
+pub fn set_raster_timing(on: bool) {
+    TIMING.with(|t| t.set(on));
+}
 
-/// One draw into a bitmap, timed until dropped: two `Instant` reads and a
-/// thread-local add.
-struct Timed(std::time::Instant);
+fn timing() -> bool {
+    TIMING.with(|t| t.get())
+}
+
+/// One raster call, timed until dropped when timing is on: two `Instant`
+/// reads and a thread-local add.
+struct Timed(Option<std::time::Instant>);
 
 fn timed() -> Timed {
-    Timed(std::time::Instant::now())
+    Timed(timing().then(std::time::Instant::now))
+}
+
+/// One draw painted into a bitmap (counted only while timing is on).
+fn painted() {
+    if timing() {
+        TOTALS.with(|t| {
+            let mut v = t.get();
+            v.draws += 1;
+            t.set(v);
+        });
+    }
 }
 
 impl Drop for Timed {
     fn drop(&mut self) {
-        let ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        let Some(start) = self.0 else { return };
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
         TOTALS.with(|t| {
             let mut v = t.get();
-            v.draws += 1;
             v.ms += ms;
             t.set(v);
         });
@@ -294,6 +317,7 @@ impl Raster {
         let paint = Paint { shader, blend_mode: blend(ctx.op), anti_alias: true, ..Paint::default() };
         if let Some(pm) = self.pixmap(ctx.size.0, ctx.size.1) {
             pm.fill_path(path, &paint, rule, ts, clip);
+            painted();
         }
     }
 
@@ -355,6 +379,7 @@ impl Raster {
         // clearRect: canvas_raster_cases.json "clear-rect".
         let paint = Paint { blend_mode: BlendMode::Clear, anti_alias: false, ..Paint::default() };
         pm.fill_path(&path, &paint, FillRule::Winding, transform(t), clip);
+        painted();
     }
 
     /// drawImage: the source rect `src` of `image` drawn into the
@@ -411,6 +436,7 @@ impl Raster {
         let paint = Paint { shader, blend_mode: blend(ctx.op), anti_alias: true, ..Paint::default() };
         if let Some(pm) = self.pixmap(ctx.size.0, ctx.size.1) {
             pm.fill_path(&PathBuilder::from_rect(area), &paint, FillRule::Winding, transform(t), ctx.clip);
+            painted();
         }
     }
 
@@ -429,6 +455,7 @@ impl Raster {
         let Some((rows, cols)) = put_span((width, height), (pm.width(), pm.height()), dx, dy, dirty) else {
             return;
         };
+        painted();
         let pixels = pm.pixels_mut();
         for row in rows {
             let ty = dy as i64 + row;

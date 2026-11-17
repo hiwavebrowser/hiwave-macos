@@ -770,6 +770,10 @@ fn run_live(
     let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     let frame_stages = FRAME_STAGES.load(std::sync::atomic::Ordering::Relaxed);
+    if frame_stages {
+        // The canvas raster's per-draw clock, off unless a stage line is printed.
+        rustkit_engine::set_frame_stage_timing(true);
+    }
     let mut last_end: Option<Instant> = None;
     loop {
         let started = Instant::now();

@@ -132,6 +132,16 @@ pub(crate) fn add_svg(ms: f64) {
     update(|t| t.svg_ms += ms);
 }
 
+/// Turns on (`on`) or off this thread's timing that only the stage line
+/// needs: the canvas raster's per-draw clock and draw count. Off by
+/// default, so a page nobody is measuring pays one thread-local read per
+/// draw and no clock; `canvas_raster_ms` and `canvas_draws` stay 0 while
+/// it is off. The stage timers and the script bucket are the W-gate's
+/// own and are kept either way.
+pub fn set_frame_stage_timing(on: bool) {
+    rustkit_bindings::canvas::set_raster_timing(on);
+}
+
 /// This thread's totals so far, the canvas raster's included.
 pub fn frame_stage_totals() -> FrameStageTotals {
     let mut totals = TOTALS.with(|t| t.get());
