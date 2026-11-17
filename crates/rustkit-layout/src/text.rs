@@ -1175,6 +1175,21 @@ thread_local! {
     static MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Test-only: shapes that missed the memo on this thread so far.
+#[cfg(test)]
+pub(crate) fn shape_memo_misses() -> usize {
+    MISSES.with(|c| c.get())
+}
+
+/// Entries the per-thread shaped-text memo of [`TextShaper::shape`] holds in
+/// its clock, plus `cap / 16` recently turned-away ones; past it, entries are
+/// evicted one at a time (`text_memo`), never all at once. An entry is about
+/// 300 bytes (an 80-byte key in an `Rc`, a 168-byte run, map and ring slots)
+/// plus, on the heap, its text twice (key and run), its family names and 24
+/// bytes per glyph: about 12 MB per thread when full of 10-character strings.
+/// The bound is entries, not bytes, as before.
+pub(crate) const SHAPED_TEXT_MEMO_CAP: usize = 16384;
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -1476,18 +1491,9 @@ impl TextShaper {
         }
 
         type Key = (String, String, Vec<String>, u16, u8, u8, u32);
-        struct Memo {
-            generation: u64,
-            runs: HashMap<Key, ShapedRun>,
-        }
-        // Bounds memory on a text-heavy page; refilling costs one shape per
-        // entry, which is what every call cost before the memo.
-        const MAX_ENTRIES: usize = 16384;
         thread_local! {
-            static MEMO: RefCell<Memo> = RefCell::new(Memo {
-                generation: 0,
-                runs: HashMap::new(),
-            });
+            static MEMO: RefCell<crate::text_memo::TextMemo<Key, ShapedRun>> =
+                RefCell::new(crate::text_memo::TextMemo::new(SHAPED_TEXT_MEMO_CAP));
         }
 
         let generation = rustkit_text::webfonts::generation();
@@ -1502,11 +1508,8 @@ impl TextShaper {
         );
         let cached = MEMO.with(|m| {
             let mut m = m.borrow_mut();
-            if m.generation != generation {
-                m.runs.clear();
-                m.generation = generation;
-            }
-            m.runs.get(&key).cloned()
+            m.sync_generation(generation);
+            m.get(&key)
         });
         if let Some(run) = cached {
             return Ok(run);
@@ -1514,13 +1517,7 @@ impl TextShaper {
         #[cfg(test)]
         MISSES.with(|c| c.set(c.get() + 1));
         let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
-        MEMO.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.runs.len() >= MAX_ENTRIES {
-                m.runs.clear();
-            }
-            m.runs.insert(key, run.clone());
-        });
+        MEMO.with(|m| m.borrow_mut().insert(key, run.clone()));
         Ok(run)
     }
 
