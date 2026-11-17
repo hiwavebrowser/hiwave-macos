@@ -146,6 +146,12 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
 /// work: the styles arm replayed styles and the kept-boxes arm spliced into its kept tree. (How many
 /// elements each arm built is no measure: the arms need not relayout the same number of times.)
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
+    assert_same_as_a_full_build(name, page, true)
+}
+
+/// [`assert_same_as_a_full_cascade`]; with `splices` false the kept-boxes arm must not splice (its
+/// relayouts build in full: while animations run, a kept box would hold last frame's values).
+fn assert_same_as_a_full_build(name: &str, page: &str, splices: bool) {
     let full = run(page, 8, RetainedStyles::Off);
     let styles = run(page, 8, RetainedStyles::On);
     let boxes = run(page, 8, RetainedStyles::Boxes);
@@ -157,8 +163,10 @@ fn assert_same_as_a_full_cascade(name: &str, page: &str) {
         full.cascades
     );
     assert!(
-        boxes.splices.0 > 0,
-        "{name}: the kept-boxes run spliced no build (built {} elements; last miss {:?})",
+        (boxes.splices.0 > 0) == splices,
+        "{name}: the kept-boxes run spliced {} builds, expected {} (built {} elements; last miss {:?})",
+        boxes.splices.0,
+        if splices { "some" } else { "none" },
         boxes.built,
         boxes.splices.1
     );
@@ -227,6 +235,58 @@ fn a_frame_that_shows_and_hides_tiles_cascades_those_tiles_alone() {
 #[test]
 fn tiles_shown_hidden_and_moved_keep_a_full_cascades_styles() {
     assert_same_as_a_full_cascade("tiles", &tiles(200, 10, TUNE));
+}
+
+/// R1 item 1: a parent whose inherited colour is mid-transition re-cascades to the same end value
+/// every frame. Its children inherit the interpolated colour, which moves each frame, so they must
+/// not replay last frame's. Another element is written each frame, so every relayout is script's.
+#[test]
+fn a_running_transition_on_an_inherited_property_reaches_the_children() {
+    assert_same_as_a_full_build(
+        "transition",
+        &page(
+            "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
+            "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
+            "document.getElementById('p').className = 'on'; \
+             document.getElementById('w').style.width = (10 + n % 50) + 'px';",
+        ),
+        false,
+    );
+}
+
+/// The same for an `@keyframes` animation of an inherited property on an ancestor.
+#[test]
+fn a_running_animation_on_an_inherited_property_reaches_the_children() {
+    assert_same_as_a_full_build(
+        "keyframes",
+        &page(
+            "@keyframes pulse{from{color:rgb(255,0,0)} to{color:rgb(0,0,255)}} \
+             #p{animation:pulse 1s linear infinite} #w{width:10px}",
+            "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
+            "document.getElementById('w').style.width = (10 + n % 50) + 'px';",
+        ),
+        false,
+    );
+}
+
+/// R1 item 2: verify mode counts only replays that would have served an element. On a page whose
+/// writes change an inherited value (children re-cascade because their parent changed, not because
+/// a replay was wrong) it reports nothing.
+#[test]
+fn verify_counts_only_replays_that_would_have_served() {
+    let page = page(
+        ".a{color:rgb(200,0,0);font-size:12px} .b{color:rgb(0,0,200);font-size:20px}",
+        "<div id=p class=a><p id=q>x<span id=s>y<em id=e>z</em></span></p></div><p id=r>w</p>",
+        "document.getElementById('p').className = n % 2 ? 'b' : 'a';",
+    );
+    let before = retained_mismatches_for_test();
+    let verified = run(&page, 8, RetainedStyles::Verify);
+    assert!(verified.cascades > 0, "the verify run built");
+    assert_eq!(
+        retained_mismatches_for_test() - before,
+        0,
+        "replays a verify run reported wrong"
+    );
 }
 
 #[test]
@@ -357,5 +417,49 @@ fn an_insert_and_a_removal_among_block_siblings_splice() {
             "var u = document.getElementById('u'); if (n % 2) { var d = document.createElement('div'); \
              u.insertBefore(d, u.firstChild); } else { u.removeChild(u.firstChild); }",
         ),
+    );
+}
+
+/// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes
+/// did not ask for, the view lets it go and records none; script writes start it again.
+#[test]
+fn a_stretch_without_script_relayouts_lets_the_styles_go() {
+    set_retained_styles_for_test(Some(RetainedStyles::On));
+    let (mut engine, view, _server) = load(&tiles(200, 10, TUNE));
+    frame(&mut engine, view);
+    frame(&mut engine, view);
+    let held = |engine: &Engine| {
+        engine.views[&view]
+            .retained_styles
+            .as_ref()
+            .map_or(0, |m| m.styles.len())
+    };
+    assert!(
+        held(&engine) > 200,
+        "script relayouts keep a style per element: {}",
+        held(&engine)
+    );
+    engine
+        .execute_script(view, "window.STOP = true")
+        .expect("stop");
+    for _ in 0..12 {
+        engine.relayout(view).expect("relayout");
+    }
+    assert_eq!(
+        held(&engine),
+        0,
+        "styles held after 12 relayouts script did not ask for"
+    );
+    engine
+        .execute_script(view, "window.STOP = false")
+        .expect("go");
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    set_retained_styles_for_test(None);
+    assert!(
+        held(&engine) > 200,
+        "script relayouts keep them again: {}",
+        held(&engine)
     );
 }
