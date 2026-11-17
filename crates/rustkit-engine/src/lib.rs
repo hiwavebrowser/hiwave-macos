@@ -2093,6 +2093,22 @@ thread_local! {
     static PRESAMPLED_FRAME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
+/// The animation clock a turn leaves (ANIM-UPDATE-ORDER): the frame's stamp `clock`, or the time
+/// the turn updated its animations to before its round (`presampled`) when the stamp is within a
+/// millisecond of it (the stamp carries the clock's reads), so the settle does not draw the same
+/// frame again.
+fn turn_animation_clock(clock: f64, presampled: Option<f64>) -> f64 {
+    match presampled {
+        Some(at) if (clock - at).abs() < 1.0 => at,
+        _ => clock,
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+pub(crate) fn turn_animation_clock_for_tests(clock: f64, presampled: Option<f64>) -> f64 {
+    turn_animation_clock(clock, presampled)
+}
+
 fn one_animation_round() -> bool {
     ONE_ANIMATION_ROUND.with(|c| {
         c.get().unwrap_or_else(|| {
@@ -7255,10 +7271,7 @@ impl Engine {
         // round keeps that time when the frame's stamp is within a millisecond of it (the stamp
         // carries the clock's reads), so the settle below does not draw the same frame again.
         let clock = bindings.animation_clock_ms();
-        view.doc.lay.animations.borrow_mut().clock_ms = match PRESAMPLED_FRAME.with(|p| p.get()) {
-            Some(at) if (clock - at).abs() < 1.0 => at,
-            _ => clock,
-        };
+        view.doc.lay.animations.borrow_mut().clock_ms = turn_animation_clock(clock, PRESAMPLED_FRAME.with(|p| p.get()));
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
