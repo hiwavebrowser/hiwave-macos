@@ -50,6 +50,16 @@
    "name": "delete_an_eval_var",
    "js": "function f(s) { eval(s); return function () { return [delete b, typeof b]; }; } var g2 = f('var b = 2'); var g1 = f(''); String([g2(), g1()])",
    "chrome": "true,undefined,true,undefined"
+  },
+  {
+   "name": "later_call_strict_eval_code_reads_a_name_an_earlier_call_declared",
+   "js": "var f = function (code) { return eval(code); }; String([f(\"eval('var x = 2;'); typeof x\"), f(\"'use strict'; eval('var x = 2;'); typeof x\"), f('typeof x')])",
+   "chrome": "number,undefined,undefined"
+  },
+  {
+   "name": "later_call_eval_code_reads_a_name_an_earlier_call_declared",
+   "js": "var f = function (code) { return eval(code); }; String([f('var x = 2; x'), f('typeof x'), f('var x = 3; x'), f('typeof x')])",
+   "chrome": "2,undefined,3,undefined"
   }
  ],
  "chrome_version": "148.0.7778.216"
