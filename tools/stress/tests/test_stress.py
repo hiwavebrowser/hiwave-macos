@@ -859,7 +859,7 @@ def test_the_hiwave_reader_knows_every_stage_the_engine_prints():
     fields = _engine_frame_stage_fields()
     assert fields[:4] == ["turn", "t_ms", "busy_ms", "wait_ms"], fields
     assert set(frame_stages.HIWAVE_STAGES) <= set(fields), set(frame_stages.HIWAVE_STAGES) - set(fields)
-    assert set(fields) - set(frame_stages.HIWAVE_STAGES) == {"turn", "t_ms", "canvas_draws", "renders"}
+    assert set(fields) - set(frame_stages.HIWAVE_STAGES) == {"turn", "t_ms", "host_calls", "canvas_draws", "renders"}
 
 
 def test_the_hiwave_reader_takes_the_middle_of_the_longest_run_of_rendering_turns():
@@ -874,6 +874,28 @@ def test_the_hiwave_reader_takes_the_middle_of_the_longest_run_of_rendering_turn
     assert out["stages"]["script_ms"] == 9.5 and out["frame_interval_ms"] == 20.0
     assert out["canvas_draws_per_frame"] == 3
     assert set(out["stages"]) == set(frame_stages.HIWAVE_STAGES)
+
+
+def test_the_hiwave_reader_splits_script_into_js_and_host_calls_with_per_frame_rows():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    lines, rows = [], {}
+    for i in range(20):  # 20 frames, each 4 arc calls (0.1 ms each) and one fill (0.5 ms)
+        lines.append(_hiwave_line(fields, turn=1 + i, t_ms=1000 + 16 * i, renders=1, script_ms=3.0, host_ms=1.0,
+                                  canvas_raster_ms=0.4, host_calls=5))
+        rows[("__rustkit_canvas", "arc")] = (4 * (i + 1), 0.4 * (i + 1))
+        rows[("__rustkit_canvas", "fill")] = (i + 1, 0.5 * (i + 1))
+        rows[("__rustkit_dom_attr", "")] = (0, 0.0)
+        if (i + 1) % 5 == 0:
+            lines.append("Host calls turn=%d rows=%s" % (i + 1, ",".join(
+                "%s/%s:%d:%.3f" % (n, o, c, m) for (n, o), (c, m) in rows.items())))
+    out = frame_stages.hiwave_summary("\n".join(lines))
+    assert out["js_ms"] == 2.0 and out["host_less_raster_ms"] == 0.6 and out["host_calls_per_frame"] == 5, out
+    by = {(r["name"], r["op"]): r for r in out["host_rows_per_frame"]}
+    assert set(by) == {("__rustkit_canvas", "arc"), ("__rustkit_canvas", "fill")}, by  # no calls: left out
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "arc")]["us_per_call"] == 100.0
+    assert by[("__rustkit_canvas", "fill")]["ms"] == 0.5
+    assert out["host_rows_per_frame"][0]["op"] == "fill"  # the most time first
 
 
 def _x(name, ts, dur, tid=1, pid=10):

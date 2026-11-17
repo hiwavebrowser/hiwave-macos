@@ -168,3 +168,53 @@ fn the_animation_round_a_stopped_frame_tree_turn_still_runs_is_script_time() {
         d.script_ms
     );
 }
+
+/// SCRIPT-SPLIT: the host calls a canvas page makes are part of its script
+/// time and hold its canvas raster; each canvas operation has its row.
+#[test]
+fn host_calls_are_part_of_script_time_and_hold_the_canvas_raster() {
+    let (mut engine, view, _server, rt) = load(PAGE);
+    set_frame_stage_timing(true);
+    let before = frame_stage_totals();
+    for _ in 0..5 {
+        rt.block_on(engine.pump_live(view, 16));
+    }
+    let d = frame_stage_totals().since(&before);
+    let line = host_call_rows_line(5);
+    set_frame_stage_timing(false);
+    // Each frame: clearRect, fillStyle, fillRect, beginPath, arc, stroke.
+    assert!(d.renders >= 3 && d.host_calls >= 6 * 3, "{d:?}");
+    assert!(d.canvas_raster_ms <= d.host_ms && d.host_ms <= d.script_ms, "{d:?}");
+    for op in ["clearRect", "fillRect", "beginPath", "arc", "stroke"] {
+        assert!(line.contains(&format!(",__rustkit_canvas/{op}:")) || line.contains(&format!("=__rustkit_canvas/{op}:")), "{op}: {line}");
+    }
+    // Off: no host calls are kept.
+    let before = frame_stage_totals();
+    rt.block_on(engine.pump_live(view, 16));
+    let d = frame_stage_totals().since(&before);
+    assert_eq!((d.host_calls, d.host_ms), (0, 0.0), "{d:?}");
+}
+
+/// A forced layout inside a host call (a geometry read after a style
+/// write, every frame, on a page of many boxes) is the layout stages'
+/// time: out of the script's share and out of the host calls' too, so
+/// host time stays inside script time.
+#[test]
+fn a_forced_layout_inside_a_host_call_is_not_host_time() {
+    let page = "<html><body><div id=w></div><script>\
+        var w = document.getElementById('w'), n = 0;\
+        for (var i = 0; i < 400; i++) { var e = document.createElement('div'); e.textContent = 'row ' + i; w.appendChild(e); }\
+        function f() { n++; w.style.paddingLeft = (n % 9) + 'px'; window.x = w.offsetWidth + w.firstChild.offsetTop;\
+          requestAnimationFrame(f); }\
+        requestAnimationFrame(f);</script></body></html>";
+    let (mut engine, view, _server, rt) = load(page);
+    set_frame_stage_timing(true);
+    let before = frame_stage_totals();
+    for _ in 0..5 {
+        rt.block_on(engine.pump_live(view, 16));
+    }
+    let d = frame_stage_totals().since(&before);
+    set_frame_stage_timing(false);
+    assert!(d.build_ms + d.layout_ms > 0.0 && d.host_calls > 0, "no forced layout ran: {d:?}");
+    assert!(d.host_ms <= d.script_ms, "host time {:.3} ms is more than script time {:.3} ms: {d:?}", d.host_ms, d.script_ms);
+}
