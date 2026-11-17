@@ -1,0 +1,46 @@
+//! A function whose body runs a sloppy direct eval: a `var` that one call's eval declares belongs to that
+//! call's environment only. Another call of the same function, made before or after, reads and writes
+//! the name where it is declared for that call (an outer scope, or nowhere). Each case runs in its own
+//! context and must give Chrome's answer.
+//!
+//! Expected values are Chrome for Testing 148.0.7778.216's answers:
+//! `docs/diagnostics/2026-11-17/eval_var_per_call_cases.json`, written by
+//! `tools/parity_oracle/js_cases_log.mjs --write`.
+
+use boa_engine::{Context, Source, js_string};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+const CASES: &str = include_str!("../../../docs/diagnostics/2026-11-17/eval_var_per_call_cases.json");
+
+/// The case's answer as the oracle reads it: the completion value as a string.
+fn run(js: &str) -> String {
+    let mut ctx = Context::default();
+    // As the oracle runs it: the case's text through indirect eval (global code), its completion value.
+    let lit = serde_json::to_string(js).unwrap();
+    let src = format!("globalThis.__r = 'pending'; Promise.resolve((0, eval)({lit})).then(String).then(function (v) {{ globalThis.__r = v; }});");
+    if let Err(e) = ctx.eval(Source::from_bytes(&src)) {
+        return format!("error: {e}");
+    }
+    if let Err(e) = ctx.run_jobs() {
+        return format!("jobs error: {e}");
+    }
+    let r = ctx.global_object().get(js_string!("__r"), &mut ctx).unwrap();
+    r.to_string(&mut ctx).unwrap().to_std_string_escaped()
+}
+
+#[test]
+fn an_eval_var_belongs_to_the_call_that_declared_it() {
+    let doc: serde_json::Value = serde_json::from_str(CASES).unwrap();
+    assert_eq!(doc["chrome_version"].as_str(), Some("148.0.7778.216"));
+    let cases = doc["cases"].as_array().unwrap();
+    let mut wrong = Vec::new();
+    for case in cases {
+        let (name, js, want) =
+            (case["name"].as_str().unwrap(), case["js"].as_str().unwrap(), case["chrome"].as_str().unwrap());
+        let got = catch_unwind(AssertUnwindSafe(|| run(js))).unwrap_or_else(|_| "no answer".to_string());
+        if got != want {
+            wrong.push(format!("{name}: chrome {want:?}, here {got:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of {} differ:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+}
