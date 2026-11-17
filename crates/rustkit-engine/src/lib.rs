@@ -13096,6 +13096,12 @@ impl layout_ctx::LayoutCtx {
         if lay.script_unlaid_animated.get() {
             return miss("the kept tree was built while animations ran");
         }
+        // `running()` covers CSS transitions and animations only. A script animation is applied
+        // from the view's script layer, and can start, move or fill in frames no build saw: any
+        // write to that layer since the kept tree was built refuses it (#1247 delta R1).
+        if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
+            return miss("script animations moved since the kept tree was built");
+        }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
             Err(why) => return miss(why),
@@ -13271,6 +13277,7 @@ impl layout_ctx::LayoutCtx {
             let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
             lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
+            lay.script_unlaid_generation.set(lay.animated.borrow().generation);
         }
 
         // Layout computation

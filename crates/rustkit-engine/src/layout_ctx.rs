@@ -658,6 +658,11 @@ pub(crate) struct ViewLayout {
     /// boxes no later write reaches may hold a value it has moved on from, or that went when it
     /// ended: the kept tree is not spliced into (#1247 R1 item 2).
     pub(crate) script_unlaid_animated: Cell<bool>,
+    /// The script animation layer's generation (`animated.generation`) when the kept tree was
+    /// built. Script animations (`element.animate`) are applied in the build from that layer and
+    /// can start, move or fill in paint-only frames no build sees; when the layer has been written
+    /// since, the kept tree is not spliced into (#1247 delta R1).
+    pub(crate) script_unlaid_generation: Cell<u64>,
     /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
     /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
     /// kept tree, since the published boxes were not laid out from it.
