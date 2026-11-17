@@ -11401,6 +11401,19 @@ impl Engine {
                 .counts
                 .iter()
                 .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        // A stretch with no script relayouts: let the styles go, and record none.
+        memo.untrusted_run = if trusted { 0 } else { memo.untrusted_run + 1 };
+        let script_caused = causes
+            .counts
+            .iter()
+            .any(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        if memo.untrusted_run > RETAINED_IDLE && !script_caused {
+            let run = memo.untrusted_run;
+            let mut idle = StyleMemo::retained(memo.verify);
+            idle.untrusted_run = run;
+            view.retained_styles = Some(idle);
+            return false;
+        }
         match (trusted, dirty, view.document.clone()) {
             (true, Some(dirty), Some(document)) => {
                 for (&raw, &bits) in &dirty.nodes {
@@ -14429,7 +14442,14 @@ impl layout_ctx::LayoutCtx {
                 // Transitions: start what this cascade's changes call for
                 // and overlay the running ones (after the memo, so the
                 // memo keeps the cascade's own result).
-                self.animate_style(node.id.raw(), &mut style, stylesheets);
+                let may_animate = self.animate_style(node.id.raw(), &mut style, stylesheets);
+                // Its memo entry is the bare cascade, and transitions and animations are applied
+                // after it: an element that animates, or may (it names an animation or a
+                // transition), hands its children values its entry does not show. A retained
+                // build treats it as changed, so they cascade (#1246 R1 item 1).
+                if may_animate {
+                    note_retained_animating(node.id);
+                }
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -48647,7 +48667,15 @@ struct StyleMemo {
     recomputed: HashSet<rustkit_dom::NodeId>,
     /// The script-set control state (checkedness, values) the entries were cascaded with.
     controls: u64,
+    /// Relayouts in a row the styles were not kept across (`RETAINED_IDLE`).
+    untrusted_run: u32,
 }
+
+/// After this many relayouts in a row that script writes alone did not ask for (an animation, a
+/// resize, a load), a view lets its retained styles go and its builds stop recording them, until
+/// script writes come again: the memo holds a computed style per element (#1246 R1 item 5), and
+/// recording one costs every such build a copy of each.
+const RETAINED_IDLE: u32 = 8;
 
 /// The script-set control state a cascade reads (`:checked`, `:placeholder-shown`): retained
 /// styles cascaded under other control state are not replayed (TREE-REUSE a).
@@ -48686,6 +48714,7 @@ impl StyleMemo {
             changed: HashSet::new(),
             recomputed: HashSet::new(),
             controls: 0,
+            untrusted_run: 0,
         }
     }
 
@@ -48785,6 +48814,7 @@ impl StyleMemoScope {
                 changed: HashSet::new(),
                 recomputed: HashSet::new(),
                 controls: 0,
+                untrusted_run: 0,
             })
         });
         Some(StyleMemoScope { owner: true })
@@ -48903,16 +48933,18 @@ fn memoized_element_style(
         let built_under = RETAIN_PARENTS.with(|s| s.borrow().last().copied());
         // Built outside every element's scope (body, under the root): any change may be its parent's.
         let unknown_parent = built_under.is_none() && !memo.changed.is_empty();
-        let must = memo.stale.contains(&node)
+        // A replay would serve the element: no write reached it, it has an entry, and no element its
+        // style inherits from cascaded to a new style this build.
+        let serves = !(memo.stale.contains(&node)
             || parent_changed(dom_parent)
             || parent_changed(built_under)
             || unknown_parent
-            || !memo.styles.contains_key(&node);
-        Some(!must && !memo.verify)
+            || !memo.styles.contains_key(&node));
+        Some((serves && !memo.verify, serves))
     });
     match retained {
         None => memoized_style_through_memo(node, compute),
-        Some(true) => {
+        Some((true, _)) => {
             let hit = STYLE_MEMO.with(|m| {
                 let mut slot = m.borrow_mut();
                 let memo = slot.as_mut()?;
@@ -48921,19 +48953,19 @@ fn memoized_element_style(
             });
             hit.unwrap_or_else(|| Box::new(compute()))
         }
-        Some(false) => {
+        Some((false, serves)) => {
             let fresh = Box::new(compute());
             STYLE_MEMO.with(|m| {
                 if let Some(memo) = m.borrow_mut().as_mut() {
-                    let was_stale = memo.stale.remove(&node);
-                    let had = memo.styles.contains_key(&node);
+                    memo.stale.remove(&node);
                     let differs = memo.styles.get(&node).is_none_or(|old| !same_computed_style(old, &fresh));
                     if differs {
                         memo.changed.insert(node);
                     }
                     memo.misses += 1;
-                    // A verifying build counts the elements a replay would have got wrong.
-                    if memo.verify && differs && had && !was_stale {
+                    // A verifying build counts the elements a replay would have served, and wrongly:
+                    // not the ones a write reached or whose parent changed, which cascade anyway.
+                    if memo.verify && differs && serves {
                         memo.mismatches += 1;
                         #[cfg(test)]
                         RETAINED_MISMATCHES.with(|c| c.set(c.get() + 1));
@@ -48946,6 +48978,18 @@ fn memoized_element_style(
             fresh
         }
     }
+}
+
+/// In a retained build, `node` animates or may: its children and its pseudos cascade.
+fn note_retained_animating(node: rustkit_dom::NodeId) {
+    STYLE_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if memo.retained && matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+                memo.changed.insert(node);
+                memo.recomputed.insert(node);
+            }
+        }
+    });
 }
 
 thread_local! {

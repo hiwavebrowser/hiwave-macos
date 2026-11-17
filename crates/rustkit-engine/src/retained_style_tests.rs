@@ -334,3 +334,47 @@ fn measure_a_tune_frames_build_with_and_without_retained_styles() {
         }
     }
 }
+
+/// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes
+/// did not ask for, the view lets it go and records none; script writes start it again.
+#[test]
+fn a_stretch_without_script_relayouts_lets_the_styles_go() {
+    set_retained_styles_for_test(Some(RetainedStyles::On));
+    let (mut engine, view, _server) = load(&tiles(200, 10, TUNE));
+    frame(&mut engine, view);
+    frame(&mut engine, view);
+    let held = |engine: &Engine| {
+        engine.views[&view]
+            .retained_styles
+            .as_ref()
+            .map_or(0, |m| m.styles.len())
+    };
+    assert!(
+        held(&engine) > 200,
+        "script relayouts keep a style per element: {}",
+        held(&engine)
+    );
+    engine
+        .execute_script(view, "window.STOP = true")
+        .expect("stop");
+    for _ in 0..12 {
+        engine.relayout(view).expect("relayout");
+    }
+    assert_eq!(
+        held(&engine),
+        0,
+        "styles held after 12 relayouts script did not ask for"
+    );
+    engine
+        .execute_script(view, "window.STOP = false")
+        .expect("go");
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    set_retained_styles_for_test(None);
+    assert!(
+        held(&engine) > 200,
+        "script relayouts keep them again: {}",
+        held(&engine)
+    );
+}
