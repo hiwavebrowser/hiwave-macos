@@ -3,6 +3,7 @@ import argparse
 import collections
 import json
 import re
+import subprocess
 from pathlib import Path
 
 CSS = "crates/rustkit-css/src/lib.rs"
@@ -35,6 +36,22 @@ def diagnosis(test, page):
             return f"Computed {prop} value differs", "computed-value resolution and CSSOM serialization"
         if "property <" in name and message.startswith(("assert_equals:", "assert_approx_equals:")):
             return f"Animation or transition samples differ for {prop}", "animation sampling / property interpolation"
+    if "/css-values/" in page:
+        math = re.search(r"\b(calc|min|max|clamp|round|mod|rem|sign|abs|sin|cos|tan|acos|asin|atan2?|exp|log|pow|sqrt|hypot)\(", name)
+        if math:
+            fn = math[1] + "()"
+            if "specified value" in message and "serialize" in message:
+                return f"Specified {fn} expression does not simplify as expected", CSS + " CSS math simplification / specified serialization"
+            if "got the default value instead" in message:
+                return f"Valid {fn} expression falls back to the default value", CSS + " CSS math parsing and value resolution"
+            if "serialize to the same thing in used values" in message:
+                return f"Used {fn} value differs from equivalent expression", CSS + " CSS math evaluation / resolved style"
+        if page.endswith("/if-conditionals.html") and "should be substituted" in message:
+            return "CSS if() substitution differs", CSS + " conditional substitution during cascade"
+        if "non-zero px-based value" in message and "getComputedStyle" in name:
+            return "Viewport unit retained instead of resolved CSS pixels", "computed length resolution and CSSOM readback"
+        if page.endswith("/attr-all-types.html") and "attr(" in message:
+            return "Typed attr() substitution differs", CSS + " attribute substitution and type conversion"
     if page.endswith("/scrollable-overflow-transform-unreachable-region.html") and re.match(r"assert_equals: scroll(Width|Height) expected", message):
         return "Transformed unreachable overflow changes the reported scroll extent", "rustkit-layout overflow geometry / scroll metrics"
     if "cssText serialization should have no value defintions" in message and page.endswith("/test_font_feature_values_parsing.html"):
@@ -149,6 +166,8 @@ def main():
     pages = json.loads(args.inventory.read_text())
     if collections.Counter(pages) != collections.Counter(row["page"] for row in rows):
         parser.error("results do not cover the exact manifest")
+    from wpt_chrome import HOST
+    subprocess.run(["node", HOST, "--verify"], check=True)
     counts, clusters = summarize(rows)
     if args.tables:
         args.tables.write_bytes(directory_tables(counts).encode())
