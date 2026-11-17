@@ -663,9 +663,20 @@ pub(crate) struct ViewLayout {
     /// can start, move or fill in paint-only frames no build sees; when the layer has been written
     /// since, the kept tree is not spliced into (#1247 delta R1).
     pub(crate) script_unlaid_generation: Cell<u64>,
+    /// TREE-REUSE step (1): set by a forced layout (a geometry read after a write) for its own
+    /// build while `RUSTKIT_RETAINED_STYLES=boxes`: that build keeps its tree, built from the DOM as
+    /// it was at the read, so the end-of-task relayout splices the task's writes into it instead of
+    /// building the whole document a second time. Its dirty set holds every write of the task, those
+    /// before the read too, so building them again over the forced tree is exact.
+    pub(crate) keep_forced_tree_now: Cell<bool>,
+    /// The kept tree is a forced layout's, not the one the view laid out and published. LPF1's short
+    /// path compares written boxes with the kept tree and patches the published tree to match, which
+    /// is right only when the two are the same tree: it does not take a forced read's.
+    pub(crate) script_unlaid_unpublished: Cell<bool>,
     /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
     /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
-    /// kept tree, since the published boxes were not laid out from it.
+    /// kept tree, since the published boxes were not laid out from it, except a forced layout's
+    /// in `boxes` mode (`keep_forced_tree_now`).
     pub(crate) retain_script_unlaid_now: Cell<bool>,
     /// After a script write that changed more than paint, the relayouts the short path sits out
     /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
@@ -707,6 +718,7 @@ impl ViewLayout {
     pub(crate) fn forget_script_restyle(&self) {
         self.script_unlaid.borrow_mut().take();
         self.script_unlaid_animated.set(false);
+        self.script_unlaid_unpublished.set(false);
         self.want_script_unlaid.set(false);
         self.script_cooldown.set(0);
         self.script_last_cooldown.set(None);

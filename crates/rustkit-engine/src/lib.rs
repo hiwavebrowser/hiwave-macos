@@ -11893,6 +11893,11 @@ impl Engine {
         let Some(mut unlaid) = view.lay.script_unlaid.borrow_mut().take() else {
             return miss("no kept tree");
         };
+        // A forced read's tree is not the published one this path patches (TREE-REUSE step (1)).
+        if view.lay.script_unlaid_unpublished.get() {
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+            return miss("the kept tree is a forced read's");
+        }
         // The topmost written elements, and the elements above them: the build walks down those
         // and builds only what is under a root.
         // A miss before the patch below leaves the kept tree as it was: put it back, for a build
@@ -13274,8 +13279,11 @@ impl layout_ctx::LayoutCtx {
         // LPF1: the tree as built, before layout writes into it, for script paint writes to
         // compare their elements with; dropped when no such writes asked for it.
         if let Some(lay) = lay.as_ref() {
-            let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
+            // TREE-REUSE step (1): or a forced layout's own build, in `boxes` mode.
+            let forced = lay.keep_forced_tree_now.get();
+            let keep = lay.want_script_unlaid.get() && (lay.retain_script_unlaid_now.get() || forced);
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+            lay.script_unlaid_unpublished.set(keep && forced);
             lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
         }
@@ -26434,7 +26442,10 @@ impl Engine {
     /// for the DOM as it was at the read. Nothing reads them before the
     /// end-of-task relayout, which rebuilds all of them from the DOM as
     /// script left it; this relies on that relayout always following a
-    /// task that wrote. (Reusing the forced tree to skip it is a follow-up.)
+    /// task that wrote. With `RUSTKIT_RETAINED_STYLES=boxes` that relayout
+    /// splices the task's writes into the forced build's tree (TREE-REUSE
+    /// step (1), `ViewLayout::keep_forced_tree_now`) instead of building
+    /// the whole document again.
     fn forced_layout_for(&self, id: EngineViewId) -> Option<rustkit_bindings::ForcedLayout> {
         let view = self.views.get(&id)?;
         let document = view.document.clone()?;
@@ -26517,6 +26528,13 @@ impl Engine {
             // wrote: this build neither replays nor records. The memo goes
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
+            // TREE-REUSE step (1): in `boxes` mode the build keeps its tree for the end-of-task
+            // relayout to splice the task's writes into (`ViewLayout::keep_forced_tree_now`).
+            let keep_tree = retained_styles_mode().keeps_boxes();
+            if keep_tree {
+                lay.want_script_unlaid.set(true);
+                lay.keep_forced_tree_now.set(true);
+            }
             let built = lctx.lay_out_document(
                 building.for_build(),
                 &document,
@@ -26524,6 +26542,7 @@ impl Engine {
                 javascript_enabled,
                 bounds,
             );
+            lay.keep_forced_tree_now.set(false);
             drop(memo_aside);
             baseline.restore(&lay);
             stamp_element_scrolls(&built, &lay.element_scrolls);
