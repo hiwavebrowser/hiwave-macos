@@ -198,6 +198,19 @@ pub fn vm_stats_report() -> String {
     String::new()
 }
 
+/// HIWAVE PATCH (vm-stats): how many times the opcode named `name` ran on this thread, with
+/// `RUSTKIT_VM_STATS=1`; `None` when the counters are off or `name` is no opcode. Diagnostic only.
+#[cfg(feature = "boa")]
+pub fn vm_stats_opcode_count(name: &str) -> Option<u64> {
+    boa_engine::vm_stats::opcode_count(name)
+}
+
+/// Without the Boa engine there are no counters.
+#[cfg(not(feature = "boa"))]
+pub fn vm_stats_opcode_count(_name: &str) -> Option<u64> {
+    None
+}
+
 /// The interpreter's code-block flags that are not one bit or share a bit with another, and how
 /// many flags there are (two patches once took the same bits). Tests.
 #[cfg(feature = "boa")]
