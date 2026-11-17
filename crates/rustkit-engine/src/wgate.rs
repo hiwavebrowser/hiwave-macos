@@ -470,6 +470,11 @@ pub(crate) fn add(stage: HoldStage, ms: f64) {
     if around == Some(HoldBucket::Script) && (stage as usize) < RELAYOUT_STAGES {
         crate::frame_stages::add_script(-ms);
     }
+    if (stage as usize) < RELAYOUT_STAGES {
+        // A forced layout inside a host call (a geometry read) is the
+        // stage's, not also the host call's (SCRIPT-SPLIT).
+        rustkit_js::host_call_exclude(ms);
+    }
     HOLD_MS.with(|c| {
         let mut hold = c.get();
         hold.add(stage, ms);
@@ -492,6 +497,7 @@ pub(crate) fn add_svg_total(ms: f64) {
     if ACTIVE.with(|active| active.get()).is_some_and(|(bucket, _)| bucket == HoldBucket::Script) {
         crate::frame_stages::add_script(-ms);
     }
+    rustkit_js::host_call_exclude(ms);
 }
 
 /// Times one presenter stage until dropped.

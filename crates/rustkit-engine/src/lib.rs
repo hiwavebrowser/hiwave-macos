@@ -356,7 +356,8 @@ mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
 mod frame_stages;
 pub use frame_stages::{
-    frame_stage_line, frame_stage_totals, set_frame_stage_timing, FrameStageTotals, FRAME_STAGE_FIELDS,
+    frame_stage_line, frame_stage_totals, host_call_rows_line, set_frame_stage_timing, FrameStageTotals,
+    FRAME_STAGE_FIELDS,
 };
 #[cfg(test)]
 mod send_bounds_tests;

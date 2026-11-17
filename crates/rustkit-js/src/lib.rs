@@ -27,6 +27,11 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+mod host_calls;
+pub use host_calls::{
+    host_call_exclude, host_call_rows, host_call_rows_since, host_call_totals, set_host_call_timing, HostCallRow,
+    HostCallTotals,
+};
 #[cfg(feature = "boa")]
 mod bytes;
 mod source_context;
@@ -2144,7 +2149,20 @@ impl JsRuntime {
         length: usize,
         function: HostFunction,
     ) -> Result<(), JsError> {
-        self.register_native(name, length, Box::new(move |args, _| function(args)), false)
+        self.register_native(name, length, Box::new(move |args, _| function(args)), false, None)
+    }
+
+    /// [`register_host_function`](Self::register_host_function) for a
+    /// dispatcher whose argument `op_arg` names the operation: the host
+    /// call timing (`host_calls`, SCRIPT-SPLIT) keeps a row per operation.
+    pub fn register_host_function_by_op(
+        &mut self,
+        name: &str,
+        length: usize,
+        op_arg: usize,
+        function: HostFunction,
+    ) -> Result<(), JsError> {
+        self.register_native(name, length, Box::new(move |args, _| function(args)), false, Some(op_arg))
     }
 
     /// [`register_host_function`](Self::register_host_function), also
@@ -2157,7 +2175,7 @@ impl JsRuntime {
         length: usize,
         function: HostFunctionWithCaller,
     ) -> Result<(), JsError> {
-        self.register_native(name, length, function, true)
+        self.register_native(name, length, function, true, None)
     }
 
     fn register_native(
@@ -2166,10 +2184,13 @@ impl JsRuntime {
         length: usize,
         function: HostFunctionWithCaller,
         with_caller: bool,
+        op_arg: Option<usize>,
     ) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
             use boa_engine::{JsString, NativeFunction};
+
+            let slot = host_calls::slot(name);
 
             // SAFETY: `HostFunction` only ever sees and returns the
             // crate's own `JsValue`, which holds no GC-managed data, so the
@@ -2202,7 +2223,16 @@ impl JsRuntime {
                         // says which limit this was.
                         return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
                     }
+                    // SCRIPT-SPLIT: timed from here (conversions included) when on.
+                    let mut call = host_calls::enter(slot);
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
+                    // The operation key only for a timed call: off, nothing more than the flag.
+                    if let Some(i) = op_arg.filter(|_| call.timed()) {
+                        call.op(host_calls::op_key(match args.get(i) {
+                            Some(JsValue::String(op)) => Some(op.as_str()),
+                            _ => None,
+                        }));
+                    }
                     let caller = match with_caller {
                         true => diag::caller_position(context, true),
                         false => None,
@@ -2217,7 +2247,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
-            let _ = (name, length, function, with_caller);
+            let _ = (name, length, function, with_caller, op_arg);
             Err(JsError::NotInitialized)
         }
     }

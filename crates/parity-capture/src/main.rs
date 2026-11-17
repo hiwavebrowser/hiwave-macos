@@ -138,7 +138,9 @@ struct Args {
     /// With `--live-ms`: print one `Frame stages ...` line per live turn to stderr
     /// (`rustkit_engine::frame_stage_line`): the turn's busy time and the wait before it, and what
     /// its script, canvas raster, build, layout, display list, render and the rest took. For a
-    /// stress run's stage split (tools/stress `--frame-stages`); numbers and names only.
+    /// stress run's stage split (tools/stress `--frame-stages`); numbers and names only. Every 5
+    /// turns and at the end, a `Host calls turn=N rows=...` line: the thread's running host call
+    /// rows (host function / operation : calls : ms), for the split of script into JS and host calls.
     #[arg(long, requires = "live_ms")]
     frame_stages: bool,
 
@@ -789,6 +791,11 @@ fn run_live(
                 "{}",
                 rustkit_engine::frame_stage_line(stats.turns as u64 + 1, ms(started - began), ms(started.elapsed()), wait, &d)
             );
+            // The running host call rows, every HOST_ROWS_EVERY turns (SCRIPT-SPLIT): the stage split
+            // reads the two lines around its steady frames.
+            if (stats.turns as u64 + 1) % HOST_ROWS_EVERY == 0 {
+                eprintln!("{}", rustkit_engine::host_call_rows_line(stats.turns as u64 + 1));
+            }
             last_end = Some(Instant::now());
         }
         stats.turns += 1;
@@ -805,6 +812,9 @@ fn run_live(
         stats.idle_at_end = next.is_none();
         let left = limit.saturating_sub(began.elapsed());
         if left.is_zero() {
+            if frame_stages {
+                eprintln!("{}", rustkit_engine::host_call_rows_line(stats.turns as u64));
+            }
             break;
         }
         match pacing {
@@ -842,6 +852,9 @@ struct LayoutStats {
 /// The most `--live-turn-budget-ms` takes: an hour, far below what the engine's deadline arithmetic
 /// (`Instant + Duration`) can hold.
 const MAX_LIVE_TURN_BUDGET_MS: u64 = 3_600_000;
+
+/// With `--frame-stages`: how many live turns apart the running host call rows are printed.
+const HOST_ROWS_EVERY: u64 = 5;
 
 /// `--frame-stages`, for the live loop (`run_live`): set once in `main`.
 static FRAME_STAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

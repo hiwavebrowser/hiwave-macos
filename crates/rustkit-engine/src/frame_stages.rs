@@ -11,6 +11,10 @@
 //!
 //! Script time includes the canvas raster the page's draw calls made
 //! (tiny-skia, inside the host calls); `canvas_raster_ms` is that part.
+//! SCRIPT-SPLIT: `host_ms` is the part of script time spent inside host
+//! functions (DOM, CSSOM, canvas and the other natives, `rustkit_js`'s
+//! host call timing), the canvas raster included; script less host is the
+//! engine's JS execution (the bindings' own JS shims included).
 //! A relayout stage that ran inside a script turn (a forced layout) is
 //! the stage's time and is taken out of the script's, as the hold does.
 
@@ -22,7 +26,11 @@ pub struct FrameStageTotals {
     /// Script turns: timers, animation frame callbacks, responses, with
     /// their microtasks, less the relayout stages run inside them.
     pub script_ms: f64,
-    /// Of `script_ms`: the canvas draws rasterized into their bitmaps.
+    /// Of `script_ms`: the time inside host functions (outermost calls),
+    /// less any relayout stage run inside one; and how many host calls.
+    pub host_ms: f64,
+    pub host_calls: u64,
+    /// Of `host_ms`: the canvas draws rasterized into their bitmaps.
     pub canvas_raster_ms: f64,
     pub canvas_draws: u64,
     /// The box tree from the DOM, styles included (RustKit computes style
@@ -48,6 +56,8 @@ impl FrameStageTotals {
     pub fn since(&self, before: &Self) -> Self {
         Self {
             script_ms: self.script_ms - before.script_ms,
+            host_ms: self.host_ms - before.host_ms,
+            host_calls: self.host_calls - before.host_calls,
             canvas_raster_ms: self.canvas_raster_ms - before.canvas_raster_ms,
             canvas_draws: self.canvas_draws - before.canvas_draws,
             build_ms: self.build_ms - before.build_ms,
@@ -80,6 +90,8 @@ thread_local! {
     static TOTALS: Cell<FrameStageTotals> = const {
         Cell::new(FrameStageTotals {
             script_ms: 0.0,
+            host_ms: 0.0,
+            host_calls: 0,
             canvas_raster_ms: 0.0,
             canvas_draws: 0,
             build_ms: 0.0,
@@ -133,19 +145,24 @@ pub(crate) fn add_svg(ms: f64) {
 }
 
 /// Turns on (`on`) or off this thread's timing that only the stage line
-/// needs: the canvas raster's per-draw clock and draw count. Off by
-/// default, so a page nobody is measuring pays one thread-local read per
-/// draw and no clock; `canvas_raster_ms` and `canvas_draws` stay 0 while
-/// it is off. The stage timers and the script bucket are the W-gate's
-/// own and are kept either way.
+/// needs: the canvas raster's per-draw clock and draw count, and the host
+/// call clock and count (and its per-function rows,
+/// `rustkit_js::host_call_rows`). Off by default, so a page nobody is
+/// measuring pays one thread-local read per draw or host call and no
+/// clock; `host_*` and `canvas_*` stay 0 while it is off. The stage timers
+/// and the script bucket are the W-gate's own and are kept either way.
 pub fn set_frame_stage_timing(on: bool) {
     rustkit_bindings::canvas::set_raster_timing(on);
+    rustkit_js::set_host_call_timing(on);
 }
 
 /// This thread's totals so far, the canvas raster's included.
 pub fn frame_stage_totals() -> FrameStageTotals {
     let mut totals = TOTALS.with(|t| t.get());
     let raster = rustkit_bindings::canvas::raster_totals();
+    let host = rustkit_js::host_call_totals();
+    totals.host_ms = host.ms;
+    totals.host_calls = host.calls;
     totals.canvas_raster_ms = raster.ms;
     totals.canvas_draws = raster.draws;
     totals
@@ -158,6 +175,8 @@ pub const FRAME_STAGE_FIELDS: &[&str] = &[
     "busy_ms",
     "wait_ms",
     "script_ms",
+    "host_ms",
+    "host_calls",
     "canvas_raster_ms",
     "canvas_draws",
     "build_ms",
@@ -181,10 +200,12 @@ pub const FRAME_STAGE_FIELDS: &[&str] = &[
 pub fn frame_stage_line(turn: u64, t_ms: f64, busy_ms: f64, wait_ms: f64, d: &FrameStageTotals) -> String {
     format!(
         "Frame stages turn={turn} t_ms={t_ms:.3} busy_ms={busy_ms:.3} wait_ms={wait_ms:.3} script_ms={:.3} \
-         canvas_raster_ms={:.3} canvas_draws={} build_ms={:.3} layout_ms={:.3} display_list_ms={:.3} \
+         host_ms={:.3} host_calls={} canvas_raster_ms={:.3} canvas_draws={} build_ms={:.3} layout_ms={:.3} display_list_ms={:.3} \
          snapshot_ms={:.3} svg_ms={:.3} render_ms={:.3} acquire_ms={:.3} execute_ms={:.3} present_ms={:.3} \
          renders={} other_ms={:.3}",
         d.script_ms,
+        d.host_ms,
+        d.host_calls,
         d.canvas_raster_ms,
         d.canvas_draws,
         d.build_ms,
@@ -199,4 +220,17 @@ pub fn frame_stage_line(turn: u64, t_ms: f64, busy_ms: f64, wait_ms: f64, d: &Fr
         d.renders,
         (busy_ms - d.claimed_ms()).max(0.0),
     )
+}
+
+/// The thread's running host call rows as one line (SCRIPT-SPLIT):
+/// `Host calls turn=N rows=name/op:calls:ms,...`, the most time first.
+/// Names are host functions and the operations the embedder's own script
+/// names (`rustkit_js::host_call_rows`): no page content.
+pub fn host_call_rows_line(turn: u64) -> String {
+    let rows: Vec<String> = rustkit_js::host_call_rows()
+        .iter()
+        .filter(|r| r.calls > 0)
+        .map(|r| format!("{}/{}:{}:{:.3}", r.name, r.op, r.calls, r.ms))
+        .collect();
+    format!("Host calls turn={turn} rows={}", rows.join(","))
 }

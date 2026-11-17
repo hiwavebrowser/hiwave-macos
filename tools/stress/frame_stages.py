@@ -27,9 +27,12 @@ import sys
 GAP_MS = 2000.0
 STEADY = (0.2, 0.8)
 
-HIWAVE_STAGES = ["script_ms", "canvas_raster_ms", "build_ms", "layout_ms", "display_list_ms", "snapshot_ms", "svg_ms",
+HIWAVE_STAGES = ["script_ms", "host_ms", "canvas_raster_ms", "build_ms", "layout_ms", "display_list_ms", "snapshot_ms", "svg_ms",
                  "render_ms", "acquire_ms", "execute_ms", "present_ms", "other_ms", "busy_ms", "wait_ms"]
 LINE = re.compile(r"Frame stages ((?:[a-z_]+=[-0-9.]+ ?)+)")
+# SCRIPT-SPLIT: parity-capture's running host call rows, every 5 turns and at the end:
+# `Host calls turn=N rows=name/op:calls:ms,...` (cumulative; names are host functions and operations).
+HOST_LINE = re.compile(r"Host calls turn=([0-9]+) rows=([A-Za-z0-9_/?:.,-]*)")
 
 
 def steady(items, t_of):
@@ -68,6 +71,57 @@ def hiwave_summary(text):
     out["script_less_raster_ms"] = median([f["script_ms"] - f["canvas_raster_ms"] for f in frames])
     out["renders_per_frame"] = median([f["renders"] for f in frames])
     out["canvas_draws_per_frame"] = median([f["canvas_draws"] for f in frames])
+    if frames and "host_ms" in frames[0]:
+        # SCRIPT-SPLIT: script = the engine's JS execution + the host calls it made (canvas raster inside).
+        out["js_ms"] = median([f["script_ms"] - f["host_ms"] for f in frames])
+        out["host_less_raster_ms"] = median([f["host_ms"] - f["canvas_raster_ms"] for f in frames])
+        out["host_calls_per_frame"] = median([f["host_calls"] for f in frames])
+        out["host_rows_per_frame"] = host_rows(text, frames)
+    return out
+
+
+def host_row_blocks(text):
+    """The `Host calls` lines: [(turn, {(name, op): (calls, ms)})] in log order."""
+    blocks = []
+    for m in HOST_LINE.finditer(text):
+        rows = {}
+        for item in filter(None, m.group(2).split(",")):
+            key, calls, ms = item.rsplit(":", 2)
+            name, _, op = key.partition("/")
+            rows[(name, op)] = (int(calls), float(ms))
+        blocks.append((int(m.group(1)), rows))
+    return blocks
+
+
+def host_rows(text, frames):
+    """Per-frame host call rows over the steady frames: the difference between the last `Host calls`
+    line at or before the first steady frame's turn and the first at or after the last one's, over the
+    frames rendered between them. Rows by time, largest first: name, op, calls and ms per frame."""
+    blocks = host_row_blocks(text)
+    if not frames or not blocks:
+        return []
+    first, last = frames[0]["turn"], frames[-1]["turn"]
+    # The lines around the steady frames; where there is none before the first (or after the last),
+    # the nearest inside them (a heavy cell has few turns), so the window never reaches into the load.
+    before = [b for b in blocks if b[0] <= first] or [b for b in blocks if first <= b[0] <= last][:1]
+    if not before:
+        return []
+    t0, r0 = before[-1]
+    after = [b for b in blocks if b[0] >= last] or [b for b in blocks if t0 < b[0] <= last][-1:]
+    if not after:
+        return []
+    t1, r1 = after[0]
+    rendered = sum(1 for t in hiwave_turns(text) if t0 < t["turn"] <= t1 and t.get("renders", 0) > 0)
+    if rendered == 0:
+        return []
+    out = []
+    for key, (calls, ms) in r1.items():
+        c0, m0 = r0.get(key, (0, 0.0))
+        if calls > c0:
+            out.append({"name": key[0], "op": key[1], "calls": round((calls - c0) / rendered, 2),
+                        "ms": round((ms - m0) / rendered, 4),
+                        "us_per_call": round(1000.0 * (ms - m0) / (calls - c0), 3)})
+    out.sort(key=lambda r: -r["ms"])
     return out
 
 

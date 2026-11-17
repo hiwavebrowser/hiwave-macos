@@ -2234,9 +2234,10 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_info",
         3,
+        2,
         Box::new(move |args| {
             // innerText reads computed display/visibility (CH2.E13).
             // `geom:<read>` names the geometry read for the forced-layout log.
@@ -2684,9 +2685,10 @@ pub(crate) fn install(
     let d = dirty.clone();
     let m = mutations.clone();
     let l = log.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_write",
         5,
+        1,
         Box::new(move |args| {
             let record = write_record(&h.borrow(), args);
             let (reach, cause) = write_reach(&h.borrow(), args, &d);
