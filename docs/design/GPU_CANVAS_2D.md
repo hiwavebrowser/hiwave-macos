@@ -1,8 +1,18 @@
 # GPU 2D canvas: what it would take (design note, 2026-11-17)
 
-For the owner. A decision note, not a plan of record: what moving the canvas 2D
-raster from the CPU to the GPU would take, what it would remove according to
-the measurements we have, what it risks, and what to measure before choosing.
+For the owner. Written as a decision note: what moving the canvas 2D raster
+from the CPU to the GPU would take, what it would remove according to the
+measurements we have, what it risks, and what to measure before choosing.
+
+**Decision (Pete, 2026-11-17): option A.** The canvas is drawn on the GPU for
+display; the CPU raster runs only when a page reads pixels back
+(`getImageData`, `toDataURL` / `toBlob` when they land, `drawImage` of a
+canvas, `createPattern` of a canvas). Basis: of the measured pages only
+MotionMark Images reads back (section 1 below), and Chrome's own GPU and
+software canvases differ from each other by as much as ours differs from
+Chrome (section 3), so byte parity on anti-aliased edges is not the bar for
+what the screen shows. The staged plan is at the end of this note
+("Plan of record: option A").
 
 ## Where canvas time goes today
 
@@ -304,3 +314,188 @@ display 0.18, raster workers 0; Lines 0.25 / 0.17 / 0.37 / 0.25 / 0; Paths
   the software-Chrome pins as tiny-skia is now. A's split pictures (GPU on
   screen, tiny-skia for reads) would differ from each other by about that
   much at edges, not more.
+
+## Plan of record: option A (decided 2026-11-17)
+
+Two pictures of one canvas, from one recording:
+
+- **The recording** (per context): every draw as an operation that carries
+  everything the raster takes, resolved at the time of the call (path with its
+  curves, fill rule, style, transform, line width / cap / join / miter limit /
+  dash / dash offset, composite operation, globalAlpha, the clip in force, the
+  image for a `drawImage`, the bytes for a `putImageData`). Saved state never
+  enters it: `save` / `restore` / `setTransform` / style setters change what
+  the next operation carries, not the recording.
+- **The screen picture** (A1): the recording replayed on the GPU into a
+  texture per canvas that the compositor draws.
+- **The read picture** (A0, A2): the same recording replayed on the CPU by
+  tiny-skia into today's bitmap, only when something reads it. Byte-identical
+  to today's `getImageData`, so the readback pins do not move.
+
+The existing `DrawCommand` list (the text overlay and partial clears the
+engine paints today, `canvas_paint.rs`) is a different, lossy recording; it
+stays until text is in the bitmap (A2, text row) and is then retired.
+
+### A0: the recording and its CPU replay (no behaviour change)
+
+- **What:** the context records every raster operation instead of
+  rasterizing at the call; the bitmap is brought up to date (the pending
+  operations replayed, oldest first, by the same tiny-skia calls) whenever
+  anything reads it: `getImageData`, the canvas as a `drawImage` /
+  `createPattern` source, the display list's copy of the bitmap
+  (`premultiplied_pixels`), the bitmap's byte count. A clip is recorded as its
+  path (a chain of clip paths shared by the states and operations that hold
+  it) and its coverage mask is built on first use in a replay, not at the
+  `clip()` call. `putImageData` is an operation holding a copy of the bytes it
+  writes (the dirty rect only); `drawImage` of a canvas or image holds the
+  source bitmap as it was at the call (the source is brought up to date first,
+  so a canvas drawn onto itself copies what it showed at the call).
+- **Memory bound:** pending operations are counted in bytes (the operation, its
+  path, dash, gradient stops, image and put bytes); past
+  `PENDING_BYTE_BUDGET` the context replays them into the bitmap and drops
+  them. A page that draws forever without reading or presenting holds at most
+  the budget plus one bitmap.
+- **What it changes:** nothing on screen or in reads. Where the raster time is
+  spent moves from the draw call (script) to the first read after it: on a
+  presented frame that is the display list build (`premultiplied_pixels`).
+  The stage split (#1258/#1263) will show raster under the display list stage
+  instead of script; the total is the same plus the recording's own cost.
+- **Tests:** red first, for the recording itself: for every operation kind
+  (fill rect, fill path non-zero and even-odd, stroke with every cap / join /
+  dash, stroke rect, clear rect under a transform and a clip, gradients,
+  patterns under globalAlpha, every composite operation, nested clips with
+  save / restore, drawImage of a bitmap and of the canvas itself, putImageData
+  with a dirty rect, reset and resize), the recorded context's pixels after a
+  read equal a context that rasterizes at the call (a test switch keeps the
+  old path) byte for byte; a draw without a read leaves the bitmap untouched
+  and the operation pending; the memory bound (a long run of draws never holds
+  more than the budget pending, and still matches). Every existing canvas test
+  (rustkit-canvas, the bindings' `web_canvas_*` incl. `canvas_raster_cases`,
+  the engine's `canvas_*` modules) passes unchanged, and the canvas probe
+  pages hash the same pixels before and after.
+- **Risks:** a read path missed (a stale bitmap: the probes and the
+  pin tests read through every path); the recording's per-call cost (a path
+  copy per draw; priced by the A4 tool at A0); memory between reads (bounded
+  above).
+- **On:** no switch; it is the only path once it lands.
+
+### A1: GPU replay into a texture the compositor draws (switch, default off)
+
+- **What:** behind `HIWAVE_GPU_CANVAS=1` (and a thread-local for tests), the
+  display list names a per-canvas wgpu texture instead of a `CanvasFrame`
+  copy of the bitmap. Each frame replays only the operations recorded since
+  the last frame onto the kept texture (a full clear, or a resize, starts the
+  texture over and lets the CPU side drop everything before it too). Paths:
+  built on the CPU from the recorded commands, strokes turned into outlines by
+  tiny-skia's stroker (the same outline the CPU replay fills, 0.2-1.9 µs a
+  draw, section 2), tessellated by the engine's existing fill tessellation
+  (`canvas_paint.rs` / rustkit-svg), drawn with 4x MSAA into the canvas
+  texture and resolved. Styles: solid and gradient in the shader, patterns as
+  a sampled texture. Composite operations that fixed-function blending can do
+  (source-over, the Porter-Duff set, lighter, copy) on the GPU; the separable
+  blend modes that read the destination (multiply, screen, overlay, darken,
+  lighten) draw through a copy of the texture, or the canvas falls back to the
+  CPU picture for display (decided at A1 by measuring which is simpler and
+  whether any page uses them; the bindings do not expose
+  `globalCompositeOperation` yet). The clip: the clip paths into a stencil.
+- **Not on the GPU at A1:** text (still the overlay, as today), shadows and
+  image smoothing settings (not implemented in either picture yet).
+- **Risks:** screen and `getImageData` differ at edges (expected, bounded by
+  A3's metric); headless and CI need an adapter (the headless engine already
+  renders offscreen; a run with no adapter keeps the CPU picture); a texture
+  per canvas (memory: one texture plus, only after a read, one bitmap);
+  readback of a canvas that is also drawn every frame (A2's read switch).
+- **Tests:** with the switch on, every engine canvas test that checks the
+  screen runs against the GPU picture under A3's metric; with it off, nothing
+  changes. A unit test per operation kind: GPU replay vs CPU replay of the
+  same recording, under A3's metric; incremental replay over several frames
+  equals one replay of the whole recording.
+- **On:** default stays off at A1.
+
+### A2: the read path and how state mixes into the recording
+
+- **Reads force a CPU replay, never a GPU readback.** `getImageData`,
+  `toDataURL` / `toBlob` (when they land), and the canvas as a `drawImage` /
+  `createPattern` source bring the CPU bitmap up to date from the recording
+  and read it. The GPU texture is not read back.
+- **`putImageData`** enters the recording as an operation holding the bytes of
+  its dirty rect: the CPU replay writes them as today (no transform, clip,
+  alpha or compositing); the GPU replay writes the same rect of the texture
+  (`queue.write_texture`, premultiplied the same way). Both pictures are exact
+  for those pixels.
+- **`drawImage` / `createPattern` of a canvas** enter as an operation holding
+  the source's CPU bitmap at the time of the call (shared, not copied twice).
+  Both replays draw that bitmap, so the copied content is the read picture in
+  both (the source's GPU edges are not what is copied). Cost: a page that
+  copies a canvas every frame replays the source on the CPU every frame; if a
+  page does that at volume, a GPU-to-GPU copy for the screen picture is the
+  follow-up.
+- **State:** transform, globalAlpha, composite operation, line styles and the
+  clip are resolved into each operation, so `save` / `restore` and setters
+  need nothing at replay time. The clip is a chain of (path, rule, transform)
+  links shared by reference; the CPU replay builds its mask from the chain,
+  the GPU replay its stencil. Shadows, `imageSmoothingEnabled` /
+  `imageSmoothingQuality` and `filter`, when implemented, are fields of the
+  operation and drawn by both replays.
+- **Text:** a row of its own (TEXT-IN-BITMAP): shaped at the call into
+  positioned glyphs held by the operation; the CPU replay draws glyph
+  outlines with tiny-skia, the GPU replay through the glyph atlas. Until then
+  text stays the overlay in both modes, as today.
+- **Read-heavy canvases stay on the CPU:** a canvas created with
+  `willReadFrequently: true`, or one read in 3 of its last 4 frames, is
+  displayed from the CPU bitmap as today (raster at the call, bitmap upload
+  per frame). MotionMark Images is such a canvas; the canvas subtests are
+  not.
+- **Tests:** a page that draws, reads, draws again, reads again with every
+  state kind in between (transform, clip, save / restore, globalAlpha,
+  composite operation, putImageData, drawImage of itself) reads the same bytes
+  as today at every read; a read does not change the screen picture; the
+  switch to CPU display happens and is undone on the counts above.
+
+### A3: pixel tests by tolerance against Chrome, not byte identity
+
+The read picture keeps its pins (`canvas_raster_cases`, byte identity with
+today and today's tolerance with Chrome's software raster). The screen
+picture is compared with Chrome for Testing 148 per pixel:
+
+- **Metric**, over the canvas's pixels, each image unpremultiplied RGBA:
+  - *interior* pixels (in Chrome's image the pixel and its 8 neighbours all
+    have alpha 255, or all alpha 0): every channel within 2 (rounding), no
+    exceptions. A wrong colour, a missing or extra shape fails here.
+  - *edge* pixels (every other pixel either image painted): mean absolute
+    alpha difference over them, the share of them off by more than 2, and the
+    largest difference.
+  - *coverage*: the sum of alpha over the canvas within 1% of Chrome's (a
+    stroke drawn a pixel too wide or too thin fails here even when each edge
+    pixel is within the bounds).
+- **Bounds** for the edge pixels are not invented: each case's bound is
+  Chrome's own GPU-vs-software distance on that case (section 3: all 18
+  draws, mean 2.14, 9.5% off by more than 2, largest 115) times 1.25,
+  measured once per case into a pinned JSON beside the cases with the Chrome
+  build and launch flags that produced it. A case passes when our GPU
+  picture is no further from Chrome's software raster than 1.25x Chrome's
+  GPU raster is.
+- **Tests:** the 18 shapes of section 3 plus `canvas_raster_cases` drawn
+  through the GPU replay; a self-test of the metric (an image one pixel
+  shifted fails; Chrome's GPU image passes against Chrome's software one).
+- **On:** A3 is what lets A1's switch default on; it changes no behaviour.
+
+### A4: the stage-tool receipt
+
+- MotionMark Canvas Arcs, Canvas Lines and Paths at 100 and 1000 elements
+  (`tools/stress/run.py --complexity N --frame-stages`), arms interleaved
+  twice: develop, A0, A1 switch off, A1 switch on. Per tick: script (JS +
+  host calls), raster (by `raster_totals`), display list, render, and the
+  bitmap copy / texture upload.
+- At A0: the recording's overhead per draw (target small; the raster moves
+  from script to display list, the sum should not grow by more than the
+  recording's cost).
+- At A1 (switch on): raster in script and display list at ~0 on the three
+  subtests, script per tick down by about the raster share (59 / 33 / 28%
+  at 1000), and the GPU side measured (headless executes no canvas draw on
+  these frames today: the render column needs either that fixed or the
+  real-window pass).
+- **Default on** when: A3 green on every case, A4 shows the script drop with
+  no frame-time regression on any of the 8 subtests (Images on the CPU mode
+  unchanged), the batch gate green with the switch on (board, campaign, A/B,
+  WPT, two real-window passes), and the owner sees the A4 table.
