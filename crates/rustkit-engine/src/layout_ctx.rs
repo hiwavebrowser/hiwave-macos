@@ -623,6 +623,11 @@ pub(crate) struct ViewLayout {
     pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
     /// LAT22 probe: the shadow trees' sheet cost in the view's last build.
     pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
+    /// FORCED-READ: the elements the view's last build walked (styled and given an identity).
+    pub(crate) last_build_elements: Cell<u32>,
+    /// FORCED-READ: the document's forced builds so far, the time in their build stage and in
+    /// their layout stage, in ms (the relayout summary takes them).
+    pub(crate) forced_stage_ms: Cell<(f64, f64)>,
     /// Element cascades of the view's last build that had no rule index.
     pub(crate) last_unindexed_cascades: Cell<u32>,
     /// LAT22: the document's shadow tree styles across builds.

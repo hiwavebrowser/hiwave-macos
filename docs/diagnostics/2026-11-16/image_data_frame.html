@@ -1,0 +1,5 @@
+<!doctype html><html><head><meta charset="utf-8"><title>canvas image in a frame probe</title></head><body>
+<script>
+addEventListener("message", function (ev) { window.__out = JSON.stringify({ framed: JSON.parse(ev.data) }); console.log("PROBE " + window.__out); });
+</script>
+<iframe src="image_data_inner.html" width="300" height="200"></iframe></body></html>

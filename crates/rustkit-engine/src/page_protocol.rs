@@ -1268,6 +1268,10 @@ impl EndpointSide {
     pub(crate) async fn run(&mut self, engine: &mut Engine) {
         let mut clock = LiveClock::new(std::time::Instant::now());
         let mut overshoot = OvershootEstimate::default();
+        // LINKS-SLOW part 2, diagnostics only (`HIWAVE_LINKS_TRACE`): the last wait's due
+        // instant, where it was aimed, and whether it was exact.
+        let tracing = crate::links_trace_on();
+        let mut traced_due: Option<(std::time::Instant, std::time::Instant, bool)> = None;
         loop {
             let mut cmds = self.drain_coalesced();
             if cmds.is_empty() {
@@ -1277,6 +1281,9 @@ impl EndpointSide {
                 // time (LINKS-SLOW).
                 let fraction = clock.behind(woke).as_secs_f64() * 1000.0;
                 let turn = engine.pump_live_real_at(self.view, elapsed, fraction).await;
+                if tracing {
+                    trace_turn(traced_due.take(), woke, fraction, &turn);
+                }
                 self.after_page_change(engine);
                 // A resize (or any other command) that arrived during the
                 // turn is applied before the next timer slice. The frame
@@ -1305,6 +1312,9 @@ impl EndpointSide {
                     // Aimed early by this thread's sleep overshoot when the wait is exact; a wake
                     // before the due instant sleeps the rest, so nothing runs early (LINKS-SLOW).
                     let aimed = if exact.is_some() { overshoot.aim(due).max(now) } else { due };
+                    if tracing {
+                        traced_due = Some((due, aimed, exact.is_some()));
+                    }
                     // A command ends the wait (CH3.A9): the chrome's Cmd+T
                     // used to sit here until the chrome's next timer.
                     let slept = match &self.cmd_wake {
@@ -1496,6 +1506,53 @@ impl OvershootEstimate {
         let step = if sample < self.ms { 0.5 } else { 0.0625 };
         self.ms = (self.ms + (sample - self.ms) * step).clamp(0.0, Self::CAP_MS);
     }
+}
+
+/// LINKS-SLOW part 2, diagnostics only (`HIWAVE_LINKS_TRACE`): one line per live turn that ran a
+/// timer, in microseconds, all real time: `late` the turn began past the due instant the loop
+/// waited for (negative: early), `aim` how early that wait was aimed (the overshoot estimate),
+/// `entry` from the turn's start to the engine's live turn, `pre` from the live turn to its timer
+/// slice, `slice` the timer slice (timers, then the frame round), `post` the rest of the turn
+/// (network, layout, paint) and `frac` the fraction of a millisecond the loop's clock kept back.
+fn trace_turn(
+    due: Option<(std::time::Instant, std::time::Instant, bool)>,
+    woke: std::time::Instant,
+    fraction_ms: f64,
+    turn: &crate::LivePump,
+) {
+    let ended = std::time::Instant::now();
+    let [entered, slice_from, slice_to] = crate::links_trace_take();
+    if turn.timers_ran == 0 {
+        return;
+    }
+    let us = |a: std::time::Instant, b: std::time::Instant| -> i64 {
+        if b >= a {
+            b.duration_since(a).as_micros() as i64
+        } else {
+            -(a.duration_since(b).as_micros() as i64)
+        }
+    };
+    let (late, aim, exact) = match due {
+        Some((due, aimed, exact)) => (us(due, woke), us(aimed, due), exact),
+        None => (0, 0, false),
+    };
+    let entry = entered.map_or(-1, |e| us(woke, e));
+    let pre = match (entered, slice_from) {
+        (Some(e), Some(f)) => us(e, f),
+        _ => -1,
+    };
+    let slice = match (slice_from, slice_to) {
+        (Some(f), Some(t)) => us(f, t),
+        _ => -1,
+    };
+    let post = slice_to.map_or(-1, |t| us(t, ended));
+    eprintln!(
+        "LTRACE ran={} waited={} exact={} late={late} aim={aim} entry={entry} pre={pre} slice={slice} post={post} frac={}",
+        turn.timers_ran,
+        due.is_some(),
+        exact,
+        (fraction_ms * 1000.0) as i64
+    );
 }
 
 /// LINKS-SLOW: after an aimed sleep that ended at `woke`, the instant to sleep until again so the

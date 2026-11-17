@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>canvas image in a frame probe: the document</title></head><body>
+<script>
+// What a canvas holds after an image is drawn into it, in whichever document this is: loaded on its
+// own, or as the frame of image_data_frame.html (the answer must be the same).
+function load(src) { return new Promise(function (ok) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = function () { ok(null); }; i.src = src; }); }
+function count(x) { var d = x.getImageData(0, 0, 50, 50).data, n = 0; for (var i = 3; i < d.length; i += 4) if (d[i] !== 0) n++; return n; }
+(async function () {
+  var out = {}, names = ["image_data_shape.svg", "image_data_shape.png"];
+  for (var q = 0; q < names.length; q++) {
+    var img = await load(names[q]), c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.appendChild(c);
+    var x = c.getContext("2d");
+    x.fillRect(0, 0, 5, 5); var filled = count(x); x.clearRect(0, 0, 50, 50);
+    if (img) x.drawImage(img, 0, 0, 50, 50);
+    out[names[q].split(".").pop()] = img ? { natural: img.naturalWidth + "x" + img.naturalHeight, after_fill: filled, after_image: count(x) } : "error";
+  }
+  if (parent !== window) parent.postMessage(JSON.stringify(out), "*");
+  else { window.__out = JSON.stringify({ top: out }); console.log("PROBE " + window.__out); }
+})();
+</script></body></html>
