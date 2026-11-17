@@ -3,9 +3,11 @@ test_gate0_warnings.py — guards for scripts/gate0/warnings.py (gate 0's warnin
 
 1. A warning is `<message> @ <file>`; its line and column do not count, and summary lines are not
    warnings.
-2. `check` passes on the baseline's own set, names a new warning and fails, and reports a warning
+2. Within one log identical warnings in one file are counted, and a second one is new; across logs
+   (the app's check repeats the engine's) a key counts at its largest; a Windows path is the same key.
+3. `check` passes on the baseline's own set, names a new warning and fails, and reports a warning
    that went away without failing.
-3. The committed baselines are sorted, unique and in the census's own form.
+4. The committed baselines are sorted, unique and in the census's own form.
 """
 
 import importlib.util
@@ -54,14 +56,14 @@ class Census(unittest.TestCase):
             return code, out.getvalue()
 
     def test_check_passes_on_the_baseline_and_fails_on_a_new_warning(self):
-        known = sorted(tool.census([LOG]))
+        known = tool.lines_of(tool.census([LOG]))
         self.assertEqual(self.run_check(known, LOG)[0], 0)
         code, out = self.run_check(known[:1], LOG)
         self.assertEqual(code, 1)
-        self.assertIn("NEW  " + known[1], out)
+        self.assertIn("NEW  unused import: `Duration` @ crates/rustkit-engine/src/content_thread.rs\n", out)
 
     def test_a_warning_that_went_away_is_reported_and_does_not_fail(self):
-        known = sorted(tool.census([LOG])) + ["unused variable: `x` @ crates/hiwave-app/src/main.rs"]
+        known = tool.lines_of(tool.census([LOG])) + ["unused variable: `x` @ crates/hiwave-app/src/main.rs"]
         code, out = self.run_check(known, LOG)
         self.assertEqual(code, 0)
         self.assertIn("gone unused variable: `x` @ crates/hiwave-app/src/main.rs", out)
@@ -73,9 +75,13 @@ class Census(unittest.TestCase):
                              "warning: method `ms` is never used\n  --> crates/rustkit-engine/src/page_protocol.rs:90:12\n"
                              "warning: method `ms` is never used\n", 1)
         self.assertEqual(tool.census([second])["method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs"], 2)
-        code, out = self.run_check(sorted(tool.census([LOG])), second)
+        code, out = self.run_check(tool.lines_of(tool.census([LOG])), second)
         self.assertEqual(code, 1)
         self.assertIn("NEW  method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs (2, baseline 1)", out)
+
+    def test_a_crates_warnings_repeated_in_a_second_log_count_once(self):
+        # `check -p hiwave-app` reports the engine's warnings again: the two logs of one gate.
+        self.assertEqual(tool.census([LOG, LOG]), tool.census([LOG]))
 
     def test_a_windows_path_is_the_same_key(self):
         windows = LOG.replace("crates/rustkit-engine/src/content_thread.rs", "crates\\rustkit-engine\\src\\content_thread.rs")

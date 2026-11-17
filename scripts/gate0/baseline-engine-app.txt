@@ -1,7 +1,7 @@
 # Gate 0 baseline: cargo check -p rustkit-engine --features headless + cargo check -p hiwave-app --features rustkit
 # (scripts/gate0/warnings.py). Taken at develop 9c0396ad; a change that adds a warning updates this file in the same PR and says why.
 associated function `install` is never used @ crates/rustkit-engine/src/lib.rs
-associated function `load` is never used @ crates/hiwave-app/src/state.rs
+associated function `load` is never used @ crates/hiwave-app/src/state.rs x2
 associated functions `inline_svg_markup` and `inline_svg_markup_with` are never used @ crates/rustkit-engine/src/lib.rs
 associated items `image_env` and `serialize_svg_subtree` are never used @ crates/rustkit-engine/src/lib.rs
 constant `AUDIO_DETECTOR` is never used @ crates/hiwave-app/src/main.rs
@@ -34,13 +34,13 @@ methods `register_module` and `get_module` are never used @ crates/rustkit-js/sr
 multiple associated items are never used @ crates/hiwave-app/src/webview_rustkit_chrome.rs
 multiple fields are never read @ crates/hiwave-app/src/webview_rustkit_chrome.rs
 multiple fields are never read @ crates/rustkit-renderer/src/lib.rs
-unexpected `cfg` condition value: `cargo-clippy` @ crates/hiwave-app/src/main.rs
-unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-engine/src/text_input.rs
-unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/lib.rs
-unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/macos.rs
+unexpected `cfg` condition value: `cargo-clippy` @ crates/hiwave-app/src/main.rs x16
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-engine/src/text_input.rs x16
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/lib.rs x22
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/macos.rs x165
 unused import: `Duration` @ crates/rustkit-engine/src/content_thread.rs
 unused import: `FontLoader` @ crates/rustkit-engine/src/lib.rs
 unused imports: `coalesce` and `runs_mid_load` @ crates/rustkit-engine/src/content_thread.rs
 unused macro definition: `num_prop` @ crates/rustkit-engine/src/animations.rs
 variable `index` is assigned to, but never used @ crates/rustkit-engine/src/lib.rs
-variable does not need to be mutable @ crates/rustkit-engine/src/lib.rs
+variable does not need to be mutable @ crates/rustkit-engine/src/lib.rs x2
