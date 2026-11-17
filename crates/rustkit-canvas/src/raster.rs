@@ -675,6 +675,36 @@ pub(crate) fn put_span(
 }
 
 #[cfg(test)]
+mod raster_totals_tests {
+    use crate::{raster_totals, CanvasRenderingContext2D};
+
+    /// Every draw that reaches the bitmap is one more on this thread's
+    /// totals (the per-frame stage line reads the difference across a
+    /// turn). Counts, not milliseconds: no wall-clock bound.
+    #[test]
+    fn each_draw_into_the_bitmap_counts_once_on_the_thread_totals() {
+        let before = raster_totals();
+        let mut ctx = CanvasRenderingContext2D::new(20, 20);
+        ctx.fill_rect(1.0, 1.0, 5.0, 5.0);
+        ctx.stroke_rect(2.0, 2.0, 6.0, 6.0);
+        ctx.clear_rect(0.0, 0.0, 3.0, 3.0);
+        let after = raster_totals();
+        assert_eq!(after.draws - before.draws, 3, "fill, stroke and clear: one each");
+        assert!(after.ms >= before.ms, "the time only grows");
+        // Another thread's draws are not this thread's.
+        let other = std::thread::spawn(|| {
+            let mut ctx = CanvasRenderingContext2D::new(4, 4);
+            ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            raster_totals().draws
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other, 1);
+        assert_eq!(raster_totals().draws, after.draws);
+    }
+}
+
+#[cfg(test)]
 mod put_span_tests {
     use super::put_span;
 
