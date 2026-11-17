@@ -896,6 +896,10 @@ def test_the_hiwave_reader_splits_script_into_js_and_host_calls_with_per_frame_r
     assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "arc")]["us_per_call"] == 100.0
     assert by[("__rustkit_canvas", "fill")]["ms"] == 0.5
     assert out["host_rows_per_frame"][0]["op"] == "fill"  # the most time first
+    # A heavy cell: no line before the first steady frame; the nearest inside the steady frames is used.
+    late = "\n".join(l for l in lines if not l.startswith("Host calls turn=5 "))
+    by = {(r["name"], r["op"]): r for r in frame_stages.hiwave_summary(late)["host_rows_per_frame"]}
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "fill")]["ms"] == 0.5, by
 
 
 def _x(name, ts, dur, tid=1, pid=10):
