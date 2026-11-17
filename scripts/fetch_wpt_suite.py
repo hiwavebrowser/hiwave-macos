@@ -9,13 +9,17 @@ PIN = "a24eb4e7a77917cfa5a6f64e8b02288ca1df1877"
 MANIFEST = Path(__file__).with_name("wpt_suite.json")
 
 
+def verified_file(path, digest):
+    return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
     for name, digest in json.loads(MANIFEST.read_text()).items():
         path = args.directory / name
-        if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+        if verified_file(path, digest):
             continue
         with urlopen(f"https://raw.githubusercontent.com/web-platform-tests/wpt/{PIN}/{name}", timeout=60) as response:
             data = response.read()
