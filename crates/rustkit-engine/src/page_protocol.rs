@@ -1263,6 +1263,20 @@ impl EndpointSide {
         coalesce(batch)
     }
 
+    /// LINKS-SLOW part 2 delta R1: take a command that arrived while the loop waited, if any, onto
+    /// the deferred queue. The wake permit its sender left is cleared first (a command sent after
+    /// that leaves its own): taken here, it would end the next runtime wait at once, an extra turn.
+    fn take_waiting_command(&mut self) -> bool {
+        clear_stale_wake(self.cmd_wake.as_deref());
+        match self.rx.try_recv() {
+            Ok(cmd) => {
+                self.deferred.push_back(cmd);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// The content thread's loop. One current-thread runtime, already
     /// entered by the caller: timers and fetches progress on every idle wait.
     pub(crate) async fn run(&mut self, engine: &mut Engine) {
@@ -1322,15 +1336,17 @@ impl EndpointSide {
                             tail_estimate.observe(leave, woke);
                         }
                         // A command that came while the runtime waited (or in its yield) is taken
-                        // before the tail, not after it (R1).
-                        if let Ok(cmd) = self.rx.try_recv() {
-                            self.deferred.push_back(cmd);
+                        // before the tail, not after it (R1), and again between the tail's sleep
+                        // and its spin (delta R1).
+                        if self.take_waiting_command() {
                             continue;
                         }
                         if tracing {
                             traced_due = Some((due, woke, true));
                         }
-                        finish_exact_wait(due, &mut overshoot, &mut ThreadTail);
+                        if finish_exact_wait(due, &mut overshoot, &mut ThreadTail, || self.take_waiting_command()).is_none() {
+                            traced_due = None;
+                        }
                     } else if tracing {
                         traced_due = Some((due, leave, precise));
                     }
@@ -1610,6 +1626,10 @@ pub async fn runtime_wait(
     }
 }
 
+/// LINKS-SLOW part 2 delta R1: clear a wake permit a command's sender left (`Notify::notify_one`
+/// with no waiter) once the loop has taken that command another way.
+pub fn clear_stale_wake(_wake: Option<&tokio::sync::Notify>) {}
+
 /// LINKS-SLOW part 2 R1: how long before a timer's due instant an exact wait leaves the runtime.
 /// The tail has to cover how late the runtime's timer wakes (it keeps whole milliseconds), or the
 /// timer runs that late; past the wake the thread is blocked until the due instant, so the tail is
@@ -1673,19 +1693,22 @@ impl TailClock for ThreadTail {
 }
 
 /// LINKS-SLOW part 2: the end of an exact wait, after the runtime: thread sleeps aimed early by
-/// `overshoot`, then a spin of at most [`SPIN_CAP`] to `due`. Returns only at or after `due` (never
-/// early), and how long it spun. With more than the cap left and the estimate past it (a few long
-/// sleeps), it sleeps to the cap's distance first rather than spinning the rest (R1).
+/// `overshoot`, then a spin of at most [`SPIN_CAP`] to `due`. Returns how long it spun, only at or
+/// after `due` (never early). With more than the cap left and the estimate past it (a few long
+/// sleeps), it sleeps to the cap's distance first rather than spinning the rest (R1). `None`: a
+/// command was waiting after a sleep (`command`, asked before the spin), and the wait ended there
+/// for it (delta R1); the timer is the next turn's, which runs nothing before its due instant.
 pub fn finish_exact_wait(
     due: std::time::Instant,
     overshoot: &mut OvershootEstimate,
     clock: &mut impl TailClock,
-) -> std::time::Duration {
+    _command: impl FnMut() -> bool,
+) -> Option<std::time::Duration> {
     let mut spin_from = None;
     loop {
         let now = clock.now();
         let Some(due) = after_wake(due, now) else {
-            return spin_from.map_or(std::time::Duration::ZERO, |f| now.saturating_duration_since(f));
+            return Some(spin_from.map_or(std::time::Duration::ZERO, |f| now.saturating_duration_since(f)));
         };
         if due - now <= SPIN_CAP {
             spin_from.get_or_insert(now);

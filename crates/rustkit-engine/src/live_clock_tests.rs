@@ -348,7 +348,7 @@ fn the_tail_spins_at_most_the_cap_and_never_ends_early() {
     assert_eq!(e.ms(), OvershootEstimate::CAP_MS);
     let mut clock = ModelTail { now: t0, overshoot_us: vec![300], sleeps: 0, spun: Duration::ZERO };
     let due = t0 + us(1_900);
-    let spun = finish_exact_wait(due, &mut e, &mut clock);
+    let spun = finish_exact_wait(due, &mut e, &mut clock, || false).expect("no command");
     assert!(clock.now >= due, "ended {:?} early", due - clock.now);
     assert_eq!(spun, clock.spun);
     assert!(spun <= SPIN_CAP, "spun {spun:?} with the estimate at its cap");
@@ -366,7 +366,7 @@ fn the_tail_spins_at_most_the_cap_and_never_ends_early() {
     for i in 1..=300u64 {
         let due = t0 + Duration::from_millis(10 * i);
         clock.now = due - us(1_600);
-        let spun = finish_exact_wait(due, &mut e, &mut clock);
+        let spun = finish_exact_wait(due, &mut e, &mut clock, || false).expect("no command");
         assert!(clock.now >= due, "wait {i} ended early");
         assert!(spun <= SPIN_CAP, "wait {i} spun {spun:?}");
         late += clock.now - due;
@@ -403,4 +403,42 @@ fn the_tail_follows_the_runtimes_measured_lateness() {
     let leave = t0 + Duration::from_secs(10);
     punctual.observe(leave, leave + us(1_500));
     assert!(punctual.tail(&overshoot) >= us(800), "one late wake: {:?}", punctual.tail(&overshoot));
+}
+
+/// LINKS-SLOW part 2 delta R1: a command that arrives during the tail's thread sleep is taken
+/// before the spin: the wait ends there (the timer is the next turn's) and nothing spins. Asked
+/// only after a sleep; with no command the tail ends at its due instant as before.
+#[test]
+fn a_command_waiting_after_the_tails_sleep_ends_it_before_the_spin() {
+    use crate::page_protocol::{finish_exact_wait, OvershootEstimate};
+    let t0 = Instant::now();
+    let mut e = OvershootEstimate::default();
+    let mut clock = ModelTail { now: t0, overshoot_us: vec![100], sleeps: 0, spun: Duration::ZERO };
+    let due = t0 + us(1_800);
+    let mut asked = 0;
+    let end = finish_exact_wait(due, &mut e, &mut clock, || {
+        asked += 1;
+        true
+    });
+    assert_eq!(end, None, "the tail ran on past a waiting command");
+    assert_eq!(asked, 1);
+    assert_eq!(clock.sleeps, 1);
+    assert_eq!(clock.spun, Duration::ZERO, "it spun with a command waiting");
+}
+
+/// LINKS-SLOW part 2 delta R1: a command's sender leaves a wake permit when the loop is not waiting
+/// on it; once the loop has taken that command another way, the permit is cleared, so the next
+/// runtime wait is not ended at once by a command already served (an extra turn).
+#[test]
+fn a_stale_wake_permit_is_cleared() {
+    use crate::page_protocol::clear_stale_wake;
+    use futures::FutureExt;
+    let wake = tokio::sync::Notify::new();
+    wake.notify_one();
+    clear_stale_wake(Some(&wake));
+    assert!(wake.notified().now_or_never().is_none(), "the permit outlived its command");
+    clear_stale_wake(Some(&wake));
+    clear_stale_wake(None);
+    wake.notify_one();
+    assert!(wake.notified().now_or_never().is_some(), "a new command's permit was lost");
 }
