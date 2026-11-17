@@ -1188,10 +1188,9 @@ before, 2 / 6 / 12 ms after; `split` 116 / 471 / 1871 ms before, 1 / 1 / 3 ms af
 of the function shares, and grows only the calling environment for them (`extend_from_compile`).
 
 - **Name lookup:** a lookup in a function holding a direct eval found the name in the shared scope
-  and used that slot, whether or not this call's eval had declared it. That included a slot past
-  the end of this call's environment. It now takes the slot only when this call holds it: a binding
-  the function was compiled with, or one its own eval declared, which initializes it. Otherwise it
-  looks further out.
+  and used that slot, whether or not this call's eval had declared it. It now takes the slot only
+  when this call holds it: a binding the function was compiled with, or one its own eval declared,
+  which initializes it. Otherwise it looks further out.
 - **Environment sizing (unchanged):** a call's environment is still sized from the scope's current
   count, so every index that code compiled against the shared scope uses, eval code included, is in
   range.
