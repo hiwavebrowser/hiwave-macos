@@ -3,19 +3,19 @@
  "cases": {
   "json_strings": {
    "value": "RangeError: Invalid string length",
-   "ms": 544
+   "ms": 557
   },
   "json_tojson_calls": {
    "value": "RangeError after 65536",
-   "ms": 778
+   "ms": 754
   },
   "json_object_values": {
    "value": "RangeError: Invalid string length",
-   "ms": 554
+   "ms": 551
   },
   "json_gap": {
    "value": "15429666",
-   "ms": 42
+   "ms": 41
   },
   "json_under": {
    "value": "1051649",
@@ -23,7 +23,7 @@
   },
   "string_raw": {
    "value": "RangeError: Invalid string length",
-   "ms": 17
+   "ms": 9
   },
   "string_raw_subs": {
    "value": "RangeError: Invalid string length",
@@ -31,39 +31,67 @@
   },
   "escape_over": {
    "value": "RangeError: Invalid string length",
-   "ms": 128
+   "ms": 130
   },
   "encodeuri_over": {
    "value": "RangeError: Invalid string length",
-   "ms": 1176
+   "ms": 1155
   },
   "encodeuricomp_over": {
    "value": "RangeError: Invalid string length",
-   "ms": 1148
+   "ms": 1141
   },
   "upper_sharp_s": {
    "value": "RangeError: Invalid string length",
-   "ms": 277
+   "ms": 270
   },
   "locale_upper_sharp_s": {
    "value": "RangeError: Invalid string length",
-   "ms": 277
+   "ms": 276
   },
   "normalize_nfkd": {
-   "tab": "still running after 60 s"
+   "tab": "still running after 120 s"
   },
   "anchor_quotes": {
    "value": "RangeError: Invalid string length",
-   "ms": 1836
+   "ms": 1800
   },
   "link_long": {
    "value": "RangeError: Invalid string length",
-   "ms": 101
+   "ms": 103
   },
   "fromcharcode_many": {
    "error": "RangeError",
    "message": "Maximum call stack size exceeded",
    "ms": 2
+  },
+  "json_proxy_2_53": {
+   "value": "RangeError: Invalid string length 1",
+   "ms": 0
+  },
+  "json_new_array_2_32": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "json_quote_ctrl": {
+   "value": "RangeError: Invalid string length",
+   "ms": 5995
+  },
+  "json_quote_quotes": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1671
+  },
+  "json_quote_key": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1263
+  },
+  "json_quote_under": {
+   "value": "17",
+   "ms": 0
+  },
+  "normalize_nfkd_2_24": {
+   "value": "301989888",
+   "ms": 1211
   },
   "upper_under": {
    "value": "STRASSE",
