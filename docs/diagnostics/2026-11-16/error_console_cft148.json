@@ -1,0 +1,15 @@
+{
+ "browser": "148.0.7778.216",
+ "console_exceptions": {
+  "not cancelled": 2,
+  "window.onerror returns true": 0,
+  "an error listener calls preventDefault": 0,
+  "window.onerror returns false": 2
+ },
+ "console_rejections": {
+  "not cancelled": 1,
+  "an unhandledrejection listener calls preventDefault": 0,
+  "window.onunhandledrejection returns false": 0,
+  "window.onunhandledrejection returns true": 1
+ }
+}

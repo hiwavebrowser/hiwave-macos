@@ -74,8 +74,9 @@ pub(crate) struct RejectionHooks {
     outstanding: RefCell<VecDeque<Rejected>>,
     /// Announced as unhandled, then given a handler: `rejectionhandled` is owed.
     handled: RefCell<VecDeque<Rejected>>,
-    /// Reasons of announced rejections nobody canceled, for the reports.
-    reported: RefCell<VecDeque<JsValue>>,
+    /// Reasons of announced rejections, for the reports, each with whether
+    /// a listener canceled its event.
+    reported: RefCell<VecDeque<(JsValue, bool)>>,
     /// A pending rejection was dropped for the bound, and the log says so.
     drop_logged: Cell<bool>,
 }
@@ -155,16 +156,17 @@ impl RejectionHooks {
         push_bounded(&mut self.ignored.borrow_mut(), promise.clone(), MAX_IGNORED);
     }
 
-    /// The reasons of the rejections to report, oldest first. With events
-    /// off: those still unhandled. With events on: those announced and not
-    /// canceled; one not announced yet stays for the end of its turn.
-    pub(crate) fn take(&self) -> Vec<JsValue> {
-        let mut reasons: Vec<JsValue> = self.reported.borrow_mut().drain(..).collect();
+    /// The reasons of the rejections to report, oldest first, each with
+    /// whether a listener canceled its event. With events off: those still
+    /// unhandled. With events on: those announced; one not announced yet
+    /// stays for the end of its turn.
+    pub(crate) fn take(&self) -> Vec<(JsValue, bool)> {
+        let mut reasons: Vec<(JsValue, bool)> = self.reported.borrow_mut().drain(..).collect();
         if self.events.get() {
             return reasons;
         }
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        reasons.extend(pending.into_iter().filter_map(|(object, _)| reason_of(&object)));
+        reasons.extend(pending.into_iter().filter_map(|(object, _)| reason_of(&object)).map(|reason| (reason, false)));
         reasons
     }
 
@@ -193,13 +195,13 @@ impl RejectionHooks {
         *self.dispatching.borrow_mut() = Some((promise.clone(), false));
     }
 
-    /// The dispatch is over: `reason` is kept for the reports unless a
-    /// listener canceled the event (and reports are on), and the promise is
+    /// The dispatch is over: `reason` is kept for the reports (when they
+    /// are on) with whether a listener canceled the event, and the promise is
     /// remembered for `rejectionhandled` unless a listener gave it a handler.
     pub(crate) fn end_dispatch(&self, rejected: Rejected, reason: JsValue, canceled: bool) {
         let handled = self.dispatching.borrow_mut().take().is_some_and(|(_, handled)| handled);
-        if !canceled && self.tracking.get() {
-            push_bounded(&mut self.reported.borrow_mut(), reason, MAX_PENDING);
+        if self.tracking.get() {
+            push_bounded(&mut self.reported.borrow_mut(), (reason, canceled), MAX_PENDING);
         }
         if !handled {
             push_bounded(&mut self.outstanding.borrow_mut(), rejected, MAX_OUTSTANDING);

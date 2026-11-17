@@ -5,6 +5,7 @@ of the page channel, and the score readers.
 """
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -112,22 +113,6 @@ def test_jetstream_score_is_the_geomean_of_its_report():
     assert abs(score - 6.0) < 1e-9 and sub == {"a": 4.0, "b": 9.0}
 
 
-def test_no_window_between_five_and_half_past_seven_eastern(monkeypatch, tmp_path):
-    monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
-    monkeypatch.setattr(run, "hid_idle_seconds", lambda: 9999.0)
-    for now, ok in ((16 * 60, False),      # a 30-minute run would not cross 17:00, a 2-hour one would
-                    (17 * 60 + 5, False), (19 * 60 + 29, False), (19 * 60 + 30, True), (9 * 60, True)):
-        monkeypatch.setattr(run, "eastern_minutes", lambda offset_s=0, now=now: (now + offset_s // 60) % 1440)
-        limit = 2 * 3600 if now == 16 * 60 else 1800
-        try:
-            with run.WindowLock(limit, 0):
-                entered = True
-        except SystemExit:
-            entered = False
-        assert entered == ok, (now, entered)
-        assert not (tmp_path / "lock").exists()  # released either way
-
-
 # ── R1 on #1083 ────────────────────────────────────────────────────────────
 
 class Clock:
@@ -143,9 +128,6 @@ class Clock:
     def sleep(self, seconds):
         self.t += seconds
 
-    def minutes(self, offset_s=0):
-        return int((self.t + offset_s) // 60) % 1440
-
     def idle(self):
         return 9999.0 if self.t >= self.idle_from else 0.0
 
@@ -153,42 +135,55 @@ class Clock:
 def moving(monkeypatch, tmp_path, hhmm):
     clock = Clock(hhmm)
     monkeypatch.setattr(run, "time", clock)
-    monkeypatch.setattr(run, "eastern_minutes", clock.minutes)
     monkeypatch.setattr(run, "hid_idle_seconds", clock.idle)
     monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
     return clock
 
 
-def test_a_wait_for_an_idle_seat_that_runs_toward_five_is_refused_after_the_wait(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run: fine at entry (ends 16:30). The seat goes
-    # idle at 16:45; by then the run would end at 17:05.
+def test_a_run_at_half_past_five_with_an_idle_seat_is_allowed(monkeypatch, tmp_path):
+    # There is no time-of-day rule (the evening no-window rule was removed 2026-11-16): at any hour,
+    # for any wall limit, an idle seat gets the lock and the last check before launch passes.
+    assert not hasattr(run, "QUIET") and not hasattr(run.WindowLock, "check_quiet")
+    for hhmm, limit in ((1730, 30 * 60), (1610, 2 * 3600), (1929, 60), (900, 1800), (2359, 4 * 3600)):
+        moving(monkeypatch, tmp_path, hhmm)
+        with run.WindowLock(limit, 0) as lock:
+            assert (tmp_path / "lock").is_dir()
+            lock.clear_to_launch()
+        assert not (tmp_path / "lock").exists(), hhmm
+
+
+def test_a_busy_seat_is_waited_for_and_the_run_starts_once_it_is_idle(monkeypatch, tmp_path):
+    # 16:10: somebody is at the Mac until 16:45. The lock waits for the seat, then the run goes
+    # ahead, whatever the hour has become.
     clock = moving(monkeypatch, tmp_path, 1610)
     clock.idle_from = 16 * 3600 + 45 * 60
+    with run.WindowLock(20 * 60, 3600) as lock:
+        assert clock.t >= clock.idle_from, "it did wait for the seat"
+        lock.clear_to_launch()
+    assert not (tmp_path / "lock").exists()
+
+
+def test_a_seat_that_stays_busy_past_the_wait_is_refused_and_the_lock_released(monkeypatch, tmp_path):
+    clock = moving(monkeypatch, tmp_path, 1610)
+    clock.idle_from = clock.t + 2 * 3600
     try:
-        with run.WindowLock(20 * 60, 3600):
+        with run.WindowLock(20 * 60, 600):
             entered = True
     except SystemExit as e:
         entered, code = False, e.code
     assert not entered and code == 2
-    assert clock.t >= clock.idle_from, "it did wait for the seat"
+    assert clock.t >= 16 * 3600 + 10 * 60 + 600, "it waited as long as it was allowed"
     assert not (tmp_path / "lock").exists()
 
 
-def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run, idle seat: the lock is given. The load wait
-    # that follows lasts until 16:45: launching now could show a window at 17:05.
+def test_the_last_check_before_launch_reads_the_seat_again(monkeypatch, tmp_path):
+    # An idle seat: the lock is given. During the load wait that follows somebody sits down:
+    # the check immediately before the window goes up sees it.
     clock = moving(monkeypatch, tmp_path, 1610)
     with run.WindowLock(20 * 60, 0) as lock:
-        lock.clear_to_launch()  # 16:10: fine
+        lock.clear_to_launch()  # idle: fine
         clock.sleep(35 * 60)
-        try:
-            lock.clear_to_launch()
-            refused = False
-        except SystemExit:
-            refused = True
-        assert refused
-        # ... and somebody sitting down in the meantime is seen as well
-        clock.t = 9 * 3600.0
+        lock.clear_to_launch()  # still idle, 35 minutes later: fine at any hour
         clock.idle_from = clock.t + 1
         try:
             lock.clear_to_launch()
@@ -197,16 +192,6 @@ def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_pat
             refused = True
         assert refused
     assert not (tmp_path / "lock").exists()
-
-
-def test_a_run_whose_wall_limit_crosses_five_is_refused_at_entry(monkeypatch, tmp_path):
-    moving(monkeypatch, tmp_path, 1610)
-    try:
-        with run.WindowLock(60 * 60, 0):
-            entered = True
-    except SystemExit:
-        entered = False
-    assert not entered and not (tmp_path / "lock").exists()
 
 
 def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
@@ -472,17 +457,61 @@ def test_the_turn_budget_takes_plain_digits_up_to_an_hour(monkeypatch):
     assert run.turn_budget_ms() == run.TURN_BUDGET_MAX_MS == 3600000
 
 
-def test_a_raised_budget_is_refused_for_the_app_and_chrome(monkeypatch, tmp_path):
+def test_a_raised_budget_is_refused_for_chrome_only(monkeypatch, tmp_path):
+    # Chrome has no such watchdog. The app reads the variable (it is what run.py starts it with), and
+    # the headless engine takes it as an argument: neither is refused here (this run stops later, at
+    # its missing binary).
     monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
-    for engine in ("hiwave", "chrome"):
+    for engine, said in (("chrome", "HiWave engines only"), ("hiwave", "no binary at"), ("hiwave-headless", "no binary at")):
         monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "motionmark", "--engine", engine,
                                           "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")])
         try:
             run.main()
-            raise AssertionError("ran %s with a raised budget" % engine)
+            raise AssertionError("ran %s with no binary" % engine)
         except SystemExit as e:
-            assert "hiwave-headless engine only" in str(e.code), e.code
+            assert said in str(e.code), (engine, e.code)
     assert not (tmp_path / "out").exists()
+
+
+def test_the_budget_is_not_taken_through_env_and_the_app_takes_at_most_five_minutes(monkeypatch, tmp_path):
+    # Through --env the variable would reach the app with no flag in the record and no raised-budget line:
+    # a score nobody could tell from a default one. And the app ignores more than five minutes.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    base = ["run.py", "--suite", "motionmark", "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")]
+    for engine in ("hiwave", "hiwave-headless"):
+        monkeypatch.setattr(sys, "argv", base + ["--engine", engine, "--env", run.TURN_BUDGET_ENV + "=60000"])
+        try:
+            run.main()
+            raise AssertionError("took the budget through --env for %s" % engine)
+        except SystemExit as e:
+            assert "is not a --env variable" in str(e.code), e.code
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, str(run.APP_TURN_BUDGET_MAX_MS + 1))
+    monkeypatch.setattr(sys, "argv", base + ["--engine", "hiwave"])
+    try:
+        run.main()
+        raise AssertionError("started the app with more than it honours")
+    except SystemExit as e:
+        assert "at most 300000 ms for the app" in str(e.code), e.code
+    # The app honours the variable only beside the console log switch, which every app run has.
+    assert run.NET_LOG_ENV["HIWAVE_CONSOLE_LOG"] == "1"
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_app_is_started_with_the_runs_budget_and_never_with_the_shells(monkeypatch):
+    # A raised run: the app's environment has the run's number (the one after the clamp), and the record's
+    # flags say so. A default run: nothing is passed, and a value the shell had is taken out of what the
+    # app inherits, so a score without the flag never ran under one.
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "999999")
+    assert run.app_turn_budget_env(60000) == {run.TURN_BUDGET_ENV: "60000"}
+    assert os.environ[run.TURN_BUDGET_ENV] == "999999"
+    assert run.app_turn_budget_env(None) == {}
+    assert run.TURN_BUDGET_ENV not in os.environ
+    shell = {run.TURN_BUDGET_ENV: "999999", "HIWAVE_FROM_THE_SHELL": "yes"}
+    assert run.engine_flags("hiwave", {}, inherited=shell, turn_budget=60000)[run.TURN_BUDGET_ENV] == "60000"
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave", {}, inherited=shell)
+    # The headless engine takes an argument, not the variable; Chrome reads nothing.
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave-headless", {}, inherited=shell, turn_budget=60000)
+    assert run.engine_flags("chrome", {}, inherited=shell, turn_budget=60000) == {}
 
 
 # The one failure FLK8 saw (once in 26, a loaded Mac): the run came back invalid after its full wall
@@ -544,7 +573,7 @@ def test_the_engine_flags_are_what_the_engine_process_is_started_with():
     shell = {"HIWAVE_CONTENT_THREAD": "0", "HIWAVE_FROM_THE_SHELL": "yes", "HOME": "/x", run.TURN_BUDGET_ENV: "60000"}
     asked = run.suite_env("motionmark", {"HIWAVE_ASKED": "1", "RUST_BACKTRACE": "1"})
     # Every HIWAVE_ variable in the engine's environment, the shell's included; not the dropped one, not
-    # the harness's own turn-budget variable (the record has that as live_turn_budget_ms), nothing else.
+    # the shell's own turn-budget variable (only a run that raised the budget passes one, to the app), nothing else.
     assert run.engine_flags("hiwave-headless", asked, inherited=shell) == {
         "HIWAVE_ASKED": "1", "HIWAVE_CONSOLE_LOG": "1", "HIWAVE_FROM_THE_SHELL": "yes",
         "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}
@@ -581,3 +610,41 @@ def test_a_motionmark_run_starts_the_engine_with_the_frames_flag_and_records_it(
     assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "0", rec["engine_flags"]
     assert engine_saw(tmp_path / "off") == ["fake engine sees nested=0"]
 
+
+def test_the_engines_own_uncaught_errors_are_read_from_its_log(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("\x1b[2m2026-11-16T01:21:24.9Z\x1b[0m  INFO hiwave::console: uncaught TypeError: cannot convert at script#9:94:31\n"
+                   "    at script#9:94:31\n"
+                   "2026-11-16T01:21:25.0Z  INFO hiwave::console: console log inline#1:2:3 uncaught is only a word here\n"
+                   "2026-11-16T01:21:25.1Z  INFO hiwave::console: unhandled rejection Error: boom at script#2:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught TypeError: cannot convert at script#9:94:31",
+                                     "unhandled rejection Error: boom at script#2:1:1"]
+    assert run.log_uncaught(tmp_path / "missing.log") == []
+
+
+def test_an_error_the_page_cancelled_is_among_the_engines_uncaught_errors_with_its_mark(tmp_path):
+    # The engine writes an error the page cancelled (window.onerror returned true, or a listener called
+    # preventDefault) with a mark after the word the reader matches on: a page cannot keep it out of the record.
+    log = tmp_path / "app.log"
+    log.write_text("2026-11-16T17:00:00.0Z  INFO hiwave::console: uncaught (cancelled by the page) Error: boom at inline#2:1:7\n"
+                   "2026-11-16T17:00:00.1Z  INFO hiwave::console: uncaught RangeError: left alone at inline#3:1:7\n")
+    assert run.log_uncaught(log) == ["uncaught (cancelled by the page) Error: boom at inline#2:1:7",
+                                     "uncaught RangeError: left alone at inline#3:1:7"]
+
+
+def test_a_message_with_an_escaped_line_break_is_one_error_to_the_reader(tmp_path):
+    # The engine writes control characters in page text escaped, so text shaped like a log line inside a
+    # message stays inside its own line.
+    log = tmp_path / "app.log"
+    log.write_text("2026-11-16T17:00:00.0Z  INFO hiwave::console: uncaught Error: first\\n2026-11-16T00:00:00.0Z  INFO "
+                   "hiwave::console: uncaught Error: second at inline#9:1:1 at inline#1:1:1\n    at inline#1:1:1\n"
+                   "2026-11-16T17:00:00.1Z  INFO hiwave::console: unhandled rejection (cancelled by the page) Error: boom at inline#2:1:1\n")
+    found = run.log_uncaught(log)
+    assert len(found) == 2 and found[0].startswith("uncaught Error: first\\n2026-11-16T00:00:00.0Z") and "second" in found[0]
+    assert found[1] == "unhandled rejection (cancelled by the page) Error: boom at inline#2:1:1"
+
+
+def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
+    progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
+                {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
+    assert run.frames_by_test(progress) == {"Multiply": {"samples": 3}}

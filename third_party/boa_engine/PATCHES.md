@@ -964,3 +964,87 @@ Pin: `crates/rustkit-js/tests/arraybuffer_detach_key.rs` (Chrome for Testing 148
 transfer list and `postMessage` with one all throw a TypeError and leave the buffer attached;
 `memory.grow()` detaches it; a plain buffer's `transfer()` works). Red on develop (the constructor
 stub ignoring the key): script's `transfer()` succeeded.
+
+## Patch: code blocks carry their script's error-detail flag (`error-detail`)
+
+A host reports some scripts' errors to the page without detail (HTML's "muted errors" of a script).
+That is a property of the code that is running when an error is thrown, so it is kept on the code.
+
+**Change.**
+- A code block is one of three (`vm::ErrorDetail`, two bits of `CodeBlockFlags`): a page script
+  reported in full, a page script reported without detail, or the embedder's own code. It is set in
+  `ByteCompiler::finish` from the `vm::ErrorDetailScope` entered (a thread-local with a guard): a
+  script's top-level code and every function compiled from its source. Code compiled under no
+  scope, the embedder's own scripts among it, is the embedder's: compiled with the flag clear of
+  both page states, it answers for nothing. `CodeBlock::error_detail()` reads it.
+- Code made at run time carries the answer of the code that made it: `eval` (`builtins/eval`) and
+  the `Function` constructors (`create_dynamic_function`) enter the scope with the current frame's.
+  Made by the embedder's code it is the embedder's, always: nothing is kept between one compile and
+  the next. A host that compiles text for the page says what it is in the call:
+  `Script::parse` under a scope, and `BuiltInFunctionObject::compile_function_as(parameters, body,
+  detail, context)` for a function (new), which reads two strings and leaves nothing behind whether
+  the text compiles or not. A module keeps the answer it was parsed under (`ModuleCode`) and is
+  compiled with it at link time.
+- `Vm::page_error_detail(depth)`: the page script that is running, passing over the embedder's
+  frames. `JsError::detail_withheld()` is that script's answer where the error was first raised,
+  stamped once in `handle_error`, `handle_throw` and the `Throw` opcode; it stays with the error
+  through `finally` blocks and native callers. An error raised with no page script running has none.
+  `JsError::or_detail_withheld(bool)` gives one to an error that has none (a host's compile of a
+  known script's text that fails before any of its code ran).
+- When a raised error becomes a value (`JsError::into_opaque`: a `catch`, a rejection) the VM
+  notes the value and its answer (`Vm::error_detail_note`); `Context::take_error_detail_note(&value)`
+  gives it to whoever is handed that value next.
+- `Context::running_error_detail_withheld(depth)`: `Vm::page_error_detail` for a host.
+- `Promise::rejection_detail_withheld()`: set when a promise is rejected, from the reason's note
+  (the code that threw, or the promise the reason was passed on from: a reaction with no handler
+  or a native one passes the note on), else the page script calling the reject function, else the
+  page script the promise's resolving functions were made for.
+
+**Cost.** One thread-local read per compiled code block. Where an error is first raised, and where
+a promise's resolving functions are made or a promise is rejected, `Vm::page_error_detail` walks the
+frame stack from the top and stops at the first frame that is not the embedder's: it reads two flag
+bits a frame, allocates nothing and runs no code, and passes over only the embedder's own frames
+above the page script that called them (for an error raised with no page script running, the whole
+stack, once). Where a raised error becomes a value, a clone of the value. Nothing on a path that
+does not throw or make a promise.
+
+Pin: `crates/rustkit-bindings/src/window_error_event_tests.rs` (which code decides, by family:
+plain and bound functions, `eval` and `Function` code, accessors, a proxy trap, `valueOf` and
+`toString`, a class constructor, a resumed generator, built-in errors, a microtask, an async function
+resumed after `await`, promise reactions and combinators, the embedder's own errors raised for a
+call, another document's code), against Chrome for Testing 148.0.7778.216
+(`docs/diagnostics/2026-11-16/window_error_cft148.json`).
+`CodeBlockFlags::ERROR_DETAIL_WITHHELD` and `ERROR_DETAIL_EMBEDDER` are bits 11 and 12 (bits 9 and
+10 are `sort-diff`'s). `vm::code_block_flag_clashes()` lists any flag that is not one bit or shares
+one; `crates/rustkit-js/tests/code_block_flags.rs` asserts there is none.
+
+## Patch: a comparator that is `a - b` is not called for two Numbers (`sort-diff`)
+
+**Why.** `Array.prototype.sort` with a comparator costs one native-to-script call per comparison
+(about 200 ns each; 100,000 numbers make about 1.5 million calls). The sort itself costs the same as a
+plain loop making those calls, so the cost is the call. A comparator that is exactly `return a - b`
+(or `b - a`) over its two plain parameters does nothing else: for two Numbers it computes their
+difference, with no side effect.
+
+**What.** The bytecompiler marks a function (not async, generator or method) whose parameter list is
+two plain identifiers and whose body is one `return a - b` or `return b - a`, parentheses allowed
+(`CodeBlockFlags::NUMERIC_DIFF`, `NUMERIC_DIFF_SWAPPED`). `Array.prototype.sort` and `toSorted` read the
+flag once; `compare_array_elements` computes the difference itself when both elements are Numbers and
+calls the function otherwise (strings, objects with `valueOf`, BigInts, anything else). The result is
+treated as `ToNumber(call)` is: NaN counts as equal. `TypedArray.prototype.sort` is not changed.
+
+**Pin.** `crates/rustkit-js/tests/sort_numeric_difference.rs`: 19 answers equal Chrome's (numbers,
+Infinity, NaN, -0, mixed strings, holes, `undefined`, BigInt, objects with `valueOf`, defaults and
+other shapes that must still be called), and an opcode budget in a child process (4000 numbers: 17
+opcodes with `a - b` or `b - a`, 510,293 for `a - b + 0`, 383,709 when half the elements are strings).
+Red without the fast path (425,247).
+The budget is under 100 opcodes (measured 17). Forms that look like `a - b` but are not an ordinary
+function (class constructor, bound function, Proxy with an `apply` trap, object-literal method, generator,
+async function) are pinned to Chrome's answers in the same file.
+
+**Turn budget.** A compared pair that takes the fast path makes no call, and a call is where the interrupt
+word is read, so the fast path reads it itself (`Context::check_interrupt`, one relaxed load) before each
+difference. `crates/rustkit-js/tests/sort_numeric_difference_stop.rs`: a 3,000,000-number `sort` and
+`toSorted` (about 4 s to finish) are stopped by the word set 100 ms in, and end within 2 s of it. Red
+before the check (the sort ran to its end). A sort with no comparator, and `TypedArray.prototype.sort`,
+make no call or check either way and are not changed here.

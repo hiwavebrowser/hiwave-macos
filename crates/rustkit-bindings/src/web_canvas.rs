@@ -70,6 +70,24 @@ pub(crate) struct CanvasStore {
     /// The document's origin (`DomBindings::set_location`): an image of
     /// any other origin leaves a canvas that draws it not origin-clean.
     pub(crate) origin: Option<url::Origin>,
+    /// The image each `<img>` shows, by NodeId, as the engine reported it
+    /// (`DomBindings::fire_image_load`): what a canvas draws for that
+    /// element. Nothing script can write reaches this.
+    pub(crate) loaded: HashMap<usize, LoadedImage>,
+    /// The images patterns were made from, by the index script holds.
+    pattern_sources: Vec<LoadedImage>,
+}
+
+/// An `<img>`'s loaded resource: the response's URL and the image's own
+/// size, with the `src` and `srcset` the element had when it loaded (it
+/// stands for the element only while they are unchanged).
+#[derive(Clone, PartialEq)]
+pub(crate) struct LoadedImage {
+    pub(crate) src: Option<String>,
+    pub(crate) srcset: Option<String>,
+    pub(crate) url: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 pub(crate) type SharedCanvases = Rc<RefCell<CanvasStore>>;
@@ -113,6 +131,8 @@ impl CanvasStore {
     /// a mark left here would list and present that same frame again at the
     /// next settle (#905 batch 22: an extra frame after every load).
     pub(crate) fn clear(&mut self) {
+        self.loaded.clear();
+        self.pattern_sources.clear();
         self.contexts.clear();
         self.painted = false;
     }
@@ -206,15 +226,35 @@ fn number_list<const N: usize>(s: Option<&str>) -> Option<[f32; N]> {
     Some(out)
 }
 
-fn unhex(hex: &str) -> Vec<u8> {
-    let b = hex.as_bytes();
-    let val = |c: u8| match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    };
-    b.chunks_exact(2).map(|p| val(p[0]) << 4 | val(p[1])).collect()
+/// The ImageData a put writes, from what the script left in the pixel
+/// slot and the size it gave: only when the size is a whole number of
+/// pixels a canvas can hold and the bytes are exactly that many.
+fn image_from_slot(data: Option<Vec<u8>>, width: f32, height: f32) -> Option<ImageData> {
+    let whole = |v: f32| v >= 1.0 && v <= rustkit_canvas::MAX_CANVAS_SIDE as f32 && v.fract() == 0.0;
+    if !whole(width) || !whole(height) {
+        return None;
+    }
+    let (width, height) = (width as u32, height as u32);
+    let data = data.filter(|data| rustkit_canvas::rgba_len(width, height) == Some(data.len()))?;
+    Some(ImageData { width, height, data })
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::image_from_slot;
+
+    #[test]
+    fn a_put_takes_the_slots_bytes_only_at_exactly_the_size_given() {
+        let made = image_from_slot(Some(vec![7; 24]), 2.0, 3.0).expect("2 x 3 pixels are 24 bytes");
+        assert_eq!((made.width, made.height, made.data.len()), (2, 3, 24));
+        for (bytes, width, height) in [
+            (Some(23), 2.0, 3.0), (Some(25), 2.0, 3.0), (Some(0), 2.0, 3.0), (None, 2.0, 3.0), (Some(24), 3.0, 3.0), (Some(24), 0.0, 3.0),
+            (Some(24), 2.5, 3.0), (Some(24), -2.0, -3.0), (Some(24), f32::NAN, 3.0), (Some(24), f32::INFINITY, 1.0), (Some(24), 4294967296.0, 4294967296.0),
+            (Some(4), 65536.0, 1.0), (Some(0), 0.0, 0.0),
+        ] {
+            assert!(image_from_slot(bytes.map(|n| vec![0; n]), width, height).is_none(), "{bytes:?} {width} {height}");
+        }
+    }
 }
 
 fn flag(args: &[JsValue], i: usize) -> bool {
@@ -242,6 +282,8 @@ pub(crate) fn install(
     script: bool,
 ) -> Result<(), JsError> {
     let (s, h) = (store.clone(), host.clone());
+    // Pixels cross in the runtime's slot, not as arguments.
+    let pixels = runtime.pixel_slot();
     runtime.register_host_function(
         "__rustkit_canvas",
         12,
@@ -266,6 +308,34 @@ pub(crate) fn install(
                 Some(node) => node,
                 None => return JsValue::Undefined,
             };
+            // What an element is as an image source, from the engine's own
+            // record of it: "w,h" (its image's size) once its image is in,
+            // "" before that, "TypeError" for anything that is not an `<img>`.
+            // `imagePattern` also keeps the resource for a pattern and
+            // answers "w,h,index".
+            if op == "imageSource" || op == "imagePattern" {
+                let Some((src, srcset)) = h.borrow().img_sources(node) else {
+                    return JsValue::String("TypeError".into());
+                };
+                let Some(image) = store.loaded.get(&node).filter(|image| image.src == src && image.srcset == srcset).cloned() else {
+                    return JsValue::String(String::new());
+                };
+                if image.width == 0 || image.height == 0 {
+                    return JsValue::String(String::new());
+                }
+                let size = format!("{},{}", image.width, image.height);
+                if op == "imageSource" {
+                    return JsValue::String(size);
+                }
+                let index = match store.pattern_sources.iter().position(|kept| *kept == image) {
+                    Some(index) => index,
+                    None => {
+                        store.pattern_sources.push(image);
+                        store.pattern_sources.len() - 1
+                    }
+                };
+                return JsValue::String(format!("{size},{index}"));
+            }
             if op == "create" {
                 let (w, hgt) = (dimension(args, 3, 300), dimension(args, 4, 150));
                 store
@@ -293,17 +363,36 @@ pub(crate) fn install(
             // fetch, so a crossorigin image counts as another origin.
             let mut tainted = false;
             let source = if matches!(op, "drawImage" | "fillPattern" | "strokePattern") {
-                tainted = match (text(args, 3), args.get(4)) {
-                    (Some("canvas"), Some(JsValue::Number(n))) => {
+                // An image source is ("image", the element's NodeId) for a
+                // draw and ("pattern", the index `imagePattern` gave) for a
+                // pattern: its URL is the engine's record, never an argument.
+                let image: Option<LoadedImage> = match (text(args, 3), args.get(4)) {
+                    (Some("image"), Some(JsValue::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => {
+                        let element = *n as usize;
+                        let now = h.borrow().img_sources(element);
+                        store.loaded.get(&element).filter(|image| now.as_ref().is_some_and(|(src, srcset)| image.src == *src && image.srcset == *srcset)).cloned()
+                    }
+                    (Some("pattern"), Some(JsValue::Number(n))) if *n >= 0.0 && n.fract() == 0.0 => store.pattern_sources.get(*n as usize).cloned(),
+                    _ => None,
+                };
+                let is_image = matches!(text(args, 3), Some("image" | "pattern"));
+                if is_image && image.is_none() {
+                    return JsValue::Undefined;
+                }
+                // Decided on the URL, before its pixels are looked for: the
+                // answer does not depend on what the image store holds.
+                tainted = match (text(args, 3), args.get(4), &image) {
+                    (Some("canvas"), Some(JsValue::Number(n)), _) => {
                         store.contexts.get(&(*n as usize)).is_some_and(|c| !c.is_origin_clean())
                     }
-                    (Some("image"), Some(JsValue::String(url))) => match url::Url::parse(url) {
+                    (_, _, Some(image)) => match url::Url::parse(&image.url) {
                         Ok(u) if u.scheme() == "data" => false,
                         Ok(u) => store.origin.as_ref() != Some(&u.origin()) || !u.origin().is_tuple(),
                         Err(_) => true,
                     },
                     _ => false,
                 };
+                let url = image.as_ref().map(|image| image.url.clone());
                 let found = match (text(args, 3), args.get(4)) {
                     (Some("canvas"), Some(JsValue::Number(n))) => {
                         let (w, hh) = store.contexts.get(&(*n as usize)).map(|c| (c.width, c.height)).unwrap_or((0, 0));
@@ -312,7 +401,8 @@ pub(crate) fn install(
                             CanvasBitmap::from_rgba(w, hh, &vec![0; w as usize * hh as usize * 4])
                         })
                     }
-                    (Some("image"), Some(JsValue::String(url))) => {
+                    (Some("image" | "pattern"), _) => {
+                        let url = url.as_deref().unwrap_or_default();
                         // drawImage: the size the whole image is drawn at, from
                         // the dest/source ratio and the transform's scale.
                         let size = match (op, number_list::<8>(text(args, 5)), number_list::<2>(text(args, 6))) {
@@ -339,6 +429,13 @@ pub(crate) fn install(
                     _ => None,
                 };
                 if found.is_none() {
+                    // Nothing to draw; a canvas asked to draw another
+                    // origin's image is not origin-clean all the same.
+                    if tainted {
+                        if let Some(ctx) = store.contexts.get_mut(&node) {
+                            ctx.taint();
+                        }
+                    }
                     return JsValue::Undefined;
                 }
                 found
@@ -473,12 +570,18 @@ pub(crate) fn install(
                     }
                 }
                 "putImageData" => {
-                    // hex, width, height, dx, dy, then "x,y,w,h" (the dirty rect, cut to the image).
-                    if let (Some(hex), Some([w, hh, dx, dy])) = (text(args, 3), nums::<4>(args, 4)) {
-                        if let Some([x, y, dw, dh]) = number_list::<4>(text(args, 8)) {
-                            let data = ImageData { width: w as u32, height: hh as u32, data: unhex(hex) };
-                            ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]);
-                        }
+                    // width, height, dx, dy, then the dirty rect (cut to the
+                    // image); the bytes are what the script's `pixelsIn`
+                    // left in the slot, and must be the image's size.
+                    let data = pixels.take();
+                    match (nums::<4>(args, 3), nums::<4>(args, 7)) {
+                        (Some([w, hh, dx, dy]), Some([x, y, dw, dh])) => match image_from_slot(data, w, hh) {
+                            // The casts saturate, and the canvas cuts the rect
+                            // to the image and the bitmap (`raster::put_span`).
+                            Some(data) => ctx.put_image_data_dirty(&data, dx as i32, dy as i32, [x as i32, y as i32, dw as i32, dh as i32]),
+                            None => drew = false,
+                        },
+                        _ => drew = false,
                     }
                 }
                 "lineWidth" => {
@@ -651,13 +754,11 @@ pub(crate) fn install(
                         if rustkit_canvas::rgba_len(w as u32, hh as u32).is_none() || w > u32::MAX as f32 || hh > u32::MAX as f32 {
                             return JsValue::String("RangeError".into());
                         }
+                        // The bytes wait in the slot for the script's
+                        // `pixelsOut`; the answer is how many.
                         let d = ctx.get_image_data(x as i32, y as i32, w as u32, hh as u32);
-                        let mut hex = String::with_capacity(d.data.len() * 2);
-                        for b in &d.data {
-                            use std::fmt::Write;
-                            let _ = write!(hex, "{b:02x}");
-                        }
-                        result = JsValue::String(hex);
+                        result = JsValue::Number(d.data.len() as f64);
+                        pixels.put(d.data);
                     }
                 }
                 "fill" => ctx.fill_with_rule(text(args, 3) == Some("evenodd")),
@@ -697,8 +798,11 @@ pub(crate) fn install(
             result
         }),
     )?;
+    // The host function is the canvas script's alone: moved to the host
+    // object now, before any page script, and never on the window again.
+    runtime.evaluate_with_host("__rk.canvasCall = globalThis.__rustkit_canvas; delete globalThis.__rustkit_canvas;")?;
     if !script {
         return Ok(());
     }
-    runtime.evaluate_script(SCRIPT).map(|_| ())
+    runtime.evaluate_with_host(SCRIPT).map(|_| ())
 }

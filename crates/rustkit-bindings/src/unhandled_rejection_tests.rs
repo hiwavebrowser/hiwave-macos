@@ -73,8 +73,10 @@ fn page() -> DomBindings {
     b
 }
 
+/// The scripts of these tests stand for a page's own: they are evaluated as page scripts
+/// (`evaluate_as_page_script`), not as the host's, whose rejections are not the page's to hear.
 fn ev(b: &DomBindings, script: &str) -> String {
-    match b.evaluate(script).unwrap() {
+    match b.evaluate_as_page_script(script).unwrap() {
         JsValue::String(s) => s,
         other => panic!("{other:?}"),
     }
@@ -92,22 +94,21 @@ fn turns_until(b: &DomBindings, done: &str) {
     panic!("`{done}` was not true after 5000 turns");
 }
 
-/// What the engine reported as an unhandled rejection, as a browser's console names it: an
-/// error's message, else the value's text.
-fn reported(b: &DomBindings) -> Vec<String> {
-    b.take_error_reports()
-        .into_iter()
-        .filter(|r| r.rejection)
-        .map(|r| r.message.unwrap_or_else(|| r.value.to_string()))
-        .collect()
+/// What the engine reported as an unhandled rejection, as a browser's console names it (an
+/// error's message, else the value's text), in two lists: those a console shows, and those whose
+/// event the page canceled, which the engine keeps with a mark for its own log only.
+fn reported(b: &DomBindings) -> (Vec<String>, Vec<String>) {
+    let (canceled, shown): (Vec<_>, Vec<_>) = b.take_error_reports().into_iter().filter(|r| r.rejection).partition(|r| r.canceled);
+    let names = |reports: Vec<rustkit_js::ErrorReport>| reports.into_iter().map(|r| r.message.unwrap_or_else(|| r.value.to_string())).collect();
+    (names(shown), names(canceled))
 }
 
-/// The probe here: each scenario's answer, and the rejections reported, in order.
-fn ours() -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
+/// The probe here: each scenario's answer, and the rejections reported, in order (shown, canceled).
+fn ours() -> (serde_json::Map<String, serde_json::Value>, (Vec<String>, Vec<String>)) {
     let b = page();
     b.set_error_details(true, true).unwrap();
-    b.evaluate("window.__noWorkers = true;").unwrap();
-    b.evaluate(SCRIPT).unwrap();
+    b.evaluate_as_page_script("window.__noWorkers = true;").unwrap();
+    b.evaluate_as_page_script(SCRIPT).unwrap();
     turns_until(&b, "window.__out");
     (object(&ev(&b, "window.__out")), reported(&b))
 }
@@ -139,8 +140,8 @@ fn rejection_events_come_as_in_chrome() {
 }
 
 /// The console's side: what Chrome reported as uncaught (`pageErrors`), less the one exception a
-/// listener threw, is the rejections reported here, in the same order. A rejection whose event
-/// was canceled is in neither.
+/// listener threw, is the rejections reported here without the mark, in the same order. A
+/// rejection whose event was canceled is not in Chrome's; here it is reported with the mark.
 #[test]
 fn a_rejection_is_reported_unless_its_event_was_canceled() {
     let pin = object(CHROME);
@@ -155,8 +156,14 @@ fn a_rejection_is_reported_unless_its_event_was_canceled() {
     for canceled in ["prevented-P", "prevented-F", "L2"] {
         assert!(!chrome.contains(&canceled.to_string()), "{canceled} was canceled in Chrome: {chrome:?}");
     }
-    let (_, ours) = ours();
-    assert_eq!(ours, chrome);
+    let (_, (shown, marked)) = ours();
+    assert_eq!(shown, chrome);
+    // The marked ones are the probe's canceled rejections (these three and its
+    // flood's), and none of them is one Chrome reported.
+    for canceled in ["prevented-P", "prevented-F", "L2"] {
+        assert!(marked.contains(&canceled.to_string()), "{canceled} is not marked: {marked:?}");
+    }
+    assert!(marked.iter().all(|name| !chrome.contains(name)), "{marked:?}");
 }
 
 /// The events do not wait for an embedder that records errors: with error details off (the
@@ -164,7 +171,7 @@ fn a_rejection_is_reported_unless_its_event_was_canceled() {
 #[test]
 fn the_events_fire_with_error_reports_off() {
     let b = page();
-    b.evaluate(
+    b.evaluate_as_page_script(
         "var log = []; \
          window.addEventListener('unhandledrejection', function (e) { log.push('unhandled:' + e.reason); }); \
          window.addEventListener('rejectionhandled', function (e) { log.push('handled:' + e.reason); }); \
@@ -172,7 +179,7 @@ fn the_events_fire_with_error_reports_off() {
     )
     .unwrap();
     assert_eq!(ev(&b, "log.join()"), "sync,micro,unhandled:r1");
-    b.evaluate("p.catch(function () { log.push('caught'); });").unwrap();
+    b.evaluate_as_page_script("p.catch(function () { log.push('caught'); });").unwrap();
     assert_eq!(ev(&b, "log.join()"), "sync,micro,unhandled:r1,caught,handled:r1");
     assert!(b.take_error_reports().is_empty());
 }
@@ -183,12 +190,12 @@ fn the_events_fire_with_error_reports_off() {
 fn reports_are_as_before_for_a_page_with_no_listener() {
     let b = page();
     b.set_error_details(true, true).unwrap();
-    b.evaluate("Promise.reject(new Error('handled')).catch(function () {}); Promise.reject(new RangeError('left'));").unwrap();
-    assert_eq!(reported(&b), ["left"]);
-    assert!(reported(&b).is_empty(), "reported once");
+    b.evaluate_as_page_script("Promise.reject(new Error('handled')).catch(function () {}); Promise.reject(new RangeError('left'));").unwrap();
+    assert_eq!(reported(&b), (vec!["left".to_string()], Vec::new()));
+    assert_eq!(reported(&b), (Vec::new(), Vec::new()), "reported once");
     // A handler added later does not report it again, and takes nothing back.
-    b.evaluate("Promise.reject(new Error('late')).catch(function () {});").unwrap();
-    assert!(reported(&b).is_empty());
+    b.evaluate_as_page_script("Promise.reject(new Error('late')).catch(function () {});").unwrap();
+    assert_eq!(reported(&b), (Vec::new(), Vec::new()));
 }
 
 /// Announcing a rejection calls none of these when a page has replaced them: the event
@@ -198,7 +205,7 @@ fn reports_are_as_before_for_a_page_with_no_listener() {
 #[test]
 fn announcing_calls_no_replaced_event_constructor_dispatch_reflect_weak_write_or_promise_method() {
     let b = page();
-    b.evaluate(
+    b.evaluate_as_page_script(
         "var calls = 0, seen = []; function spy() { calls++; throw new Error('replaced'); } \
          window.addEventListener('unhandledrejection', function (e) { \
              seen.push([e.type, e.isTrusted, e.reason, e.promise === p, String(e)].join(':')); }); \
@@ -222,12 +229,12 @@ fn a_rejection_is_announced_in_the_document_whose_script_rejected() {
         .set_document(Rc::new(Document::parse_html("<html><head></head><body></body></html>").unwrap()))
         .unwrap();
     parent.expose_window("child", &child).unwrap();
-    parent.evaluate("var log = []; window.addEventListener('unhandledrejection', function (e) { log.push('page:' + e.reason); });").unwrap();
+    parent.evaluate_as_page_script("var log = []; window.addEventListener('unhandledrejection', function (e) { log.push('page:' + e.reason); });").unwrap();
     child
-        .evaluate("var log = []; window.addEventListener('unhandledrejection', function (e) { log.push('frame:' + e.reason + ':' + (e.target === window)); });")
+        .evaluate_as_page_script("var log = []; window.addEventListener('unhandledrejection', function (e) { log.push('frame:' + e.reason + ':' + (e.target === window)); });")
         .unwrap();
-    child.evaluate("Promise.reject('in-frame');").unwrap();
-    parent.evaluate("Promise.reject('in-page');").unwrap();
+    child.evaluate_as_page_script("Promise.reject('in-frame');").unwrap();
+    parent.evaluate_as_page_script("Promise.reject('in-page');").unwrap();
     assert_eq!(ev(&child, "log.join()"), "frame:in-frame:true");
     assert_eq!(ev(&parent, "log.join()"), "page:in-page");
 }
@@ -237,7 +244,7 @@ fn a_rejection_is_announced_in_the_document_whose_script_rejected() {
 fn every_rejection_of_a_task_is_announced_at_its_end() {
     for count in [100, 300, 3000] {
         let b = page();
-        b.evaluate(&format!(
+        b.evaluate_as_page_script(&format!(
             "var seen = []; window.addEventListener('unhandledrejection', function (e) {{ seen.push(e.reason); }}); \
              for (var i = 0; i < {count}; i++) Promise.reject(i);"
         ))
@@ -254,7 +261,7 @@ fn every_rejection_of_a_task_is_announced_at_its_end() {
 #[test]
 fn a_listener_that_rejects_again_each_time_does_not_hold_the_turn_and_loses_nothing() {
     let b = page();
-    b.evaluate(
+    b.evaluate_as_page_script(
         "var n = 0; window.addEventListener('unhandledrejection', function (e) { e.preventDefault(); n++; if (n < 200) Promise.reject(n); }); \
          Promise.reject(0);",
     )
@@ -278,7 +285,7 @@ fn a_listener_that_rejects_again_each_time_does_not_hold_the_turn_and_loses_noth
 #[test]
 fn rejections_made_inside_a_listener_are_announced_in_the_same_turn() {
     let b = page();
-    b.evaluate(
+    b.evaluate_as_page_script(
         "var seen = 0; window.addEventListener('unhandledrejection', function (e) { seen++; \
              if (e.reason === 'seed') for (var i = 0; i < 100; i++) Promise.reject(i); }); \
          Promise.reject('seed');",

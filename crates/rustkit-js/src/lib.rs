@@ -18,6 +18,8 @@ pub use import_map::ImportMap;
 pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
 pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
+pub use bytes::PixelSlot;
+#[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
 mod describe;
@@ -189,6 +191,14 @@ pub fn vm_stats_report() -> String {
 #[cfg(not(feature = "boa"))]
 pub fn vm_stats_report() -> String {
     String::new()
+}
+
+/// The interpreter's code-block flags that are not one bit or share a bit with another, and how
+/// many flags there are (two patches once took the same bits). Tests.
+#[cfg(feature = "boa")]
+#[doc(hidden)]
+pub fn code_block_flag_clashes() -> (Vec<&'static str>, usize) {
+    boa_engine::vm::code_block_flag_clashes()
 }
 
 /// How many times a regular expression pattern has been compiled to a matcher in this process (a
@@ -384,6 +394,11 @@ pub struct ErrorReport {
     /// A module that threw after a top-level `await` outlived the step that
     /// ran it: its path.
     pub module: Option<String>,
+    /// The page cancelled the event fired for it (`error`: `window.onerror`
+    /// returned true, or a listener called `preventDefault`;
+    /// `unhandledrejection` likewise). A console
+    /// shows no such error; a record of what a page threw still has it.
+    pub canceled: bool,
 }
 
 /// Timer callback.
@@ -590,6 +605,9 @@ pub struct JsRuntime {
     /// a response body crosses into script as one buffer, not as text.
     #[cfg(feature = "boa")]
     byte_stash: bytes::Stash,
+    /// Canvas pixels on their way to or from script (see `bytes::PixelSlot`).
+    #[cfg(feature = "boa")]
+    pixel_slot: bytes::PixelSlot,
     /// What stands behind the page's blob URLs (see `bytes::Blobs`).
     #[cfg(feature = "boa")]
     blobs: bytes::Blobs,
@@ -670,7 +688,9 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         let blobs = bytes::Blobs::default();
         #[cfg(feature = "boa")]
-        let host = host_object(&diag, &byte_stash, &blobs, &mut context);
+        let pixel_slot = bytes::PixelSlot::default();
+        #[cfg(feature = "boa")]
+        let host = host_object(&diag, &byte_stash, &blobs, &pixel_slot, &mut context);
         // One object every realm's host object holds as `shared`:
         // what the documents of a frame tree must agree on (which events
         // are the engine's) is kept there, not once per realm. Like the
@@ -714,6 +734,8 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             byte_stash,
             #[cfg(feature = "boa")]
+            pixel_slot,
+            #[cfg(feature = "boa")]
             blobs,
             sources: source_context::ScriptSources::default(),
             source_tap: None,
@@ -749,7 +771,7 @@ impl JsRuntime {
             let outer = self.enter_realm(id);
             let console = self.setup_console();
             // The new realm's own host object, made in it.
-            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &mut self.context);
+            let host = host_object(&self.diag, &self.byte_stash, &self.blobs, &self.pixel_slot, &mut self.context);
             if let Ok(shared) = self.host.get(boa_engine::js_string!("shared"), &mut self.context) {
                 let _ = host.set(boa_engine::js_string!("shared"), shared, false, &mut self.context);
             }
@@ -773,6 +795,7 @@ impl JsRuntime {
             Some(Some(target)) => {
                 self.context.enter_realm(target.clone());
                 self.current_realm = realm;
+                self.diag.realm.set(realm.0);
             }
             // A dropped realm is entered as gone: evaluation errors until
             // the outer realm is entered again (see `realm_gone`).
@@ -840,6 +863,7 @@ impl JsRuntime {
                 *host = None;
             }
             let dropped = slot.take();
+            self.diag.drop_realm(realm.0);
             if let Some(realm) = &dropped {
                 self.rejections.drop_realm(realm);
             }
@@ -997,6 +1021,113 @@ impl JsRuntime {
         let _ = on;
     }
 
+    /// Announce uncaught exceptions to the embedder's scripts, for the
+    /// page's `error` event (HTML "report an exception"). Off by default.
+    /// On: an exception a page script ends with
+    /// ([`evaluate_script_named`](Self::evaluate_script_named), a module),
+    /// or one the embedder's scripts hand to the host object's
+    /// `reportError` (a listener's, a timer's), is first handed to the host
+    /// object's `fireError` of the realm it happened in, as
+    /// `(value, text, path, line, column)`. `false` back means a listener
+    /// canceled the event, and that exception is then left out of the error
+    /// reports. An exception thrown during the hand-over is reported and
+    /// not handed over; nothing is handed over after the watchdog stopped
+    /// the turn. A realm with no `fireError` has no event.
+    pub fn set_error_events(&mut self, on: bool) {
+        #[cfg(feature = "boa")]
+        self.diag.error_events.set(on);
+        #[cfg(not(feature = "boa"))]
+        let _ = on;
+    }
+
+    /// Say what the page script evaluated as `name`
+    /// ([`evaluate_script_named`](Self::evaluate_script_named), a module's
+    /// URL) is, for the realm entered: the script at `url`, and whether its
+    /// errors are reported to the page without detail (`muted`, HTML's
+    /// "muted errors": a script of another origin). An announced exception
+    /// ([`set_error_events`](Self::set_error_events)) names `url` as its
+    /// file; one thrown by a `muted` script, or by a script never
+    /// registered, is announced as "Script error." with no file, position
+    /// or value. The script's code carries that from when it is compiled,
+    /// and code it makes at run time carries it too: what an event says is
+    /// decided by the code that was running where the error was thrown.
+    /// At most 4096 scripts are kept; past that a script is an
+    /// unregistered one.
+    pub fn register_script(&mut self, name: &str, url: &str, muted: bool) {
+        #[cfg(feature = "boa")]
+        self.diag.register_script(self.current_realm.0, name, url, muted);
+        #[cfg(not(feature = "boa"))]
+        let _ = (name, url, muted);
+    }
+
+    /// The URL of the document in the realm entered: the file an announced
+    /// exception names when it was thrown by code with no script of its
+    /// own (`eval` code, a handler attribute).
+    pub fn set_document_url(&mut self, url: &str) {
+        #[cfg(feature = "boa")]
+        self.diag.set_document_url(self.current_realm.0, url);
+        #[cfg(not(feature = "boa"))]
+        let _ = url;
+    }
+
+    /// A page script or module ended with `error`: announce it
+    /// ([`set_error_events`](Self::set_error_events)), then report it
+    /// unless a listener canceled the event.
+    #[cfg(feature = "boa")]
+    ///
+    /// What the page is told is decided by the code that was running where
+    /// the error was thrown (the flag its code block was compiled with).
+    /// An error the VM never raised (a script that does not parse) is its
+    /// script's: `evaluated`, as registered. With neither, no detail.
+    pub(crate) fn uncaught_error(&mut self, error: &boa_engine::JsError, announce: bool, evaluated: Option<&str>) {
+        let unraised = evaluated.map(|name| self.diag.compiles_withheld(name, self.current_realm.0));
+        self.uncaught_error_or(error, announce, unraised);
+    }
+
+    /// [`uncaught_error`](Self::uncaught_error), with the answer for an
+    /// error the VM never raised given outright.
+    ///
+    /// With no answer at all (no page script threw it, and it is no page
+    /// script's own failure) the error is the host's: reported, with no
+    /// event at the page.
+    pub(crate) fn uncaught_error_or(&mut self, error: &boa_engine::JsError, announce: bool, unraised: Option<bool>) {
+        let events = announce && self.diag.error_events.get() && !self.deadline.hit.get();
+        if !events && !self.diag.on.get() {
+            return;
+        }
+        let report = self.diag.describe_error(error, &mut self.context);
+        if events {
+            let value = match error.as_opaque() {
+                Some(value) => Some(value.clone()),
+                None => error.clone().into_opaque(&mut self.context).ok(),
+            };
+            if let Some(value) = value {
+                let host = self.entered_host();
+                self.context.reset_recursion_max();
+                self.diag.realm.set(self.current_realm.0);
+                let canceled = match error.detail_withheld().or(unraised) {
+                    Some(withheld) => self.diag.announce(&host, &value, &report, withheld, &mut self.context),
+                    None => false,
+                };
+                self.consume_interrupt();
+                let _ = self.context.run_jobs();
+                self.consume_interrupt();
+                // What the listeners rejected is announced in this turn too.
+                self.notify_rejections();
+                if canceled {
+                    // Still described for the embedder, with the mark.
+                    if self.diag.on.get() {
+                        self.diag.push(ErrorReport { canceled: true, ..report });
+                    }
+                    return;
+                }
+            }
+        }
+        if self.diag.on.get() {
+            self.diag.push(report);
+        }
+    }
+
     /// HTML "notify about rejected promises", at the end of a turn's
     /// microtasks. Everything pending at that point is announced, oldest
     /// first, however many: that is one round. What the listeners rejected
@@ -1085,6 +1216,20 @@ impl JsRuntime {
             return false;
         };
         let outer = self.enter_realm(RealmId(index));
+        // A rejection made by a script whose errors are reported without
+        // detail fires no event (HTML HostPromiseRejectionTracker, the
+        // script's muted errors): the reason is not the page's to read.
+        // Decided by the code that rejected it (the promise keeps its
+        // flag). A rejection no page script made is the host's: not
+        // announced to the page, and so always reported.
+        let withheld = promise
+            .downcast_ref::<boa_engine::builtins::promise::Promise>()
+            .and_then(|promise| promise.rejection_detail_withheld())
+            .unwrap_or(true);
+        if withheld {
+            self.enter_realm(outer);
+            return false;
+        }
         let host = self.entered_host();
         let fire = host.get(js_string!("fireRejection"), &mut self.context).ok();
         let mut canceled = false;
@@ -1130,9 +1275,9 @@ impl JsRuntime {
                 reports.push(report);
             }
             let reasons = self.rejections.take();
-            for reason in reasons {
+            for (reason, canceled) in reasons {
                 let report = self.diag.describe(&reason, None, true, &mut self.context);
-                reports.push(report);
+                reports.push(ErrorReport { canceled, ..report });
             }
             reports
         }
@@ -1408,7 +1553,17 @@ impl JsRuntime {
     /// page's own scripts go through
     /// [`evaluate_script_named`](Self::evaluate_script_named)).
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
-        self.evaluate(source, None)
+        self.evaluate(source, None, false)
+    }
+
+    /// Evaluate JavaScript code as a script of the page's own with no name
+    /// (a test's script that stands for a page's): unnamed, as
+    /// [`evaluate_script`](Self::evaluate_script), so its frames are passed
+    /// over in reports and its uncaught exception is not announced; but it
+    /// is the document's code, not the embedder's: what it rejects is
+    /// announced to the page, and an error raised for its calls is its own.
+    pub fn evaluate_document_script(&mut self, source: &str) -> Result<JsValue, JsError> {
+        self.evaluate(source, None, true)
     }
 
     /// Evaluate JavaScript code as the script `path`: error positions,
@@ -1416,7 +1571,7 @@ impl JsRuntime {
     /// as a URL (`inline#3`) leaves dynamic `import()` resolving against the
     /// document, as an unnamed script does.
     pub fn evaluate_script_named(&mut self, source: &str, path: &str) -> Result<JsValue, JsError> {
-        self.evaluate(source, Some(path))
+        self.evaluate(source, Some(path), false)
     }
 
     /// Hand every source this runtime evaluates from now on to `tap`, the
@@ -1428,7 +1583,7 @@ impl JsRuntime {
         self.source_tap = tap;
     }
 
-    fn evaluate(&mut self, source: &str, path: Option<&str>) -> Result<JsValue, JsError> {
+    fn evaluate(&mut self, source: &str, path: Option<&str>, documents: bool) -> Result<JsValue, JsError> {
         self.realm_gone()?;
         trace!(len = source.len(), "Evaluating script");
         if let Some(tap) = self.source_tap.as_ref() {
@@ -1443,18 +1598,28 @@ impl JsRuntime {
             // below. The live counters are not touched: a stop already
             // unwinds them.
             self.context.reset_recursion_max();
-            let result = match path {
-                Some(path) => {
-                    self.diag.know_path(path);
-                    self.sources.remember(path, source);
-                    self.context
-                        .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
-                }
-                None => self
-                    .context
-                    .eval(Source::from_bytes(source).with_path(std::path::Path::new(diag::EMBEDDER_PATH))),
+            // The script's code is compiled carrying what was registered
+            // for it (`register_script`); the embedder's own carries none.
+            // Only while it is compiled: what runs later compiles its own.
+            use boa_engine::vm::{ErrorDetail, ErrorDetailScope};
+            let detail = match path {
+                Some(path) if self.diag.compiles_withheld(path, self.current_realm.0) => ErrorDetail::Withheld,
+                Some(_) => ErrorDetail::Full,
+                None if documents => ErrorDetail::Full,
+                None => ErrorDetail::Embedder,
             };
-            self.settle_evaluation(result)
+            if let Some(path) = path {
+                self.diag.know_path(path);
+                self.sources.remember(path, source);
+            }
+            let source_path = std::path::Path::new(path.unwrap_or(diag::EMBEDDER_PATH));
+            let compiled = {
+                let _detail = ErrorDetailScope::enter(detail);
+                boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
+                    .and_then(|script| script.codeblock(&mut self.context).map(|_| script))
+            };
+            let result = compiled.and_then(|script| script.evaluate(&mut self.context));
+            self.settle_evaluation(result, path)
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1467,7 +1632,9 @@ impl JsRuntime {
     /// What follows a script or a kept call: the interrupt state, the microtask drain, console output and
     /// the error report, then the value.
     #[cfg(feature = "boa")]
-    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>) -> Result<JsValue, JsError> {
+    /// `page`: the code was the page script of this name, whose uncaught exception is
+    /// announced to the page ([`set_error_events`](Self::set_error_events)).
+    fn settle_evaluation(&mut self, result: boa_engine::JsResult<boa_engine::JsValue>, page: Option<&str>) -> Result<JsValue, JsError> {
         self.consume_interrupt();
         // Promise reactions (`.then`, `await`) are jobs Boa queues but
         // does not run on its own; a page's async code never resumes
@@ -1497,10 +1664,7 @@ impl JsRuntime {
             }
             Err(err) => {
                 self.flush_console_logs();
-                if self.diag.on.get() {
-                    let report = self.diag.describe_error(&err, &mut self.context);
-                    self.diag.push(report);
-                }
+                self.uncaught_error(&err, page.is_some(), page);
                 let msg = describe::error_text(&err, &mut self.context);
                 Err(JsError::ExecutionError(msg))
             }
@@ -1559,7 +1723,7 @@ impl JsRuntime {
                 .collect();
             self.context.reset_recursion_max();
             let result = callee.call(&BoaValue::undefined(), &args, &mut self.context);
-            self.settle_evaluation(result)
+            self.settle_evaluation(result, None)
         }
         #[cfg(not(feature = "boa"))]
         {
@@ -1955,6 +2119,13 @@ impl JsRuntime {
         let _ = bytes;
     }
 
+    /// The slot canvas pixels cross in (`__rk.pixelsOut`, `__rk.pixelsIn`):
+    /// the embedder's canvas code holds a clone.
+    #[cfg(feature = "boa")]
+    pub fn pixel_slot(&self) -> PixelSlot {
+        self.pixel_slot.clone()
+    }
+
     /// Forget the bytes stashed under `key`, if script did not take them.
     pub fn drop_stashed_bytes(&mut self, key: u64) {
         #[cfg(feature = "boa")]
@@ -2167,6 +2338,7 @@ fn host_object(
     diag: &std::rc::Rc<diag::Diagnostics>,
     byte_stash: &bytes::Stash,
     blobs: &bytes::Blobs,
+    pixels: &bytes::PixelSlot,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsObject {
     use boa_engine::{js_string, object::ObjectInitializer, NativeFunction};
@@ -2174,9 +2346,26 @@ fn host_object(
     // SAFETY: the closure holds an `Rc<Diagnostics>`, whose only GC handles
     // (the stack getter, report values never) stay rooted while it lives.
     let report_error = unsafe {
-        NativeFunction::from_closure(move |_this, args, context| {
+        NativeFunction::from_closure(move |this, args, context| {
             let value = args.first().cloned().unwrap_or_default();
-            reporter.reported(&value, context);
+            // Whose code threw it. Handed over from a `catch` (the usual
+            // caller): the flag the VM noted for the value it caught. Handed
+            // over for the page (`reportError(e)`, second argument `true`):
+            // the page script calling that function.
+            let for_the_page = args.get(1).and_then(boa_engine::JsValue::as_boolean) == Some(true);
+            let withheld = if for_the_page {
+                context.running_error_detail_withheld(0)
+            } else {
+                context.take_error_detail_note(&value)
+            };
+            match withheld {
+                // Called on the host object (`__rk.reportError(e)`): the
+                // realm's `error` event comes first, and can cancel the report.
+                Some(withheld) => reporter.uncaught(this.as_object().as_ref(), &value, withheld, context),
+                // No page script threw it: the host's own. Reported to the
+                // host, with no event the page could hear or cancel.
+                None => reporter.reported(&value, context),
+            }
             Ok(boa_engine::JsValue::undefined())
         })
     };
@@ -2194,9 +2383,49 @@ fn host_object(
         })
     };
     let mut host = ObjectInitializer::new(context);
+    // Text the page's document owns that the embedder's scripts run for it
+    // (an inline script, a string timer; a handler attribute's function):
+    // compiled here as a page script reported in full, in one step. Each
+    // takes text already computed (anything but a string is a TypeError:
+    // nothing is converted, so no script runs to be read), and nothing is
+    // kept afterwards on any path. The embedder's own `eval` and `Function`
+    // stay the embedder's.
+    let run_document_script = NativeFunction::from_fn_ptr(|_this, args, context| {
+        use boa_engine::vm::{ErrorDetail, ErrorDetailScope};
+        let Some(text) = args.first().and_then(|text| text.as_string()) else {
+            return Err(boa_engine::JsNativeError::typ().with_message("document text must be a string").into());
+        };
+        let text = text.to_std_string_escaped();
+        // A failure before any of the text's code ran (it does not parse,
+        // it declares a name again) is the document's own, as its code is.
+        let script = {
+            let _detail = ErrorDetailScope::enter(ErrorDetail::Full);
+            boa_engine::Script::parse(boa_engine::Source::from_bytes(text.as_bytes()), None, context)
+                .and_then(|script| script.codeblock(context).map(|_| script))
+                .map_err(|error| error.or_detail_withheld(false))?
+        };
+        script.evaluate(context).map_err(|error| error.or_detail_withheld(false))
+    });
+    let compile_document_function = NativeFunction::from_fn_ptr(|_this, args, context| {
+        let (Some(parameters), Some(body)) =
+            (args.first().and_then(|text| text.as_string()), args.get(1).and_then(|text| text.as_string()))
+        else {
+            return Err(boa_engine::JsNativeError::typ().with_message("document text must be a string").into());
+        };
+        boa_engine::builtins::function::BuiltInFunctionObject::compile_function_as(
+            &parameters,
+            &body,
+            boa_engine::vm::ErrorDetail::Full,
+            context,
+        )
+        .map(Into::into)
+        .map_err(|error| error.or_detail_withheld(false))
+    });
     host.function(report_error, js_string!("reportError"), 1)
-        .function(unsupported, js_string!("unsupported"), 2);
-    bytes::install(&mut host, byte_stash, blobs);
+        .function(unsupported, js_string!("unsupported"), 2)
+        .function(run_document_script, js_string!("runDocumentScript"), 1)
+        .function(compile_document_function, js_string!("compileDocumentFunction"), 2);
+    bytes::install(&mut host, byte_stash, blobs, pixels);
     let host = host.build();
     // The host object inherits from nothing: a name it does not own reads
     // as `undefined` and a first write makes an own property, with no
@@ -3375,5 +3604,93 @@ mod tests {
         assert!(max >= 20, "{line}");
         let attribution = interrupt_attribution();
         assert!(attribution.contains(&line), "{attribution}");
+    }
+}
+
+#[cfg(all(test, feature = "boa"))]
+mod pixel_slot_tests {
+    use super::*;
+
+    fn text(runtime: &mut JsRuntime, body: &str) -> String {
+        match runtime.evaluate_with_host(body).unwrap() {
+            JsValue::String(s) => s,
+            other => panic!("{body} evaluated to {other:?}"),
+        }
+    }
+
+    /// `pixelsOut` makes the realm's own `Uint8ClampedArray` of exactly the
+    /// length asked for, from the slot when the slot holds that many bytes,
+    /// and empties the slot; it takes a whole number in range and nothing
+    /// else, whatever the page did to the global or its prototype.
+    #[test]
+    fn pixels_out_hands_the_slots_bytes_once_as_the_realms_own_array() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = runtime.pixel_slot();
+        runtime
+            .evaluate_script(
+                "var Real = Uint8ClampedArray, ran = 0; Uint8ClampedArray = function () { ran++; }; \
+                 Real.prototype.constructor = function () { ran++; }; \
+                 Object.defineProperty(Real, Symbol.species, { get: function () { ran++; return Array; } });",
+            )
+            .unwrap();
+        slot.put(vec![1, 2, 3, 250]);
+        assert_eq!(
+            text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a instanceof Real, Object.getPrototypeOf(a) === Real.prototype, a[0], a[1], a[2], a[3], a.length, ran].join();"),
+            "true,true,1,2,3,250,4,0"
+        );
+        assert!(slot.take().is_none(), "the slot is emptied");
+        // Nothing left, another length, or `fresh`: zeros, and the slot is emptied.
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a[0], a[3], a.length].join();"), "0,0,4");
+        slot.put(vec![9; 8]);
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, false); return [a[0], a.length].join();"), "0,4");
+        assert!(slot.take().is_none());
+        slot.put(vec![9; 4]);
+        assert_eq!(text(&mut runtime, "var a = __rk.pixelsOut(4, true); return [a[0], a.length].join();"), "0,4");
+        assert!(slot.take().is_none());
+        assert_eq!(text(&mut runtime, "return String(__rk.pixelsOut(0, true).length);"), "0");
+        for bad in ["-1", "1.5", "NaN", "Infinity", "'4'", "{ valueOf: function () { ran++; return 4; } }", "undefined", "16384 * 16384 * 4 + 1"] {
+            slot.put(vec![9; 4]);
+            assert_eq!(
+                text(&mut runtime, &format!("try {{ __rk.pixelsOut({bad}, false); return 'made'; }} catch (e) {{ return e.name + ' ' + ran; }}")),
+                "RangeError 0",
+                "{bad}"
+            );
+            assert!(slot.take().is_none(), "{bad}: the slot is emptied");
+        }
+    }
+
+    /// `pixelsIn` answers for a `Uint8ClampedArray` on a live buffer only,
+    /// reads no property of what it is given, and leaves a copy of exactly
+    /// the array's own bytes in the slot when asked to.
+    #[test]
+    fn pixels_in_reads_a_clamped_arrays_own_bytes_and_nothing_else() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let slot = runtime.pixel_slot();
+        runtime
+            .evaluate_script(
+                "var ran = 0, proto = Object.getPrototypeOf(Uint8ClampedArray.prototype); \
+                 ['length', 'byteLength', 'byteOffset', 'buffer'].forEach(function (k) { Object.defineProperty(proto, k, { get: function () { ran++; return 1; }, configurable: true }); }); \
+                 var whole = new Uint8ClampedArray([5, 6, 7, 8]), base = new ArrayBuffer(8), part = new Uint8ClampedArray(base, 2, 4); \
+                 new Uint8Array(base).set([0, 1, 2, 3, 4, 5, 6, 7]);",
+            )
+            .unwrap();
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(whole, false), ran].join();"), "4,0");
+        assert!(slot.take().is_none(), "nothing is kept unless asked");
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(whole, true), ran].join();"), "4,0");
+        assert_eq!(slot.take(), Some(vec![5, 6, 7, 8]));
+        assert_eq!(text(&mut runtime, "return [__rk.pixelsIn(part, true), ran].join();"), "4,0");
+        assert_eq!(slot.take(), Some(vec![2, 3, 4, 5]), "a view's own part of its buffer");
+        for other in [
+            "new Uint8Array(4)", "new Int8Array(4)", "new ArrayBuffer(4)", "new DataView(new ArrayBuffer(4))", "[1, 2, 3, 4]", "'abcd'", "4", "null", "undefined",
+            "Object.create(whole)", "new Proxy(whole, {})", "{ length: 4, get buffer() { ran++; return whole.buffer; } }",
+        ] {
+            assert_eq!(text(&mut runtime, &format!("return [__rk.pixelsIn({other}, true), ran].join();")), "-2,0", "{other}");
+            assert!(slot.take().is_none(), "{other}");
+        }
+        assert_eq!(
+            text(&mut runtime, "var left = new ArrayBuffer(4), gone = new Uint8ClampedArray(left); left.transfer(); return [__rk.pixelsIn(gone, true), ran].join();"),
+            "-1,0"
+        );
+        assert!(slot.take().is_none());
     }
 }

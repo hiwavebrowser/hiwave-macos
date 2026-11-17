@@ -425,7 +425,7 @@ fn an_engine_events_dispatch_state_is_its_own() {
 fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() {
     let got = bounded(|| {
         let (b, _doc) = bindings(false);
-        b.evaluate(
+        b.evaluate_as_page_script(
             "var calls = 0, seen = [], p;
              window.addEventListener('unhandledrejection', function (e) {
                  seen.push([e.type, e.cancelable, e.promise === p, e.reason, e.isTrusted].join(':'));
@@ -438,4 +438,42 @@ fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() 
         text(b.evaluate("seen.join() + ' calls=' + calls").unwrap())
     });
     assert_eq!(got, "unhandledrejection:true:true:r:true calls=0");
+}
+
+/// The load-listener check made when a frame goes into the document reads
+/// the tree and the handler attribute from the engine's own records: an
+/// ancestor lookup or attribute read the page has replaced is not asked,
+/// nor is a set constructor the page put in the built-in's place;
+/// the check ends, and its answers are the same. (The check is called
+/// here as web_frames.js calls it; an insertion made with these accessors
+/// replaced has other readers of the tree.)
+#[test]
+fn the_load_listener_check_asks_nothing_of_the_page() {
+    let (ran, heard) = bounded(|| {
+        let (b, _) = bindings(false);
+        b.enable_frames().unwrap();
+        b.evaluate(
+            "var ran = 0, none = function () {};
+             var box = document.createElement('div'); box.addEventListener('load', none, true); document.body.appendChild(box);
+             var marked = document.createElement('iframe'); marked.setAttribute('onload', '0');
+             var plain = document.createElement('iframe'), inner = document.createElement('iframe');
+             document.body.appendChild(plain); document.body.appendChild(marked); box.appendChild(inner);
+             Object.defineProperty(Node.prototype, 'parentNode', { get: function () { ran++; return this; }, configurable: true });
+             Object.defineProperty(Node.prototype, 'parentElement', { get: function () { ran++; return this; }, configurable: true });
+             Element.prototype.getAttribute = function () { ran++; return null; };
+             Element.prototype.hasAttribute = function () { ran++; return false; };
+             window.WeakSet = function () { ran++; this.add = function () { ran++; }; this.has = function () { ran++; return false; }; };",
+        )
+        .unwrap();
+        let heard = b
+            .host_turn(
+                "var H = __rk.domHooks, d = document; \
+                 return [!!H.loadSnapshot(d.querySelectorAll('iframe')[0]), !!H.loadSnapshot(d.querySelectorAll('iframe')[1]), \
+                         !!H.loadSnapshot(d.querySelectorAll('iframe')[2])].join();",
+                &[],
+            )
+            .unwrap();
+        (text(b.evaluate("String(ran)").unwrap()), text(heard))
+    });
+    assert_eq!((ran.as_str(), heard.as_str()), ("0", "true,false,true"), "page functions run; the check for the frame under a capturing listener, a plain frame, a frame with the attribute");
 }

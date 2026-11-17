@@ -641,6 +641,36 @@ pub(crate) struct ViewLayout {
     /// box, so its build may be skipped (`Engine::relayout` sets it, the
     /// next build takes it).
     pub(crate) incremental_skip_build: Cell<bool>,
+    /// LPF1: the view's last full build as built (before layout), kept while script writes
+    /// change only paint (`want_script_unlaid`), so a relayout for such writes builds only the
+    /// written elements and compares them with their boxes here; patched along with the laid-out
+    /// tree. `None` after any full build that was not asked to keep it.
+    pub(crate) script_unlaid: RefCell<Option<rustkit_layout::LayoutBox>>,
+    pub(crate) want_script_unlaid: Cell<bool>,
+    /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
+    /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
+    /// kept tree, since the published boxes were not laid out from it.
+    pub(crate) retain_script_unlaid_now: Cell<bool>,
+    /// After a script write that changed more than paint, the relayouts the short path sits out
+    /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
+    /// not pay for a kept copy of its tree every frame.
+    pub(crate) script_cooldown: Cell<u32>,
+    /// LPF3: the cooldown the short path's last miss set, while its run of misses goes on; `None`
+    /// once it has ended (a hit, `SCRIPT_RESTYLE_IDLE` relayouts with no script paint write, a
+    /// navigation). A miss with a run going is one in a row: it sits out twice the last cooldown
+    /// (at least 1, at most `SCRIPT_RESTYLE_COOLDOWN`); a one-off miss sits out none. A relayout
+    /// the path refuses leaves the run as it is (R1: a scroll between two misses ended it).
+    pub(crate) script_last_cooldown: Cell<Option<u32>>,
+    /// A window or element scroll happened in the task that dirtied the page: the short path,
+    /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
+    pub(crate) scrolled_in_task: Cell<bool>,
+    /// Relayouts in a row that no script paint write asked for; at 8 the kept tree is let go.
+    pub(crate) script_idle: Cell<u32>,
+    /// The written elements (raw NodeIds) the coming relayout may restyle alone
+    /// (`Engine::relayout` sets it, `relayout_uncounted` takes it), and the child nodes the last
+    /// such restyle's build went into.
+    pub(crate) script_roots: RefCell<Option<Vec<usize>>>,
+    pub(crate) script_walked: Cell<Option<usize>>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
@@ -653,6 +683,18 @@ pub(crate) struct ViewLayout {
     pub(crate) failed_images: RefCell<FailedImages>,
     /// E54: which `<img>` elements have heard `load`, and for which image.
     pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+impl ViewLayout {
+    /// A navigation committed: the script restyle path starts the new document afresh. No kept
+    /// tree (its node ids were the old document's), no cooldown, and no run of misses (LPF3 R1).
+    pub(crate) fn forget_script_restyle(&self) {
+        self.script_unlaid.borrow_mut().take();
+        self.want_script_unlaid.set(false);
+        self.script_cooldown.set(0);
+        self.script_last_cooldown.set(None);
+        self.script_idle.set(0);
+    }
 }
 
 /// The current document's loaded images, as its script has been told of

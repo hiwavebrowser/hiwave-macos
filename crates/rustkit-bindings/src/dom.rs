@@ -780,6 +780,16 @@ impl DomHost {
         host.borrow().node(args).map(|n| n.id.raw())
     }
 
+    /// The `src` and `srcset` attributes of the bound document's node
+    /// `node` as they are now, when it is an `<img>` element.
+    pub(crate) fn img_sources(&self, node: usize) -> Option<(Option<String>, Option<String>)> {
+        let node = self.document.as_ref()?.get_node(NodeId::new(node))?;
+        if !node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("img")) {
+            return None;
+        }
+        Some((node.get_attribute("src").map(str::to_string), node.get_attribute("srcset").map(str::to_string)))
+    }
+
     /// The `sandbox` attribute of the bound document's node `node`, as it
     /// is now (`None`: no such attribute, or no such node).
     pub(crate) fn frame_sandbox(&self, node: usize) -> Option<String> {
@@ -1471,10 +1481,10 @@ enum Reach {
 }
 
 impl Reach {
-    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str) {
+    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str, logged: crate::Logged) {
         match self {
-            Reach::Seen => dirty.mark(bucket, cause),
-            Reach::Unseen => dirty.mark_unseen(bucket),
+            Reach::Seen => dirty.mark(bucket, cause, logged),
+            Reach::Unseen => dirty.mark_unseen(bucket, logged),
         }
     }
 }
@@ -2494,7 +2504,7 @@ pub(crate) fn install(
                 kind: kind.clone(),
                 op: op.clone(),
             });
-            d.mark(crate::DomDirty::Layout, "animation");
+            d.mark(crate::DomDirty::Layout, "animation", crate::Logged::No);
             JsValue::Undefined
         }),
     )?;
@@ -2649,6 +2659,7 @@ pub(crate) fn install(
             let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
             match mutate(&h.borrow(), args) {
             Ok(()) => {
+                let logged = if records.is_empty() { crate::Logged::No } else { crate::Logged::Yes };
                 let mut log = l.borrow_mut();
                 for record in records {
                     log.push(record);
@@ -2659,7 +2670,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                reach.mark(&d, DomDirty::Style, cause);
+                reach.mark(&d, DomDirty::Style, cause, logged);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -2681,14 +2692,18 @@ pub(crate) fn install(
             let (reach, cause) = write_reach(&h.borrow(), args, &d);
             match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
-                if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
-                    l.borrow_mut().push(record);
-                }
+                let logged = match record.filter(|_| bucket != DomDirty::Clean) {
+                    Some(record) => {
+                        l.borrow_mut().push(record);
+                        crate::Logged::Yes
+                    }
+                    None => crate::Logged::No,
+                };
                 trace_dirty(&h.borrow(), args, bucket);
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                reach.mark(&d, bucket, cause);
+                reach.mark(&d, bucket, cause, logged);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -2714,13 +2729,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), None));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             result
         }),
     )?;
@@ -2734,13 +2751,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), Some("checked")));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             JsValue::Null
         }),
     )?;
@@ -2819,7 +2838,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             node.set_adopted_styles(texts);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
         }),
     )?;
@@ -2842,7 +2861,7 @@ pub(crate) fn install(
             };
             let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
             document.set_style_sheet_disabled(&node, on);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
         }),
     )?;
@@ -2893,6 +2912,8 @@ const WRAPPERS_JS: &str = r#"
     // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
     // or `Object.defineProperty` afterwards changes nothing here.
     var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    // The constructor of install time too, for a set made later.
+    var WeakSetNow = WeakSet;
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
@@ -3132,7 +3153,7 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadSnapshot = HOOKS.loadReplay = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = HOOKS.watched = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
@@ -3216,11 +3237,8 @@ const WRAPPERS_JS: &str = r#"
         // that out the way it asks: a media element is one with nothing to
         // play. Without the methods the question itself threw (github.com's
         // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
-        // which takes this way to a canvas's node and deletes it.
-        Object.defineProperty(g, '__rustkit_canvas_slot', {
-            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
-            configurable: true, writable: true, enumerable: false
-        });
+        // which takes this way to a canvas's node from the host object.
+        __rk.canvasSlot = function (el) { var s = slotOf(el); return [s.gen, s.id]; };
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;
@@ -3278,8 +3296,8 @@ const WRAPPERS_JS: &str = r#"
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
-        w = Object.create(proto);
-        Object.defineProperty(w, SLOT, { value: slotRecord(id) });
+        w = objCreate(proto);
+        defineOwn(w, SLOT, { value: slotRecord(id) });
         cache.set(id, w);
         return w;
     }
@@ -3376,21 +3394,29 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
-        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute.
+        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute (`HOOKS.watched`: the names some definition observes).
         var ar = HOOKS.attrs && (op === 'setAttr' || op === 'removeAttr') && HOOKS.attrs(o, op, a);
+        // The steps that follow an attribute write act on three kinds of name only: `on<type>` (handlers),
+        // `async` and `src` (scripts), `src` (frames), `src` and `srcset` (images). Whether the name begins with
+        // o, s or a (either case) is one index read, with no call; every other name skips them.
+        var c0 = a[0];
+        var acts = !(op === 'setAttr' || op === 'removeAttr') ||
+            c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A';
         // Removing an absent attribute runs no attribute-change steps (DOM
         // "remove an attribute by name"), so it must not drop an assigned
         // on<type> handler. N.attr matches the name as the write does.
-        var changed = op === 'setAttr' ||
-            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
+        var changed = acts && (op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null));
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
-        if (changed) attributeChanged(o, a);
-        if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
-        if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        if (acts) {
+            if (changed) attributeChanged(o, a);
+            if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+            if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        }
         if (ar) ar();
         return r;
     }
@@ -3701,12 +3727,25 @@ const WRAPPERS_JS: &str = r#"
     // write `setAttribute` makes (the mutation record included), without the steps that only act
     // on another name (`on<type>` handlers, `async`, `src`): neither name is one.
     var accStr = String;
+    // `name` is a literal that is already lower case, so the custom-element reaction is only asked for
+    // when some definition watches it.
     function putPlain(el, name, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', name);
-        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', name);
+        var ar = HOOKS.attrs && HOOKS.watched[name] === true && HOOKS.attrs(el, 'setAttr', name, true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, name, text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
+        if (m) m();
+        if (ar) ar();
+    }
+    // setAttribute and removeAttribute for a name that none of the steps after a write act on (below): the
+    // same write and the same mutation record as `setData`, any case of name.
+    function putAttr(el, op, name, text, method) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, op, name);
+        var ar = HOOKS.attrs && HOOKS.attrs(el, op, name);
+        var r = N.write(gen, op, s.gen === gen ? s.id : -1, name, text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute '" + method + "'.", r);
         if (m) m();
         if (ar) ar();
     }
@@ -4035,7 +4074,9 @@ const WRAPPERS_JS: &str = r#"
     // (E54): the marks script reads `complete` and `decode()` from are
     // updated at once, not on the next event.
     function imageWritten(el, name) {
-        var n = String(name).toLowerCase();
+        var n = String(name);
+        if (n.length !== 3 && n.length !== 6) return;
+        n = n.toLowerCase();
         if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
             __rk.imageWritten(el);
         }
@@ -4044,12 +4085,24 @@ const WRAPPERS_JS: &str = r#"
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
-        setData(this, 'setAttr', String(name), String(value), 'setAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        // A name that begins with o, s or a (either case) may be one the steps after a write act on
+        // (`on<type>`, `async`, `src`, `srcset`): those take the full write. Any other name is a plain write.
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'setAttr', n, String(value), 'setAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'setAttr', n, String(value), 'setAttribute');
+        }
     };
     Element.prototype.removeAttribute = function (name) {
-        setData(this, 'removeAttr', String(name), null, 'removeAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'removeAttr', n, null, 'removeAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'removeAttr', n, null, 'removeAttribute');
+        }
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -4189,7 +4242,7 @@ const WRAPPERS_JS: &str = r#"
     function putClass(el, text) {
         var s = slotOf(el);
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
-        var ar = HOOKS.attrs && HOOKS.attrs(el, 'setAttr', 'class');
+        var ar = HOOKS.attrs && HOOKS.watched.class === true && HOOKS.attrs(el, 'setAttr', 'class', true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
         if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
         if (m) m();
@@ -4328,11 +4381,11 @@ const WRAPPERS_JS: &str = r#"
         byId: function (id) { return wrap(id); }
     };
     // What web_animations.js drives the engine's animated-style layer
-    // with; it takes this and deletes it. write: the element's entries,
+    // with, kept on the host object. write: the element's entries,
     // `[[property, value, composite], ...]`, or null for none. css: the
     // engine's CSS animations and transitions as of the last layout.
     // control: pause/play/cancel/finish one of them.
-    g.__rustkit_animated_style = {
+    __rk.animatedStyle = {
         write: function (el, entries) {
             var s = slotOf(el);
             N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
@@ -6654,6 +6707,13 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
+    function callOnError(t, h, event) {
+        try {
+            return callNow(h, t, event.message, event.filename, event.lineno, event.colno, event.error);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+        }
+    }
     // An element's on<type> handler (HTML §8.1.8): the value assigned through
     // its `on<type>` IDL attribute (`null` included, which turns the handler
     // off), else its `on<type>` content attribute. The attribute's text is
@@ -6678,9 +6738,10 @@ const WRAPPERS_JS: &str = r#"
     // depends on the throw, and one compile path is one place to get right.
     function compileHandler(src, el) {
         try {
-            return new Function('__rk_doc', '__rk_el',
-                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
-            )(el.ownerDocument || {}, el);
+            // A handler attribute is the document's code, whoever set it:
+            // its text first, then the one step that compiles it.
+            var body = 'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };';
+            return __rk.compileDocumentFunction('__rk_doc,__rk_el', body)(el.ownerDocument || {}, el);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
             return null;
@@ -6688,7 +6749,10 @@ const WRAPPERS_JS: &str = r#"
     }
     function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return null;
+        return src === null ? null : inlineFrom(t, type, src);
+    }
+    // The handler `src` is as `t`'s `on<type>` attribute, compiled once.
+    function inlineFrom(t, type, src) {
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
@@ -6734,8 +6798,11 @@ const WRAPPERS_JS: &str = r#"
         // name here too. Lowercasing unconditionally is fine: SVG's on<type>
         // attributes are lowercase already, so a case-sensitive SVG name
         // either is lowercase or names no handler attribute at all.
-        name = String(name).toLowerCase();
-        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+        name = String(name);
+        // `on` in either case, asked before lowering the name (most names are not handlers).
+        var n0 = name[0], n1 = name[1];
+        if (name.length > 2 && (n0 === 'o' || n0 === 'O') && (n1 === 'n' || n1 === 'N')) {
+            name = name.toLowerCase();
             var type = name.slice(2), a = ASSIGNED.get(t);
             if (a) delete a[type];
             // The body's attribute for a Window type is the Window's
@@ -6856,6 +6923,8 @@ const WRAPPERS_JS: &str = r#"
         if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
         var type = evType(event);
         var all = LISTENERS.get(t), list = all && all[type];
+        // A replayed `load` (below) reaches only what its record holds.
+        var only = ONLY !== null && ONLY.event === event ? ONLY : null;
         // The legacy type, at a target with no listener or handler for the
         // event's own (the user's wheel as `mousewheel`). The engine's
         // event changes type in the type map only, never by assignment.
@@ -6871,6 +6940,7 @@ const WRAPPERS_JS: &str = r#"
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
+                if (only && !setHas(only.entries, l)) continue;
                 if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
                 var passiveBefore = passiveNow;
                 passiveNow = l.passive === true ? event : null;
@@ -6878,8 +6948,15 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
-        if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
+        var h = capture || event[STOP_NOW] ? null
+            : only ? (t === only.target ? only.handler : null) : handlerOf(t, type);
+        if (typeof h !== 'function') return;
+        // `window.onerror` (HTML §8.1.8.2, the OnErrorEventHandler): for an
+        // ErrorEvent at the Window it is called with the event's message,
+        // filename, lineno, colno and error, and `true` back cancels.
+        var special = t === g && type === 'error' && PROTOS.ErrorEvent !== undefined && isProto(PROTOS.ErrorEvent, event);
+        var back = special ? callOnError(t, h, event) : callListener(t, h, event);
+        if (back === (special ? true : false) && setHas(CANCELABLE, event)) {
             if (isRealEvent(event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
@@ -6893,6 +6970,46 @@ const WRAPPERS_JS: &str = r#"
         // A composed event goes on from a shadow root to its host.
         return p || (HOOKS.shadowParent ? HOOKS.shadowParent(n, event) : null);
     }
+    // What a `load` dispatched at `target` right now would call: its own
+    // listeners and handler, and the capturing listeners above it (`load`
+    // does not bubble and stops at the document). `null` when nothing would
+    // hear it. For web_frames.js: Chrome fires a blank frame's `load` inside
+    // the frame's insertion; the engine's comes later and is replayed to
+    // this record, so what was added, or put in a handler's place, after
+    // the insertion does not hear it. `parsed`: the frame was the parser's,
+    // and at its insertion only its `onload` attribute could be on it.
+    //
+    // Read from the engine's own records: the handler as assigned or as the
+    // `onload` attribute in the node store, the listener registry, and the
+    // node store's parent, in a walk with an end.
+    var ONLY = null, LOAD_WALK_MAX = 65536;
+    HOOKS.loadSnapshot = function (target, parsed) {
+        var t = thisTarget(target), s = t[SLOT], a = parsed ? undefined : ASSIGNED.get(t);
+        var snap = objCreate(null), any = false;
+        snap.target = t; snap.event = null; snap.handler = null; snap.src = null; snap.entries = new WeakSetNow();
+        if (a && 'load' in a) { if (typeof a.load === 'function') snap.handler = a.load; }
+        else if (s && s.gen === gen) {
+            var src = N.attr(s.gen, s.id, 'onload');
+            // Compiled when the `load` is replayed, as a dispatch does.
+            if (src !== null) snap.src = src;
+        }
+        for (var n = t, steps = 0; !parsed && n && n !== g && steps < LOAD_WALK_MAX; steps++) {
+            var all = LISTENERS.get(n), list = all && all.load;
+            for (var i = 0; list && i < list.length; i++) {
+                if (n === t || list[i].capture) { setAdd(snap.entries, list[i]); any = true; }
+            }
+            n = n === doc || !n[SLOT] ? null : related(n, 'parent');
+        }
+        return any || snap.src !== null || typeof snap.handler === 'function' ? snap : null;
+    };
+    // Dispatch `event` at the record's target to what the record holds (a
+    // listener removed since is not called).
+    HOOKS.loadReplay = function (snap, event) {
+        var was = ONLY;
+        if (snap.src !== null) { snap.handler = inlineFrom(snap.target, 'load', snap.src); snap.src = null; }
+        snap.event = event; ONLY = snap;
+        try { return dispatchTo(snap.target, event); } finally { ONLY = was; snap.event = null; }
+    };
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
     // checkbox before its listeners run and clicks a label's control after.
@@ -6971,6 +7088,44 @@ const WRAPPERS_JS: &str = r#"
         trust(e);
         return dispatchTo(g, e);
     };
+
+    // The `error` event for an uncaught exception (HTML §8.1.4.6 "report
+    // an exception"). The runtime calls this with the exception before it
+    // is reported any further (`JsRuntime::set_error_events`), and with
+    // what the event is to say, which the runtime decides from the scripts
+    // the engine registered (`JsRuntime::register_script`): the thrown
+    // value, the message, the file, line and column. Script errors from
+    // another origin are reported without detail, as the HTML standard's
+    // muted errors: the value is null, the message "Script error.", no
+    // file, no position. Nothing here reads a URL or decides that.
+    // The event is the engine's own: trusted, cancelable, at the Window,
+    // built and dispatched with nothing a page can replace. `false` back
+    // means a listener canceled it, which keeps the exception out of the
+    // console.
+    __rk.fireError = function (value, message, file, line, column) {
+        var init = objCreate(null);
+        init.cancelable = true;
+        init.message = message;
+        init.filename = file;
+        init.lineno = line;
+        init.colno = column;
+        init.error = value;
+        var e = make('ErrorEvent', 'error', init);
+        trust(e);
+        return dispatchTo(g, e);
+    };
+    // `reportError(e)` (HTML §8.1.4.6): `e` is reported as an uncaught
+    // exception is, the `error` event first.
+    defineOwn(g, 'reportError', {
+        value: function reportError(e) {
+            if (arguments.length < 1) {
+                throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
+            }
+            // `true`: reported for the page, by the code that called this.
+            __rk.reportError(e, true);
+        },
+        writable: true, enumerable: true, configurable: true
+    });
 
     function Event(type, init) {
         if (!(this instanceof Event)) {

@@ -84,6 +84,10 @@ mod dom_accessor_cost_tests;
 #[cfg(test)]
 mod class_list_cost_tests;
 #[cfg(test)]
+mod attr_write_cost_tests;
+#[cfg(test)]
+mod attr_write_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
@@ -166,6 +170,8 @@ mod child_realm_hardening_tests;
 mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
+#[cfg(test)]
+mod window_error_event_tests;
 #[cfg(test)]
 mod host_object_tests;
 #[cfg(test)]
@@ -496,12 +502,13 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animationRound", "becomeFrame", "compose",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationRound", "becomeFrame", "builtins",
+    "canvasCall", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
-    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "locationHashSync",
+    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
@@ -530,9 +537,9 @@ pub(crate) const SHARED_SLOTS: &[&str] = &[
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     // Described natively (no page code runs) and queued in the runtime.
-    var reportError = __rk.reportError;
+    // Called on the host object: the realm's `error` event comes first.
     function report(e) {
-        try { reportError(e); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -605,7 +612,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // counts from the same time as one the top document sets.
         Q.liveAt = -1; Q.liveReal = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
-        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false;
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
@@ -822,7 +829,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         if (delay < 0) delay = 0;
         var id = Q.nextId++;
         var timer = objCreate(null);
-        timer.id = id; timer.seq = id; timer.due = (frame ? Q.now : liveNow()) + delay; timer.cb = cb; timer.args = args;
+        // A timer set outside a real turn's timer slice (a frame callback, an event handler, a network
+        // callback after a real turn) counts from the turn's real progress, not from its start
+        // (LINKS-SLOW R1: a 10 ms timeout set after 8 ms of frame work ran 2 ms after it was set).
+        var base = frame ? Q.now : Q.liveAt >= 0 ? liveNow() : Q.realTurn && !Q.det ? turnNow() : Q.now;
+        timer.id = id; timer.seq = id; timer.due = base + delay; timer.cb = cb; timer.args = args;
+        // LINKS-SLOW: in a real turn a timeout also keeps the page clock's reading when it is set
+        // (`performance.now()`'s, on the tree's clock), and does not run until that clock has
+        // moved its delay: the page never sees a timeout early, whatever the turn's real-time base
+        // read (the loop's clock and the page's are each re-anchored per turn, a millisecond or two
+        // apart). Not on the stepped or deterministic clocks, which have no real turns.
+        if ((Q.liveAt >= 0 || Q.realTurn) && !Q.det && !frame) { timer.setPage = treeNow(); timer.delay = delay; }
         if (frame) { timer.k = nextFrame(); timer.due = frameAt(timer.k); }
         timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
         // The document that set it, and that document's own way to run it.
@@ -910,7 +927,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function call(timer) {
         try {
             if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
-            else evalNow(toText(timer.cb));
+            else {
+                // A string timer is the document's code: its text first,
+                // then the one step that compiles and runs it.
+                var text = toText(timer.cb);
+                __rk.runDocumentScript(text);
+            }
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
@@ -929,10 +951,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.taskFrom = Q.nextId;
         for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
         while (ran < max && !(until && realNow() >= until)) {
-            var best = -1;
+            var best = -1, pageNow = -1;
             for (var i = 0; i < Q.count; i++) {
                 var t = timers[i];
                 if (timersOnly && t.frame) continue;
+                // A timeout held for the page clock (`setPage`) is skipped, not waited on: the
+                // timers due behind it still run (LINKS-SLOW R1).
+                if (typeof t.setPage === 'number' && !Q.det) {
+                    if (pageNow < 0) pageNow = treeNow();
+                    if (pageNow - t.setPage < t.delay) continue;
+                }
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
@@ -957,6 +985,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // the real clock it keeps its grid, as Chrome's does: the next
             // run is the first of its periods after the turn's time.
             if (timer.every) {
+                // Only an interval's first run is held for the page clock; the rest keep its grid.
+                timer.setPage = undefined;
                 timer.due += timer.every;
                 var from = liveNow();
                 if (timer.due <= from) {
@@ -1001,6 +1031,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return ran;
     }
     __rk.runTimers = function (horizon, max) {
+        Q.realTurn = false;
         return runTimers(horizon, max, false);
     };
     // The load's clock, one callback at a time, so the host can publish a
@@ -1036,6 +1067,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
+        Q.realTurn = false;
         turnBegins();
         var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
@@ -1067,6 +1099,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // `real`: `delta` is real time that has passed (the app's live loops),
     // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
     __rk.advanceTimersFramed = function (delta, max, frameMs, real, before) {
+        Q.realTurn = !!real;
         turnBegins();
         var target = Q.now + delta;
         var start = realNow();
@@ -1175,10 +1208,21 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     __rk.nextTimer = function () {
         // Only a number is a time; compared and subtracted here, with no
         // call.
-        var due = -1;
+        var due = -1, page = -1;
         for (var i = 0; i < Q.count; i++) {
             var at = timers[i].due;
             if (typeof at !== 'number') continue;
+            // A timeout held for the page clock (`setPage`) is due when that clock has moved its
+            // delay, if that is later.
+            var t = timers[i];
+            if (typeof t.setPage === 'number' && !Q.det) {
+                if (page < 0) page = treeNow();
+                // What is left is measured now: it counts from the turn's real progress, not from
+                // its start, or the loop's deadline is already past and it turns back to back
+                // until the page clock catches up (LINKS-SLOW R1).
+                var left = t.setPage + t.delay - page;
+                if (left > 0 && turnNow() + left > at) at = turnNow() + left;
+            }
             if (due < 0 || at < due) due = at;
         }
         if (due < 0) return -1;
@@ -1246,6 +1290,18 @@ pub(crate) struct DirtyMark {
     /// whatever property: an animation frame over the painted boxes can
     /// answer a read when no value a layout places moved.
     other_since_layout: Cell<bool>,
+    /// LPF1: the pending bucket holds a mark with no `MutationLog` record behind it (a sheet
+    /// adopted or disabled, a write or mutation the log does not record, Web Animations' layer, the
+    /// embedder's `mark_dirty`). The engine then trusts no dirty set built from the log alone.
+    unlogged: Cell<bool>,
+}
+
+/// Whether a dirty mark's write pushed a `MutationLog` record (LPF1 R1): every caller of
+/// [`DirtyMark::mark`] says so, since it cannot be told from the write's kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Logged {
+    Yes,
+    No,
 }
 
 /// A layer write of paint properties (`opacity`, `color`,
@@ -1258,11 +1314,31 @@ pub(crate) const LAYER_TRANSFORM: u8 = 2;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
-    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
+    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str, logged: Logged) {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
             self.other_since_layout.set(true);
-            self.mark_animation_layer(bucket, kind);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bump(bucket, kind);
+        }
+    }
+
+    /// A mark with no `MutationLog` record behind it (see `unlogged`).
+    pub(crate) fn note_unlogged(&self) {
+        self.unlogged.set(true);
+    }
+
+    /// Whether the pending bucket holds a mark with no log record (see `unlogged`).
+    pub(crate) fn unlogged(&self) -> bool {
+        self.unlogged.get()
+    }
+
+    fn bump(&self, bucket: DomDirty, kind: &'static str) {
+        self.bucket.set(self.bucket.get().max(bucket));
+        if !self.since_layout.replace(true) {
+            self.cause.set(Some(kind));
         }
     }
 
@@ -1278,10 +1354,8 @@ impl DirtyMark {
     /// the forced-layout log like every other mark.
     pub(crate) fn mark_animation_layer(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
-            self.bucket.set(self.bucket.get().max(bucket));
-            if !self.since_layout.replace(true) {
-                self.cause.set(Some(kind));
-            }
+            self.unlogged.set(true);
+            self.bump(bucket, kind);
         }
     }
 
@@ -1293,6 +1367,7 @@ impl DirtyMark {
     /// only the reads that see the values lay out (`needs_layout_for`).
     pub(crate) fn mark_animation_paint(&self, bucket: DomDirty, reads: u8) {
         if bucket != DomDirty::Clean {
+            self.unlogged.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
             self.layer_since_layout.set(self.layer_since_layout.get() | reads);
         }
@@ -1321,8 +1396,11 @@ impl DirtyMark {
     /// It is still a write the engine has to lay out, so it is beyond the
     /// animated-style layer: the paint-only animation frame must not skip
     /// it. A no-op write (`Clean`) is not a write and marks nothing.
-    pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
+    pub(crate) fn mark_unseen(&self, bucket: DomDirty, logged: Logged) {
         if bucket != DomDirty::Clean {
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
             self.beyond_animation_layer.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
         }
@@ -1345,6 +1423,7 @@ impl DirtyMark {
 
     fn take(&self) -> DomDirty {
         self.beyond_animation_layer.set(false);
+        self.unlogged.set(false);
         self.bucket.replace(DomDirty::Clean)
     }
 
@@ -1596,15 +1675,41 @@ impl Drop for InRealm<'_> {
     }
 }
 
+/// Whether the errors of a script fetched for the document at `document`
+/// are reported to the page without detail (the HTML standard's muted
+/// errors): `redirects` are the URLs that redirected on the way, `landed`
+/// the URL of the response that was read. In full only when the document
+/// has an origin of its own and every one of those URLs is of it.
+pub fn script_without_detail<'a>(
+    document: Option<&Url>,
+    redirects: impl IntoIterator<Item = &'a Url>,
+    landed: &'a Url,
+) -> bool {
+    let Some(document) = document else {
+        return true;
+    };
+    let origin = document.origin();
+    if !origin.is_tuple() {
+        return true;
+    }
+    redirects.into_iter().chain(std::iter::once(landed)).any(|url| url.origin() != origin)
+}
+
 /// What a page asked of its frames (web_frames.js): show `url` in the
 /// iframe element `node` (`Some`), or that element left the document
 /// (`None`). `sandbox` is the element's `sandbox` attribute for this
 /// navigation: its value when the request was made (`None`: no attribute).
+/// `initial`: the document is the about:blank of the frame's insertion,
+/// whose `load` goes to what could hear it then ([`DomBindings::frame_loaded`]).
+/// `quiet`: nothing could, so no `load` is fired at the element (Chrome
+/// fired it inside the insertion, to nobody).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameRequest {
     pub node: usize,
     pub url: Option<String>,
     pub sandbox: Option<String>,
+    pub initial: bool,
+    pub quiet: bool,
 }
 
 pub struct DomBindings {
@@ -1707,7 +1812,7 @@ impl DomBindings {
         let mut runtime = self.runtime.borrow_mut();
         runtime.register_host_function(
             "__rustkit_frame_request",
-            2,
+            3,
             Box::new(move |args| {
                 if let Some(JsValue::Number(node)) = args.first() {
                     let node = *node as usize;
@@ -1731,7 +1836,13 @@ impl DomBindings {
                         Some(_) => host.borrow().frame_sandbox(node).or(as_parsed),
                         None => None,
                     };
-                    queue.push(FrameRequest { node, url, sandbox });
+                    // 1: the insertion's blank document, heard by nothing;
+                    // 2: heard by what the page half recorded.
+                    let mode = match args.get(2) {
+                        Some(JsValue::Number(mode)) => *mode as u8,
+                        _ => 0,
+                    };
+                    queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1 });
                 }
                 JsValue::Null
             }),
@@ -1825,11 +1936,11 @@ impl DomBindings {
 
     /// Fire `load` at this document's iframe `node` (the child's load is
     /// done, or a cross-origin frame was left blank).
-    pub fn frame_loaded(&self, node: usize) -> Result<bool, BindingError> {
+    pub fn frame_loaded(&self, node: usize, initial: bool) -> Result<bool, BindingError> {
         let fired = self
             .runtime
             .borrow_mut()
-            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}) : false;"), &[])?;
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}, {initial}) : false;"), &[])?;
         Ok(matches!(fired, JsValue::Boolean(true)))
     }
 
@@ -1864,6 +1975,9 @@ impl DomBindings {
         // Promise rejections are announced to the page (`__rk.fireRejection`,
         // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
         runtime.set_rejection_events(true);
+        // An uncaught exception is announced the same way (`__rk.fireError`):
+        // the `error` event at the Window.
+        runtime.set_error_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
@@ -2045,8 +2159,17 @@ impl DomBindings {
         // they do not make a geometry read lay the page out.
         if bucket != DomDirty::Clean {
             self.dirty.beyond_animation_layer.set(true);
+            self.dirty.note_unlogged();
         }
         self.dirty.bucket.set(self.dirty.get().max(bucket));
+    }
+
+    /// Whether the invalidation pending (until `take_dirty`) holds a mark with no `MutationLog`
+    /// record behind it: a sheet adopted or disabled, a write the log does not record, Web
+    /// Animations' layer, or a `mark_dirty` from the embedder. Read before `take_dirty`. A dirty
+    /// set computed from the log alone is then not the whole of what changed (LPF1).
+    pub fn dirty_unlogged(&self) -> bool {
+        self.dirty.unlogged()
     }
 
     /// Whether the invalidation pending (until `take_dirty`) holds anything
@@ -2414,7 +2537,7 @@ impl DomBindings {
         web_intl_likely::install(runtime)?;
         if !lazy {
             runtime.evaluate_with_host(include_str!("web_streams.js"))?;
-            runtime.evaluate_script(include_str!("web_intl.js"))?;
+            runtime.evaluate_with_host(include_str!("web_intl.js"))?;
         }
 
         // IPC bridge for communication with Rust: the app's own documents
@@ -2954,6 +3077,8 @@ impl DomBindings {
         // Update state
         self.window.borrow_mut().location = location.clone();
         self.canvases.borrow_mut().origin = Some(url.origin());
+        // The file an `error` event names for code with no script of its own.
+        self.runtime.borrow_mut().set_document_url(url.as_str());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
@@ -3031,6 +3156,28 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_script(script)
             .map_err(Into::into)
+    }
+
+    /// Evaluate `script` as a script of the page's own (unnamed), not as
+    /// the host's: what it rejects is announced to the page, and an error
+    /// raised for its calls is its own. For tests whose script stands for a
+    /// page's; a host's script goes through [`Self::evaluate`], and a
+    /// page's real scripts through [`Self::evaluate_named`].
+    #[doc(hidden)]
+    pub fn evaluate_as_page_script(&self, script: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_document_script(script)
+            .map_err(Into::into)
+    }
+
+    /// Say what the page script evaluated as `name` is (see
+    /// [`JsRuntime::register_script`]): the script at `url`, and whether
+    /// its errors are reported to the page without detail. An `error`
+    /// event for an exception thrown in a script never registered carries
+    /// no detail.
+    pub fn register_script(&self, name: &str, url: &str, muted: bool) {
+        self.runtime.borrow_mut().register_script(name, url, muted);
     }
 
     /// Evaluate a page script as `path` (see
@@ -3207,6 +3354,7 @@ impl DomBindings {
     /// bubble). Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_image_error(&self, node: usize) -> Result<(), BindingError> {
+        self.canvases.borrow_mut().loaded.remove(&node);
         self.runtime.borrow_mut().evaluate_host_turn(&format!(
             "return __rk.imageFailed({node});"
         ), &[])?;
@@ -3221,6 +3369,13 @@ impl DomBindings {
     /// `load` fires at it (it does not bubble). Listener exceptions are
     /// queued, see [`Self::take_reported_errors`].
     pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
+        // The engine's own record of the element's image, which a canvas
+        // draws from (web_canvas.rs): kept before any listener runs.
+        if let Some((src, srcset)) = self.dom_host.borrow().img_sources(node) {
+            // No URL: a `data:` image, which is its own `src`.
+            let url = if url.is_empty() { src.clone().unwrap_or_default() } else { url.to_string() };
+            self.canvases.borrow_mut().loaded.insert(node, web_canvas::LoadedImage { src, srcset, url, width, height });
+        }
         // The URL is an argument, never script source (`fire_key_event`).
         self.runtime
             .borrow_mut()
@@ -3561,9 +3716,25 @@ impl DomBindings {
         self.runtime.borrow_mut().take_dynamic_import_failures()
     }
 
-    /// Supply one requested module's source, or why there is none.
+    /// Supply one requested module's source, or why there is none. The
+    /// module is registered as the script it is ([`Self::register_script`]):
+    /// reported in full only when the URL asked for and the URL it was
+    /// served from are both of this document's origin.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
+        if let Ok(fetched) = &outcome {
+            let document = self.document_url();
+            let muted = match (Url::parse(requested), Url::parse(&fetched.final_url)) {
+                (Ok(asked), Ok(landed)) => script_without_detail(document.as_ref(), [&asked], &landed),
+                _ => true,
+            };
+            self.register_script(&fetched.final_url, &fetched.final_url, muted);
+        }
         self.runtime.borrow_mut().supply_module(requested, outcome);
+    }
+
+    /// This document's URL, as [`Self::set_location`] last gave it.
+    pub fn document_url(&self) -> Option<Url> {
+        Url::parse(&self.window.borrow().location.href).ok()
     }
 
     /// Advance a started module and say where it is.
@@ -3832,7 +4003,23 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_host_bookkeeping("return __rk.nextTimer()")
         {
-            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            // Rounded up: a timer set in a real turn is due at a fraction of a millisecond, and a
+            // loop that waits the delay must find it due (LINKS-SLOW). Truncated, the loop woke
+            // a fraction early and the rest became its 2 ms floor: ~2 ms late every link.
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n.ceil() as u64),
+            _ => None,
+        }
+    }
+
+    /// [`Self::next_timer_delay`] with its fraction of a millisecond (LINKS-SLOW): a timer set in a
+    /// real turn is due at a fraction, and the content loop aims its wake at that instant.
+    pub fn next_timer_delay_exact(&self) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping("return __rk.nextTimer()")
+        {
+            Ok(JsValue::Number(n)) if n >= 0.0 && n.is_finite() => Some(n),
             _ => None,
         }
     }
@@ -4800,7 +4987,7 @@ mod tests {
         d.laid_out();
         assert!(!d.needs_layout_for("computed_style"), "a layout publishes the layer");
         // A seen write afterwards forces every read again.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.needs_layout_for("offset"));
         assert_eq!(d.cause(), Some("text"));
     }
@@ -4819,7 +5006,7 @@ mod tests {
         // A write the published layout cannot see (display:none subtree)
         // still changes the DOM the engine lays out next: it is beyond the
         // layer, so the paint-only frame is not taken.
-        d.mark_unseen(DomDirty::Style);
+        d.mark_unseen(DomDirty::Style, Logged::Yes);
         assert!(d.beyond_animation_layer(), "an unseen write is beyond the layer");
         assert_eq!(d.cause(), Some("animation"), "it does not rename the first cause");
         assert_eq!(d.take(), DomDirty::Style);
@@ -4827,7 +5014,7 @@ mod tests {
 
         // Unseen first, on a current layout: no forced layout, but beyond.
         let d = DirtyMark::default();
-        d.mark_unseen(DomDirty::Layout);
+        d.mark_unseen(DomDirty::Layout, Logged::Yes);
         assert!(!d.written_since_layout(), "a read needs no forced layout");
         assert_eq!(d.cause(), None);
         assert!(d.beyond_animation_layer());
@@ -4836,14 +5023,14 @@ mod tests {
         // not a write, seen or unseen.
         let d = DirtyMark::default();
         d.mark_animation_layer(DomDirty::Layout, "animation");
-        d.mark(DomDirty::Clean, "style");
-        d.mark_unseen(DomDirty::Clean);
+        d.mark(DomDirty::Clean, "style", Logged::Yes);
+        d.mark_unseen(DomDirty::Clean, Logged::Yes);
         assert!(!d.beyond_animation_layer(), "a no-op write leaves the paint-only frame alone");
         assert_eq!(d.cause(), Some("animation"));
         assert_eq!(d.get(), DomDirty::Layout);
 
         // A real seen write after the layer: beyond, cause kept as first.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.beyond_animation_layer());
         assert_eq!(d.cause(), Some("animation"));
     }

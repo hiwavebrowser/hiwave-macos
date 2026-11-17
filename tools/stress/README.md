@@ -32,8 +32,8 @@ Full shas, licences and build notes are in `pins.json`.
 ```bash
 tools/stress/fetch.sh                                   # once per machine
 
-# HiWave, real window (takes ~/.claude/realwindow.lock, HID idle >= 180 s,
-# refuses 17:00-19:30 ET; the app it starts is the only process it stops)
+# HiWave, real window (takes ~/.claude/realwindow.lock, needs HID idle >= 180 s;
+# the app it starts is the only process it stops)
 python3 tools/stress/run.py --suite speedometer --engine hiwave --binary target/release/hiwave --label develop
 python3 tools/stress/run.py --suite motionmark  --engine hiwave --binary target/release/hiwave --label develop
 python3 tools/stress/run.py --suite jetstream   --engine hiwave --binary target/release/hiwave --label develop
@@ -85,16 +85,31 @@ One JSON file per run in `--out` (default `~/zg-measure/stress-runs`):
 `score`, `sub_scores`, `wall_s`, `load_avg_before`/`after`, `errors` (what
 the page threw or logged with `console.error`), `last_progress`,
 `log_findings` (lines of the app's log that say a script was stopped or the
-process died), `off_machine`, `offline_checks`, `engine_flags` and, when the
-run did not finish, `log_tail`.
+process died), `engine_errors`, `frames`, `off_machine`, `offline_checks`,
+`engine_flags` and, when the run did not finish, `log_tail`.
+
+`errors` is what the page heard: the window's `error` and
+`unhandledrejection` events and `console.error`. `engine_errors` is what the
+engine logged as uncaught (the app's console log, first 20), whether or not
+the page heard it: as of 2026-11-15 the engine fires no `error` event at the
+window for an uncaught exception
+(docs/diagnostics/2026-11-15/error_event_cft148.json is Chrome's answer), so
+a run can have `errors: []` and a full `engine_errors`. Read both.
+
+`frames` (MotionMark) is, for each test that finished, its frames in up to
+twelve steps of rising complexity (`from`, `to`, `frames`, `mean_ms`,
+`max_ms`, `fps`), how many frame lengths were not a positive number
+(`unusable`), and the complexity each ramp settled on (`ramps`). A test
+scores about 0 when no step holds the target frame rate.
 
 `engine_flags` is every `HIWAVE_` variable the engine process was started
 with: the suite's own (below), what `--env` asked for, what the offline
 checks force, and whatever the shell had. `{}` for Chrome. A score is read
 with its flags: two runs whose `engine_flags` differ did not measure the
-same engine. Records from before 2026-11-15 have no such key. (The harness's
-own `HIWAVE_STRESS_TURN_BUDGET_MS` is not listed there; it is
-`live_turn_budget_ms`.)
+same engine. Records from before 2026-11-15 have no such key.
+`HIWAVE_STRESS_TURN_BUDGET_MS` is listed there only for a real-window run
+that raised the budget (the app is started with it, at the run's number);
+`live_turn_budget_ms` has the number for either HiWave engine.
 
 ### What a suite's engine is started with
 
@@ -204,8 +219,13 @@ animation loop and every later test. To list everything that stops a suite in on
 
     HIWAVE_STRESS_TURN_BUDGET_MS=60000 python3 tools/stress/run.py --suite motionmark --engine hiwave-headless --binary <parity-capture>
 
-- For `hiwave-headless` only (it passes `--live-turn-budget-ms` to parity-capture, with
-  `--interrupt-scripts`, which the flag requires); refused for the other engines.
+- For the HiWave engines; refused for Chrome. `hiwave-headless` gets it as `--live-turn-budget-ms`
+  (with `--interrupt-scripts`, which the flag requires). The app (`--engine hiwave`) reads the variable
+  itself when it builds a content view's engine, and run.py starts it with the run's number; a run
+  without a raised budget starts the app with the variable removed, whatever the shell had. The app
+  honours it only beside `HIWAVE_CONSOLE_LOG` (which this harness always sets and a normal launch does
+  not have) and only up to 300000 ms; run.py refuses more for the app, and refuses the variable in
+  `--env` (it would not be recorded). An app started any other way is unchanged: 5000 ms.
 - Off unless set; the engine's default does not change. Whole milliseconds, 1 to 3600000; above the run's
   wall limit it is clamped to that limit.
 - It raises more than the stop: the same number is the turn's whole allowance of script time
@@ -232,6 +252,7 @@ discarded for load), a candidate with no score, a candidate that failed
 any of its runs, a different N on the two arms. Nothing compared at all (a
 mistyped label) exits 2. A finding is read before it is rerun.
 
-Real-window runs also re-check the 17:00-19:30 ET window after every wait
-(idle seat, load) and once more immediately before the app starts, and
-refuse when now plus the run's wall limit reaches 17:00.
+Real-window runs check that the seat is idle (HID idle >= 180 s) when they
+take the lock, waiting for it if need be, and once more immediately before
+the app starts, after the load wait. There is no time-of-day rule: the
+owner removed the evening no-window rule on 2026-11-16.

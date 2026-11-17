@@ -415,6 +415,11 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+mod script_error_detail;
+#[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
+mod frame_canvas_tests;
 #[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
@@ -466,6 +471,8 @@ mod script_module_tests;
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pseudo_custom_props_var_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -595,6 +602,8 @@ mod style_string_brace_tests;
 #[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
+mod canvas_pixels_tests;
+#[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
 mod flex_cross_size_tests;
@@ -680,6 +689,10 @@ mod css_transitions_tests;
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
+#[cfg(all(test, feature = "headless"))]
+mod layout_per_frame_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2216,7 +2229,7 @@ impl ScriptFeed {
             0,
             Err(ScriptOutcome::Skipped("script fetch lost")),
             false,
-            ScriptFetched { kind, fetch: None, arrived: None },
+            ScriptFetched { kind, fetch: None, arrived: None, without_detail: false },
         ))
     }
 
@@ -2263,6 +2276,10 @@ struct ScriptFetched {
     fetch: Option<std::time::Duration>,
     /// When its body or failure arrived; `None` for an inline script.
     arrived: Option<std::time::Instant>,
+    /// Its errors are reported to the page without detail
+    /// (`script_error_detail`): every fetched script until its response
+    /// says otherwise; never an inline one.
+    without_detail: bool,
 }
 
 impl ScriptFetched {
@@ -2465,6 +2482,10 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+    /// LINKS-SLOW: the same wait in whole microseconds, rounded up, when this turn's own timers
+    /// set it (`None` otherwise): a timer set in a real turn is due at a fraction of a
+    /// millisecond, and the content loop aims its wake at that instant.
+    pub next_timer_exact_us: Option<u64>,
 }
 
 /// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
@@ -6318,6 +6339,9 @@ impl Engine {
             if timer_stopped {
                 log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(_)));
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6342,7 +6366,8 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_ms);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -6514,6 +6539,16 @@ impl Engine {
         self.pump_live_on(id, elapsed_ms, true).await
     }
 
+    /// [`Self::pump_live_real`] for a turn whose clock kept `fraction_ms` of real time it did not
+    /// give the page (the content loop's `LiveClock`): the turn's real instant is that much
+    /// earlier than its start, so the timers' clock reads real time (LINKS-SLOW).
+    pub async fn pump_live_real_at(&mut self, id: EngineViewId, elapsed_ms: u64, fraction_ms: f64) -> LivePump {
+        LIVE_FRACTION_MS.with(|f| f.set(if fraction_ms.is_finite() && fraction_ms > 0.0 { fraction_ms } else { 0.0 }));
+        let out = self.pump_live_on(id, elapsed_ms, true).await;
+        LIVE_FRACTION_MS.with(|f| f.set(0.0));
+        out
+    }
+
     /// Nested browsing contexts, Stage 2: take what this view's document
     /// asked of its iframes and do it. A same-origin `src` (or none:
     /// about:blank) is fetched, parsed and bound in a new realm of the
@@ -6564,7 +6599,7 @@ impl Engine {
             if request.sandbox.is_some() || (!blank && !same_origin) {
                 // The cross-origin floor: no request, no document, one `load`.
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             }
@@ -6581,7 +6616,7 @@ impl Engine {
                     Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
                         // The cross-origin floor, as for a cross-origin `src`.
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6602,7 +6637,7 @@ impl Engine {
                     // redirect, or the request failed): the floor too.
                     Err(_) => {
                         if let Some(parent) = parent_of(self, id) {
-                            let _ = parent.frame_loaded(request.node);
+                            let _ = parent.frame_loaded(request.node, false);
                         }
                         continue;
                     }
@@ -6612,7 +6647,7 @@ impl Engine {
             // parses (HTML §13.2.3.5: `<noscript>` content is text).
             let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
                 if let Some(parent) = parent_of(self, id) {
-                    let _ = parent.frame_loaded(request.node);
+                    let _ = parent.frame_loaded(request.node, false);
                 }
                 continue;
             };
@@ -6645,6 +6680,9 @@ impl Engine {
                 continue;
             };
             child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            // The images its canvases draw: what the frame's own image loads
+            // put in the engine's image store, as for a top-level page.
+            child.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             // What a top-level page's bindings are given at load, for the
             // frame's: the engine's selector matcher (without it script's
             // `querySelector` fell back to the bindings' own, which does not
@@ -6670,12 +6708,34 @@ impl Engine {
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
             }
+            // The frame's linked stylesheets, before its scripts and its
+            // `load`, as a page's are before its own: what the parent's
+            // `load` handler measures in the frame is styled (Chrome 148,
+            // docs/diagnostics/2026-11-15/frame_style_cft148.json). A sheet
+            // over the subresource budget lands on a live turn, as a page's.
+            // Nothing of the page runs during this wait (the tree's one
+            // loop is here), so the frame cannot be navigated under it; a
+            // later request for the element drops this view and its sheets
+            // with it. The wait ends at the subresource budget.
+            match self.load_external_stylesheets_slotted(fid).await {
+                Ok((links, fetched, late)) => {
+                    if let Some(frame) = self.views.get_mut(&fid) {
+                        frame.sheet_links = links;
+                        frame.fetched_sheets = fetched;
+                        frame.live_sheets = late;
+                        frame.rebuild_link_sheets();
+                    }
+                }
+                // The live turn's link check asks for them again.
+                Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
+            }
             // The child's classic scripts, in document order.
-            let listed = child.evaluate_named(
+            // The engine's own question (not a page script: nothing of it
+            // is announced to the frame's page).
+            let listed = child.evaluate(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
                    return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
-                "rustkit#frames",
             );
             let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
@@ -6696,12 +6756,20 @@ impl Engine {
                         }
                         let fetched = loader.fetch(referrer.get_for(url.clone(), RequestDestination::Script)).await;
                         match fetched {
-                            Ok(response) if response.ok() => (response.text().await.unwrap_or_default(), url.to_string()),
+                            Ok(response) if response.ok() => {
+                                // What its `error` events may say, from where it was served in the end.
+                                child.register_script(url.as_str(), url.as_str(), script_error_detail::of_response(Some(&target), &response));
+                                (response.text().await.unwrap_or_default(), url.to_string())
+                            }
                             _ => continue,
                         }
                     }
-                    None if is_module => (text, format!("{target}#inline-module-{}", index + 1)),
-                    None => (text, format!("frame-inline#{}", index + 1)),
+                    None => {
+                        let name = if is_module { format!("{target}#inline-module-{}", index + 1) } else { format!("frame-inline#{}", index + 1) };
+                        // The frame's own code.
+                        child.register_script(&name, target.as_str(), false);
+                        (text, name)
+                    }
                 };
                 if is_module {
                     modules.push((name, source));
@@ -6766,8 +6834,13 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 view.frames.insert(request.node, FrameState { view: fid, url: target });
             }
-            if let Some(parent) = parent_of(self, id) {
-                let _ = parent.frame_loaded(request.node);
+            // The initial about:blank of a frame nothing listened to at
+            // its insertion: Chrome fired that `load` inside the insertion,
+            // so a handler set since must not hear it now.
+            if !request.quiet {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node, request.initial);
+                }
             }
             changed = true;
         }
@@ -7004,7 +7077,7 @@ impl Engine {
                             elapsed_ms,
                             live_timer_cap,
                             LIVE_FRAME_MS,
-                            turn_began.elapsed().as_secs_f64() * 1000.0,
+                            turn_began.elapsed().as_secs_f64() * 1000.0 + LIVE_FRACTION_MS.with(|f| f.get()),
                         )?
                     } else {
                         bindings.advance_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
@@ -7236,6 +7309,11 @@ impl Engine {
             Some(0)
         } else {
             bindings.next_timer_delay()
+        };
+        out.next_timer_exact_us = if out.next_timer_ms.is_some_and(|ms| ms > 0) {
+            bindings.next_timer_delay_exact().map(|ms| (ms * 1000.0).ceil() as u64)
+        } else {
+            None
         };
         view.doc.script_log.extend(stopped);
         let threw = threw
@@ -8309,6 +8387,8 @@ impl Engine {
         policy: Option<Arc<FetchPolicy>>,
     ) -> Option<ScriptFeed> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
+        // The document's own URL, for what each fetched script's errors may say.
+        let page_url = self.views.get(&id).and_then(|v| v.url.clone());
 
         // Collect in document order.
         enum Body {
@@ -8467,6 +8547,7 @@ impl Engine {
                     }
                     _ => None,
                 };
+                let page_url = page_url.clone();
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -8475,6 +8556,10 @@ impl Engine {
                         _ => None,
                     };
                     let fetch_started = std::time::Instant::now();
+                    // An inline script's errors are the page's; a fetched
+                    // one's are until its response is known to be the
+                    // document's origin all the way.
+                    let mut without_detail = external;
                     let result = match entry {
                         Err(outcome) => Err(outcome),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
@@ -8485,6 +8570,10 @@ impl Engine {
                         // One fetch per module URL (see `module_fetches`).
                         Ok((timing, Body::External(_))) if is_module => match shared_module {
                             Some(shared) => shared.await.map(|(final_url, source)| {
+                                without_detail = match Url::parse(&final_url) {
+                                    Ok(landed) => script_error_detail::without_detail(page_url.as_ref(), requested.iter(), &landed),
+                                    Err(_) => true,
+                                };
                                 label = final_url;
                                 (timing, source)
                             }),
@@ -8503,6 +8592,7 @@ impl Engine {
                                 .await;
                                 match fetched {
                                     Ok(Ok(response)) if response.ok() => {
+                                        without_detail = script_error_detail::of_response(page_url.as_ref(), &response);
                                         let received = guard.map(|g| g.received(&response));
                                         match response.text().await {
                                             Ok(text) => {
@@ -8541,6 +8631,7 @@ impl Engine {
                         kind,
                         fetch: external.then(|| fetch_started.elapsed()),
                         arrived: external.then(std::time::Instant::now),
+                        without_detail,
                     };
                     // A module's source is in: its imports start now. An
                     // external module's imports resolve against the URL it
@@ -8992,7 +9083,7 @@ impl Engine {
                     Some((label, _, _, _, facts)) => facts.cancelled(&inspector, &label),
                     None => {
                         let (label, kind, _) = &feed.entries[position];
-                        ScriptFetched { kind, fetch: None, arrived: None }.cancelled(&inspector, label);
+                        ScriptFetched { kind, fetch: None, arrived: None, without_detail: true }.cancelled(&inspector, label);
                     }
                 }
             }
@@ -9155,6 +9246,12 @@ impl Engine {
                 if module_url != label {
                     inspector.alias_script(&module_url, &label);
                 }
+                // An inline module is the page's own code; an external one
+                // is what its fetch found it to be.
+                match (label.starts_with("inline#"), &document_url) {
+                    (true, Some(document)) => bindings.register_script(&module_url, document.as_str(), false),
+                    _ => bindings.register_script(&module_url, &module_url, facts.without_detail),
+                }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
                 let (begun, begin_stopped) = with_script_js(bindings, || {
@@ -9302,12 +9399,16 @@ impl Engine {
                 if let Some(url) = document_url.as_ref() {
                     crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
+                // The page's own code: its `error` events name the document.
+                bindings.register_script(&label, document_url.as_ref().map_or("", |url| url.as_str()), false);
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
                 crate::console_log::alias(inspector.view_id(), &name, &label);
+                // What its `error` events may say was decided at its fetch.
+                bindings.register_script(&name, &label, facts.without_detail);
                 Some(name)
             };
             let began = std::time::Instant::now();
@@ -9629,12 +9730,17 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
-                timers_ms += step_started.elapsed().as_millis() as u64;
+                let slice_ms = step_started.elapsed().as_millis() as u64;
+                // A slice that ends in a record of its own (stopped, threw)
+                // has its time there, not in the errors' (SCRIPT-TIME-DUP).
+                if !(stopped || matches!(caught, Ok(Err(_)) | Err(_))) {
+                    timers_ms += slice_ms;
+                }
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
                 if stopped && !matches!(caught, Err(_)) {
-                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    let elapsed_ms = slice_ms;
                     log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
                     inspector_glue::log_script(
                         log,
@@ -10138,6 +10244,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -10664,6 +10771,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -10944,6 +11052,8 @@ impl Engine {
             info!(source = %label, bytes = text.len(), "Running inline script of an HTML load");
             let record = run(label.clone(), text.len(), &|| {
                 let _ = bindings.set_current_script(Some(node_id));
+                // An inline script of markup the host loaded: the page's own.
+                bindings.register_script(&label, bindings.document_url().as_ref().map_or("", |url| url.as_str()), false);
                 let result = bindings.evaluate_named(&text, &label).map(|_| ()).map_err(strip);
                 let _ = bindings.set_current_script(None);
                 result
@@ -11091,9 +11201,67 @@ impl Engine {
                     .set(only_script && nothing_dirty && pointer_restyle.is_none());
             }
         }
+        // LPF1: script writes that marked their elements for a new style and paint only (no box,
+        // no layout, no subtree or sibling restyle) may build those elements alone.
+        let cooling = self.views.get(&id).is_some_and(|view| {
+            let left = view.lay.script_cooldown.get();
+            // The cooldown's last relayout keeps its tree, for the attempt after it (LPF3: a
+            // `no kept tree` miss followed every cooldown).
+            if left == 1 {
+                view.lay.want_script_unlaid.set(true);
+            }
+            if left > 0 {
+                view.lay.script_cooldown.set(left - 1);
+            }
+            left > 0
+        });
+        // The one trust check (R1): everything that happened in the task is in the set the short
+        // path trusts. The set is from the log, so a mark with no log record made it full
+        // (`unlogged_mark`); a scroll in the task is not in it; and every cause is a script one.
+        let scrolled_in_task = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.lay.scrolled_in_task.replace(false));
+        let mut script_note = "-".to_string();
+        if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
+            match script_restyle_roots(&causes, dirty.as_ref(), scrolled_in_task) {
+                Ok(roots) => {
+                    if let Some(view) = self.views.get(&id) {
+                        view.lay.script_idle.set(0);
+                        *view.lay.script_roots.borrow_mut() = Some(roots);
+                    }
+                }
+                Err(why) => {
+                    script_note = format!("refused:{why}");
+                    // No script paint write in a row of relayouts: the kept tree is let go.
+                    if let Some(view) = self.views.get(&id) {
+                        let idle = view.lay.script_idle.get() + 1;
+                        view.lay.script_idle.set(idle);
+                        if idle >= SCRIPT_RESTYLE_IDLE {
+                            view.lay.want_script_unlaid.set(false);
+                            view.lay.script_unlaid.borrow_mut().take();
+                            // ... and the run of misses has ended (LPF3).
+                            view.lay.script_last_cooldown.set(None);
+                        }
+                    }
+                }
+            }
+        } else if cooling {
+            script_note = "cooling".to_string();
+        }
+        let tried = self.views.get(&id).is_some_and(|view| view.lay.script_roots.borrow().is_some());
         let layout_skipped = self.relayout_uncounted(id);
+        let mut script_walked = None;
         if let Some(view) = self.views.get(&id) {
             view.lay.incremental_skip_build.set(false);
+            view.lay.script_roots.borrow_mut().take();
+            script_walked = view.lay.script_walked.take();
+        }
+        if tried {
+            script_note = match script_walked {
+                Some(walked) => format!("hit:walked={walked}"),
+                None => format!("miss:{}", LAST_RESTYLE_MISS.with(|why| why.borrow().clone()).replace(' ', "_")),
+            };
         }
         let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
@@ -11148,7 +11316,7 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {} script_restyle={}",
             cause,
             causes.counts,
             causes.mutations,
@@ -11157,7 +11325,8 @@ impl Engine {
             stages,
             extract_ms,
             layout_skipped,
-            would
+            would,
+            script_note
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
@@ -11169,6 +11338,10 @@ impl Engine {
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
                     view.relayout_stats.layouts_skipped.saturating_add(1);
+            }
+            if let Some(walked) = script_walked {
+                view.relayout_stats.script_restyles = view.relayout_stats.script_restyles.saturating_add(1);
+                view.relayout_stats.last_restyle_walked = walked;
             }
         }
         Ok(())
@@ -11236,6 +11409,13 @@ impl Engine {
         {
             return Ok(true);
         }
+        // LPF1: script writes that change only paint build only the written elements.
+        let script_roots = self.views.get(&id).and_then(|view| view.lay.script_roots.borrow_mut().take());
+        if let Some(written) = script_roots {
+            if self.repaint_script_restyled(id, &document, &external_stylesheets, (bounds.width, bounds.height), written)? {
+                return Ok(true);
+            }
+        }
 
         let javascript_enabled = self.config.javascript_enabled;
         // INC5 stage 2: the incremental path takes the published tree back
@@ -11246,6 +11426,11 @@ impl Engine {
                 view.layout = None;
             }
         }
+        // LPF1: this build is the one the view publishes, so it is the one kept for script paint
+        // writes (when they asked for it).
+        if let Some(view) = self.views.get(&id) {
+            view.lay.retain_script_unlaid_now.set(true);
+        }
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -11253,6 +11438,9 @@ impl Engine {
             javascript_enabled,
             (bounds.width, bounds.height),
         );
+        if let Some(view) = self.views.get(&id) {
+            view.lay.retain_script_unlaid_now.set(false);
+        }
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -11541,6 +11729,201 @@ impl Engine {
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
+    }
+
+    /// LPF1: a relayout asked for by script writes that marked their elements for a new style
+    /// and paint only (`written`, from the frame's `DirtySet`). As the pointer restyle does, it
+    /// builds no more of the page than those elements, and, when their boxes come out as they were
+    /// built last time but for what is painted, copies the paint onto the laid-out tree and paints
+    /// it again: no full build and no layout. "As they were built last time" is the last full
+    /// build kept before layout (`ViewLayout::script_unlaid`, patched here too): the document no
+    /// longer has the old state to build. Anything else is a miss, named on the relayout line, and
+    /// the full build that follows keeps its tree for the next frame.
+    fn repaint_script_restyled(
+        &mut self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        size: (u32, u32),
+        written: Vec<usize>,
+    ) -> Result<bool, EngineError> {
+        let miss = |why: &str| {
+            debug!(?id, why, "Script restyle needs a full build");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = format!("script: {why}"));
+            Ok(false)
+        };
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        // The full build this relayout falls back to keeps its tree for the next one.
+        view.lay.want_script_unlaid.set(true);
+        let (Some(with), Some(_)) = (view.laid_with.as_ref(), view.layout.as_ref()) else {
+            return miss("no layout");
+        };
+        if with.size != size {
+            return miss("resized");
+        }
+        let Some(mut unlaid) = view.lay.script_unlaid.borrow_mut().take() else {
+            return miss("no kept tree");
+        };
+        // The topmost written elements, and the elements above them: the build walks down those
+        // and builds only what is under a root.
+        let body = document.body().map(|body| body.id.raw());
+        let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+        for raw in &written {
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a written element left the document");
+            };
+            let mut chain = Vec::new();
+            let mut parent = node.parent();
+            while let Some(p) = parent {
+                chain.push(p.id.raw());
+                parent = p.parent();
+            }
+            above.insert(*raw, chain);
+        }
+        let written_set: std::collections::HashSet<usize> = written.iter().copied().collect();
+        let roots: Vec<usize> = written
+            .iter()
+            .copied()
+            .filter(|raw| !above[raw].iter().any(|up| written_set.contains(up)))
+            .collect();
+        let mut path = std::collections::HashSet::new();
+        for root in &roots {
+            // The root element and body have no box of their own to patch.
+            if !body.is_some_and(|body| above[root].contains(&body)) {
+                return miss("the root element or body was written");
+            }
+            path.extend(above[root].iter().copied());
+        }
+        let mut pending: HashMap<usize, usize> = HashMap::new();
+        let mut steps = std::collections::HashSet::new();
+        for root in &roots {
+            let mut child = *root;
+            for parent in &above[root] {
+                if steps.insert((*parent, child)) {
+                    *pending.entry(*parent).or_insert(0) += 1;
+                }
+                child = *parent;
+            }
+        }
+        let started = std::time::Instant::now();
+        let (found, walked) = {
+            let _build_time = time_stage(Stage::Build);
+            RESTYLE_BUILD.with(|build| {
+                *build.borrow_mut() = Some(RestyleBuild {
+                    path,
+                    roots: roots.iter().copied().collect(),
+                    pending,
+                    found: HashMap::new(),
+                    walked: 0,
+                })
+            });
+            self.build_layout_for_view(id, document, external_stylesheets);
+            let build = RESTYLE_BUILD.with(|build| build.borrow_mut().take());
+            match build {
+                Some(build) => (build.found, build.walked),
+                None => (HashMap::new(), 0),
+            }
+        };
+        // A build numbers its elements in the order it reaches them (`element_id`): the build of
+        // a few elements numbers them from the start. They take the numbers the full build gave
+        // them, which the laid-out boxes keep.
+        let mut found = found;
+        for root in &roots {
+            if let (Some(fresh), Some(kept)) = (found.get_mut(root), box_of_node(&unlaid, *root)) {
+                adopt_build_ids(fresh, kept);
+            }
+        }
+        // Each root as built now against its box as built last time, and its laid-out box.
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(mut laid) = view.layout.take() else {
+            return miss("no layout");
+        };
+        let mut boxed = Vec::with_capacity(roots.len());
+        let mut why = None;
+        for root in &roots {
+            let Some(fresh) = found.get(root) else {
+                why = Some("a written element was not reached".to_string());
+                break;
+            };
+            match (box_of_node(&unlaid, *root), fresh.node_id.is_some()) {
+                // No box before or now (`display: none`): nothing is painted.
+                (None, false) => continue,
+                (None, true) | (Some(_), false) => {
+                    why = Some("a box came or went".to_string());
+                    break;
+                }
+                (Some(kept), true) => {
+                    if let Some(needs) = script_restyle_needs_layout(kept, fresh) {
+                        why = Some(needs);
+                        break;
+                    }
+                    if !box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, fresh)) {
+                        why = Some("layout moved boxes".to_string());
+                        break;
+                    }
+                    boxed.push(*root);
+                }
+            }
+        }
+        if let Some(why) = why {
+            view.layout = Some(laid);
+            // More than paint changed. A one-off miss sits out nothing: the full build that follows
+            // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
+            // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
+            // `no kept tree` miss after them). Misses in a row sit out 1, 2, 4, ... relayouts, up to
+            // the cap and then at it, keeping no tree until the last of them, so a page whose
+            // writes keep changing layout pays neither an attempt nor a kept copy every frame. A
+            // miss is in a row when no hit (and no idle stretch or navigation) came since the last
+            // one; relayouts the path refused between them do not end the run (R1).
+            let cooldown = view
+                .lay
+                .script_last_cooldown
+                .get()
+                .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
+            view.lay.script_last_cooldown.set(Some(cooldown));
+            view.lay.script_cooldown.set(cooldown);
+            view.lay.want_script_unlaid.set(cooldown == 0);
+            return miss(&why);
+        }
+        {
+            let laid = Rc::make_mut(&mut laid);
+            for root in &boxed {
+                let (Some(_), Some(fresh)) = (box_of_node(&unlaid, *root), found.get(root)) else {
+                    continue;
+                };
+                if let Some(laid) = box_of_node_mut(laid, *root) {
+                    copy_all_paint(laid, fresh);
+                    copy_transform_and_opacity(laid, fresh);
+                }
+                if let Some(kept) = box_of_node_mut(&mut unlaid, *root) {
+                    *kept = fresh.clone();
+                }
+            }
+        }
+        *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        view.lay.script_last_cooldown.set(None);
+        laid.forget_hit_overflow();
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.layout = Some(laid);
+        // Script reads of computed style answer from the restyled boxes.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let _snapshot_time = time_stage(Stage::Snapshot);
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+        }
+        view.display_list = Some(Arc::new(display_list));
+        view.frame_generation += 1;
+        view.lay.script_walked.set(Some(walked));
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_forced_layout(self.forced_layout_for(id));
+        }
+        self.render(id)?;
+        debug!(?id, roots = roots.len(), walked, ms = started.elapsed().as_secs_f64() * 1000.0, "Script restyle without layout");
+        Ok(true)
     }
 
     /// The short path of a pointer restyle: `true` when the view was
@@ -12600,6 +12983,12 @@ impl layout_ctx::LayoutCtx {
                 self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
             })
         };
+        // LPF1: the tree as built, before layout writes into it, for script paint writes to
+        // compare their elements with; dropped when no such writes asked for it.
+        if let Some(lay) = lay.as_ref() {
+            let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
+            *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+        }
 
         // Layout computation
         let mut root_box = root_box;
@@ -25351,6 +25740,15 @@ impl Engine {
         self.script_turn(id, |bindings| bindings.evaluate(script))
     }
 
+    /// [`Self::execute_script`] with `script` run as a script of the
+    /// page's own, not as the host's (`DomBindings::evaluate_as_page_script`):
+    /// what it rejects is announced to the page. For tests whose script
+    /// stands for a page's.
+    #[doc(hidden)]
+    pub fn execute_as_page_script(&mut self, id: EngineViewId, script: &str) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.evaluate_as_page_script(script))
+    }
+
     /// [`Self::execute_script`] for one of the engine's own entry points:
     /// `body` is a function body whose `__rk` is the host object, which no
     /// page script reaches (`return __rk.fragmentNavigation(__a[0]);`), and
@@ -25525,6 +25923,7 @@ impl Engine {
         };
         // Read before the take, which clears it.
         let beyond_layer = bindings.dirty_beyond_animation_layer();
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
         let had_title = view.doc.title.is_some();
@@ -25568,8 +25967,16 @@ impl Engine {
         let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
+        if scrolled || element_scrolled {
+            view.doc.lay.scrolled_in_task.set(true);
+        }
         if dirty != DomDirty::Clean {
-            view.doc.pending_dirty = Some(view.dirty_set(&log));
+            // A mark with no log record behind it: the set from the log is not the whole.
+            view.doc.pending_dirty = Some(if unlogged {
+                restyle_invalidation::DirtySet::full("unlogged_mark")
+            } else {
+                view.dirty_set(&log)
+            });
         }
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
@@ -25854,6 +26261,7 @@ impl Engine {
     /// held outside the view (the page's own load: `run_page_scripts`). One
     /// layout per call, none when nothing changed.
     fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
@@ -25862,11 +26270,19 @@ impl Engine {
             Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-            Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
+            let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
             element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+            if scrolled || element_scrolled {
+                view.lay.scrolled_in_task.set(true);
+            }
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
-                view.pending_dirty = Some(view.dirty_set(&log));
+                // A mark with no log record behind it: the set from the log is not the whole.
+                view.pending_dirty = Some(if unlogged {
+                    restyle_invalidation::DirtySet::full("unlogged_mark")
+                } else {
+                    view.dirty_set(&log)
+                });
             }
         }
         let canvas_painted = bindings.take_canvas_painted();
@@ -47426,6 +47842,80 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
+/// LPF1: the most relayouts the script restyle path sits out after writes that changed more than
+/// paint (LPF3: reached only by misses in a row; a one-off miss sits out none).
+const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
+/// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
+const SCRIPT_RESTYLE_IDLE: u32 = 8;
+/// LPF1: past this many written elements a relayout takes the full build (the path walks every
+/// written element's ancestors).
+const SCRIPT_RESTYLE_MAX_WRITTEN: usize = 256;
+
+/// LPF1's trust check, the one every script short path calls: the written elements to build alone,
+/// or why the relayout is not one for the short path. Every cause is a script one; the dirty set,
+/// built from the `MutationLog`, is not full (a mark with no log record makes it full:
+/// `unlogged_mark`) and marks its elements for a new style and paint only; no scroll happened in
+/// the task; and there are at most `SCRIPT_RESTYLE_MAX_WRITTEN` of them.
+fn script_restyle_roots(
+    causes: &PendingCauses,
+    dirty: Option<&restyle_invalidation::DirtySet>,
+    scrolled_in_task: bool,
+) -> Result<Vec<usize>, &'static str> {
+    if causes.counts.is_empty()
+        || !causes
+            .counts
+            .iter()
+            .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"))
+    {
+        return Err("cause");
+    }
+    let Some(dirty) = dirty else {
+        return Err("no_set");
+    };
+    if dirty.full.is_some() {
+        return Err("full");
+    }
+    if dirty.nodes.is_empty() {
+        return Err("empty");
+    }
+    if dirty.nodes.len() > SCRIPT_RESTYLE_MAX_WRITTEN {
+        return Err("too_many");
+    }
+    if !dirty
+        .nodes
+        .values()
+        .all(|bits| bits & !(restyle_invalidation::STYLE | restyle_invalidation::PAINT) == 0)
+    {
+        return Err("not_paint");
+    }
+    if scrolled_in_task {
+        return Err("scrolled");
+    }
+    let mut roots: Vec<usize> = dirty.nodes.keys().copied().collect();
+    roots.sort_unstable();
+    Ok(roots)
+}
+
+/// LPF1, tests only: turn the script-write restyle path off on this thread (`false`) or back on.
+/// The last restyle short path's miss, tests only.
+#[cfg(test)]
+pub(crate) fn last_restyle_miss_for_test() -> String {
+    LAST_RESTYLE_MISS.with(|why| why.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn set_script_restyle_for_test(on: bool) {
+    SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
+}
+
+/// LPF1's switch: `RUSTKIT_SCRIPT_RESTYLE=0` turns the script restyle path off (on by default), so a
+/// batch can tell a mover from it; tests turn it off per thread.
+fn script_restyle_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_SCRIPT_RESTYLE").is_none_or(|v| v != "0"))
+        && !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
+}
+
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
@@ -47498,6 +47988,11 @@ struct RestyleBuild {
 }
 
 thread_local! {
+    /// LPF1, tests only: script style writes take the full rebuild (the cross-check's other arm).
+    static SCRIPT_RESTYLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// LINKS-SLOW: the real time the content loop's clock kept from this turn (see
+    /// [`Engine::pump_live_real_at`]).
+    static LIVE_FRACTION_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -47685,6 +48180,88 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 }
 
 /// What the build gives a box besides its style and its children.
+/// LPF2: a transform that stays a transform, or an opacity that stays below 1 (or stays 1), is
+/// paint: the box keeps its stacking context and its containing block for fixed and absolute
+/// descendants (Chrome, `transform_paint_probe_cft148.json`), and layout reads neither (the painter
+/// does, from the style). One that comes or goes is not: it falls to [`restyle_needs_layout`].
+fn keeps_what_it_establishes(kept: &ComputedStyle, fresh: &ComputedStyle) -> bool {
+    kept.transform.ops.is_empty() == fresh.transform.ops.is_empty() && (kept.opacity < 1.0) == (fresh.opacity < 1.0)
+}
+
+/// [`restyle_needs_layout`] for a script write (LPF2): where a box keeps what it establishes, its
+/// transform, transform origin and opacity are compared as paint.
+fn script_restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<String> {
+    if !built_alike(kept, fresh) {
+        return Some("boxes".to_string());
+    }
+    let mut masked = fresh.clone();
+    masked.children.clear();
+    if keeps_what_it_establishes(&kept.style, &fresh.style) {
+        masked.style.transform = kept.style.transform.clone();
+        masked.style.transform_origin = kept.style.transform_origin.clone();
+        masked.style.opacity = kept.style.opacity;
+    }
+    let mut shallow = kept.clone();
+    shallow.children.clear();
+    if let Some(why) = restyle_needs_layout(&shallow, &masked) {
+        return Some(why);
+    }
+    if kept.children.len() != fresh.children.len() {
+        return Some("boxes".to_string());
+    }
+    kept.children
+        .iter()
+        .zip(&fresh.children)
+        .find_map(|(kept, fresh)| script_restyle_needs_layout(kept, fresh))
+}
+
+/// LPF1 R1: copy onto `laid` every box's paint from `fresh` (one shape), whether or not it differs
+/// from the kept tree: the pointer restyle and paint-only animation frames patch the laid-out
+/// tree's paint without the kept tree, so only the fresh build says what is painted now. The kept
+/// tree answers only whether more than paint changed, which those paths never change.
+fn copy_all_paint(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    if let (BoxType::Image { url, .. }, BoxType::Image { url: is, .. }) = (&mut laid.box_type, &fresh.box_type) {
+        if url != is {
+            *url = is.clone();
+        }
+    }
+    laid.style.copy_paint_only(&fresh.style);
+    laid.focused_caret = fresh.focused_caret;
+    laid.focused_selection = fresh.focused_selection.clone();
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_all_paint(laid, fresh);
+    }
+}
+
+/// LPF2: copy the transform, its origin and the opacity of every box of `fresh` onto `laid` (one
+/// shape), after `copy_changed_paint`; [`script_restyle_needs_layout`] let only boxes that keep
+/// what they establish differ in them.
+fn copy_transform_and_opacity(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    laid.style.transform = fresh.style.transform.clone();
+    laid.style.transform_origin = fresh.style.transform_origin.clone();
+    laid.style.opacity = fresh.style.opacity;
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_transform_and_opacity(laid, fresh);
+    }
+}
+
+/// LPF1: `fresh` (a build of a few elements) takes the element numbers `kept` (the full build) gave
+/// the same boxes, where the two have one shape; the build-order numbers are all that differ.
+fn adopt_build_ids(fresh: &mut LayoutBox, kept: &LayoutBox) {
+    if fresh.node_id != kept.node_id {
+        return;
+    }
+    fresh.element_id = kept.element_id;
+    if let (Some(f), Some(k)) = (fresh.identity.as_mut(), kept.identity.as_ref()) {
+        f.element_id = k.element_id;
+    }
+    if fresh.children.len() == kept.children.len() {
+        for (f, k) in fresh.children.iter_mut().zip(&kept.children) {
+            adopt_build_ids(f, k);
+        }
+    }
+}
+
 fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
     // CH2.E19: an inline svg whose markup changed only in author paint
     // (another key, the same natural size) is the same box: the new icon

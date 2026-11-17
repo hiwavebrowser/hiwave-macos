@@ -15,7 +15,7 @@ Engines:
                    real-window driver launches it (tools/real_window/driver.py:
                    a throwaway profile under $HOME, the restored tab pointed
                    at the runner URL). Takes ~/.claude/realwindow.lock, needs
-                   HID idle >= 180 s and refuses 17:00-19:30 ET.
+                   HID idle >= 180 s.
   hiwave-headless  parity-capture --url --live-ms: the same engine with no
                    window (offscreen GPU, nothing presented). Its live loop
                    waits between turns as the app's content thread does
@@ -66,7 +66,6 @@ MIN_IDLE_S = 180
 # SCORE_LOAD. report.py discards the rest.
 START_LOAD = 6.0
 SCORE_LOAD = 3.0
-QUIET = (17 * 60, 19 * 60 + 30)  # no visible window, America/New_York
 MOTIONMARK_TESTS = ["Multiply", "Canvas Arcs", "Leaves", "Paths", "Canvas Lines", "Images", "Design", "Suits"]
 
 CHROME_OWN_HOSTS = {"accounts.google.com", "clients2.google.com", "content-autofill.googleapis.com",
@@ -301,12 +300,15 @@ def suite_env(suite, asked):
     return env
 
 
-def engine_flags(engine, extra_env, inherited=None):
+def engine_flags(engine, extra_env, inherited=None, turn_budget=None):
     """Every HIWAVE_ variable the engine process is started with, for the
     run record: a score is read with the flags it ran under. The shell's
     own count too (both HiWave arms start from this process's
     environment). Chrome reads none. The harness's turn-budget variable is
-    not the engine's; the record has it as `live_turn_budget_ms`."""
+    the app's when a run raised it (`turn_budget`, as the app is started
+    with it: `start_hiwave`); for the headless engine it is an argument,
+    not a variable. The record has the number as `live_turn_budget_ms`
+    either way."""
     if engine == "chrome":
         return {}
     inherited = os.environ if inherited is None else inherited
@@ -315,7 +317,10 @@ def engine_flags(engine, extra_env, inherited=None):
     if engine == "hiwave":
         env["HIWAVE_TEST_HOOKS"] = "0"  # start_hiwave
     env.update(forced)
-    return {k: env[k] for k in sorted(env) if k.startswith("HIWAVE_") and k != TURN_BUDGET_ENV}
+    env.pop(TURN_BUDGET_ENV, None)
+    if engine == "hiwave" and turn_budget is not None:
+        env[TURN_BUDGET_ENV] = str(turn_budget)
+    return {k: env[k] for k in sorted(env) if k.startswith("HIWAVE_")}
 
 
 def engine_env(extra_env, inherited=None):
@@ -467,12 +472,6 @@ def wait_for_load(limit, wait_s):
     return True
 
 
-def eastern_minutes(offset_s=0):
-    from zoneinfo import ZoneInfo
-    now = datetime.datetime.now(ZoneInfo("America/New_York")) + datetime.timedelta(seconds=offset_s)
-    return now.hour * 60 + now.minute
-
-
 def hid_idle_seconds():
     r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
     m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
@@ -503,37 +502,22 @@ class WindowLock:
                         sys.exit(2)
                     time.sleep(10)
         try:
-            self.check_quiet()  # before waiting: no point holding the lock
             end = time.time() + self.wait_s
             while hid_idle_seconds() < MIN_IDLE_S:
                 if time.time() >= end:
                     raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
                                      % (hid_idle_seconds(), MIN_IDLE_S))
                 time.sleep(15)
-            self.check_quiet()  # the wait moved the clock
         except SystemExit as e:
             self.__exit__()
             print(e, file=sys.stderr)
             sys.exit(2)
         return self
 
-    def check_quiet(self):
-        """Refuse when a window could be up between 17:00 and 19:30 ET:
-        now is inside the quiet window, or the run's latest possible end
-        (now + its wall limit) reaches 17:00. Read from the clock at the
-        time of the call, so it is asked again after every wait."""
-        start = eastern_minutes()
-        end = start + self.limit_s / 60.0
-        if start < QUIET[1] and end >= QUIET[0]:
-            raise SystemExit("a window could be up between 17:00 and 19:30 ET "
-                             "(now %02d:%02d ET, the run may last %d min); not run"
-                             % (start // 60, start % 60, self.limit_s // 60))
-
     def clear_to_launch(self):
-        """The last check, immediately before the window goes up: the
-        waits since the lock was taken (idle seat, load) may have run into
-        the quiet window, and someone may have sat down."""
-        self.check_quiet()
+        """The last check, immediately before the window goes up: someone
+        may have sat down during the waits since the lock was taken (idle
+        seat, load)."""
         if hid_idle_seconds() < MIN_IDLE_S:
             raise SystemExit("someone is using this Mac (HID idle %.0f s < %d s); not run"
                              % (hid_idle_seconds(), MIN_IDLE_S))
@@ -615,10 +599,13 @@ def seed_filter_lists(profile):
     return copied
 
 
-def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
+def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None, turn_budget=None):
     """As tools/real_window/driver.py does: let the app write its own
     first-run state under a throwaway $HOME, point the restored tab at
-    `url`, start again. `on_pid` is told each process it starts."""
+    `url`, start again. `on_pid` is told each process it starts.
+    `turn_budget`: the raised live-turn watchdog, which the app reads from
+    TURN_BUDGET_ENV; without one the variable is taken out of the app's
+    environment, whatever the shell had."""
     import driver as rw
     profile = work / "profile"
     profile.mkdir(parents=True)
@@ -628,6 +615,7 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None):
     forced, dropped = engine_env(extra_env)
     env = {"HIWAVE_TEST_HOOKS": "0"}
     env.update(forced)
+    env.update(app_turn_budget_env(turn_budget))
     for name in dropped:
         os.environ.pop(name, None)  # the driver's App starts from os.environ
     binary = sandboxed(binary, work)
@@ -688,6 +676,9 @@ TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
 ENGINE_TURN_BUDGET_MS = 5000
 # What parity-capture's --live-turn-budget-ms takes at most (an hour).
 TURN_BUDGET_MAX_MS = 3600000
+# What the app honours at most (hiwave-app `STRESS_TURN_BUDGET_MAX_MS`), and only when it is started with
+# the console log on, which every app this harness starts is (NET_LOG_ENV).
+APP_TURN_BUDGET_MAX_MS = 300000
 
 
 def turn_budget_ms():
@@ -701,6 +692,16 @@ def turn_budget_ms():
         raise SystemExit("%s must be a whole number of milliseconds from 1 to %d, not %r"
                          % (TURN_BUDGET_ENV, TURN_BUDGET_MAX_MS, raw))
     return value
+
+
+def app_turn_budget_env(turn_budget):
+    """What the app is started with for a run's turn budget: the variable set to the run's number (after
+    the clamp to the wall limit), or, with no raised budget, nothing, and the shell's own value removed so
+    a default run cannot pick one up."""
+    if turn_budget is None:
+        os.environ.pop(TURN_BUDGET_ENV, None)  # the driver's App starts from os.environ
+        return {}
+    return {TURN_BUDGET_ENV: str(turn_budget)}
 
 
 def headless_argv(launcher, url, work, limit_s, turn_budget):
@@ -810,6 +811,27 @@ def log_findings(path):
     return hits[:20], text[-1500:]
 
 
+def log_uncaught(path):
+    """What the engine itself logged as uncaught (the app's console log: exceptions and rejections nothing
+    handled, with where). The page-side reporter hears these only through the window's `error` and
+    `unhandledrejection` events, so an engine that does not fire one for an exception leaves `errors`
+    empty: this is the engine's own account, read from its log. An error the page cancelled is there too,
+    as `uncaught (cancelled by the page) ...`. A line's record is what follows the first `hiwave::console: `
+    on it (the engine escapes line breaks in page text, so later ones are inside a message). The first 20,
+    300 characters each."""
+    try:
+        text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text(errors="replace"))
+    except OSError:
+        return []
+    hits = [m.group(1).strip()[:300] for m in re.finditer(r"(?m)^.*?hiwave::console: ((?:uncaught|unhandled rejection) .*)$", text)]
+    return hits[:20]
+
+
+def frames_by_test(progress):
+    """MotionMark: what each finished test measured (reporter.js `motionmarkFrames`), by test name."""
+    return {str(p.get("test")): p["frames"] for p in progress if p.get("event") == "test-done" and p.get("frames")}
+
+
 def headless_events(path):
     """From parity-capture's event log: request hosts and script errors."""
     hosts, errors, unsupported = {}, [], {}
@@ -861,13 +883,19 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
-    extra_env = suite_env(args.suite, dict(kv.split("=", 1) for kv in args.env))
-    flags = engine_flags(args.engine, extra_env)
+    asked = dict(kv.split("=", 1) for kv in args.env)
+    if TURN_BUDGET_ENV in asked:
+        # Through --env it would reach the app unrecorded: no flag, no raised-budget line, no clamp.
+        sys.exit("%s is not a --env variable: set it in the environment of this command (%s=<ms> python3 "
+                 "tools/stress/run.py ...), which records it in the run" % (TURN_BUDGET_ENV, TURN_BUDGET_ENV))
+    extra_env = suite_env(args.suite, asked)
     turn_budget = turn_budget_ms()
     if turn_budget is not None:
-        if args.engine != "hiwave-headless":
-            sys.exit("%s is for the hiwave-headless engine only (the app does not read it; Chrome has no such "
-                     "watchdog)" % TURN_BUDGET_ENV)
+        if args.engine == "chrome":
+            sys.exit("%s is for the HiWave engines only (Chrome has no such watchdog)" % TURN_BUDGET_ENV)
+        if args.engine == "hiwave" and turn_budget > APP_TURN_BUDGET_MAX_MS:
+            sys.exit("%s is at most %d ms for the app (it ignores more), not %d"
+                     % (TURN_BUDGET_ENV, APP_TURN_BUDGET_MAX_MS, turn_budget))
         print("TURN BUDGET RAISED: the live turn's script watchdog is %d ms, not the engine's %d (%s): "
               "this run finds blockers; its score is not a default-engine score and report.py keeps it apart"
               % (turn_budget, ENGINE_TURN_BUDGET_MS, TURN_BUDGET_ENV), file=sys.stderr)
@@ -885,6 +913,8 @@ def main():
         # No turn can outlast the run itself.
         turn_budget = limit * 1000
         print("TURN BUDGET RAISED: clamped to the run's wall limit, %d ms" % turn_budget, file=sys.stderr)
+    # After the clamp: the record's flags are what the engine is started with.
+    flags = engine_flags(args.engine, extra_env, turn_budget=turn_budget)
     stall = args.stall or SUITE[args.suite]["stall"]
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -942,7 +972,7 @@ def main():
                     watch = SocketWatch()
                 if args.engine == "hiwave":
                     try:
-                        handle = start_hiwave(binary, url, work, extra_env, watch.add)
+                        handle = start_hiwave(binary, url, work, extra_env, watch.add, turn_budget)
                     except NotOffline as e:
                         print("%s; not run" % e, file=sys.stderr)
                         watch.close()
@@ -1046,6 +1076,10 @@ def main():
         "not_found": record.not_found,
         "done_get_score": record.done_score,
         "log_findings": findings,
+        # Uncaught exceptions and rejections in the engine's own log (the app's console log).
+        "engine_errors": log_uncaught(work / "app.log") if handle is not None else [],
+        # MotionMark: frames by complexity for each finished test.
+        "frames": frames_by_test(record.progress),
         "off_machine": left,
         "discarded_score": discarded_score,
         # Every HIWAVE_ variable the engine was started with (the suite's own, --env, the shell's).
@@ -1080,10 +1114,11 @@ def main():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
     shutil.rmtree(work, ignore_errors=True)
-    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d -> %s"
+    print("%s %s %s: %s%s%s score=%s wall=%ss errors=%d engine_errors=%d -> %s"
           % (args.suite, args.engine, label, status, "" if run["load_valid"] else " (load %.1f: score not valid)" % load_before[0],
              "" if turn_budget is None else " (TURN BUDGET RAISED to %d ms: not a default-engine score)" % turn_budget,
-             "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors), path))
+             "%.2f" % score if isinstance(score, (int, float)) else score, wall, len(record.errors),
+             len(run["engine_errors"]), path))
     return 0 if status == "ok" else 1
 
 
