@@ -4927,7 +4927,14 @@ const WRAPPERS_JS: &str = r#"
     // for every property, so the declaration is not in the block (CH2.E29:
     // Chromium's `el.style.length` leaves it out and the earlier value
     // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    //
+    // Only a `url(` can make a value bad, so a value with none (almost every
+    // value a page writes: a transform, a colour, a length) is answered by
+    // one search; the walk below costs a JS call per character. Built-ins
+    // taken now: page script cannot change the answer.
+    var urlLower = uncurry(String.prototype.toLowerCase), urlIndexOf = uncurry(String.prototype.indexOf);
     function hasBadUrl(value) {
+        if (urlIndexOf(urlLower(value), 'url(') < 0) return false;
         var quote = null, i, j, k, c;
         for (i = 0; i < value.length; i++) {
             c = value.charAt(i);
