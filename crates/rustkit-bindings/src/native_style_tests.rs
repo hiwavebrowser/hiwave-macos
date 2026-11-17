@@ -44,6 +44,8 @@ const STARTS: &[Option<&str>] = &[
     Some("width: url(it's); height: 2px"),
     Some("x"),
     Some("\u{feff}left: 1px;\u{a0}top:\u{2003}2px\u{3000}"),
+    Some("color: red\u{a0}; left:\u{feff}1px\u{feff}; top: 2px\u{2003} ! important"),
+    Some("background-image: url(a\u{a0}b); width: url(a\u{2003}b); height: 1px"),
 ];
 
 /// Each a statement on `s` (the element's style) that leaves its result in `r`.
@@ -76,6 +78,12 @@ const OPS: &[&str] = &[
     "r = s.setProperty('left', '7px !important')",
     "r = s.setProperty('  ', '1px')",
     "r = (s.left = '')",
+    "r = s.setProperty('color', 'red\\u00a0')",
+    "r = s.setProperty('left', '\\ufeff5px\\ufeff')",
+    "r = s.setProperty('left', '\\u20035px\\u2003')",
+    "r = s.setProperty('background-image', 'url(a\\u00a0b)')",
+    "r = s.setProperty('background-image', 'url(a\\u0085b)')",
+    "r = s.setProperty('background-image', 'url(\"a\\u00a0b\")')",
 ];
 
 /// Everything a page can read of the style and its writes, after `op` on `start`.
@@ -154,11 +162,20 @@ fn both_copies_keep_or_refuse_the_chrome_pinned_url_values() {
     let b = bound();
     let mut wrong = Vec::new();
     let cases = doc["cases"].as_array().unwrap();
+    // As style_value_url_tests reads the file (#1266): rows Chrome refuses for another rule are skipped, rows
+    // the engine's url reader refuses stay refused here, and each value is built from its UTF-16 units.
+    const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
+    const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)"];
     for native in [true, false] {
         set_native(&b, native);
         for case in cases {
             let css = case["css"].as_str().unwrap();
-            let lit = serde_json::to_string(css).unwrap();
+            if NOT_THE_URL_RULE.contains(&css) {
+                continue;
+            }
+            let units: Vec<String> =
+                case["css_units"].as_array().unwrap().iter().map(|u| u.as_u64().unwrap().to_string()).collect();
+            let lit = format!("String.fromCharCode({})", units.join(","));
             let got = ev(
                 &b,
                 &format!(
@@ -173,7 +190,11 @@ fn both_copies_keep_or_refuse_the_chrome_pinned_url_values() {
             // with an empty value, and dropped here as an empty declaration (not the url rule).
             let want_attr =
                 !css.trim_start().starts_with("/*") && case["kept_via_attribute"].as_bool().unwrap();
-            let want = format!("{}|{want_attr}", case["kept_via_setProperty"].as_bool().unwrap());
+            let want = if ENGINE_REFUSES.contains(&css) {
+                "false|false".to_string()
+            } else {
+                format!("{}|{want_attr}", case["kept_via_setProperty"].as_bool().unwrap())
+            };
             if got != want {
                 wrong.push(format!("{} {css:?}: {got}, Chrome {want}", if native { "native" } else { "js" }));
             }
