@@ -202,20 +202,22 @@ impl LayoutCtx {
     /// view being built (`Animations::on_style`); nothing outside a build.
     /// A `@keyframes` an animation names is resolved here: each block's
     /// declarations applied to the element's cascaded style, and the values
-    /// of the properties they set read back.
+    /// of the properties they set read back. True when the element animates or
+    /// may (it names an animation or a transition, script animates it, or it
+    /// has running records): its style is then more than its cascade.
     pub(crate) fn animate_style(
         &self,
         node: usize,
         style: &mut crate::ComputedStyle,
         stylesheets: &[rustkit_css::Stylesheet],
-    ) {
+    ) -> bool {
         let lay = self
             .building
             .borrow()
             .as_ref()
             .and_then(|view| view.lay.clone());
         let Some(lay) = lay else {
-            return;
+            return false;
         };
         let resolve =
             |name: &str, base: &crate::ComputedStyle| -> Option<Vec<crate::animations::Frame>> {
@@ -262,10 +264,10 @@ impl LayoutCtx {
             .animations
             .iter()
             .any(|item| !item.name.trim().is_empty() && !item.name.trim().eq_ignore_ascii_case("none"));
-        let cascaded = (named || !style.transitions.is_empty() || entries.is_some() || {
+        let may_animate = named || !style.transitions.is_empty() || entries.is_some() || {
             lay.animations.borrow().has_records(node)
-        })
-        .then(|| style.clone());
+        };
+        let cascaded = may_animate.then(|| style.clone());
         lay.animations.borrow_mut().on_style(node, style, &resolve);
         // Script's animated values, above the CSS ones: each entry parsed
         // against the style as it stands and composed on it.
@@ -287,6 +289,7 @@ impl LayoutCtx {
                 anims.captured.remove(&node);
             }
         }
+        may_animate
     }
 
     /// Script's animated-style entries for one element (Web Animations),
