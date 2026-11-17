@@ -1175,6 +1175,16 @@ thread_local! {
     static MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Test-only: shapes that missed the memo on this thread so far.
+#[cfg(test)]
+pub(crate) fn shape_memo_misses() -> usize {
+    MISSES.with(|c| c.get())
+}
+
+/// Entries the per-thread shaped-text memo of [`TextShaper::shape`] holds at
+/// most (bounds its memory on a text-heavy page).
+pub(crate) const SHAPED_TEXT_MEMO_CAP: usize = 16384;
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -1480,9 +1490,7 @@ impl TextShaper {
             generation: u64,
             runs: HashMap<Key, ShapedRun>,
         }
-        // Bounds memory on a text-heavy page; refilling costs one shape per
-        // entry, which is what every call cost before the memo.
-        const MAX_ENTRIES: usize = 16384;
+        const MAX_ENTRIES: usize = SHAPED_TEXT_MEMO_CAP;
         thread_local! {
             static MEMO: RefCell<Memo> = RefCell::new(Memo {
                 generation: 0,

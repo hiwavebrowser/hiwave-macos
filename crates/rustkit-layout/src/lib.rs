@@ -47,6 +47,8 @@ mod flex_resolve_tests;
 #[cfg(test)]
 mod float_line_wrap_tests;
 #[cfg(test)]
+mod text_memo_step_tests;
+#[cfg(test)]
 mod float_in_items_unit_tests;
 
 #[cfg(test)]
@@ -14642,6 +14644,11 @@ pub fn measure_text_advanced(
     )
 }
 
+/// Entries the per-thread text-measurement memo of
+/// [`measure_text_with_spacing`] holds at most (bounds its memory on a
+/// text-heavy page).
+pub(crate) const TEXT_MEASURE_MEMO_CAP: usize = 16384;
+
 /// Measure text using the text shaper with letter-spacing and word-spacing.
 ///
 /// This provides accurate text measurement using DirectWrite on Windows,
@@ -14670,9 +14677,7 @@ pub fn measure_text_with_spacing(
         generation: u64,
         metrics: std::collections::HashMap<Key, TextMetrics>,
     }
-    // Bounds memory on a text-heavy page; refilling costs one shape per
-    // entry, which is what every call cost before the memo.
-    const MAX_ENTRIES: usize = 16384;
+    const MAX_ENTRIES: usize = TEXT_MEASURE_MEMO_CAP;
     thread_local! {
         static MEMO: RefCell<Memo> = RefCell::new(Memo {
             generation: 0,
