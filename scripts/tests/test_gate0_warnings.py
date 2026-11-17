@@ -36,9 +36,10 @@ warning: 2 warnings emitted
 
 class Census(unittest.TestCase):
     def test_a_warning_is_its_message_and_file(self):
-        self.assertEqual(tool.census([LOG]), {
-            "unused import: `Duration` @ crates/rustkit-engine/src/content_thread.rs",
-            "method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs",
+        # The two `Duration` warnings are on different lines of one file: one key, counted twice.
+        self.assertEqual(dict(tool.census([LOG])), {
+            "unused import: `Duration` @ crates/rustkit-engine/src/content_thread.rs": 2,
+            "method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs": 1,
         })
 
     def run_check(self, baseline_lines, log):
@@ -65,15 +66,31 @@ class Census(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("gone unused variable: `x` @ crates/hiwave-app/src/main.rs", out)
 
+    def test_a_second_identical_warning_in_the_same_file_is_new(self):
+        # Keyed without the line, two identical warnings in one file are one key: the census counts
+        # them, so a second one is a new warning, not hidden behind the first.
+        second = LOG.replace("warning: method `ms` is never used\n",
+                             "warning: method `ms` is never used\n  --> crates/rustkit-engine/src/page_protocol.rs:90:12\n"
+                             "warning: method `ms` is never used\n", 1)
+        self.assertEqual(tool.census([second])["method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs"], 2)
+        code, out = self.run_check(sorted(tool.census([LOG])), second)
+        self.assertEqual(code, 1)
+        self.assertIn("NEW  method `ms` is never used @ crates/rustkit-engine/src/page_protocol.rs (2, baseline 1)", out)
+
+    def test_a_windows_path_is_the_same_key(self):
+        windows = LOG.replace("crates/rustkit-engine/src/content_thread.rs", "crates\\rustkit-engine\\src\\content_thread.rs")
+        self.assertIn("\\", windows)
+        self.assertEqual(tool.census([windows]), tool.census([LOG]))
+
     def test_the_committed_baselines_are_in_the_census_form(self):
         for name in ("baseline-engine-app.txt", "baseline-renderer.txt"):
             path = REPO / "scripts" / "gate0" / name
             entries = [line.rstrip("\n") for line in path.read_text().splitlines()
                        if line.strip() and not line.startswith("#")]
             self.assertTrue(entries, name)
-            self.assertEqual(entries, sorted(set(entries)), name + " is not sorted and unique")
+            self.assertEqual(entries, sorted(entries), name + " is not sorted")
             for entry in entries:
-                self.assertRegex(entry, r"^.+ @ (crates|third_party)/\S+\.rs$", name)
+                self.assertRegex(entry, r"^.+ @ (crates|third_party)/\S+\.rs( x\d+)?$", name)
 
 
 if __name__ == "__main__":
