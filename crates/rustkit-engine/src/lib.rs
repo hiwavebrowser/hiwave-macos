@@ -15765,6 +15765,12 @@ impl layout_ctx::LayoutCtx {
                             } else {
                                 None
                             };
+                            // A box the parent's build drops (or a `display: contents` one) is
+                            // still a styled element: noted for `getComputedStyle` as a full build
+                            // notes it below, or script read `display: none` after the splice.
+                            if contents || !kept {
+                                self.note_boxless_style(&child_box, Some(&layout_box.style));
+                            }
                             RESTYLE_BUILD.with(|build| {
                                 if let Some(build) = build.borrow_mut().as_mut() {
                                     if !kept {
