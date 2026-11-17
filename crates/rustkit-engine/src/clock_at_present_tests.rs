@@ -35,6 +35,11 @@ function tick(t) {{ stamps.push(t); requestAnimationFrame(tick); }}
 
 impl Doc {
     fn load(page: String, child: String) -> Self {
+        Self::load_switched(page, child, true)
+    }
+
+    /// With one round a turn (`on`) or not, on this thread from the start.
+    fn load_switched(page: String, child: String, on: bool) -> Self {
         let server = serve_routes(vec![("/", "text/html", page), ("/child.html", "text/html", child)]);
         let config = EngineConfig {
             nested_contexts: true,
@@ -42,7 +47,7 @@ impl Doc {
             deterministic_page_clock: true,
             ..EngineConfig::default()
         };
-        crate::set_one_animation_round(true);
+        crate::set_one_animation_round(on);
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
@@ -150,4 +155,114 @@ fn a_css_animation_paints_the_presented_frames_time_in_a_frame_document() {
     doc.rows(3, 20);
     let rows = doc.rows(12, 20);
     assert_rows(&rows, "frame");
+}
+
+// R1 follow-ups (#1270).
+
+/// The page's stamps and its frame document's after each of `turns` (ms each): [ticks the top
+/// ran, ticks the frame ran, top's last stamp, frame's last stamp].
+fn both_per_turn(doc: &mut Doc, turns: &[u64]) -> Vec<[f64; 4]> {
+    turns
+        .iter()
+        .map(|&ms| {
+            let before = doc.nums("[stamps.length, w().stamps.length].join(',')");
+            doc.turn(ms);
+            let after = doc.nums("[stamps.length, w().stamps.length, stamps[stamps.length - 1], w().stamps[w().stamps.length - 1]].join(',')");
+            [after[0] - before[0], after[1] - before[1], after[2], after[3]]
+        })
+        .collect()
+}
+
+const MIXED: [u64; 14] = [5, 50, 16, 33, 10, 70, 17, 1, 40, 25, 8, 100, 3, 34];
+
+fn tree_with_two_loops() -> Doc {
+    let page = format!(
+        "<!doctype html>{FADE}<div id=a></div><iframe id=f src=/child.html></iframe><script>window.ready = false; window.stamps = [];
+function tick(t) {{ stamps.push(t); requestAnimationFrame(tick); }}
+document.getElementById('f').addEventListener('load', function () {{ ready = true; requestAnimationFrame(tick); }});
+function w() {{ return document.getElementById('f').contentWindow; }}</script>"
+    );
+    Doc::load(page, looped("requestAnimationFrame(tick);"))
+}
+
+/// (3) Across the documents of a frame tree: every turn's round runs both loops once, at one
+/// frame time (the frame's stamp is the page's less its later time origin, the same each turn),
+/// and neither document's stamps go back, over turns of mixed lengths.
+#[test]
+fn a_frame_trees_documents_share_each_frames_time_and_never_step_back() {
+    let mut doc = tree_with_two_loops();
+    both_per_turn(&mut doc, &[20, 20, 20]);
+    let rows = both_per_turn(&mut doc, &MIXED);
+    let offset = rows[0][2] - rows[0][3];
+    let mut last = (f64::MIN, f64::MIN);
+    for (i, r) in rows.iter().enumerate() {
+        assert!(r[0] <= 1.0 && r[1] <= 1.0, "turn {i} ({} ms): more than one round {rows:?}", MIXED[i]);
+        assert_eq!(r[0], r[1], "turn {i}: one document ran a frame the other did not {rows:?}");
+        assert!(((r[2] - r[3]) - offset).abs() < 1.0, "turn {i}: the documents' stamps are not one frame's {rows:?}");
+        assert!(r[2] >= last.0 && r[3] >= last.1, "turn {i}: a stamp stepped back {rows:?}");
+        last = (r[2], r[3]);
+    }
+}
+
+/// (4) Turns of mixed lengths (1-100 ms) in a single document: at most one round a turn, stamps
+/// that only go forward, and after each turn the timeline at the last stamp and the painted
+/// time the animation's.
+#[test]
+fn turns_of_mixed_lengths_present_their_own_frames() {
+    let mut doc = single();
+    doc.rows(3, 20);
+    let mut prev = doc.nums("[stamps.length, stamps[stamps.length - 1]].join(',')");
+    for (i, &ms) in MIXED.iter().enumerate() {
+        let rows = doc.rows(1, ms);
+        let now = doc.nums("[stamps.length, stamps[stamps.length - 1]].join(',')");
+        assert!(now[0] - prev[0] <= 1.0, "turn {i} ({ms} ms): {} rounds", now[0] - prev[0]);
+        assert!(now[1] >= prev[1], "turn {i} ({ms} ms): the stamp stepped back {prev:?} -> {now:?}");
+        assert_rows(&rows, &format!("mixed {ms} ms"));
+        prev = now;
+    }
+}
+
+/// (2) `performance.now()` is not the frames': read after each turn of mixed lengths it is the
+/// same with one round a turn as without, but for the deterministic clock's read step (0.1 ms a
+/// clock read: a turn that stamps a frame reads the clock once more than one that does not).
+#[test]
+fn performance_now_is_the_same_with_one_round_a_turn() {
+    let reads = |on: bool| -> Vec<f64> {
+        let page = looped("window.ready = true; function w() { return window; } requestAnimationFrame(tick);");
+        let mut doc = Doc::load_switched(page, String::new(), on);
+        MIXED
+            .iter()
+            .map(|&ms| {
+                doc.turn(ms);
+                doc.nums("performance.now()")[0]
+            })
+            .collect()
+    };
+    let (on, off) = (reads(true), reads(false));
+    for (i, (a, b)) in on.iter().zip(&off).enumerate() {
+        assert!((a - b).abs() <= 0.1 + 1e-9, "turn {i}: performance.now() {a} with one round a turn, {b} without ({on:?} vs {off:?})");
+    }
+}
+
+/// (1) A frame stays asked for while zero-delay timers flood every turn (2000 of them, each
+/// re-arming itself). Chrome 148
+/// (`clock_at_present_probe_cft148.json` "flood", 5 runs): 120-121 frames in 1000 ms of flood,
+/// the timeline moved 1008-1017 ms, a task's timeline - the last stamp 0, painted = currentTime.
+/// Here the turn's timer slice ends the turn's timers; the frame still runs every turn and the
+/// timeline does not stall (a pin: green before and after).
+#[test]
+fn a_frame_runs_and_the_timeline_moves_while_timers_flood() {
+    let page = looped(
+        "window.ready = true; function w() { return window; } requestAnimationFrame(tick);
+window.tasks = 0; function flood() { tasks++; setTimeout(flood, 0); } for (var i = 0; i < 2000; i++) setTimeout(flood, 0);",
+    );
+    let mut doc = Doc::load(page, String::new());
+    doc.rows(2, 20);
+    let before = doc.nums("[stamps.length, document.timeline.currentTime, tasks].join(',')");
+    let rows = doc.rows(10, 20);
+    let after = doc.nums("[stamps.length, document.timeline.currentTime, tasks].join(',')");
+    assert!(after[2] > before[2], "the flood ran: {before:?} -> {after:?}");
+    assert_eq!(after[0] - before[0], 10.0, "a frame a turn under the flood: {before:?} -> {after:?}");
+    assert!(after[1] - before[1] >= 180.0, "the timeline moved: {before:?} -> {after:?}");
+    assert_rows(&rows, "flood");
 }
