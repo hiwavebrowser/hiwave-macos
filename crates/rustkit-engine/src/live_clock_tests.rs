@@ -261,3 +261,184 @@ fn the_chain_through_the_loop_model_is_never_early_at_one_turn_a_link() {
     assert!(per_second <= 105.0, "{per_second:.0} turns a second for a 10 ms chain");
     assert!(wakes_per_second <= 130.0, "{wakes_per_second:.0} wakes a second for a 10 ms chain");
 }
+
+/// LINKS-SLOW part 2: an exact wait leaves the runtime's timer `PRECISE_TAIL` (2 ms) before its due
+/// instant (the overshoot estimate aims the thread sleep after it, not this), and the last stretch is a thread sleep: the runtime's
+/// timer keeps whole milliseconds, so a sleep on it aimed at a fraction of one ended 1.4 ms late
+/// on average (Windows, 1 ms timers; `std::thread::sleep` 0.3 ms). A wait shorter than the tail
+/// leaves the runtime at once; a whole-millisecond wait (not exact) is the runtime's to the end.
+#[test]
+fn an_exact_wait_leaves_the_runtime_two_milliseconds_before_its_due_instant() {
+    use crate::page_protocol::{runtime_wait_until, PRECISE_TAIL};
+    let now = Instant::now();
+    let due = now + Duration::from_millis(10);
+    assert_eq!(runtime_wait_until(now, due, PRECISE_TAIL), due - PRECISE_TAIL);
+    assert_eq!(runtime_wait_until(now, now + us(1_500), PRECISE_TAIL), now, "under the tail: at once");
+    assert_eq!(runtime_wait_until(now, due, Duration::ZERO), due, "a whole-millisecond wait");
+}
+
+/// LINKS-SLOW part 2 R1 (1): a wait shorter than the tail skips the runtime's timer, but not the
+/// runtime: it yields first, so the runtime's tasks, timers and sockets get their turn before the
+/// thread blocks (a 1 ms interval otherwise starved them: every wait was under the tail).
+#[test]
+fn a_wait_under_the_tail_gives_the_runtime_a_turn_first() {
+    use crate::page_protocol::runtime_wait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let ran = Arc::new(AtomicBool::new(false));
+        let task = Arc::clone(&ran);
+        tokio::spawn(async move { task.store(true, Ordering::SeqCst) });
+        let now = Instant::now();
+        assert!(runtime_wait(now, now, None).await, "no command ended the wait");
+        assert!(ran.load(Ordering::SeqCst), "the runtime's task had no turn before the tail");
+    });
+}
+
+/// LINKS-SLOW part 2 R1 (4): only a visible view's timer takes the exact wait; a background
+/// `setInterval(f, 10)` waits whole milliseconds on the runtime (no blocking tail, no spin). And
+/// only a timer the whole-millisecond wait agrees with (the turn's own timers set it).
+#[test]
+fn a_background_view_takes_no_exact_wait() {
+    use crate::page_protocol::exact_wait;
+    assert_eq!(exact_wait(Some(10), Some(9_400), true), Some(us(9_400)));
+    assert_eq!(exact_wait(Some(10), Some(9_400), false), None, "a background view took the exact wait");
+    assert_eq!(exact_wait(Some(9), Some(9_400), true), None, "the exact instant is not the next wake");
+    assert_eq!(exact_wait(Some(10), None, true), None);
+}
+
+/// A test clock for the tail: each sleep ends the given overshoots late, in turn; a spin moves
+/// 1 us.
+struct ModelTail {
+    now: Instant,
+    overshoot_us: Vec<u64>,
+    sleeps: usize,
+    spun: Duration,
+}
+
+impl crate::page_protocol::TailClock for ModelTail {
+    fn now(&mut self) -> Instant {
+        self.now
+    }
+    fn sleep(&mut self, d: Duration) {
+        self.now += d + us(self.overshoot_us[self.sleeps % self.overshoot_us.len()]);
+        self.sleeps += 1;
+    }
+    fn spin(&mut self) {
+        self.now += us(1);
+        self.spun += us(1);
+    }
+}
+
+/// LINKS-SLOW part 2 R1 (5, 6): the tail on the supplied clock. It never ends before the due
+/// instant, spins at most `SPIN_CAP` (0.5 ms; the measured thread-sleep overshoot is ~0.3 ms), and
+/// lands near the due instant. With the estimate at its cap (after a few long sleeps) and less
+/// than that left, the old tail spun all of it (up to 2 ms of a core).
+#[test]
+fn the_tail_spins_at_most_the_cap_and_never_ends_early() {
+    use crate::page_protocol::{finish_exact_wait, OvershootEstimate, SPIN_CAP};
+    let t0 = Instant::now();
+    // Long sleeps drive the estimate to its cap; then 1.9 ms are left.
+    let mut e = OvershootEstimate::default();
+    for i in 0..64u64 {
+        let at = t0 + Duration::from_millis(i);
+        e.observe(at, at + Duration::from_millis(5));
+    }
+    assert_eq!(e.ms(), OvershootEstimate::CAP_MS);
+    let mut clock = ModelTail { now: t0, overshoot_us: vec![300], sleeps: 0, spun: Duration::ZERO };
+    let due = t0 + us(1_900);
+    let spun = finish_exact_wait(due, &mut e, &mut clock, || false).expect("no command");
+    assert!(clock.now >= due, "ended {:?} early", due - clock.now);
+    assert_eq!(spun, clock.spun);
+    assert!(spun <= SPIN_CAP, "spun {spun:?} with the estimate at its cap");
+
+    // A run of waits on the Windows overshoots (0.1-0.9 ms): never early, spin capped, and the
+    // mean lateness well under a sleep's overshoot.
+    let mut e = OvershootEstimate::default();
+    let mut clock = ModelTail {
+        now: t0,
+        overshoot_us: vec![100, 300, 500, 250, 900, 200, 350],
+        sleeps: 0,
+        spun: Duration::ZERO,
+    };
+    let mut late = Duration::ZERO;
+    for i in 1..=300u64 {
+        let due = t0 + Duration::from_millis(10 * i);
+        clock.now = due - us(1_600);
+        let spun = finish_exact_wait(due, &mut e, &mut clock, || false).expect("no command");
+        assert!(clock.now >= due, "wait {i} ended early");
+        assert!(spun <= SPIN_CAP, "wait {i} spun {spun:?}");
+        late += clock.now - due;
+    }
+    let mean = late.as_secs_f64() * 1000.0 / 300.0;
+    assert!(mean < 0.25, "mean lateness {mean:.3} ms");
+}
+
+/// LINKS-SLOW part 2 R1 (2): the tail is what this machine's runtime wake needs, not a fixed 2 ms:
+/// it covers how late the runtime's (whole-millisecond) timer wakes, a high quantile of it, plus
+/// the thread sleep's overshoot. On Windows the runtime woke 0.7-2.0 ms late (mean 1.4): the tail
+/// stays 2 ms. A runtime that wakes within 0.1 ms leaves a tail under 0.5 ms, and the deaf window
+/// with it. Never more than `PRECISE_TAIL`; one late wake pulls it back up at once.
+#[test]
+fn the_tail_follows_the_runtimes_measured_lateness() {
+    use crate::page_protocol::{OvershootEstimate, TailEstimate, PRECISE_TAIL};
+    let t0 = Instant::now();
+    let overshoot = OvershootEstimate::default();
+    let mut windows = TailEstimate::default();
+    for i in 0..300u64 {
+        let leave = t0 + Duration::from_millis(10 * i);
+        windows.observe(leave, leave + us(700 + (i * 389) % 1_300));
+    }
+    assert!(windows.tail(&overshoot) >= us(1_800), "{:?}", windows.tail(&overshoot));
+    assert!(windows.tail(&overshoot) <= PRECISE_TAIL);
+
+    let mut punctual = TailEstimate::default();
+    for i in 0..300u64 {
+        let leave = t0 + Duration::from_millis(10 * i);
+        punctual.observe(leave, leave + us(20 + (i * 37) % 80));
+    }
+    let short = punctual.tail(&overshoot);
+    assert!(short < us(500), "the tail stayed {short:?} for a runtime that wakes within 0.1 ms");
+    let leave = t0 + Duration::from_secs(10);
+    punctual.observe(leave, leave + us(1_500));
+    assert!(punctual.tail(&overshoot) >= us(800), "one late wake: {:?}", punctual.tail(&overshoot));
+}
+
+/// LINKS-SLOW part 2 delta R1: a command that arrives during the tail's thread sleep is taken
+/// before the spin: the wait ends there (the timer is the next turn's) and nothing spins. Asked
+/// only after a sleep; with no command the tail ends at its due instant as before.
+#[test]
+fn a_command_waiting_after_the_tails_sleep_ends_it_before_the_spin() {
+    use crate::page_protocol::{finish_exact_wait, OvershootEstimate};
+    let t0 = Instant::now();
+    let mut e = OvershootEstimate::default();
+    let mut clock = ModelTail { now: t0, overshoot_us: vec![100], sleeps: 0, spun: Duration::ZERO };
+    let due = t0 + us(1_800);
+    let mut asked = 0;
+    let end = finish_exact_wait(due, &mut e, &mut clock, || {
+        asked += 1;
+        true
+    });
+    assert_eq!(end, None, "the tail ran on past a waiting command");
+    assert_eq!(asked, 1);
+    assert_eq!(clock.sleeps, 1);
+    assert_eq!(clock.spun, Duration::ZERO, "it spun with a command waiting");
+}
+
+/// LINKS-SLOW part 2 delta R1: a command's sender leaves a wake permit when the loop is not waiting
+/// on it; once the loop has taken that command another way, the permit is cleared, so the next
+/// runtime wait is not ended at once by a command already served (an extra turn).
+#[test]
+fn a_stale_wake_permit_is_cleared() {
+    use crate::page_protocol::clear_stale_wake;
+    use futures::FutureExt;
+    let wake = tokio::sync::Notify::new();
+    wake.notify_one();
+    clear_stale_wake(Some(&wake));
+    assert!(wake.notified().now_or_never().is_none(), "the permit outlived its command");
+    clear_stale_wake(Some(&wake));
+    clear_stale_wake(None);
+    wake.notify_one();
+    assert!(wake.notified().now_or_never().is_some(), "a new command's permit was lost");
+}

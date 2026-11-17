@@ -106,3 +106,7 @@ websuite/captures/*.ppm
 /scratch_*/
 # Batch/agent scratch inside a checkout (batch 24 landed 452 of these by accident).
 /scratch/
+
+# test262 working copy at the commit in trench/test262/PIN. Rebuild with scripts/test262_sync.sh;
+# do not vendor the suite into this repo.
+third_party/test262
