@@ -97,6 +97,49 @@ fn a_second_shape_pass_over_more_strings_than_the_cap_reshapes_only_the_overflow
     );
 }
 
+/// The entry cap the shaped-text memo had before SHAPED-CAP (16,384).
+const OLD_SHAPED_CAP: usize = 16_384;
+
+#[test]
+fn a_relayout_over_rows_shaped_under_two_keys_reshapes_none_the_second_time() {
+    // SHAPED-CAP: a relayout shapes each row at least twice under different
+    // keys (layout, then the display list), so `rows` text rows need
+    // `2 x rows` entries. Past 2 x 16,384 entries the clock's hand lapped
+    // within a pass and evicted what it was keeping (fl-19977-u5 display
+    // list 89.6 ms vs r5 35 ms on the Mac). Rows here are short strings
+    // like the fixtures', well inside the byte budget, so the second pass
+    // finds every one.
+    let rows = OLD_SHAPED_CAP + OVER;
+    let shaper = TextShaper::new();
+    let chain = FontFamilyChain::from_css_value("sans-serif");
+    let pass = || {
+        let before = shape_memo_misses();
+        for i in 0..rows {
+            for size in [16.0, 13.0] {
+                shaper
+                    .shape(
+                        &row_text(i),
+                        &chain,
+                        FontWeight(400),
+                        FontStyle::Normal,
+                        FontStretch::Normal,
+                        size,
+                    )
+                    .expect("shape");
+            }
+        }
+        shape_memo_misses() - before
+    };
+    let second = steady_pass(|| {
+        pass();
+        pass()
+    });
+    assert_eq!(
+        second, 0,
+        "second pass over {rows} rows x 2 keys shaped {second} again"
+    );
+}
+
 /// Every box's geometry, in tree order.
 fn geometry(b: &crate::LayoutBox, out: &mut Vec<String>) {
     out.push(format!("{:?}", b.dimensions));

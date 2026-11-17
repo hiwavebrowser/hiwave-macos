@@ -294,4 +294,32 @@ mod tests {
         assert_eq!(memo.get(&0), Some(0));
         assert_eq!(memo.get(&5), None);
     }
+
+    #[test]
+    fn the_test_switch_is_restored_when_the_closure_panics() {
+        let mut memo = TextMemo::new(8);
+        let caught = std::panic::catch_unwind(|| without_text_memos(|| panic!("inside")));
+        assert!(caught.is_err());
+        // The memos answer again on this thread.
+        memo.insert(1, 2);
+        assert_eq!(memo.get(&1), Some(2));
+    }
+
+    #[test]
+    fn a_string_re_read_from_the_queue_moves_into_an_unused_slot() {
+        // The memo is full of strings the page no longer uses: a lap of
+        // misses has cleared every mark. A string the clock turned away and
+        // the page keeps reading is promoted into the main table instead of
+        // living in the queue.
+        let mut memo = TextMemo::new(32);
+        pass(&mut memo, 0..32);
+        // 32 misses, each turned away: their looks clear all 32 marks.
+        pass(&mut memo, 100..132);
+        assert_eq!(memo.get(&131), Some(262));
+        assert!(
+            memo.entries.contains_key(&131),
+            "a re-read turned-away string stayed in the queue while the slot under the hand was unused"
+        );
+        assert_eq!(memo.len(), 32);
+    }
 }
