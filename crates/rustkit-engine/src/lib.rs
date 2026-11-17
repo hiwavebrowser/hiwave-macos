@@ -48003,7 +48003,6 @@ pub(crate) fn last_restyle_miss_for_test() -> String {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 thread_local! {
     /// Element cascades run on this thread (`compute_style_for_element`), for tests.
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -48050,6 +48049,7 @@ pub(crate) fn set_retained_styles_for_test(mode: Option<RetainedStyles>) {
     RETAINED_STYLES_TEST.with(|m| m.set(mode));
 }
 
+#[cfg(test)]
 pub(crate) fn set_script_restyle_for_test(on: bool) {
     SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
 }
