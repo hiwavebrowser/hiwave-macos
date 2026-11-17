@@ -13369,12 +13369,33 @@ impl layout_ctx::LayoutCtx {
                 };
                 match spliced {
                     Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
+                        // What the animation state's sweep would drop if the build ended with the
+                        // splice, as `with_building` decides it (#1257 delta R1): the comparison
+                        // build below visits every element, so the real sweep never shows it.
+                        let would_sweep = lay.as_ref().map_or_else(Vec::new, |lay| {
+                            lay.animations.borrow().would_sweep(layout_ctx::build_was_partial(false))
+                        });
                         let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
-                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                        let note_difference = |difference: String| {
                             let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
                             #[cfg(test)]
                             SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        };
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            note_difference(difference);
+                        }
+                        // Before-change values the splice's sweep drops of elements that are
+                        // still there (the full build visited them): their next style change
+                        // would start no transition.
+                        let lost = lay.as_ref().map_or(0, |lay| {
+                            let animations = lay.animations.borrow();
+                            would_sweep.iter().filter(|node| animations.visited_this_build(**node)).count()
+                        });
+                        if lost > 0 {
+                            note_difference(format!(
+                                "the splice's sweep drops the before-change values of {lost} elements still styled"
+                            ));
                         }
                         full
                     }
