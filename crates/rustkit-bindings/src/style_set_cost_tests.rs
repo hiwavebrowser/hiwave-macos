@@ -39,13 +39,67 @@ fn per_op(op: &str, base: &str) -> f64 {
 
 /// (name, script, the loop body without the write, budget in opcodes per write). Every write changes
 /// the value (`i` differs each time), so none is the unchanged-declaration no-op.
+///
+/// Before (develop 3e17a16f, the JavaScript CSSStyleDeclaration): 6,801 / 6,627 / 6,850 / 4,549 / 6,389.
+/// Native: 153.5 / 153.8 / 191.0 / 192.0 / 327.3. What is left is the Proxy's trap, the name's
+/// conversion (`backgroundColor` -> `background-color`, from a table), the value's string conversion and
+/// the host call; the cheapest attribute write, `el.id = v`, is 94 with no Proxy in front
+/// (`attr_write_cost_tests`). The budget is that, with room: 200 a write (~4 us of interpreter at the
+/// ~19 ns an opcode #1261 measured), 400 for the remove-and-set pair.
 const OPS: &[(&str, &str, &str, f64)] = &[
-    ("s.transform = v", "s.transform = 'rotate(' + i + 'deg)'", "var v = 'rotate(' + i + 'deg)'", 150.0),
-    ("s.backgroundColor = v", "s.backgroundColor = 'hsl(' + i + ',50%,50%)'", "var v = 'hsl(' + i + ',50%,50%)'", 150.0),
-    ("s.setProperty(n, v)", "s.setProperty('transform', 'rotate(' + i + 'deg)')", "var v = 'rotate(' + i + 'deg)'", 150.0),
-    ("s.setProperty(n, v, 'important')", "s.setProperty('opacity', '0.' + i, 'important')", "var v = '0.' + i", 150.0),
-    ("s.removeProperty then set", "s.removeProperty('left'); s.left = i + 'px'", "var v = i + 'px'", 300.0),
+    ("s.transform = v", "s.transform = 'rotate(' + i + 'deg)'", "var v = 'rotate(' + i + 'deg)'", 200.0),
+    ("s.backgroundColor = v", "s.backgroundColor = 'hsl(' + i + ',50%,50%)'", "var v = 'hsl(' + i + ',50%,50%)'", 200.0),
+    ("s.setProperty(n, v)", "s.setProperty('transform', 'rotate(' + i + 'deg)')", "var v = 'rotate(' + i + 'deg)'", 200.0),
+    ("s.setProperty(n, v, 'important')", "s.setProperty('opacity', '0.' + i, 'important')", "var v = '0.' + i", 200.0),
+    ("s.removeProperty then set", "s.removeProperty('left'); s.left = i + 'px'", "var v = i + 'px'", 400.0),
 ];
+
+/// The time receipt (not a gate: time depends on the machine): ns per write, native and the JavaScript
+/// copy (`__rk.styleNative(false)`) on the same bindings, the best of 5 runs of 20,000, the empty loop
+/// subtracted, as #1261's `hostcall` example measures.
+/// `cargo test --release -p rustkit-bindings --lib style_set_time -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn style_set_time() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<html><body><div id='a' style='position:absolute'></div></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.evaluate("var el = document.getElementById('a'), st = el.style; 'ok'").unwrap();
+    let cases = [
+        ("empty loop", ";"),
+        ("st.transform = (cached style)", "st.transform = 'translate(' + i + 'px, 0px) rotate(' + i + 'deg)';"),
+        ("el.style.transform =", "el.style.transform = 'translate(' + i + 'px, 0px) rotate(' + i + 'deg)';"),
+        ("st.setProperty('transform')", "st.setProperty('transform', 'translate(' + i + 'px, 0px) rotate(' + i + 'deg)');"),
+        ("st.left = (cached style)", "st.left = i + 'px';"),
+        ("st.transform (read)", "st.transform;"),
+    ];
+    let n = 20_000usize;
+    for native in [true, false] {
+        b.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.styleNative({native}); return 0"))
+            .unwrap();
+        let mut empty = 0.0f64;
+        for (index, (name, body)) in cases.iter().enumerate() {
+            let f = format!("__time{index}");
+            b.evaluate(&format!("function {f}(n) {{ for (var i = 0; i < n; i++) {{ {body} }} }} 'ok'")).unwrap();
+            b.evaluate(&format!("{f}(1000)")).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                b.evaluate(&format!("{f}({n})")).unwrap();
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            if index == 0 {
+                empty = best;
+            }
+            let ns = if index == 0 { best } else { best - empty };
+            println!("TIME {:<6} {name:<32} {ns:>10.1} ns", if native { "native" } else { "js" });
+        }
+    }
+}
 
 /// The measuring half, run in a child process (the VM's counter switch is read once per process).
 #[test]

@@ -88,6 +88,9 @@ mod attr_write_cost_tests;
 #[cfg(test)]
 mod style_set_cost_tests;
 #[cfg(test)]
+mod native_style_tests;
+mod inline_style;
+#[cfg(test)]
 mod attr_write_tests;
 #[cfg(test)]
 mod node_apis_tests;
@@ -514,7 +517,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
