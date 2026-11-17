@@ -57,7 +57,7 @@ fn the_frame_stage_line_names_every_field_once_in_order() {
 fn live_turns_of_an_animating_page_count_its_canvas_draws_and_renders() {
     let (mut engine, view, _server, rt) = load(PAGE);
     // The frames the page has run (the load's settle ran some too).
-    let mut count = |engine: &mut Engine| -> u64 {
+    let count = |engine: &mut Engine| -> u64 {
         let shown = engine.execute_script(view, "String(n)").unwrap();
         shown.trim_matches(|c: char| !c.is_ascii_digit()).parse().expect(&shown)
     };
