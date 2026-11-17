@@ -123,6 +123,59 @@ fn measure_sleep_overshoot() {
     eprintln!("SLEEP-OVERSHOOT std::thread::sleep: {}", pcts(std_late));
 }
 
+/// This process's CPU time so far (user + kernel), all threads.
+fn process_cpu() -> Duration {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn GetProcessTimes(process: isize, created: *mut u64, exited: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+        }
+        let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+        // 100 ns units.
+        Duration::from_nanos((k + u) * 100)
+    }
+    #[cfg(unix)]
+    {
+        let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+        let tv = |t: libc::timeval| Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64);
+        tv(r.ru_utime) + tv(r.ru_stime)
+    }
+}
+
+/// LINKS-SLOW part 2 R1: the CPU a page costs that runs `setInterval(f, 10)` and nothing else, on
+/// the content thread's loop, against the same page with no timer: 3000 ms each, three runs.
+/// Prints `CPU-RESULT idle|interval <cpu ms> <percent of one core>`.
+#[test]
+#[ignore]
+fn measure_an_interval_pages_cpu() {
+    sleeps_as_on_macos_if_asked();
+    const PAGE: &str = "<!doctype html><body><script>var n = 0; \
+        function go() { setInterval(function () { n++; }, 10); }</script></body>";
+    for run in 0..3 {
+        for (name, start) in [("idle", "'started'"), ("interval", "go(); 'started'")] {
+            let fixture = serve(vec![("/", html(PAGE))]);
+            let mut load = Load::start(&fixture, "/");
+            load.wait_complete();
+            let _ = load.eval(start, Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(300));
+            let (cpu0, t0) = (process_cpu(), Instant::now());
+            std::thread::sleep(Duration::from_millis(3000));
+            let (cpu, wall) = (process_cpu() - cpu0, t0.elapsed());
+            let (n, _) = load.eval("n", Duration::from_secs(10));
+            eprintln!(
+                "CPU-RESULT run {run} {name} {:.1} ms {:.2}% ticks {:?}",
+                cpu.as_secs_f64() * 1000.0,
+                cpu.as_secs_f64() / wall.as_secs_f64() * 100.0,
+                n
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn measure_the_content_threads_link_lateness() {
