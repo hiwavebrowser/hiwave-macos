@@ -348,3 +348,56 @@ fn a_long_chain_of_clips_replays_without_deep_recursion_or_unbounded_masks() {
         c.fill_rect(10.0, 10.0, 30.0, 30.0);
     });
 }
+
+// #1282 R1: what pending draws keep alive counts toward the cap.
+
+/// A page that sets a large pattern as its fill before every fill (each set
+/// holds its own copy of the source's pixels, as the bindings make one per
+/// `fillStyle = pattern`) on a canvas it never reads: the patterns the
+/// pending draws keep alive stay within the cap (plus the one that
+/// crossed it). Counted in bytes, no clock.
+#[test]
+fn pattern_bitmaps_held_by_pending_draws_count_toward_the_cap() {
+    let side = 512u32;
+    let pattern_bytes = (side * side * 4) as usize;
+    let source = CanvasBitmap::from_rgba(side, side, &vec![200u8; pattern_bytes]).unwrap();
+    let mut c = CanvasRenderingContext2D::new(64, 64);
+    for i in 0..64 {
+        c.set_fill_style(CanvasStyle::Pattern(CanvasPattern { bitmap: Arc::new(source.clone()), repetition: PatternRepetition::Repeat }));
+        c.fill_rect((i % 8) as f32, 0.0, 8.0, 8.0);
+        let held = c.pending_ops() * pattern_bytes;
+        assert!(held <= PENDING_BYTE_BUDGET + pattern_bytes, "fill {i}: {} pending draws hold {held} bytes of patterns", c.pending_ops());
+        assert!(c.pending_bytes() >= c.pending_ops() * pattern_bytes, "fill {i}: the count misses the patterns");
+    }
+    // One pattern shared by many draws counts once.
+    let mut c = CanvasRenderingContext2D::new(64, 64);
+    c.set_fill_style(CanvasStyle::Pattern(CanvasPattern { bitmap: Arc::new(source), repetition: PatternRepetition::Repeat }));
+    for i in 0..64 {
+        c.fill_rect((i % 8) as f32, 0.0, 8.0, 8.0);
+    }
+    assert_eq!(c.pending_ops(), 64, "a shared pattern does not fill the cap");
+    assert!(c.pending_bytes() < 2 * pattern_bytes);
+}
+
+/// Clips with long paths, a new one before every draw, on a canvas never
+/// read: the clip paths (and masks) the pending draws keep alive count
+/// toward the cap.
+#[test]
+fn clip_paths_held_by_pending_draws_count_toward_the_cap() {
+    let points = 20_000usize;
+    let path_bytes = points * std::mem::size_of::<PathCommand>();
+    let mut c = CanvasRenderingContext2D::new(32, 32);
+    for i in 0..200 {
+        c.save();
+        c.begin_path();
+        c.move_to(0.0, 0.0);
+        for k in 0..points {
+            c.line_to((k % 32) as f32, (k / 32 % 32) as f32 + (i % 3) as f32);
+        }
+        c.clip();
+        c.fill_rect(0.0, 0.0, 32.0, 32.0);
+        c.restore();
+        let held = c.pending_ops() * path_bytes;
+        assert!(held <= PENDING_BYTE_BUDGET + path_bytes, "draw {i}: {} pending draws hold {held} bytes of clip paths", c.pending_ops());
+    }
+}
