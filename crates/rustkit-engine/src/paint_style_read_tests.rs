@@ -48,13 +48,13 @@ fn a_paint_only_style_write_then_a_geometry_read_builds_nothing() {
             "var a = document.getElementById('a'); var w = [];\
              a.style.color = 'red'; w.push(a.offsetWidth);\
              a.style.backgroundColor = 'rgb(0, 0, 255)'; w.push(a.getBoundingClientRect().width);\
-             a.style.opacity = '0.5'; w.push(a.clientHeight);\
              a.style.borderColor = 'green'; a.style.outlineColor = 'blue'; w.push(a.offsetTop);\
              w.push(document.elementFromPoint(5, 5) === a);\
+             a.style.opacity = '0.5'; w.push(a.clientHeight);\
              window.__w = w.join();",
         )
         .unwrap();
-    assert_eq!(read(&mut engine, view, "window.__w"), "100,100,20,0,true");
+    assert_eq!(read(&mut engine, view, "window.__w"), "100,100,0,true,20");
     assert_eq!(forced(&engine, view), 0, "no box moved: every read answers from the published layout");
     assert!(relayouts(&engine, view) > before, "the engine still lays the writes out when script settles");
     assert_eq!(
@@ -154,4 +154,37 @@ fn a_paint_write_then_a_layout_write_then_a_read_builds_once() {
         .unwrap();
     assert_eq!(read(&mut engine, view, "window.__w"), "100,true,100");
     assert_eq!(forced(&engine, view), 1, "only the text write moved a box");
+}
+
+#[test]
+fn a_hit_test_after_an_opacity_write_still_builds() {
+    // Below 1, opacity makes a stacking context, which can change what paints on top.
+    let (mut engine, view) = engine_with(PAGE);
+    engine
+        .execute_script(
+            view,
+            "var a = document.getElementById('a'); var w = [];\
+             a.style.opacity = '0.5'; w.push(a.offsetWidth);\
+             w.push(document.elementFromPoint(5, 5) === a);\
+             window.__w = w.join();",
+        )
+        .unwrap();
+    assert_eq!(read(&mut engine, view, "window.__w"), "100,true");
+    assert_eq!(forced(&engine, view), 1, "the offset read is a lookup, the hit test builds");
+}
+
+#[test]
+fn a_rule_under_has_keeps_the_build() {
+    let page = "<html><head><style>body{margin:0} body:has([style*=red]) #a{width:30px}</style></head><body>\
+        <div id=a style='height:20px'>text</div><p id=p>p</p></body></html>";
+    let (mut engine, view) = engine_with(page);
+    engine
+        .execute_script(
+            view,
+            "document.getElementById('p').style.color = 'red';\
+             window.__w = document.getElementById('a').offsetWidth;",
+        )
+        .unwrap();
+    assert_eq!(read(&mut engine, view, "window.__w"), "30");
+    assert_eq!(forced(&engine, view), 1, "a :has() rule can match on what the write changed");
 }
