@@ -263,22 +263,16 @@ fn the_chain_through_the_loop_model_is_never_early_at_one_turn_a_link() {
 }
 
 /// LINKS-SLOW part 2: an exact wait leaves the runtime's timer `PRECISE_TAIL` (2 ms) before its due
-/// instant, whatever the overshoot estimate, and the last stretch is a thread sleep: the runtime's
+/// instant (the overshoot estimate aims the thread sleep after it, not this), and the last stretch is a thread sleep: the runtime's
 /// timer keeps whole milliseconds, so a sleep on it aimed at a fraction of one ended 1.4 ms late
 /// on average (Windows, 1 ms timers; `std::thread::sleep` 0.3 ms). A wait shorter than the tail
 /// leaves the runtime at once; a whole-millisecond wait (not exact) is the runtime's to the end.
 #[test]
 fn an_exact_wait_leaves_the_runtime_two_milliseconds_before_its_due_instant() {
-    use crate::page_protocol::{runtime_wait_until, OvershootEstimate, PRECISE_TAIL};
+    use crate::page_protocol::{runtime_wait_until, PRECISE_TAIL};
     let now = Instant::now();
     let due = now + Duration::from_millis(10);
-    let mut seasoned = OvershootEstimate::default();
-    for _ in 0..40 {
-        seasoned.observe(now, now + us(1_500));
-    }
-    for e in [OvershootEstimate::default(), seasoned] {
-        assert_eq!(runtime_wait_until(now, due, true, &e), due - PRECISE_TAIL, "estimate {e:?}");
-        assert_eq!(runtime_wait_until(now, now + us(1_500), true, &e), now, "under the tail: at once");
-        assert_eq!(runtime_wait_until(now, due, false, &e), due, "a whole-millisecond wait");
-    }
+    assert_eq!(runtime_wait_until(now, due, true), due - PRECISE_TAIL);
+    assert_eq!(runtime_wait_until(now, now + us(1_500), true), now, "under the tail: at once");
+    assert_eq!(runtime_wait_until(now, due, false), due, "a whole-millisecond wait");
 }

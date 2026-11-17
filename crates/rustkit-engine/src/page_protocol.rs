@@ -1309,38 +1309,43 @@ impl EndpointSide {
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    // Aimed early by this thread's sleep overshoot when the wait is exact; a wake
-                    // before the due instant sleeps the rest, so nothing runs early (LINKS-SLOW).
-                    let aimed = runtime_wait_until(now, due, exact.is_some(), &overshoot);
-                    if tracing {
-                        traced_due = Some((due, aimed, exact.is_some()));
-                    }
+                    // An exact wait leaves the runtime `PRECISE_TAIL` before its due instant, then a
+                    // thread sleep aimed early by this thread's sleep overshoot, then a spin to the
+                    // due instant, so nothing runs early (LINKS-SLOW part 2).
+                    let precise = exact.is_some();
+                    let leave = runtime_wait_until(now, due, precise);
                     // A command ends the wait (CH3.A9): the chrome's Cmd+T
                     // used to sit here until the chrome's next timer.
-                    let slept = match &self.cmd_wake {
-                        Some(wake) => tokio::time::timeout_at(tokio::time::Instant::from_std(aimed), wake.notified())
-                            .await
-                            .is_err(),
-                        None => {
-                            tokio::time::sleep_until(tokio::time::Instant::from_std(aimed)).await;
-                            true
-                        }
-                    };
-                    if slept && exact.is_some() {
-                        let woke = std::time::Instant::now();
-                        // Only a real sleep says how late sleeps end: one aimed at or before now
-                        // returns at once and would read as no overshoot (LINKS-SLOW R1).
-                        if aimed > now {
-                            overshoot.observe(aimed, woke);
-                        }
-                        if let Some(rest) = after_wake(due, woke) {
-                            match &self.cmd_wake {
-                                Some(wake) => {
-                                    let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(rest), wake.notified()).await;
-                                }
-                                None => tokio::time::sleep_until(tokio::time::Instant::from_std(rest)).await,
+                    let slept = if leave > now {
+                        match &self.cmd_wake {
+                            Some(wake) => tokio::time::timeout_at(tokio::time::Instant::from_std(leave), wake.notified())
+                                .await
+                                .is_err(),
+                            None => {
+                                tokio::time::sleep_until(tokio::time::Instant::from_std(leave)).await;
+                                true
                             }
                         }
+                    } else {
+                        true
+                    };
+                    if slept && precise {
+                        let from = std::time::Instant::now();
+                        let aimed = overshoot.aim(due).max(from);
+                        if tracing {
+                            traced_due = Some((due, aimed, true));
+                        }
+                        // Only a real sleep says how late sleeps end: one aimed at or before now
+                        // returns at once and would read as no overshoot (LINKS-SLOW R1).
+                        if aimed > from {
+                            std::thread::sleep(aimed - from);
+                            overshoot.observe(aimed, std::time::Instant::now());
+                        }
+                        while after_wake(due, std::time::Instant::now()).is_some() {
+                            std::hint::spin_loop();
+                        }
+                    } else if tracing {
+                        traced_due = Some((due, leave, precise));
                     }
                     continue;
                 }
@@ -1468,9 +1473,10 @@ impl LiveClock {
     }
 }
 
-/// LINKS-SLOW: how late this content thread's sleeps end past the instant they were asked for (a
-/// timer wheel's tick, the OS's slack: about 1.9 ms on Windows with 1 ms timers, about 1.3 ms on
-/// the Mac). The loop aims a sleep that much before a timer's due instant, so it wakes near it;
+/// LINKS-SLOW: how late this content thread's thread sleeps end past the instant they were asked
+/// for (the OS's slack: about 0.3 ms on Windows with 1 ms timers; the runtime's timer, which keeps
+/// whole milliseconds, is no longer used for the last stretch: part 2). The loop aims the last
+/// stretch of an exact wait that much before a timer's due instant, so it wakes near it;
 /// counted from when they are set (CLOCK3), timers otherwise ran one overshoot late every link
 /// (the Mac's 10 ms chain: 236-245 links in 3000 ms, Chrome 278-283).
 ///
@@ -1564,16 +1570,16 @@ fn trace_turn(
 pub const PRECISE_TAIL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// LINKS-SLOW: until when the content loop's wait for `due` sleeps on the runtime (where commands
-/// and sockets keep their turn), from `now`. An exact wait is aimed early by the thread's
-/// overshoot.
+/// and sockets keep their turn), from `now`. An exact wait leaves it `PRECISE_TAIL` early (at once
+/// when less is left) and ends with a thread sleep aimed by `OvershootEstimate`; a
+/// whole-millisecond wait is the runtime's to the end.
 pub fn runtime_wait_until(
     now: std::time::Instant,
     due: std::time::Instant,
     exact: bool,
-    overshoot: &OvershootEstimate,
 ) -> std::time::Instant {
     if exact {
-        overshoot.aim(due).max(now)
+        due.checked_sub(PRECISE_TAIL).unwrap_or(now).max(now)
     } else {
         due
     }
