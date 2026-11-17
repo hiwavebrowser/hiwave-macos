@@ -234,13 +234,13 @@ with any coverage.
   painted pixels.** A 1 px diagonal line of 482 painted pixels costs 37 µs
   (~77 ns per painted pixel); an aligned 100x100 rectangle of 10,000 pixels
   costs 6.8 µs (0.7 ns per pixel). The 4x supersampled scan over every edge
-  row is the cost; the same fill without AA is 5-17x cheaper on curves and
-  lines.
+  row is the cost; the same fill without AA is 8-15x cheaper on curves and
+  lines (3-9x on rectangles).
 - **The CPU work that stays under any design** (path build + stroke outline)
-  is 0.2-1.9 µs per draw: under 5% of today's draw.
+  is 0.2-1.9 µs per draw: under 10% of today's draw.
 - **The analytic sketch** is a 60-line signed-area accumulator (font-rs
   style, scalar, every pixel of the bounding box resolved and blended, curves
-  flattened to fixed steps). It is 1.2-5x faster than tiny-skia on thin
+  flattened to fixed steps). It is 1.1-5x faster than tiny-skia on thin
   strokes and lines, but slower on large fills and rectangles (it resolves the
   whole box; a real one keeps sparse spans and fills interiors by run). It
   prices D's shape, not D: a production analytic rasterizer would beat it on
@@ -254,7 +254,8 @@ software Skia, analytic AA). Alpha channel (one colour, so coverage), over the
 pixels either side painted: share of painted pixels off by more than 2,
 largest difference, mean difference. "Chrome GPU" is the same Chrome launched
 with Metal and GPU rasterization on (ANGLE Metal, Apple M2 Max), read back the
-same way.
+same way; whether each 200x200 canvas took Chrome's GPU raster is not
+visible from the page, but its pixels differ from the software run's.
 
 | draw kind | tiny-skia AA (today) | Chrome GPU | analytic sketch | tiny-skia non-AA |
 |---|---|---|---|---|
