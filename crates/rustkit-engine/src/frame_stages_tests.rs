@@ -93,3 +93,62 @@ fn a_relayout_stage_inside_a_script_turn_is_not_also_script_time() {
     let d = frame_stage_totals().since(&before);
     assert_eq!((d.layout_ms, d.script_ms), (7.0, 0.0));
 }
+
+/// A frame tree's turn whose timers ran past a frame's worth of time still
+/// runs the tree's due animation frame callbacks once (#776). That round is
+/// script: the turn's script time holds at least what the page itself
+/// measured its callbacks spending (the same spans, read by the page's own
+/// clock inside them). Was: the round ran outside any script turn and its
+/// time was the turn's `other_ms`.
+#[test]
+fn the_animation_round_a_stopped_frame_tree_turn_still_runs_is_script_time() {
+    let parent = "<!doctype html><body><script>window.ready = false;</script>\
+        <iframe id=f src='/child.html' onload='window.ready = true'></iframe></body>";
+    let child = "<!doctype html><body><script>\
+        window.spent = 0; window.rafs = 0; var k = 0;\
+        function spin(ms) { var t = performance.now(); while (performance.now() - t < ms) {} spent += performance.now() - t; }\
+        window.go = function () {\
+          (function tick() { setTimeout(function () { spin(20); if (++k < 20) tick(); }, 0); })();\
+          (function frame() { requestAnimationFrame(function () { spin(8); rafs++; if (rafs < 40) frame(); }); })();\
+        };</script></body>";
+    let server = serve_routes(vec![
+        ("/", "text/html", parent.to_string()),
+        ("/child.html", "text/html", child.to_string()),
+    ]);
+    let config = EngineConfig { nested_contexts: true, post_load_requests_live: true, ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let read = |engine: &mut Engine, expr: &str| -> String {
+        let v = engine.execute_script(view, &format!("String({expr})")).unwrap();
+        v.trim_start_matches("String(\"").trim_end_matches("\")").trim_matches('"').to_string()
+    };
+    for _ in 0..50 {
+        if read(&mut engine, "window.ready") == "true" {
+            break;
+        }
+        rt.block_on(engine.pump_live_real(view, 20));
+    }
+    assert_eq!(read(&mut engine, "window.ready"), "true", "the frame did not load");
+    engine.execute_script(view, "f.contentWindow.go()").unwrap();
+    let before = frame_stage_totals();
+    let mut stopped = 0;
+    for _ in 0..30 {
+        let turn = rt.block_on(engine.pump_live_real(view, 16));
+        stopped += turn.yielded_for_frame as u32;
+    }
+    let d = frame_stage_totals().since(&before);
+    let spent: f64 = read(&mut engine, "f.contentWindow.spent").parse().unwrap();
+    let rafs: f64 = read(&mut engine, "f.contentWindow.rafs").parse().unwrap();
+    assert!(stopped > 0 && rafs > 0.0, "no turn stopped for its frame ({stopped}), or no frame ran ({rafs})");
+    assert!(
+        d.script_ms >= spent,
+        "the turns' script time {:.1} ms is less than the page's callbacks measured themselves spending, {spent:.1} ms \
+         ({rafs} frames, {stopped} stopped turns): {d:?}",
+        d.script_ms
+    );
+}
