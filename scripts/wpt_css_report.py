@@ -35,19 +35,40 @@ def diagnosis(test, page):
             return f"Computed {prop} value differs", "computed-value resolution and CSSOM serialization"
         if "property <" in name and message.startswith(("assert_equals:", "assert_approx_equals:")):
             return f"Animation or transition samples differ for {prop}", "animation sampling / property interpolation"
+    if page.endswith("/scrollable-overflow-transform-unreachable-region.html") and re.match(r"assert_equals: scroll(Width|Height) expected", message):
+        return "Transformed unreachable overflow changes the reported scroll extent", "rustkit-layout overflow geometry / scroll metrics"
+    if "cssText serialization should have no value defintions" in message and page.endswith("/test_font_feature_values_parsing.html"):
+        return "Empty font feature value definitions survive serialization", CSSOM + " @font-feature-values cssText"
+    if "Selection.toString() for math-auto" in name and message.startswith("assert_equals:"):
+        return "Selection string misses math-auto text transformation", "selection text extraction and CSS text-transform"
+    if page.endswith("/grid-layout-properties.html") and message.startswith("assert_true: expected true got false"):
+        return "Property membership on element.style fails for grid properties", "rustkit-bindings CSSStyleDeclaration property exposure"
+    if re.search(r"assert_in_array: gridTemplate(?:Columns|Rows) value", message):
+        return "Resolved grid tracks differ in computed style", "rustkit-layout grid track sizing / computed style readback"
+    if "grid serialization should be canonical" in message:
+        return "Grid shorthand readback differs", CSSOM + " grid shorthand serialization"
+    if page.endswith("/at-scope-parsing.html") and 'expected "@scope ' in message:
+        return "@scope rule serialization differs", CSSOM + " rule cssText"
+    if page.endswith("/scope-invalidation.html") and message.startswith("assert_equals:"):
+        return "@scope style does not update after DOM change", "CSS scoped matching and style invalidation"
     if page.endswith("/test_font_family_parsing.html"):
         if "shouldn't parse" in message:
             return "Invalid font-family tokens retained in stylesheet", CSS + " font-family parser / CSSOM rule readback"
         if "should parse" in message or "serialization" in message:
             return "Valid font-family parsed or serialized differently", CSS + " font-family parser / CSSOM rule readback"
-    if "@font-feature-values" in name and "bad rule type expected 14 but got 0" in message:
+    if page.endswith("/test_font_feature_values_parsing.html") and "bad rule type expected 14 but got 0" in message:
         return "Font feature values rule has incorrect CSSRule type", CSSOM + " rule type dispatch"
     if page.split("?")[0].endswith("/font-shorthand-serialization-prevention.html") and 'expected "" but got' in message:
         return "Font shorthand serialized despite incompatible longhands", CSSOM + " shorthand readback"
     if message.startswith("assert_equals:") and "data-" in message:
         geometry = re.search(r"\n(offset(?:Top|Left|Width|Height)|client(?:Height|Width)|scroll(?:Height|Width)|width|height) expected", message)
         if geometry:
-            section = page.strip("/").split("/")[1]
+            parts = page.strip("/").split("/")
+            section = parts[1]
+            if section == "css-grid" and len(parts) > 3:
+                section += "/" + parts[2]
+            elif section == "css-flexbox" and "/abspos/" in page:
+                section += "/abspos"
             return f"{section} {geometry[1]} differs from check-layout expectation", "rustkit-layout geometry and DOM metric readback"
     api = re.search(r"\b((?:CSS|DOM|WebKit)[a-zA-Z0-9_]+) is not defined", message)
     if api:
@@ -97,12 +118,31 @@ def summarize(rows):
     return dict(totals), clusters
 
 
+def directory_tables(counts):
+    lines = ["# Pinned CSS testharness results", "",
+             "Windows, Chrome for Testing 148.0.7778.216, WPT a24eb4e7a77917cfa5a6f64e8b02288ca1df1877.",
+             "The shared denominator sums the larger reported subtest count per page.", ""]
+    for directory, count in sorted(counts.items()):
+        lines.extend([f"## `{directory}/`", "",
+                      "| Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |",
+                      "|---|---:|---:|---:|---:|---:|---:|"])
+        total = count["total"]
+        for engine, label in (("hiwave", "HiWave"), ("chrome", "Chrome")):
+            passed = count[engine + "_pass"]
+            rate = f"{passed / total:.1%}" if total else "n/a"
+            lines.append(f'| {label} | {count["pages"]:,} | {count[engine + "_observed"]:,} | '
+                         f'{total:,} | {passed:,} | {rate} | {count[engine + "_crashes"]} |')
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inventory", type=Path)
     parser.add_argument("results", type=Path)
     parser.add_argument("expectations", type=Path)
     parser.add_argument("clusters", type=Path)
+    parser.add_argument("--tables", type=Path)
     args = parser.parse_args()
     with args.results.open(encoding="utf8") as stream:
         rows = [json.loads(line) for line in stream]
@@ -110,6 +150,8 @@ def main():
     if collections.Counter(pages) != collections.Counter(row["page"] for row in rows):
         parser.error("results do not cover the exact manifest")
     counts, clusters = summarize(rows)
+    if args.tables:
+        args.tables.write_bytes(directory_tables(counts).encode())
     withheld = {r["page"].split("?")[0].split("#")[0] for r in rows
                 if any(r[e]["status"] in {"CRASH", "TIMEOUT"} for e in ("hiwave", "chrome"))}
     args.expectations.write_bytes((json.dumps(counts, sort_keys=True, indent=2) + "\n").encode())

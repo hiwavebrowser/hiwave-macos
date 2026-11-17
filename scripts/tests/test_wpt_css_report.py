@@ -24,3 +24,21 @@ class CssReportTests(unittest.TestCase):
         fail = ("paint", "FAIL", "CSSStyleRule is not defined")
         row = {"page": "/css/cssom/rules.html", "chrome": run("OK", fail), "hiwave": run("OK", fail)}
         self.assertFalse(summarize([row])[1])
+
+    def test_first_membership_assertion_precedes_value_serialization(self):
+        check = "Property color value 'red'"
+        row = {"page": "/css/css-color/example.html",
+               "chrome": run("OK", (check, "PASS", None)),
+               "hiwave": run("OK", (check, "FAIL", "assert_true: color doesn't seem to be supported in the computed style"))}
+        counts, clusters = summarize([row])
+        self.assertEqual(counts["css/css-color"]["classified_fail"], 1)
+        self.assertEqual(next(iter(clusters))[0], "Property membership on getComputedStyle fails")
+
+    def test_duplicate_names_are_matched_by_occurrence(self):
+        row = {"page": "/css/cssom/example.html",
+               "chrome": run("OK", ("rule", "FAIL", None), ("rule", "PASS", None)),
+               "hiwave": run("OK", ("rule", "FAIL", "CSSStyleRule is not defined"),
+                             ("rule", "FAIL", "CSSStyleRule is not defined"))}
+        counts, clusters = summarize([row])
+        self.assertEqual(counts["css/cssom"]["matched_fail"], 1)
+        self.assertEqual(next(iter(clusters.values()))["count"], 1)

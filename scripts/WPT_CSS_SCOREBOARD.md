@@ -12,7 +12,7 @@ python scripts/prepare_wpt_css.py "$local/wpt"
 python scripts/wpt_css_inventory.py "$local/wpt" | Set-Content -Encoding ascii "$local/pages.json"
 cargo build -j 2 -p parity-capture
 python scripts/wpt_css_run.py "$local/wpt" "$local/pages.json" target/debug/parity-capture.exe "$local/paired.jsonl" --jobs 4
-python scripts/wpt_css_report.py "$local/pages.json" "$local/paired.jsonl" "$local/expectations.json" "$local/clusters.json"
+python scripts/wpt_css_report.py "$local/pages.json" "$local/paired.jsonl" "$local/expectations.json" "$local/clusters.json" --tables "$local/directory-tables.md"
 ```
 
 The download happens during preparation. Both browsers load from the same loopback origin. WPT's server supplies the generated resources, HTTP headers and substitutions. The runner appends a completion callback to the served harness. Each page gets a fresh browser process. The deadline contains hangs. Keep the JSONL and server logs local. A rerun with the same inputs and output path resumes completed pairs. Use a new output file after changing the host binary, WPT pin or browser.
