@@ -1149,3 +1149,21 @@ reserved from the length: `new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12))` as
 and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3"; the ICU list pattern
 gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
 its own every 65,536 units, so its memory follows the text's length, not the number of parts.
+
+## Patch: a direct eval in a class element keeps the bindings around the class (`class-element-eval`)
+
+**Files.** `third_party/boa_ast/src/operations/mod.rs` (`contains`, `visit_class_element`).
+
+**What.** Boa decides which scopes keep their bindings in environments, rather than in registers, from
+`contains(node, ContainsSymbol::DirectEval)`: a scope holding a direct eval, or holding a function
+that does, keeps them all, so the eval can find them by name at run time. For a class element the
+answer was always no: method bodies were skipped, a field was asked only about its name, and a
+static block not at all. So `{ let x = 1; class C { m() { return eval('x'); } } }` left `x` in a
+register, and the eval's lookup went to an environment that was not there. It now answers as a
+nested function does: a method by its `contains_direct_eval`, and a field, private field or static
+field initializer and a static block by what they contain. Every other symbol keeps the spec's
+ComputedPropertyContains rule (only a computed name is looked at).
+
+**Pin.** `crates/rustkit-js/tests/class_element_eval.rs`: 16 cases, run as classic scripts, against
+Chrome for Testing 148.0.7778.216 (`docs/diagnostics/2026-11-17/class_element_eval_cases.json`). Red
+without the patch: 12 of 16 differed (no answer, or `undefined` for a static block's read).
