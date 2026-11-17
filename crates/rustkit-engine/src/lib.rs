@@ -700,6 +700,8 @@ mod lat22_forced_read_build_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hidden_tiles_build_tests;
 #[cfg(all(test, feature = "headless"))]
+mod retained_style_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
@@ -16306,6 +16308,8 @@ impl layout_ctx::LayoutCtx {
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
+        #[cfg(test)]
+        CASCADES.with(|c| c.set(c.get() + 1));
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
         let _ua_control_border = UaControlBorderScope::enter(tag_name);
         let _border_style_declared = BorderStyleDeclaredScope::enter(tag_name);
@@ -47906,6 +47910,54 @@ pub(crate) fn last_restyle_miss_for_test() -> String {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+thread_local! {
+    /// Element cascades run on this thread (`compute_style_for_element`), for tests.
+    static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Element cascades this thread has run so far (tests).
+#[cfg(test)]
+pub(crate) fn cascades_for_test() -> usize {
+    CASCADES.with(std::cell::Cell::get)
+}
+
+/// TREE-REUSE: `RUSTKIT_RETAINED_STYLES` keeps each view's per-element styles from one build to
+/// the next across script writes, and replays an element's style when nothing it depends on was
+/// written: `on`, `verify` (cascade anyway and count the replays that would differ), or `off`
+/// (default) (`docs/design/INCREMENTAL_RESTYLE.md` §3.3 item 1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RetainedStyles {
+    Off,
+    On,
+    Verify,
+}
+
+fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
+    match value {
+        Some("on") | Some("1") => RetainedStyles::On,
+        Some("verify") => RetainedStyles::Verify,
+        _ => RetainedStyles::Off,
+    }
+}
+
+#[allow(dead_code)] // red: read by the fix
+fn retained_styles_mode() -> RetainedStyles {
+    #[cfg(test)]
+    if let Some(mode) = RETAINED_STYLES_TEST.with(std::cell::Cell::get) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<RetainedStyles> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| retained_styles_from(std::env::var("RUSTKIT_RETAINED_STYLES").ok().as_deref()))
+}
+
+/// Run this thread's builds with retained styles `mode`; `None` goes back to the environment's.
+#[cfg(test)]
+pub(crate) fn set_retained_styles_for_test(mode: Option<RetainedStyles>) {
+    RETAINED_STYLES_TEST.with(|m| m.set(mode));
+}
+
 pub(crate) fn set_script_restyle_for_test(on: bool) {
     SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
 }
