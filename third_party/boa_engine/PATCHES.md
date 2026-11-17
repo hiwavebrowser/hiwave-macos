@@ -1150,6 +1150,34 @@ and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3";
 gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
 its own every 65,536 units, so its memory follows the text's length, not the number of parts.
 
+## Patch: native string loops cost what the string is long, and the turn budget stops them (`regex-input-copy`, `string-search`, `native-loop-interrupt`)
+
+**Why.** Three costs grew with the square of a page's string, or could not be stopped:
+
+- `regress` matches UCS-2 or UTF-16, not Latin-1, so `RegExpBuiltinExec` copied a Latin-1 input to UCS-2
+  on every call: a global match, `replace`, `split`, `matchAll` or a page's own `exec` loop over a long
+  ASCII string copied the whole string once per match (276 MB allocated for 8,192 matches in 16 KiB).
+- The string crate's `index_of` skips `fromIndex` positions one by one before comparing, so `replaceAll`
+  and `split`, which search on from each match, were quadratic in the string's length.
+- Those two loops call nothing per step, so the interrupt checks that run on a call never ran in them,
+  and the turn budget could not stop them. (The `RegExp.prototype` loops call `exec` each step, which is
+  checked.)
+
+**What.** The UCS-2 copy of a Latin-1 input is kept, with the string it came from, and reused while the
+same string is matched (`LATIN1_INPUT`, one entry per thread; inputs under 256 units are copied each
+time). The kept pair would pin a page's string after the page drops it, so `rustkit_js::JsRuntime::end_turn`
+releases it (`regexp::release_kept_input`), and an input over 2^24 units is never kept (copied for each
+match, as before): one match on a 2^29-unit string no longer holds 512 MiB plus a 1 GiB copy for the
+life of the thread (`crates/rustkit-js/tests/regexp_input_release.rs`, red before). `String::index_of_from` takes the substring from `fromIndex` (no copy) and searches that; `indexOf`,
+`includes`, `replaceAll` and `split` use it. The `replaceAll` and `split` loops read the interrupt word.
+
+**Pin.** `crates/rustkit-js/tests/native_loop_limits.rs`: bytes allocated on the thread during a global
+match, `replace`, `split`, an `exec` loop and `matchAll` over a 16 KiB string (under 32 MiB; it was
+276 MB), and `replaceAll` / `split` stopped by an interrupt word set just before their loop. Red without
+the patch. Measured (not a test, release build, this machine): at 2^15 / 2^16 / 2^17 characters,
+`match(/x/g)` 125 / 369 / 1295 ms before, 68 / 130 / 283 ms after; `replaceAll` 120 / 470 / 1875 ms
+before, 2 / 6 / 12 ms after; `split` 116 / 471 / 1871 ms before, 1 / 1 / 3 ms after.
+
 ## Patch: a direct eval in a class element keeps the bindings around the class (`class-element-eval`)
 
 **Files.** `third_party/boa_ast/src/operations/mod.rs` (`contains`, `visit_class_element`).

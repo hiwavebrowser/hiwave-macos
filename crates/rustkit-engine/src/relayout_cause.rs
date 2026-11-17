@@ -315,10 +315,22 @@ thread_local! {
     /// kept box tree instead of walking the DOM. The engine is single
     /// threaded; `relayout` reads it right after its own build.
     static LAST_BUILD_REUSED_TREE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the last `build_layout_from_document` on this thread ran under a restyle build
+    /// (`RESTYLE_BUILD`): it visited only the written elements and the path down to them. A
+    /// kept-tree splice starts its restyle build inside `with_building`, after the wrapper looked.
+    static LAST_BUILD_PARTIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn set_last_build_reused_tree(reused: bool) {
     LAST_BUILD_REUSED_TREE.with(|c| c.set(reused));
+}
+
+pub(crate) fn set_last_build_partial(partial: bool) {
+    LAST_BUILD_PARTIAL.with(|c| c.set(partial));
+}
+
+pub(crate) fn last_build_partial() -> bool {
+    LAST_BUILD_PARTIAL.with(|c| c.get())
 }
 
 pub(crate) fn last_build_reused_tree() -> bool {

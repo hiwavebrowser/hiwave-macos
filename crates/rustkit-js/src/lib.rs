@@ -1796,6 +1796,9 @@ impl JsRuntime {
 
     /// Close what [`JsRuntime::begin_turn`] opened.
     pub fn end_turn(&mut self, stamp: &control::ThreadStamp) {
+        // HIWAVE PATCH (regex-input-copy): the engine keeps a copy of the last long Latin-1 regexp
+        // input, with the string, between matches; it must not pin the page's string past the turn.
+        boa_engine::builtins::regexp::release_kept_input();
         if self.deadline.control.borrow().is_none() {
             return;
         }
