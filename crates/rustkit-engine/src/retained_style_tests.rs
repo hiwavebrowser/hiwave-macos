@@ -172,17 +172,38 @@ fn tiles_shown_hidden_and_moved_keep_a_full_cascades_styles() {
     assert_same_as_a_full_cascade("tiles", &tiles(200, 10, TUNE));
 }
 
+/// For a page whose animations run while it is measured. Two runs of one page sample a running
+/// animation at different times (since #1231 the animation clock is the document timeline, whose
+/// origin is the load's real time: two plain full runs give colours one step apart), so their
+/// display lists are not compared frame by frame. The check is inside one run: `verify` cascades
+/// every element afresh beside its replay, and no replay that would have served may differ. The
+/// run must have animated: its frames' display lists differ from each other.
+fn assert_replays_match_a_fresh_cascade(name: &str, page: &str) {
+    let before = retained_mismatches_for_test();
+    let (lists, _, _) = run(page, 8, RetainedStyles::Verify);
+    assert_eq!(
+        retained_mismatches_for_test() - before,
+        0,
+        "{name}: replays that would have served differ from a fresh cascade"
+    );
+    assert!(
+        lists.windows(2).any(|w| w[0] != w[1]),
+        "{name}: nothing animated in the frames measured"
+    );
+}
+
 /// R1 item 1: a parent whose inherited colour is mid-transition re-cascades to the same end value
 /// every frame. Its children inherit the interpolated colour, which moves each frame, so they must
 /// not replay last frame's. Another element is written each frame, so every relayout is script's.
+/// The class flips every 4 frames, so a transition (2 s) is always running, reversed mid-way.
 #[test]
 fn a_running_transition_on_an_inherited_property_reaches_the_children() {
-    assert_same_as_a_full_cascade(
+    assert_replays_match_a_fresh_cascade(
         "transition",
         &page(
             "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
             "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
-            "document.getElementById('p').className = 'on'; \
+            "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
              document.getElementById('w').style.width = (10 + n % 50) + 'px';",
         ),
     );
@@ -191,7 +212,7 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
 /// The same for an `@keyframes` animation of an inherited property on an ancestor.
 #[test]
 fn a_running_animation_on_an_inherited_property_reaches_the_children() {
-    assert_same_as_a_full_cascade(
+    assert_replays_match_a_fresh_cascade(
         "keyframes",
         &page(
             "@keyframes pulse{from{color:rgb(255,0,0)} to{color:rgb(0,0,255)}} \
