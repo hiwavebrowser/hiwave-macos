@@ -1181,14 +1181,56 @@ pub(crate) fn shape_memo_misses() -> usize {
     MISSES.with(|c| c.get())
 }
 
-/// Entries the per-thread shaped-text memo of [`TextShaper::shape`] holds in
-/// its clock, plus `cap / 16` recently turned-away ones; past it, entries are
-/// evicted one at a time (`text_memo`), never all at once. An entry is about
-/// 300 bytes (an 80-byte key in an `Rc`, a 168-byte run, map and ring slots)
-/// plus, on the heap, its text twice (key and run), its family names and 24
-/// bytes per glyph: about 12 MB per thread when full of 10-character strings.
-/// The bound is entries, not bytes, as before.
-pub(crate) const SHAPED_TEXT_MEMO_CAP: usize = 16384;
+/// Bytes the per-thread shaped-text memo of [`TextShaper::shape`] may hold
+/// (SHAPED-CAP), its queue of turned-away strings included; past it, entries
+/// are evicted one at a time (`text_memo`), never all at once. Each entry is
+/// weighed by [`shaped_entry_bytes`]: its key, its run with its glyphs, and
+/// the memo's bookkeeping. A relayout shapes each text row under at least two
+/// keys (layout, display list): a 16,384-entry cap made relayouts above about
+/// 16 k distinct rows re-shape most of them. A short row (a 5-digit number)
+/// weighs about 500 bytes, so this holds about 60,000 of them.
+pub(crate) const SHAPED_TEXT_MEMO_BYTES: usize = 32 << 20;
+
+type ShapedKey = (String, String, Vec<String>, u16, u8, u8, u32);
+
+/// What one shaped-memo entry costs: the key and the run with everything
+/// they own on the heap (texts, family names, glyphs, face name) and the
+/// memo's per-entry bookkeeping. Allocator rounding is not counted.
+fn shaped_entry_bytes(key: &ShapedKey, run: &std::rc::Rc<ShapedRun>) -> usize {
+    use std::mem::size_of;
+    let key_bytes = size_of::<ShapedKey>()
+        + key.0.capacity()
+        + key.1.capacity()
+        + key.2.capacity() * size_of::<String>()
+        + key.2.iter().map(String::capacity).sum::<usize>();
+    let run_bytes = 2 * size_of::<usize>()
+        + size_of::<ShapedRun>()
+        + run.text.capacity()
+        + run.font_family.capacity()
+        + run.glyphs.capacity() * size_of::<PositionedGlyph>()
+        + run
+            .face
+            .as_ref()
+            .map_or(0, |face| face.postscript_name.capacity());
+    key_bytes
+        + run_bytes
+        + crate::text_memo::bookkeeping_bytes::<ShapedKey, std::rc::Rc<ShapedRun>>()
+}
+
+thread_local! {
+    static SHAPED_MEMO: std::cell::RefCell<
+        crate::text_memo::TextMemo<ShapedKey, std::rc::Rc<ShapedRun>>,
+    > = std::cell::RefCell::new(crate::text_memo::TextMemo::with_byte_budget(
+        SHAPED_TEXT_MEMO_BYTES,
+        shaped_entry_bytes,
+    ));
+}
+
+/// Test-only: the bytes this thread's shaped-text memo holds.
+#[cfg(test)]
+pub(crate) fn shaped_memo_bytes() -> usize {
+    SHAPED_MEMO.with(|m| m.borrow().weight())
+}
 
 /// Text shaper for complex text layout.
 pub struct TextShaper {
@@ -1470,8 +1512,6 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
-        use std::cell::RefCell;
-
         // `font-size: 0`: no glyph, no advance, no extent. Core Text is not
         // asked: it answers a size of 0 with its default size, so text that
         // a page had hidden this way was measured about 12px tall.
@@ -1490,14 +1530,8 @@ impl TextShaper {
             });
         }
 
-        type Key = (String, String, Vec<String>, u16, u8, u8, u32);
-        thread_local! {
-            static MEMO: RefCell<crate::text_memo::TextMemo<Key, ShapedRun>> =
-                RefCell::new(crate::text_memo::TextMemo::new(SHAPED_TEXT_MEMO_CAP));
-        }
-
         let generation = rustkit_text::webfonts::generation();
-        let key: Key = (
+        let key: ShapedKey = (
             text.to_string(),
             font_chain.primary.clone(),
             font_chain.fallbacks.clone(),
@@ -1506,18 +1540,21 @@ impl TextShaper {
             stretch as u8,
             size.to_bits(),
         );
-        let cached = MEMO.with(|m| {
+        let cached = SHAPED_MEMO.with(|m| {
             let mut m = m.borrow_mut();
             m.sync_generation(generation);
             m.get(&key)
         });
         if let Some(run) = cached {
-            return Ok(run);
+            return Ok((*run).clone());
         }
         #[cfg(test)]
         MISSES.with(|c| c.set(c.get() + 1));
         let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
-        MEMO.with(|m| m.borrow_mut().insert(key, run.clone()));
+        SHAPED_MEMO.with(|m| {
+            m.borrow_mut()
+                .insert(key, std::rc::Rc::new(run.clone()))
+        });
         Ok(run)
     }
 
