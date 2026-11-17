@@ -609,6 +609,43 @@ fn a_script_animation_started_after_the_kept_build_leaves_no_value_behind() {
     );
 }
 
+/// TREE-REUSE step (1): a task that writes and then reads geometry. The read forces a full build;
+/// the end-of-task relayout built the whole document again (`no kept tree`: the forced build let the
+/// kept tree go). With the forced build's tree kept, the relayout splices into it: one full build
+/// per frame, not two.
+const TUNE_THEN_READ: &str = "var N = document.querySelectorAll('.tile').length; \
+    var a = document.getElementById('t' + (10 + n) % N), b = document.getElementById('t' + n % N), \
+    c = document.getElementById('t' + (n + 5) % N); \
+    a.style.display = ''; b.style.display = 'none'; c.style.left = (n * 3 % 700) + 'px'; \
+    window.R = c.offsetLeft;";
+
+#[test]
+fn a_tune_frame_that_reads_geometry_builds_the_document_once() {
+    set_retained_styles_for_test(Some(RetainedStyles::Boxes));
+    let (mut engine, view, _server) = load(&tiles(1_000, 10, TUNE_THEN_READ));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    let mut per_frame = Vec::new();
+    for _ in 0..5 {
+        let before = built_elements_for_test();
+        frame(&mut engine, view);
+        per_frame.push(built_elements_for_test() - before);
+    }
+    let miss = splices_for_test().1;
+    set_retained_styles_for_test(None);
+    // One full build walks the stage's 1,002 elements; the splice adds the written tiles.
+    assert!(
+        per_frame.iter().all(|&b| b > 1_000 && b <= 1_030),
+        "elements built per frame (a forced read, then the relayout): {per_frame:?} (last miss {miss:?})"
+    );
+}
+
+#[test]
+fn tiles_written_then_read_keep_a_full_builds_boxes() {
+    assert_same_as_a_full_cascade("tiles then read", &tiles(200, 10, TUNE_THEN_READ));
+}
+
 /// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes
 /// did not ask for, the view lets it go and records none; script writes start it again.
 #[test]

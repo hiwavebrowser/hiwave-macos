@@ -11599,10 +11599,10 @@ impl Engine {
             }
         }
         // LPF1: this build is the one the view publishes, so it is the one kept for script paint
-        // writes (when they asked for it).
-        if let Some(view) = self.views.get(&id) {
-            view.lay.retain_script_unlaid_now.set(true);
-        }
+        // writes (when they asked for it). The guard clears the flag after the build, also if the
+        // build unwinds.
+        let retaining = self.views.get(&id).map(|view| view.lay.clone());
+        let retain = retaining.as_ref().map(|lay| FlagGuard::set(&lay.retain_script_unlaid_now));
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -11610,9 +11610,7 @@ impl Engine {
             javascript_enabled,
             (bounds.width, bounds.height),
         );
-        if let Some(view) = self.views.get(&id) {
-            view.lay.retain_script_unlaid_now.set(false);
-        }
+        drop(retain);
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -11938,6 +11936,11 @@ impl Engine {
         let Some(mut unlaid) = view.lay.script_unlaid.borrow_mut().take() else {
             return miss("no kept tree");
         };
+        // A forced read's tree is not the published one this path patches (TREE-REUSE step (1)).
+        if view.lay.script_unlaid_unpublished.get() {
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+            return miss("the kept tree is a forced read's");
+        }
         // The topmost written elements, and the elements above them: the build walks down those
         // and builds only what is under a root.
         // A miss before the patch below leaves the kept tree as it was: put it back, for a build
@@ -13319,8 +13322,11 @@ impl layout_ctx::LayoutCtx {
         // LPF1: the tree as built, before layout writes into it, for script paint writes to
         // compare their elements with; dropped when no such writes asked for it.
         if let Some(lay) = lay.as_ref() {
-            let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
+            // TREE-REUSE step (1): or a forced layout's own build, in `boxes` mode.
+            let forced = lay.keep_forced_tree_now.get();
+            let keep = lay.want_script_unlaid.get() && (lay.retain_script_unlaid_now.get() || forced);
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+            lay.script_unlaid_unpublished.set(keep && forced);
             lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
         }
@@ -26493,7 +26499,10 @@ impl Engine {
     /// for the DOM as it was at the read. Nothing reads them before the
     /// end-of-task relayout, which rebuilds all of them from the DOM as
     /// script left it; this relies on that relayout always following a
-    /// task that wrote. (Reusing the forced tree to skip it is a follow-up.)
+    /// task that wrote. With `RUSTKIT_RETAINED_STYLES=boxes` that relayout
+    /// splices the task's writes into the forced build's tree (TREE-REUSE
+    /// step (1), `ViewLayout::keep_forced_tree_now`) instead of building
+    /// the whole document again.
     fn forced_layout_for(&self, id: EngineViewId) -> Option<rustkit_bindings::ForcedLayout> {
         let view = self.views.get(&id)?;
         let document = view.document.clone()?;
@@ -26580,6 +26589,13 @@ impl Engine {
             let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
             let stages_before = relayout_cause::stage_ms_so_far();
             let passes_before = lay.layout_builds.get();
+            // TREE-REUSE step (1): in `boxes` mode the build keeps its tree for the end-of-task
+            // relayout to splice the task's writes into (`ViewLayout::keep_forced_tree_now`). The
+            // guard clears the flag after the build, also if the build unwinds.
+            let keep_tree = retained_styles_mode().keeps_boxes().then(|| {
+                lay.want_script_unlaid.set(true);
+                FlagGuard::set(&lay.keep_forced_tree_now)
+            });
             let built = lctx.lay_out_document(
                 building.for_build(),
                 &document,
@@ -26587,6 +26603,7 @@ impl Engine {
                 javascript_enabled,
                 bounds,
             );
+            drop(keep_tree);
             drop(memo_aside);
             baseline.restore(&lay);
             stamp_element_scrolls(&built, &lay.element_scrolls);
@@ -49250,6 +49267,24 @@ thread_local! {
     /// Set by `StyleMemoScope` for the span of `load_subresources`.
     static STYLE_MEMO: std::cell::RefCell<Option<StyleMemo>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Sets a view's build flag (`ViewLayout::retain_script_unlaid_now`, `keep_forced_tree_now`) for
+/// one build, and clears it when dropped, also if the build unwinds: a flag left set would make a
+/// later build keep a tree it should not.
+struct FlagGuard<'a>(&'a Cell<bool>);
+
+impl<'a> FlagGuard<'a> {
+    fn set(flag: &'a Cell<bool>) -> Self {
+        flag.set(true);
+        Self(flag)
+    }
+}
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
 }
 
 /// Holds the armed memo aside for one build that must neither replay nor
