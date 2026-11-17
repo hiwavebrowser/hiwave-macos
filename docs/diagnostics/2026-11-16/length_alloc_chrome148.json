@@ -27,11 +27,11 @@
   },
   "apply_2_27": {
    "value": "RangeError: Maximum call stack size exceeded",
-   "ms": 2435
+   "ms": 2400
   },
   "apply_2_17_plus_1": {
    "value": "RangeError: Maximum call stack size exceeded 131073",
-   "ms": 50
+   "ms": 54
   },
   "apply_2_16": {
    "value": "65536",
@@ -59,7 +59,35 @@
   },
   "array_of_2_27": {
    "value": "RangeError: Maximum call stack size exceeded",
-   "ms": 2429
+   "ms": 2502
+  },
+  "ownkeys_2_27_plus_1": {
+   "value": "RangeError: Invalid array length 0",
+   "ms": 0
+  },
+  "ownkeys_small": {
+   "value": "b,a",
+   "ms": 0
+  },
+  "ta_join_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 2
+  },
+  "ta_join_over2": {
+   "value": "RangeError: Invalid string length",
+   "ms": 2564
+  },
+  "ta_join_under": {
+   "value": "1-2-3",
+   "ms": 0
+  },
+  "ta_join_big_under": {
+   "value": "1048576",
+   "ms": 7
+  },
+  "ta_tolocale_under": {
+   "value": "1,2,3",
+   "ms": 10
   },
   "apply_small": {
    "value": "a-b-c",
@@ -71,11 +99,11 @@
   },
   "json_2_20": {
    "value": "5242881",
-   "ms": 10
+   "ms": 12
   },
   "sort_2_24": {
    "value": "1,2,3,,16777216,1,2,3,16777216",
-   "ms": 576
+   "ms": 595
   },
   "sort_2_32": {
    "tab": "still running after 60 s"

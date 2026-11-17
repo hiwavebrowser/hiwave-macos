@@ -101,3 +101,27 @@ fn a_call_with_more_arguments_than_fit_is_refused() {
     assert_eq!(run("return Math.max(...new Array(2 ** 15).fill(1));"), "value 1");
     assert_eq!(run("return Array.of.apply(null, { length: 2 ** 27 }).length;"), stack);
 }
+
+#[test]
+fn a_proxy_own_keys_list_past_the_bound_is_refused_at_once() {
+    // The trap's result goes through the same list builder: Chrome 148 refuses more than 2^27 keys
+    // before reading one.
+    assert_eq!(
+        run("var n = 0, keys = { length: 2 ** 27 + 1, get 0() { n++; return 'a'; } };
+            try { Reflect.ownKeys(new Proxy({}, { ownKeys() { return keys; } })); return 'ok'; }
+            catch (e) { return e.name + ': ' + e.message + ' ' + n; }"),
+        "value RangeError: Invalid array length 0"
+    );
+    assert_eq!(run("return Reflect.ownKeys(new Proxy({}, { ownKeys() { return ['b', 'a']; } })).join();"), "value b,a");
+}
+
+#[test]
+fn a_typed_array_join_past_the_string_limit_is_refused() {
+    let refused = "RangeError: Invalid string length";
+    assert_eq!(run("return new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12)).length;"), refused);
+    assert_eq!(run("return new Uint8Array(2 ** 28).join('xx').length;"), refused);
+    assert_eq!(run("return new Uint8Array([1, 2, 3]).join('-');"), "value 1-2-3");
+    assert_eq!(run("return new Uint8Array(2 ** 20).join('').length;"), "value 1048576");
+    // Chrome 148 joins with "," in toLocaleString too.
+    assert_eq!(run("return new Uint8Array([1, 2, 3]).toLocaleString();"), "value 1,2,3");
+}
