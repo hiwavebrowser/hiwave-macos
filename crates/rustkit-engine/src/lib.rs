@@ -421,6 +421,8 @@ mod window_error_event_tests;
 #[cfg(test)]
 mod frame_canvas_tests;
 #[cfg(test)]
+mod frame_stage_timer_tests;
+#[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
 mod inspector_tests;
