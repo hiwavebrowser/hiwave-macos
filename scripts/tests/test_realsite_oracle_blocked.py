@@ -145,6 +145,7 @@ def launch_options(env_extra):
             % json.dumps(LAUNCH_MJS.as_uri()))
     env = {k: v for k, v in os.environ.items() if k != "REALSITE_ORACLE_HEADLESS"}
     env.pop("PARITY_CHROME_PATH", None)
+    env["PARITY_ALLOW_BUNDLED_CHROMIUM"] = "1"  # the launch options only; no browser starts
     env.update(env_extra)
     p = subprocess.run([NODE, "--input-type=module", "-e", code], capture_output=True,
                        text=True, env=env, timeout=60)
