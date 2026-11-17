@@ -32,20 +32,27 @@ function getResetCssWithAbsoluteFontPaths() {
 const RESET_CSS = getResetCssWithAbsoluteFontPaths();
 
 // Campaign pin: PARITY_CHROME_PATH points at the exact Chrome for Testing
-// binary recorded in trench/BASELINE-<os>.md. Without it the launch fails:
-// Playwright's bundled Chromium drifts with the npm package, so an output
-// taken with it is not a pinned expectation. A run that means to use the
-// bundled browser (CI guards, local iteration) says so with
-// PARITY_ALLOW_BUNDLED_CHROMIUM=1; record browser.version() in any output.
-export function getPinnedExecutablePath(env = process.env) {
+// binary recorded in trench/BASELINE-<os>.md. Playwright's bundled Chromium
+// drifts with the npm package, so an output taken with it is not a pinned
+// expectation. An oracle that writes expectations passes { required: true }:
+// without the pin it fails. Otherwise a run without the pin says so on stderr
+// and uses the bundled browser (boards and gates that do not set the pin yet;
+// failing them closed is a follow-up once each sets it). Record
+// browser.version() in any output.
+export function getPinnedExecutablePath({ required = false, env = process.env } = {}) {
   const p = env.PARITY_CHROME_PATH;
   if (!p) {
-    if (env.PARITY_ALLOW_BUNDLED_CHROMIUM === '1') return undefined;
-    throw new Error(
-      'PARITY_CHROME_PATH is not set: point it at the pinned Chrome for Testing ' +
-      '(trench/BASELINE-<os>.md), or set PARITY_ALLOW_BUNDLED_CHROMIUM=1 to use ' +
-      "Playwright's bundled Chromium on purpose (not a pinned expectation)."
+    if (required) {
+      throw new Error(
+        'PARITY_CHROME_PATH is not set: point it at the pinned Chrome for Testing ' +
+        '(trench/BASELINE-<os>.md); this output is a pinned expectation.'
+      );
+    }
+    console.error(
+      "deterministic.mjs: PARITY_CHROME_PATH is not set; using Playwright's bundled " +
+      'Chromium, which is not the pinned Chrome (not a pinned expectation).'
     );
+    return undefined;
   }
   if (!existsSync(p)) {
     throw new Error(`PARITY_CHROME_PATH set but not found: ${p}`);
