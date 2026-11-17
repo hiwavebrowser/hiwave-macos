@@ -2683,7 +2683,9 @@ impl Array {
     {
         // 1. Let items be a new empty List.
         // doesn't matter if it clamps since it's just a best-effort optimization
-        let mut items = Vec::with_capacity(len as usize);
+        // HIWAVE PATCH (array-like-length): not reserved from `length`, which the page sets (a sparse
+        // array of 2^32 - 1 slots would ask for 32 GiB before reading its few elements).
+        let mut items = Vec::with_capacity((len as usize).min(1 << 12));
 
         // 2. Let k be 0.
         // 3. Repeat, while k < len,

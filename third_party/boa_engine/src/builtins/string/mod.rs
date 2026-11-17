@@ -404,7 +404,8 @@ impl String {
         }
 
         // 6. Let stringElements be a new empty List.
-        let mut string_elements = vec![];
+        // HIWAVE PATCH (string-length): shared pieces, refused once past the limit.
+        let mut string_elements = Pieces::immediate();
 
         // 7. Let nextIndex be 0.
         let mut next_index = 0;
@@ -417,13 +418,16 @@ impl String {
             let next_seg = raw.get(next_key, context)?.to_string(context)?;
 
             // c. Append the code unit elements of nextSeg to the end of stringElements.
-            string_elements.extend(next_seg.iter());
+            string_elements.string(next_seg)?;
 
             // d. If nextIndex + 1 = literalSegments, then
             if next_index + 1 == literal_segments {
                 // i. Return the String value whose code units are the elements in the List stringElements.
                 //    If stringElements has no elements, the empty String is returned.
-                return Ok(js_string!(&string_elements[..]).into());
+                return Ok(string_elements
+                    .finish()
+                    .js_expect("an immediate builder has thrown before passing the limit")?
+                    .into());
             }
 
             // e. If nextIndex < numberOfSubstitutions, let next be substitutions[nextIndex].
@@ -439,7 +443,7 @@ impl String {
             let next_sub = next.to_string(context)?;
 
             // h. Append the code unit elements of nextSub to the end of stringElements.
-            string_elements.extend(next_sub.iter());
+            string_elements.string(next_sub)?;
 
             // i. Set nextIndex to nextIndex + 1.
             next_index += 1;
@@ -1762,6 +1766,9 @@ impl String {
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
 
+        // HIWAVE PATCH (string-length): the mapped length is counted before it is built.
+        Self::check_length(Self::case_mapped_length::<UPPER>(&string))?;
+
         // 3. Let sText be ! StringToCodePoints(S).
         // 4. Let upperText be the result of toUppercase(sText), according to
         // the Unicode Default Case Conversion algorithm.
@@ -1780,6 +1787,24 @@ impl String {
         // 5. Let L be ! CodePointsToString(upperText).
         // 6. Return L.
         Ok(text.into())
+    }
+
+    /// HIWAVE PATCH (string-length): the length of `string` after the Unicode Default Case
+    /// Conversion, in code units, counted without building it. Unpaired surrogates stay as they are.
+    fn case_mapped_length<const UPPER: bool>(string: &JsString) -> u64 {
+        // A code point maps to at most three code units: a string under a third of the limit needs no
+        // count.
+        if string.len() as u64 * 3 <= Self::MAX_STRING_LENGTH as u64 {
+            return string.len() as u64;
+        }
+        string
+            .code_points()
+            .map(|cp| match cp {
+                CodePoint::Unicode(c) if UPPER => c.to_uppercase().map(char::len_utf16).sum::<usize>() as u64,
+                CodePoint::Unicode(c) => c.to_lowercase().map(char::len_utf16).sum::<usize>() as u64,
+                CodePoint::UnpairedSurrogate(_) => 1,
+            })
+            .sum()
     }
 
     /// [`String.prototype.toLocaleLowerCase ( [ locales ] )`][lower] and
@@ -1831,6 +1856,11 @@ impl String {
             // ICU4X already handles locales in the correct way.
             let casemapper = context.intl_provider().case_mapper()?;
 
+            // HIWAVE PATCH (string-length): the default mapping's length is counted before the
+            // mapping is built; a locale's tailoring changes it by a few units at most, and the
+            // result is checked as well.
+            Self::check_length(Self::case_mapped_length::<UPPER>(&string))?;
+
             // 8. Let codePoints be StringToCodePoints(S).
             let result = string.map_valid_segments(|segment| {
                 if UPPER {
@@ -1852,6 +1882,7 @@ impl String {
             });
 
             // 11. Return CodePointsToString(newCodePoints).
+            Self::check_length(result.len() as u64)?; // HIWAVE PATCH (string-length)
             Ok(result.into())
         }
 
@@ -2224,6 +2255,32 @@ impl String {
         };
 
         let s = s.iter().collect::<Vec<_>>();
+
+        // HIWAVE PATCH (string-length): a decomposition can be up to 18 times its input (U+FDFA).
+        // When that could pass the limit, the result's length is counted first, without building it,
+        // stopping as soon as it passes.
+        if s.len() as u64 * 18 > Self::MAX_STRING_LENGTH as u64 {
+            fn passes(output: impl Iterator<Item = char>) -> bool {
+                let mut len = 0u64;
+                for c in output {
+                    len += c.len_utf16() as u64;
+                    if len > String::MAX_STRING_LENGTH as u64 {
+                        return true;
+                    }
+                }
+                false
+            }
+            let chars = || char::decode_utf16(s.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}'));
+            let too_long = match normalization {
+                Normalization::Nfc => passes(normalizers.nfc.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfd => passes(normalizers.nfd.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfkc => passes(normalizers.nfkc.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfkd => passes(normalizers.nfkd.as_borrowed().normalize_iter(chars())),
+            };
+            if too_long {
+                return Err(Self::invalid_length());
+            }
+        }
 
         let result = match normalization {
             Normalization::Nfc => normalizers.nfc.as_borrowed().normalize_utf16(&s),
@@ -2913,15 +2970,33 @@ impl Pieces {
     pub(crate) fn units(&mut self, units: &[u16]) -> JsResult<()> {
         if self.grow(units.len())? {
             self.literal.extend_from_slice(units);
+            if self.literal.len() >= Self::FLUSH_AT {
+                self.flush();
+            }
         }
         Ok(())
     }
 
+    /// A string this short is copied into the literal run rather than kept as its own part: a
+    /// reference per part would cost more than the text (a `join` of 2^28 one-unit elements).
+    const SHARE_FROM: usize = 64;
+    /// The literal run becomes a part of its own once it is this long, so it is never reallocated
+    /// past this size and its copy is stored compactly.
+    const FLUSH_AT: usize = 1 << 16;
+
     pub(crate) fn string(&mut self, string: JsString) -> JsResult<()> {
-        if self.grow(string.len())? && !string.is_empty() {
-            self.flush();
-            self.parts.push(string);
+        if !self.grow(string.len())? || string.is_empty() {
+            return Ok(());
         }
+        if string.len() < Self::SHARE_FROM {
+            self.literal.extend(string.iter());
+            if self.literal.len() >= Self::FLUSH_AT {
+                self.flush();
+            }
+            return Ok(());
+        }
+        self.flush();
+        self.parts.push(string);
         Ok(())
     }
 

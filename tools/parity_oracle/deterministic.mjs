@@ -32,12 +32,21 @@ function getResetCssWithAbsoluteFontPaths() {
 const RESET_CSS = getResetCssWithAbsoluteFontPaths();
 
 // Campaign pin: PARITY_CHROME_PATH points at the exact Chrome for Testing
-// binary recorded in trench/BASELINE-<os>.md. Without it, captures fall back
-// to Playwright's bundled Chromium, whose version drifts with the npm package
-// — fine for local iteration, invalid for pinned-baseline capture.
-function getPinnedExecutablePath() {
-  const p = process.env.PARITY_CHROME_PATH;
-  if (!p) return undefined;
+// binary recorded in trench/BASELINE-<os>.md. Without it the launch fails:
+// Playwright's bundled Chromium drifts with the npm package, so an output
+// taken with it is not a pinned expectation. A run that means to use the
+// bundled browser (CI guards, local iteration) says so with
+// PARITY_ALLOW_BUNDLED_CHROMIUM=1; record browser.version() in any output.
+export function getPinnedExecutablePath(env = process.env) {
+  const p = env.PARITY_CHROME_PATH;
+  if (!p) {
+    if (env.PARITY_ALLOW_BUNDLED_CHROMIUM === '1') return undefined;
+    throw new Error(
+      'PARITY_CHROME_PATH is not set: point it at the pinned Chrome for Testing ' +
+      '(trench/BASELINE-<os>.md), or set PARITY_ALLOW_BUNDLED_CHROMIUM=1 to use ' +
+      "Playwright's bundled Chromium on purpose (not a pinned expectation)."
+    );
+  }
   if (!existsSync(p)) {
     throw new Error(`PARITY_CHROME_PATH set but not found: ${p}`);
   }

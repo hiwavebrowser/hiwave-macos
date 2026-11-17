@@ -86,6 +86,15 @@ mod class_list_cost_tests;
 #[cfg(test)]
 mod attr_write_cost_tests;
 #[cfg(test)]
+mod style_set_cost_tests;
+#[cfg(test)]
+mod native_style_tests;
+mod inline_style;
+#[cfg(test)]
+mod style_write_cost_tests;
+#[cfg(test)]
+mod style_value_url_tests;
+#[cfg(test)]
 mod attr_write_tests;
 #[cfg(test)]
 mod node_apis_tests;
@@ -512,7 +521,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -1234,13 +1243,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         schedule(woke, 0, rest(arguments, 0), false);
         wake = timers[Q.count - 1];
     };
-    __rk.nextTimer = function () {
+    __rk.nextTimer = function (timersOnly) {
         // Only a number is a time; compared and subtracted here, with no
-        // call.
+        // call. `timersOnly`: animation frames left out (the content loop's
+        // exact wait is a timer's, never a frame's: LINKS-SLOW part 2 R1).
         var due = -1, page = -1;
         for (var i = 0; i < Q.count; i++) {
             var at = timers[i].due;
             if (typeof at !== 'number') continue;
+            if (timersOnly === true && timers[i].frame) continue;
             // A timeout held for the page clock (`setPage`) is due when that clock has moved its
             // delay, if that is later.
             var t = timers[i];
@@ -4087,12 +4098,14 @@ impl DomBindings {
     }
 
     /// [`Self::next_timer_delay`] with its fraction of a millisecond (LINKS-SLOW): a timer set in a
-    /// real turn is due at a fraction, and the content loop aims its wake at that instant.
+    /// real turn is due at a fraction, and the content loop aims its wake at that instant. Timers
+    /// only: an animation frame lands on the 60 Hz grid, and the loop's whole-millisecond wait
+    /// serves it (LINKS-SLOW part 2 R1: an exact wait ends in a blocking tail).
     pub fn next_timer_delay_exact(&self) -> Option<f64> {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_host_bookkeeping("return __rk.nextTimer()")
+            .evaluate_host_bookkeeping("return __rk.nextTimer(true)")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 && n.is_finite() => Some(n),
             _ => None,

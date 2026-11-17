@@ -563,6 +563,13 @@ class ChromiumFonts(unittest.TestCase):
         "const b = await chromium.launch(getDeterministicLaunchOptions()); await b.close();"
     )
 
+    def setUp(self):
+        # This pin uses Playwright's bundled Chromium on purpose (the ubuntu runner has no pinned Chrome); the
+        # oracle refuses an unpinned browser unless told. A seat with PARITY_CHROME_PATH set uses its pin.
+        patch = mock.patch.dict(os.environ, {"PARITY_ALLOW_BUNDLED_CHROMIUM": "1"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def no_browser(self):
         try:
             proc = subprocess.run(
