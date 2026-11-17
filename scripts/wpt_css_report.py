@@ -36,6 +36,14 @@ def diagnosis(test, page):
             return f"Computed {prop} value differs", "computed-value resolution and CSSOM serialization"
         if "property <" in name and message.startswith(("assert_equals:", "assert_approx_equals:")):
             return f"Animation or transition samples differ for {prop}", "animation sampling / property interpolation"
+    if page.endswith("/CSSStyleRule-set-selectorText.html") and "Invalid CSS selector:" in name and message.startswith("assert_equals:"):
+        return "selectorText setter retains invalid selector", CSSOM + " CSSStyleRule.selectorText setter"
+    if page.endswith("/serialize-values.html") and "raw inline style declaration" in message:
+        return "Inline declaration value readback differs from canonical serialization", "CSSOM declaration readback and CSS value serializers"
+    if page.endswith("/serialize-namespaced-type-selectors.html") and message.startswith("assert_equals:"):
+        return "Namespace-qualified type selector serializes differently", CSSOM + " selectorText serialization"
+    if page.endswith("/cssstyledeclaration-all-shorthand.html") and "getPropertyValue('all')" in name and 'expected ""' in message:
+        return "all shorthand retained after longhand overrides", CSSOM + " shorthand reconstruction"
     if "/css-values/" in page:
         math = re.search(r"\b(calc|min|max|clamp|round|mod|rem|sign|abs|sin|cos|tan|acos|asin|atan2?|exp|log|pow|sqrt|hypot)\(", name)
         if math:
