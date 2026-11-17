@@ -1,0 +1,5 @@
+# Gate 0 baseline, counted apart: cargo check -p rustkit-renderer (scripts/gate0/warnings.py). Taken at develop 9c0396ad.
+fields `rect`, `angle_rad`, `stops`, `repeating`, and `border_radius` are never read @ crates/rustkit-renderer/src/lib.rs
+fields `rect`, `from_angle_rad`, `center`, `stops`, `repeating`, and `border_radius` are never read @ crates/rustkit-renderer/src/lib.rs
+method `render_linear_gradient_gpu` is never used @ crates/rustkit-renderer/src/lib.rs
+multiple fields are never read @ crates/rustkit-renderer/src/lib.rs
