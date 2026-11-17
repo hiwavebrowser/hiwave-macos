@@ -2080,9 +2080,10 @@ thread_local! {
 /// RAF-ONE-ROUND: a frame tree's live turn (one presented frame) runs one animation-frame round
 /// on this thread's engines. Off, a late turn ran a second round, of the frame a late callback
 /// asked for (due already), before the turn returned: MotionMark's heavy cells counted two suite
-/// frames per presented frame. Off by default (on with `HIWAVE_RAF_ONE_ROUND=1`): on, a frame
-/// document's CSS animation clock can be read at the timers' clock on a turn that defers that
-/// frame, ahead of the time its animations report (`css_timeline_tests`, RAF-ONE-ROUND PR).
+/// frames per presented frame. With it a late round is the frame of the turn's time
+/// (CLOCK-AT-PRESENT) and the animations are updated to it before its callbacks
+/// (ANIM-UPDATE-ORDER). On by default; `HIWAVE_RAF_ONE_ROUND=0` turns it off (the behaviour before
+/// RAF-ONE-ROUND, kept for A/B and as the escape hatch).
 pub fn set_one_animation_round(on: bool) {
     ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
 }
@@ -2096,7 +2097,7 @@ thread_local! {
 fn one_animation_round() -> bool {
     ONE_ANIMATION_ROUND.with(|c| {
         c.get().unwrap_or_else(|| {
-            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() == Some("1");
+            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() != Some("0");
             c.set(Some(on));
             on
         })
