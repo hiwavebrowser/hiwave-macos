@@ -2070,6 +2070,31 @@ const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 /// still run in the one turn, which is what a pump of a few timers observes.
 const LIVE_FRAME_MS: u64 = 16;
 
+thread_local! {
+    /// RAF-ONE-ROUND on this thread (`set_one_animation_round`); `None`: `HIWAVE_RAF_ONE_ROUND`.
+    static ONE_ANIMATION_ROUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// RAF-ONE-ROUND: a frame tree's live turn (one presented frame) runs one animation-frame round
+/// on this thread's engines. Off, a late turn ran a second round, of the frame a late callback
+/// asked for (due already), before the turn returned: MotionMark's heavy cells counted two suite
+/// frames per presented frame. Off by default (on with `HIWAVE_RAF_ONE_ROUND=1`): on, a frame
+/// document's CSS animation clock can be read at the timers' clock on a turn that defers that
+/// frame, ahead of the time its animations report (`css_timeline_tests`, RAF-ONE-ROUND PR).
+pub fn set_one_animation_round(on: bool) {
+    ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
+}
+
+fn one_animation_round() -> bool {
+    ONE_ANIMATION_ROUND.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() == Some("1");
+            c.set(Some(on));
+            on
+        })
+    })
+}
+
 /// What a load lends the engine to at its safe points (LAT15): the content
 /// thread's endpoint, which applies the window's commands that may run
 /// there. See [`Engine::safe_point`].
@@ -6943,6 +6968,10 @@ impl Engine {
         // their documents' scripts asked of the network and of layout. The
         // turn's time is the tree's.
         let started = std::time::Instant::now();
+        // The turn is one presented frame, so it runs one animation-frame round, however many
+        // calls below run its parts (RAF-ONE-ROUND): a frame a late round's callbacks ask for,
+        // due already, is the next turn's, not a second round in a sub-turn or the stop's.
+        self.set_tree_turn(id, true);
         self.live_timer_cap = 0;
         let mut frames = self.pump_frames(id, 0, real_clock).await;
         self.live_timer_cap = 1;
@@ -6974,6 +7003,7 @@ impl Engine {
             }
             out.yielded_for_frame = true;
         }
+        self.set_tree_turn(id, false);
         // The frames lay out and send what this turn's tasks wrote and asked.
         self.live_timer_cap = 0;
         let after = self.pump_frames(id, 0, real_clock).await;
@@ -6986,6 +7016,18 @@ impl Engine {
             (a, b) => a.or(b),
         };
         self.frame_requests_wake(id, out)
+    }
+
+    /// Open or close the frame tree's turn on `id`'s timer queue (the tree's one).
+    fn set_tree_turn(&self, id: EngineViewId, open: bool) {
+        if !one_animation_round() {
+            return;
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+            if let Err(e) = bindings.set_tree_turn(open) {
+                debug!(error = %e, open, "frames: the tree's turn mark failed");
+            }
+        }
     }
 
     /// A frame request the page made during this turn asks for the next

@@ -67,6 +67,7 @@ impl Tree {
         ];
         let server = serve_routes(routes);
         let config = EngineConfig { nested_contexts: true, post_load_requests_live: true, ..EngineConfig::default() };
+        crate::set_one_animation_round(true);
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
@@ -179,4 +180,15 @@ requestAnimationFrame(tick);
     tree.per_turn("ticks", 3, 50);
     let ticks = tree.per_turn("ticks", 8, 50);
     assert_eq!(ticks, vec![1; 8], "the page's rAF loop per presented turn");
+}
+
+/// Off (the default until the frame documents' CSS animation clock follows the deferred frame),
+/// a late turn of a frame tree still runs the loop twice: what `HIWAVE_RAF_ONE_ROUND=1` changes.
+#[test]
+fn with_the_switch_off_a_late_turn_of_a_frame_tree_runs_two_rounds() {
+    let mut tree = Tree::load(PAGE, LOOP_CHILD);
+    crate::set_one_animation_round(false);
+    tree.per_turn("w().ticks", 3, 50);
+    let ticks = tree.per_turn("w().ticks", 8, 50);
+    assert_eq!(ticks, vec![2; 8], "the frame's rAF loop per presented turn with the switch off");
 }
