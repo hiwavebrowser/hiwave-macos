@@ -1075,3 +1075,77 @@ a replacement with no `$` is shared, not copied.
 above, the strings under the limit unchanged, and the refusal points Chrome showed (replacer calls
 1024 of 1024, `replaceAll` after 512, getters 16384 of 16384, `join` after 32768). Red without the
 patch. test262 `staging/sm/String/replace-math.js` now passes.
+
+## Patch: the second set of string paths keeps to the maximum length (`string-length`, part 2)
+
+**Why.** As for part 1, on the paths it did not cover: `JSON.stringify`, `String.raw`, `encodeURI` /
+`encodeURIComponent`, and case mapping (`toUpperCase`, `toLowerCase` and the locale forms), each of which
+can make a result longer than its inputs. Chrome for Testing 148 refuses each past 2^29 - 24 code units
+with `RangeError: Invalid string length` (`tools/parity_oracle/string_paths2_log.mjs`, output in
+`docs/diagnostics/2026-11-16/string_paths2_chrome148.json`).
+
+**What.** `JSON.stringify` counts the text as it serializes it (each value as it is produced, and each
+object's and array's punctuation, keys and indentation at its join). Past the limit it stops keeping
+what it builds but goes on serializing, so every `toJSON`, getter and replacer still runs as in Chrome,
+and refuses at the end. A string value or key is counted at its quoted length (`quoted_len`: six
+units for a control character, two for a quote or backslash) before it is quoted. An array whose
+shortest text (one character per element, the commas and the brackets) already passes the limit is
+refused before any element is read, as Chrome does (a Proxy can report a length of 2^53 - 1); the
+element list is not reserved from that length, and the element loop reads the interrupt word, so the
+turn budget can stop a long array. `String.raw` collects shared pieces with their length counted (`Pieces`). The URI
+encoders and case mapping count the result's exact length before building it. The locale case forms
+also check the result, since a locale's tailoring can change the length by a few units; a string under
+a third of the limit skips the count (a code point maps to at most three units). `normalize` counts
+its result first when it could pass the limit (input length x 18, U+FDFA's decomposition), streaming
+it without building it, and refuses past the limit. Chrome had not finished that case after 120 s, so
+the refusal is this engine's choice, the same as on every other path.
+
+**Not here.** `escape` and the HTML methods (`anchor`, `link`, ...) are Annex B, which this build does
+not enable.
+
+**Pin.** `crates/rustkit-js/tests/string_length_limit_more.rs`: each path past the limit, the moment
+`JSON.stringify` refuses (after all 65,536 `toJSON` calls, as Chrome), and results under the limit
+unchanged (Chrome's lengths for two JSON texts and for 2^24 U+FDFA normalized), a huge array length
+and quoted strings refused before they are built; `crates/rustkit-js/tests/json_array_stop.rs`: the
+interrupt word stops a long array's serialization. Red without the patch: `JSON.stringify` asked for
+2 GiB, 4 GiB and 96 GiB in one allocation and the process aborted; `String.raw`, `encodeURI` and
+`normalize` built strings Chrome refuses; the serialization ran past the interrupt.
+## Patch: an array-like's length does not size a reservation (`array-like-length`)
+
+**Why.** An array-like's `length` is set by the page and can be far larger than what it holds (a
+sparse array of 2^32 - 1 slots, or `{ length: 2 ** 32 - 1 }`). Three places reserved memory for that
+`length` before reading an element: `CreateListFromArrayLike` (under `Function.prototype.apply`,
+`Reflect.apply`, `Reflect.construct`) and `SortIndexedProperties` (`sort`, `toSorted`). (The array case
+of `JSON.stringify` is part 2 of `string-length`.) Chrome for Testing 148
+(`tools/parity_oracle/length_alloc_log.mjs`, output in
+`docs/diagnostics/2026-11-16/length_alloc_chrome148.json`) refuses the first at once and walks the
+second.
+
+**What.** `CreateListFromArrayLike` refuses more than 2^27 elements with `RangeError: Invalid array
+length` before reading any (Chrome's limit for an argument list; at 2^27 Chrome reads them and then
+overflows its stack). Neither reserves more than 4096 entries up front; the lists grow with what is
+read.
+
+A call takes at most 2^17 arguments (`vm::MAX_ARGUMENTS`). Chrome refuses a call whose arguments do not
+fit its stack, about 120,000 at the top, with `RangeError: Maximum call stack size exceeded`: a spread
+call at once (`Call`, `CallSpread`, `New` with spread, `super(...)`), and `apply` / `Reflect.apply` /
+`Reflect.construct` after reading every element (`create_argument_list_from_array_like`, which keeps no
+more than the bound). Before, a spread call into a native function had no limit at all, and an `apply`
+over 2^27 elements built the whole list (1 GiB) before the VM stack check refused it. Separately, the VM
+stack (64K values) refuses calls Chrome takes (65,536 arguments): not changed here.
+
+**Pin.** `crates/rustkit-js/tests/array_like_length_limits.rs`: the refusals and their moment (no
+getter called), ordinary calls unchanged, the argument bound (131,073 refused after 131,073 reads, spread refused at once, 2^15 taken),
+and the largest single allocation while sorting a sparse array of 2^24 slots under 1 MiB (it was
+128 MiB). Red without the patch: `apply` asked for 32 GiB and the process aborted, `Array.of.apply` over 2^27 elements aborted at 1 GiB, and `Math.max` took 131,073
+spread arguments.
+
+**Follow-ups (R1 on #1250).** Both list builders read the interrupt word on every element (up to 2^27
+reads otherwise unstoppable; `crates/rustkit-js/tests/argument_list_stop.rs`, red before: the reads ran
+to the end). A Proxy's `ownKeys` result goes through the same builder, so more than 2^27 keys are refused
+at once with `RangeError: Invalid array length`, as Chrome 148 does (pinned). `%TypedArray%.prototype.join`
+and `toLocaleString` build with `string::Pieces` (refused past the maximum string length, as Chrome; not
+reserved from the length: `new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12))` asked for 4 GiB and aborted),
+and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3"; the ICU list pattern
+gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
+its own every 65,536 units, so its memory follows the text's length, not the number of parts.

@@ -381,6 +381,19 @@ fn setting_a_timeout_takes_no_reading_on_the_deterministic_clock() {
     assert!((gap - 0.1).abs() < 1e-9, "two readings around setTimeout were {gap} apart");
 }
 
+/// LINKS-SLOW part 2 R1 (3): an animation frame is not an exact wait (frames land on the 60 Hz grid
+/// and the loop's whole-millisecond wait serves them; an exact wait ends with a blocking tail, 60
+/// a second on every animated page): only a timer's instant is.
+#[test]
+fn only_a_timer_not_a_frame_sets_the_exact_wait() {
+    let b = fake_clock_bindings();
+    b.evaluate("requestAnimationFrame(function () {});").unwrap();
+    assert!(b.next_timer_delay().is_some(), "the frame is waited for");
+    assert_eq!(b.next_timer_delay_exact(), None, "a frame took the exact wait");
+    b.evaluate("setTimeout(function () {}, 30);").unwrap();
+    assert!(b.next_timer_delay_exact().is_some(), "the timeout has no exact wait");
+}
+
 /// LINKS-SLOW R1: a timeout set outside the timer slice of a real turn (here an animation frame
 /// callback after 8 ms of work) counts from when it is set, not from the turn's start: it does not
 /// run 2 ms of page clock later.
