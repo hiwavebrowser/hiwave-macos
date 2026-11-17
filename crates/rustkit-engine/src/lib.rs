@@ -6970,6 +6970,9 @@ impl Engine {
             // The turn's frame still comes (#776): the tree's due animation
             // frame callbacks run once before it returns.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                // The callbacks are page script: the W-gate hold and the frame stage totals
+                // charge their time to the script bucket, not to the turn's `other`.
+                let _script = wgate::script_turn();
                 if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
                     debug!(error = %e, "frames: the tree's animation round failed");
                 }
