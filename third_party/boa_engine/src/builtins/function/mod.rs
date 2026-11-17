@@ -757,7 +757,7 @@ impl BuiltInFunctionObject {
         }
 
         // 4. Let argList be ? CreateListFromArrayLike(argArray).
-        let arg_list = arg_array.create_list_from_array_like(&[], context)?;
+        let arg_list = arg_array.create_argument_list_from_array_like(context)?; // HIWAVE PATCH (array-like-length)
 
         // 5. Perform PrepareForTailCall().
         // TODO?: 5. PrepareForTailCall

@@ -1110,3 +1110,42 @@ and quoted strings refused before they are built; `crates/rustkit-js/tests/json_
 interrupt word stops a long array's serialization. Red without the patch: `JSON.stringify` asked for
 2 GiB, 4 GiB and 96 GiB in one allocation and the process aborted; `String.raw`, `encodeURI` and
 `normalize` built strings Chrome refuses; the serialization ran past the interrupt.
+## Patch: an array-like's length does not size a reservation (`array-like-length`)
+
+**Why.** An array-like's `length` is set by the page and can be far larger than what it holds (a
+sparse array of 2^32 - 1 slots, or `{ length: 2 ** 32 - 1 }`). Three places reserved memory for that
+`length` before reading an element: `CreateListFromArrayLike` (under `Function.prototype.apply`,
+`Reflect.apply`, `Reflect.construct`) and `SortIndexedProperties` (`sort`, `toSorted`). (The array case
+of `JSON.stringify` is part 2 of `string-length`.) Chrome for Testing 148
+(`tools/parity_oracle/length_alloc_log.mjs`, output in
+`docs/diagnostics/2026-11-16/length_alloc_chrome148.json`) refuses the first at once and walks the
+second.
+
+**What.** `CreateListFromArrayLike` refuses more than 2^27 elements with `RangeError: Invalid array
+length` before reading any (Chrome's limit for an argument list; at 2^27 Chrome reads them and then
+overflows its stack). Neither reserves more than 4096 entries up front; the lists grow with what is
+read.
+
+A call takes at most 2^17 arguments (`vm::MAX_ARGUMENTS`). Chrome refuses a call whose arguments do not
+fit its stack, about 120,000 at the top, with `RangeError: Maximum call stack size exceeded`: a spread
+call at once (`Call`, `CallSpread`, `New` with spread, `super(...)`), and `apply` / `Reflect.apply` /
+`Reflect.construct` after reading every element (`create_argument_list_from_array_like`, which keeps no
+more than the bound). Before, a spread call into a native function had no limit at all, and an `apply`
+over 2^27 elements built the whole list (1 GiB) before the VM stack check refused it. Separately, the VM
+stack (64K values) refuses calls Chrome takes (65,536 arguments): not changed here.
+
+**Pin.** `crates/rustkit-js/tests/array_like_length_limits.rs`: the refusals and their moment (no
+getter called), ordinary calls unchanged, the argument bound (131,073 refused after 131,073 reads, spread refused at once, 2^15 taken),
+and the largest single allocation while sorting a sparse array of 2^24 slots under 1 MiB (it was
+128 MiB). Red without the patch: `apply` asked for 32 GiB and the process aborted, `Array.of.apply` over 2^27 elements aborted at 1 GiB, and `Math.max` took 131,073
+spread arguments.
+
+**Follow-ups (R1 on #1250).** Both list builders read the interrupt word on every element (up to 2^27
+reads otherwise unstoppable; `crates/rustkit-js/tests/argument_list_stop.rs`, red before: the reads ran
+to the end). A Proxy's `ownKeys` result goes through the same builder, so more than 2^27 keys are refused
+at once with `RangeError: Invalid array length`, as Chrome 148 does (pinned). `%TypedArray%.prototype.join`
+and `toLocaleString` build with `string::Pieces` (refused past the maximum string length, as Chrome; not
+reserved from the length: `new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12))` asked for 4 GiB and aborted),
+and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3"; the ICU list pattern
+gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
+its own every 65,536 units, so its memory follows the text's length, not the number of parts.
