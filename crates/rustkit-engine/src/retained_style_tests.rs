@@ -41,11 +41,12 @@ fn frame(engine: &mut Engine, view: EngineViewId) {
     rt().block_on(engine.pump_live(view, 17));
 }
 
-/// `body` with an animation-frame loop that runs `write` (with `n` the frame number) each frame.
+/// `body` with an animation-frame loop that runs `write` (with `n` the frame number) each frame
+/// until `window.STOP`. The load itself runs a few hundred frames, so `n` starts large.
 fn page(style: &str, body: &str, write: &str) -> String {
     format!(
         "<!doctype html><style>body{{margin:0;font:14px sans-serif}}{style}</style>{body}\
-         <script>var n = 0; requestAnimationFrame(function f() {{ n++; {write} requestAnimationFrame(f); }});</script>"
+         <script>var n = 0; requestAnimationFrame(function f() {{ n++; if (!window.STOP) {{ {write} }} requestAnimationFrame(f); }});</script>"
     )
 }
 
@@ -73,8 +74,9 @@ fn tiles(tiles: usize, shown: usize, write: &str) -> String {
 
 /// The stage's tune: each frame shows one more tile and hides the oldest shown one, and moves a
 /// shown tile (a geometry write, so no frame takes the paint-only path).
-const TUNE: &str = "var a = document.getElementById('t' + (10 + n)), b = document.getElementById('t' + n), \
-                    c = document.getElementById('t' + (n + 5)); \
+const TUNE: &str = "var N = document.querySelectorAll('.tile').length; \
+                    var a = document.getElementById('t' + (10 + n) % N), b = document.getElementById('t' + n % N), \
+                    c = document.getElementById('t' + (n + 5) % N); \
                     a.style.display = ''; b.style.display = 'none'; c.style.left = (n * 3 % 700) + 'px';";
 
 /// Every element's computed style (a few properties of each kind), as script reads it.
@@ -83,13 +85,24 @@ const DUMP: &str = "(function () { var out = []; var all = document.querySelecto
     out.push([all[i].tagName, all[i].id, s.display, s.color, s.fontSize, s.left, s.marginTop, \
     s.backgroundColor, s.width].join('|')); } return out.join('\\n'); })()";
 
-/// Display lists and computed styles after each of `frames` frames, with retained styles `mode`.
-fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, Vec<String>) {
+/// The display list after each of `frames` frames with retained styles `mode`, the element
+/// cascades the frames ran, and every element's computed style at the end. The page writes in its
+/// first `frames - 2` frames only (`window.STOP`), so the last frame's relayout takes the last
+/// writes and script reads the styles of a clean document: a read between frames would force a
+/// build of its own, which retained styles do not serve.
+fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, usize, String) {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
-    let (mut lists, mut styles) = (Vec::new(), Vec::new());
-    for _ in 0..frames {
+    let (mut lists, mut cascades) = (Vec::new(), 0);
+    for i in 0..frames {
+        if i == frames - 2 {
+            engine
+                .execute_script(view, "window.STOP = true")
+                .expect("stop");
+        }
+        let before = cascades_for_test();
         frame(&mut engine, view);
+        cascades += cascades_for_test() - before;
         lists.push(format!(
             "{:?}",
             engine.views[&view]
@@ -98,30 +111,38 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, Vec<Str
                 .expect("display list")
                 .commands
         ));
-        styles.push(format!(
-            "{:?}",
-            engine.execute_script(view, DUMP).expect("dump")
-        ));
     }
+    let before = cascades_for_test();
+    let styles = format!("{:?}", engine.execute_script(view, DUMP).expect("dump"));
+    assert_eq!(
+        cascades_for_test(),
+        before,
+        "the read of a clean document built nothing"
+    );
     set_retained_styles_for_test(None);
-    (lists, styles)
+    (lists, cascades, styles)
 }
 
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
-    let (on_lists, on_styles) = run(page, 6, RetainedStyles::On);
-    let (off_lists, off_styles) = run(page, 6, RetainedStyles::Off);
+    let (on_lists, on, on_styles) = run(page, 8, RetainedStyles::On);
+    let (off_lists, off, off_styles) = run(page, 8, RetainedStyles::Off);
+    // Not vacuous: the retained run replayed styles.
+    assert!(
+        on < off,
+        "{name}: retained styles ran {on} cascades, a full cascade {off}"
+    );
     for i in 0..on_lists.len() {
-        assert!(
-            on_styles[i] == off_styles[i],
-            "{name}, frame {i}: computed styles differ from a full cascade's\n  retained: {}\n  full:     {}",
-            on_styles[i],
-            off_styles[i]
-        );
         assert!(
             on_lists[i] == off_lists[i],
             "{name}, frame {i}: the display list differs from a full cascade's"
         );
     }
+    assert!(
+        on_styles == off_styles,
+        "{name}: computed styles differ from a full cascade's
+  retained: {on_styles}
+  full:     {off_styles}"
+    );
 }
 
 /// The red test: on Multiply's shape (1,000 tiles, 10 shown), a frame that shows a tile, hides
@@ -233,7 +254,33 @@ fn a_hidden_elements_style_answers_after_its_write() {
             ".h{display:none;color:rgb(0,0,0)} .h span{font-size:30px}",
             "<div class=h id=h><span id=s>x</span></div><div id=v>v</div>",
             "var h = document.getElementById('h'); h.style.color = 'rgb(' + n + ',0,0)'; h.style.left = n + 'px'; \
-             if (n == 4) h.style.display = 'block';",
+             h.style.display = n % 3 ? 'none' : 'block';",
         ),
     );
+}
+
+/// Prints `RETAINED-TILES n mode build_ms` (median over 9 frames of Multiply's tune, after 3).
+#[test]
+#[ignore]
+fn measure_a_tune_frames_build_with_and_without_retained_styles() {
+    for &n in &[1_000usize, 4_000, 8_000] {
+        for mode in [RetainedStyles::Off, RetainedStyles::On] {
+            set_retained_styles_for_test(Some(mode));
+            let (mut engine, view, _server) = load(&tiles(n, 10, TUNE));
+            for _ in 0..3 {
+                frame(&mut engine, view);
+            }
+            let mut ms = Vec::new();
+            for _ in 0..9 {
+                frame(&mut engine, view);
+                ms.push(engine.relayout_stats(view).expect("view").last_build_ms);
+            }
+            set_retained_styles_for_test(None);
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "RETAINED-TILES n {n} {mode:?} build_ms {:.2}",
+                ms[ms.len() / 2]
+            );
+        }
+    }
 }
