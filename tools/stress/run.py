@@ -104,11 +104,14 @@ def runner_url(base, suite, args):
             # release runner's parameters (benchmarkDefaultParameters).
             if len(args.only) != 1:
                 sys.exit("motionmark --only takes one subtest: " + ", ".join(MOTIONMARK_TESTS))
-            q = ("?suite-name=MotionMark&test-name=%s&test-interval=%d&display=minimal&tiles=big&controller=ramp"
+            # --complexity: the suite's own fixed controller (developer.html's "Keep at a fixed
+            # complexity"), the test held at that many elements for the whole interval.
+            controller = "ramp" if args.complexity is None else "fixed&complexity=%d" % args.complexity
+            q = ("?suite-name=MotionMark&test-name=%s&test-interval=%d&display=minimal&tiles=big&controller=%s"
                  "&kalman-process-error=1&kalman-measurement-error=4&time-measurement=performance"
                  "&warmup-length=2000&warmup-frame-count=30&first-frame-minimum-length=0"
                  "&system-frame-rate=60&frame-rate=60"
-                 % (re.sub(r"[^A-Za-z0-9]", "", args.only[0]), args.test_interval or 30))
+                 % (re.sub(r"[^A-Za-z0-9]", "", args.only[0]), args.test_interval or 30, controller))
             return base + "/MotionMark/developer.html" + q
         return base + "/MotionMark/index.html"
     if suite == "control":
@@ -704,7 +707,7 @@ def app_turn_budget_env(turn_budget):
     return {TURN_BUDGET_ENV: str(turn_budget)}
 
 
-def headless_argv(launcher, url, work, limit_s, turn_budget):
+def headless_argv(launcher, url, work, limit_s, turn_budget, frame_stages=False):
     argv = [str(launcher), "--url", url, "--width", "1280", "--height", "800",
             "--live-ms", str(int(limit_s * 1000)), "--timeout-ms", str(int((limit_s + 120) * 1000)),
             "--post-load-live", "--animations", "--script-budget-ms", "15000", "--interrupt-scripts",
@@ -712,20 +715,45 @@ def headless_argv(launcher, url, work, limit_s, turn_budget):
             "--event-log-error-text", "--event-log-console-text"]
     if turn_budget is not None:
         argv += ["--live-turn-budget-ms", str(turn_budget)]
+    if frame_stages:
+        argv.append("--frame-stages")
     return argv
 
 
-def start_headless(binary, url, work, limit_s, extra_env, turn_budget=None):
+def start_headless(binary, url, work, limit_s, extra_env, turn_budget=None, frame_stages=False):
     forced, dropped = engine_env(extra_env)
     env = dict(os.environ)
     for name in dropped:
         env.pop(name, None)
     env.update(forced)
-    argv = headless_argv(sandboxed(binary, work), url, work, limit_s, turn_budget)
+    argv = headless_argv(sandboxed(binary, work), url, work, limit_s, turn_budget, frame_stages)
     return Proc(argv, work / "app.log", env=env, cwd=str(work))
 
 
-def start_chrome(binary, url, work, headed, sink):
+# Chrome's own trace for the per-frame stage split (--frame-stages): startup tracing, so nothing
+# drives it from outside, written as JSON when its duration ends (frame_stages.py reads it).
+CHROME_TRACE_CATEGORIES = ("devtools.timeline,disabled-by-default-devtools.timeline,toplevel,v8,blink,cc,gpu,viz,"
+                           "disabled-by-default-devtools.timeline.frame")
+
+
+def chrome_trace_args(path, seconds):
+    return ["--trace-startup=" + CHROME_TRACE_CATEGORIES, "--trace-startup-format=json",
+            "--trace-startup-file=" + str(path), "--trace-startup-duration=%d" % seconds]
+
+
+def await_file(path, deadline):
+    """Wait until `path` exists and has stopped growing, or `deadline`; True if it did."""
+    last = -1
+    while time.time() < deadline:
+        size = path.stat().st_size if path.is_file() else -1
+        if size > 0 and size == last:
+            return True
+        last = size
+        time.sleep(1.0)
+    return False
+
+
+def start_chrome(binary, url, work, headed, sink, trace=None):
     argv = [str(binary), "--user-data-dir=" + str(work / "chrome-profile"),
             "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
             "--disable-component-update", "--disable-sync", "--disable-default-apps", "--disable-extensions",
@@ -736,6 +764,8 @@ def start_chrome(binary, url, work, headed, sink):
             "--window-size=1280,800", "--proxy-server=http://127.0.0.1:%d" % sink.port]
     if not headed:
         argv.append("--headless=new")
+    if trace is not None:
+        argv += chrome_trace_args(*trace)
     argv.append(url)
     return Proc(argv, work / "app.log")
 
@@ -861,6 +891,19 @@ def log_console_refused(path):
                if CONSOLE_RECORD_WORDS.search(line) and not ENGINE_CONSOLE_RECORD.match(line))
 
 
+def stage_split(engine, work):
+    """The per-frame stage medians of a --frame-stages run (frame_stages.py), or why there are none."""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import frame_stages
+    try:
+        if engine == "chrome":
+            return frame_stages.chrome_summary(json.loads((work / "trace.json").read_text()))
+        return frame_stages.hiwave_summary((work / "app.log").read_text(errors="replace"))
+    except (OSError, ValueError, KeyError) as e:
+        return {"error": "%s: %s" % (type(e).__name__, str(e)[:200])}
+
+
 def frames_by_test(progress):
     """MotionMark: what each finished test measured (reporter.js `motionmarkFrames`), by test name."""
     return {str(p.get("test")): p["frames"] for p in progress if p.get("event") == "test-done" and p.get("frames")}
@@ -904,6 +947,12 @@ def main():
     ap.add_argument("--only", action="append", help="one workload/subtest (repeatable); a partial run, never a suite score")
     ap.add_argument("--iterations", type=int, help="speedometer iterationCount (default: upstream's 10); partial")
     ap.add_argument("--test-interval", type=int, help="motionmark --only: seconds per subtest (default 30)")
+    ap.add_argument("--complexity", type=int,
+                    help="motionmark --only: hold the subtest at this complexity (the suite's fixed controller) "
+                         "instead of the ramp; partial")
+    ap.add_argument("--frame-stages", action="store_true",
+                    help="per-frame stage split: hiwave-headless prints a stage line per live turn, chrome writes "
+                         "its own trace; the record's `stage_split` has the per-frame medians (frame_stages.py)")
     ap.add_argument("--trace", action="store_true", help="report every subtest start (more requests; for finding a hang)")
     ap.add_argument("--headed", action="store_true", help="chrome: a visible window (takes the real-window lock)")
     ap.add_argument("--lock-wait", type=int, default=1200, help="seconds to wait for the lock and for an idle seat")
@@ -917,6 +966,11 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the work directory (profile, logs)")
     args = ap.parse_args()
 
+    if args.complexity is not None and not (args.suite == "motionmark" and args.only):
+        sys.exit("--complexity is for one motionmark subtest (--only)")
+    if args.frame_stages and args.engine == "hiwave":
+        sys.exit("--frame-stages: the app has no per-turn stage line yet; use hiwave-headless (the real window's "
+                 "present cost is the real-window pass's to measure)")
     asked = dict(kv.split("=", 1) for kv in args.env)
     if TURN_BUDGET_ENV in asked:
         # Through --env it would reach the app unrecorded: no flag, no raised-budget line, no clamp.
@@ -950,6 +1004,8 @@ def main():
     # After the clamp: the record's flags are what the engine is started with.
     flags = engine_flags(args.engine, extra_env, turn_budget=turn_budget)
     stall = args.stall or SUITE[args.suite]["stall"]
+    # Chrome's trace covers the load, the warm-up and the interval with some to spare.
+    trace_seconds = (args.test_interval or 30) + 20
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     bin_sha = sha1(binary)
@@ -1015,10 +1071,11 @@ def main():
                         sys.exit(2)
                     record.t0 = record.last = started = time.time()
                 elif args.engine == "hiwave-headless":
-                    handle = start_headless(binary, url, work, limit, extra_env, turn_budget)
+                    handle = start_headless(binary, url, work, limit, extra_env, turn_budget, args.frame_stages)
                     watch.add(handle.proc.pid)
                 else:
-                    handle = start_chrome(binary, url, work, args.headed, sink)
+                    trace = (work / "trace.json", trace_seconds) if args.frame_stages else None
+                    handle = start_chrome(binary, url, work, args.headed, sink, trace)
                 status = "running"
                 # --until-exit (headless): parity-capture writes its event log
                 # when its live window (--timeout) ends, so let it end.
@@ -1042,6 +1099,9 @@ def main():
                     if verdict:
                         status = verdict
                         break
+                if args.frame_stages and args.engine == "chrome" and handle is not None and handle.alive():
+                    # The trace is written when its duration ends, after the result.
+                    await_file(work / "trace.json", started + trace_seconds + 60)
             except KeyboardInterrupt:
                 status = "interrupted"
             finally:
@@ -1054,7 +1114,8 @@ def main():
 
     wall = round(time.time() - started, 1)
     score, sub, detail = scores(args.suite, record)
-    partial = bool(args.only or args.iterations or args.test_interval) or args.suite == "control"
+    partial = bool(args.only or args.iterations or args.test_interval or args.complexity is not None) \
+        or args.suite == "control"
     if status == "ok" and score is None:
         status = "failed"
     findings, tail = log_findings(work / "app.log") if handle is not None else ([], "")
@@ -1090,6 +1151,7 @@ def main():
         "binary_sha1": bin_sha,
         "label": label,
         "url": url.replace(base, "http://127.0.0.1:<port>"),
+        "complexity": args.complexity,
         "partial": partial,
         "status": status,
         "score": score,
@@ -1137,6 +1199,8 @@ def main():
         # whatever page is open. The sink refused them, so they did not
         # leave the machine either; anything else it saw is the page's.
         run["browser_own_requests"] = [h for h in sorted(set(sink.hosts)) if h.split(" ")[-1] in CHROME_OWN_HOSTS]
+    if args.frame_stages:
+        run["stage_split"] = stage_split(args.engine, work)
     if args.engine == "hiwave-headless":
         run["headless_events"] = events
         run["live_pacing"] = headless_pacing(binary)
@@ -1144,9 +1208,9 @@ def main():
     path.write_text(json.dumps(run, indent=1) + "\n")
     if left:
         print("INVALID: this run was not offline: %s" % json.dumps(left), file=sys.stderr)
-    if args.keep or status != "ok":
+    if args.keep or status != "ok" or args.frame_stages:
         keep = out / (name + ".work")
-        for f in ("app.log", "seed.log", "events.jsonl"):
+        for f in ("app.log", "seed.log", "events.jsonl", "trace.json"):
             if (work / f).is_file():
                 keep.mkdir(exist_ok=True)
                 shutil.copy(work / f, keep / f)
