@@ -11308,7 +11308,27 @@ impl Engine {
         }
         let tried = self.views.get(&id).is_some_and(|view| view.lay.script_roots.borrow().is_some());
         let retained = self.enter_retained_styles(id, &causes, dirty.as_ref());
+        // PR 3: a relayout whose styles were kept may splice what its writes built into the
+        // kept box tree; every full build keeps its tree for the next.
+        if let Some(view) = self.views.get(&id) {
+            let boxes = retained_styles_mode().keeps_boxes();
+            if boxes {
+                view.lay.want_script_unlaid.set(true);
+            }
+            let trusted = retained && STYLE_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.key.is_some()));
+            *view.lay.splice_roots.borrow_mut() = match (boxes && trusted, dirty.as_ref()) {
+                (true, Some(dirty)) if !dirty.nodes.is_empty() => {
+                    let mut roots: Vec<usize> = dirty.nodes.keys().copied().collect();
+                    roots.sort_unstable();
+                    Some(roots)
+                }
+                _ => None,
+            };
+        }
         let layout_skipped = self.relayout_uncounted(id);
+        if let Some(view) = self.views.get(&id) {
+            view.lay.splice_roots.borrow_mut().take();
+        }
         self.leave_retained_styles(id, retained);
         let mut script_walked = None;
         if let Some(view) = self.views.get(&id) {
@@ -11436,8 +11456,8 @@ impl Engine {
         let mut memo = view
             .retained_styles
             .take()
-            .unwrap_or_else(|| StyleMemo::retained(mode == RetainedStyles::Verify));
-        memo.verify = mode == RetainedStyles::Verify;
+            .unwrap_or_else(|| StyleMemo::retained(mode.verifies()));
+        memo.verify = mode.verifies();
         let trusted = memo.key.is_some()
             && memo.controls == controls
             && dirty.is_some_and(|d| d.full.is_none())
@@ -11920,45 +11940,15 @@ impl Engine {
         };
         // The topmost written elements, and the elements above them: the build walks down those
         // and builds only what is under a root.
-        let body = document.body().map(|body| body.id.raw());
-        let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
-        for raw in &written {
-            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
-                return miss("a written element left the document");
-            };
-            let mut chain = Vec::new();
-            let mut parent = node.parent();
-            while let Some(p) = parent {
-                chain.push(p.id.raw());
-                parent = p.parent();
+        // A miss before the patch below leaves the kept tree as it was: put it back, for a build
+        // that splices into it (PR 3, `RUSTKIT_RETAINED_STYLES=boxes`). A full build replaces it.
+        let RestylePlan { roots, path, pending } = match restyle_plan(document, &written) {
+            Ok(plan) => plan,
+            Err(why) => {
+                *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+                return miss(why);
             }
-            above.insert(*raw, chain);
-        }
-        let written_set: std::collections::HashSet<usize> = written.iter().copied().collect();
-        let roots: Vec<usize> = written
-            .iter()
-            .copied()
-            .filter(|raw| !above[raw].iter().any(|up| written_set.contains(up)))
-            .collect();
-        let mut path = std::collections::HashSet::new();
-        for root in &roots {
-            // The root element and body have no box of their own to patch.
-            if !body.is_some_and(|body| above[root].contains(&body)) {
-                return miss("the root element or body was written");
-            }
-            path.extend(above[root].iter().copied());
-        }
-        let mut pending: HashMap<usize, usize> = HashMap::new();
-        let mut steps = std::collections::HashSet::new();
-        for root in &roots {
-            let mut child = *root;
-            for parent in &above[root] {
-                if steps.insert((*parent, child)) {
-                    *pending.entry(*parent).or_insert(0) += 1;
-                }
-                child = *parent;
-            }
-        }
+        };
         let started = std::time::Instant::now();
         let (found, walked) = {
             let _build_time = time_stage(Stage::Build);
@@ -11992,6 +11982,7 @@ impl Engine {
             return Ok(false);
         };
         let Some(mut laid) = view.layout.take() else {
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
             return miss("no layout");
         };
         let mut boxed = Vec::with_capacity(roots.len());
@@ -12023,6 +12014,7 @@ impl Engine {
         }
         if let Some(why) = why {
             view.layout = Some(laid);
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
             // More than paint changed. A one-off miss sits out nothing: the full build that follows
             // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
             // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
@@ -13116,6 +13108,170 @@ impl layout_ctx::LayoutCtx {
         root_box
     }
 
+    /// TREE-REUSE (PR 3): the box tree of `document` built from the tree the view's last build kept
+    /// (`script_unlaid`) by building only the elements in `written` (the relayout's dirty set, its
+    /// topmost ones as roots) and putting each where its old box was. A box that came is inserted
+    /// among its parent's boxes and one that went is removed, only where the parent's children
+    /// are all element boxes at block level, so no anonymous box would have to change. `None`
+    /// (the caller builds in full) for anything else; the kept tree is used up either way.
+    fn spliced_build(
+        &self,
+        lay: &layout_ctx::ViewLayout,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
+        written: &[usize],
+    ) -> Option<LayoutBox> {
+        let miss = |why: &str| {
+            debug!(why, "Kept box tree: a full build");
+            LAST_SPLICE_MISS.with(|last| *last.borrow_mut() = why.to_string());
+            None
+        };
+        let Some(mut tree) = lay.script_unlaid.borrow_mut().take() else {
+            return miss("no kept tree");
+        };
+        // A running transition or animation moves boxes no write reached: their kept boxes hold
+        // last frame's values (#1246 R1 item 1, carried into the splice).
+        if lay.animations.borrow().running() {
+            return miss("animations running");
+        }
+        // One that moved while the kept tree was built may have moved on or ended since, in frames
+        // no build saw (a paint-only animation frame patches the laid-out tree, not the kept one):
+        // the boxes no write reaches would keep its value (#1247 R1 item 2).
+        if lay.script_unlaid_animated.get() {
+            return miss("the kept tree was built while animations ran");
+        }
+        // `running()` covers CSS transitions and animations only. A script animation is applied
+        // from the view's script layer, and can start, move or fill in frames no build saw: any
+        // write to that layer since the kept tree was built refuses it (#1247 delta R1).
+        if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
+            return miss("script animations moved since the kept tree was built");
+        }
+        let plan = match restyle_plan(document, written) {
+            Ok(plan) => plan,
+            Err(why) => return miss(why),
+        };
+        for root in &plan.roots {
+            let is_element = document
+                .get_node(rustkit_dom::NodeId::new(*root))
+                .is_some_and(|n| matches!(n.node_type, NodeType::Element { .. }));
+            if !is_element {
+                return miss("a written node is not an element");
+            }
+        }
+        RESTYLE_BUILD.with(|build| {
+            *build.borrow_mut() = Some(RestyleBuild {
+                path: plan.path,
+                roots: plan.roots.iter().copied().collect(),
+                pending: plan.pending,
+                found: HashMap::new(),
+                walked: 0,
+            })
+        });
+        self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+        let Some(build) = RESTYLE_BUILD.with(|build| build.borrow_mut().take()) else {
+            return miss("no restyle build");
+        };
+        let mut found = build.found;
+        let mut next_id = max_element_id(&tree) + 1;
+        let block_level = |b: &LayoutBox| {
+            !b.style.display.is_inline_level() && b.style.display != rustkit_css::Display::Contents
+        };
+        let list_item = |b: &LayoutBox| b.style.display_modifier == rustkit_css::DisplayModifier::ListItem;
+        // A parent whose boxes are its element children at block level, in a block box, none of
+        // them a list item: a list item that comes or goes renumbers the ones after it, which no
+        // write reached (#1247 R1 item 1).
+        //
+        // CSS counters (`counter-reset`/`-increment`/`-set`, `counter()` in `content`) number
+        // later boxes the same way, and anywhere in the document. RustKit computes and draws none
+        // of them yet (`rustkit_css::content::content_string`); when it does, a box that comes or
+        // goes, or a written box whose counter properties changed, must refuse the splice the same
+        // way when the kept tree uses counters.
+        let plain_parent = |b: &LayoutBox| {
+            matches!(b.box_type, BoxType::Block)
+                && block_level(b)
+                && b.children.iter().all(|c| c.node_id.is_some() && block_level(c) && !list_item(c))
+        };
+        for root in &plan.roots {
+            let fresh = found.remove(root).filter(|f| f.node_id.is_some());
+            if fresh.as_ref().is_some_and(|f| f.style.display == rustkit_css::Display::Contents) {
+                return miss("display: contents");
+            }
+            let had = box_of_node(&tree, *root).is_some();
+            match (had, fresh) {
+                (false, None) => {}
+                (true, Some(mut fresh)) => {
+                    let Some(kept) = box_of_node_mut(&mut tree, *root) else {
+                        return miss("no kept box");
+                    };
+                    if kept.style.display.is_inline_level() != fresh.style.display.is_inline_level()
+                        || kept.style.display == rustkit_css::Display::Contents
+                    {
+                        return miss("a box changed level");
+                    }
+                    if list_item(kept) != list_item(&fresh) {
+                        return miss("a box became or stopped being a list item");
+                    }
+                    number_spliced_boxes(&mut fresh, Some(kept), &mut next_id);
+                    *kept = fresh;
+                }
+                (true, None) => {
+                    let Some(parent) = document.get_node(rustkit_dom::NodeId::new(*root)).and_then(|n| n.parent()) else {
+                        return miss("no parent");
+                    };
+                    let Some(parent_box) = box_of_node_mut(&mut tree, parent.id.raw()) else {
+                        return miss("no parent box");
+                    };
+                    if !plain_parent(parent_box) {
+                        return miss("a box went from a parent with anonymous or inline boxes");
+                    }
+                    let Some(at) = parent_box.children.iter().position(|c| c.node_id == Some(*root)) else {
+                        return miss("a box went from under another box");
+                    };
+                    parent_box.children.remove(at);
+                }
+                (false, Some(mut fresh)) => {
+                    let Some(node) = document.get_node(rustkit_dom::NodeId::new(*root)) else {
+                        return miss("no node");
+                    };
+                    let Some(parent) = node.parent() else {
+                        return miss("no parent");
+                    };
+                    if !block_level(&fresh) {
+                        return miss("an inline box came");
+                    }
+                    if list_item(&fresh) {
+                        return miss("a list item came");
+                    }
+                    // After the box of the nearest earlier sibling that has one.
+                    let siblings = parent.children();
+                    let before: Vec<usize> = siblings
+                        .iter()
+                        .take_while(|c| c.id.raw() != *root)
+                        .map(|c| c.id.raw())
+                        .collect();
+                    let Some(parent_box) = box_of_node_mut(&mut tree, parent.id.raw()) else {
+                        return miss("no parent box");
+                    };
+                    if !plain_parent(parent_box) {
+                        return miss("a box came into a parent with anonymous or inline boxes");
+                    }
+                    let at = before
+                        .iter()
+                        .rev()
+                        .find_map(|raw| parent_box.children.iter().position(|c| c.node_id == Some(*raw)))
+                        .map_or(0, |i| i + 1);
+                    number_spliced_boxes(&mut fresh, None, &mut next_id);
+                    parent_box.children.insert(at, fresh);
+                }
+            }
+        }
+        number_in_document_order(&mut tree);
+        #[cfg(test)]
+        SPLICES.with(|c| c.set(c.get() + 1));
+        Some(tree)
+    }
+
     /// One build and layout of `document` (`lay_out_document`).
     fn lay_out_document_pass(
         &self,
@@ -13128,11 +13284,36 @@ impl layout_ctx::LayoutCtx {
     ) -> LayoutBox {
         let lay = building.lay.clone();
         // Build layout tree from DOM with tracing
+        // PR 3: the relayout's own build may build only what its script writes reached and splice
+        // it into the tree the last build kept.
+        let splice = lay
+            .as_ref()
+            .filter(|lay| lay.retain_script_unlaid_now.get())
+            .and_then(|lay| lay.splice_roots.borrow_mut().take());
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
             let _build_time = time_stage(Stage::Build);
             self.with_building(building, || {
-                self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
+                let spliced = match (splice, lay.as_ref()) {
+                    (Some(written), Some(lay)) => {
+                        self.spliced_build(lay, document, external_stylesheets, javascript_enabled, &written)
+                    }
+                    _ => None,
+                };
+                match spliced {
+                    Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
+                        let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
+                            #[cfg(test)]
+                            SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        }
+                        full
+                    }
+                    Some(spliced) => spliced,
+                    None => self.build_layout_from_document(document, external_stylesheets, javascript_enabled),
+                }
             })
         };
         // LPF1: the tree as built, before layout writes into it, for script paint writes to
@@ -13140,6 +13321,8 @@ impl layout_ctx::LayoutCtx {
         if let Some(lay) = lay.as_ref() {
             let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+            lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
+            lay.script_unlaid_generation.set(lay.animated.borrow().generation);
         }
 
         // Layout computation
@@ -14464,6 +14647,8 @@ impl layout_ctx::LayoutCtx {
                     // Return an empty block for hidden elements
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
+                #[cfg(test)]
+                BUILT_ELEMENTS.with(|c| c.set(c.get() + 1));
 
                 // Rules of other trees that reach this element: its shadow
                 // tree's `:host` rules, its slot's `::slotted` rules.
@@ -48126,7 +48311,42 @@ thread_local! {
     static RETAINED_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Element cascades run on this thread (`compute_style_for_element`), for tests.
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Elements the builds on this thread walked into (the element arm of the build), for tests.
+    static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Builds this thread spliced into a kept box tree (PR 3), for tests.
+    static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
+    static SPLICE_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Splices `boxes-verify` builds in this process found different from the full build beside them.
+static SPLICE_DIFFERENCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many splices `RUSTKIT_RETAINED_STYLES=boxes-verify` has found different from a full build in
+/// this process: the number the batch gate reads (0 to turn `boxes` on). Each one is also logged
+/// as an error, `Kept box tree: the splice differs from a full build`, with the running `total`.
+pub fn splice_differences() -> usize {
+    SPLICE_DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Splices `boxes-verify` builds on this thread found different from a full build so far (tests).
+#[cfg(test)]
+pub(crate) fn splice_mismatches_for_test() -> usize {
+    SPLICE_MISMATCHES.with(std::cell::Cell::get)
+}
+
+/// Builds this thread has spliced into a kept box tree so far, and why the last one that could
+/// did not (tests).
+#[cfg(test)]
+pub(crate) fn splices_for_test() -> (usize, String) {
+    (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
+}
+
+/// Elements this thread's builds have walked into so far (tests).
+#[cfg(test)]
+pub(crate) fn built_elements_for_test() -> usize {
+    BUILT_ELEMENTS.with(std::cell::Cell::get)
 }
 
 /// Replays verifying retained builds on this thread have found wrong so far (tests).
@@ -48150,12 +48370,31 @@ pub(crate) enum RetainedStyles {
     Off,
     On,
     Verify,
+    /// `On`, and the view keeps its last build's box tree too: a relayout builds the elements the
+    /// writes reached and splices them into it (TREE-REUSE, `INCREMENTAL_RESTYLE.md` PR 3).
+    Boxes,
+    /// `Boxes`, checked: every element cascades (as `Verify`), and after each splice a full build
+    /// runs beside it; the two box trees are compared and the first difference is logged and
+    /// counted, and the full build's tree is the one laid out. The gate for turning `Boxes` on.
+    BoxesVerify,
+}
+
+impl RetainedStyles {
+    fn keeps_boxes(self) -> bool {
+        matches!(self, RetainedStyles::Boxes | RetainedStyles::BoxesVerify)
+    }
+
+    fn verifies(self) -> bool {
+        matches!(self, RetainedStyles::Verify | RetainedStyles::BoxesVerify)
+    }
 }
 
 fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
     match value {
         Some("on") | Some("1") => RetainedStyles::On,
         Some("verify") => RetainedStyles::Verify,
+        Some("boxes") => RetainedStyles::Boxes,
+        Some("boxes-verify") => RetainedStyles::BoxesVerify,
         _ => RetainedStyles::Off,
     }
 }
@@ -48269,6 +48508,8 @@ thread_local! {
     /// entry, and its timer slice's start and end ([`links_trace_take`]).
     static LINKS_TRACE: std::cell::Cell<[Option<std::time::Instant>; 3]> = const { std::cell::Cell::new([None; 3]) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
+    /// Why the last relayout that could splice into the kept box tree built in full (PR 3).
+    static LAST_SPLICE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Milliseconds of the last pointer restyle without layout: the two
@@ -48450,6 +48691,153 @@ fn with_root_scrollbar(
     ));
     combined.commands.push(rustkit_layout::DisplayCommand::PopViewportFixed);
     Some(Arc::new(combined))
+}
+
+/// The build a set of written elements needs: the topmost of them (`roots`), the elements above
+/// them (`path`), and for each of those how many of its children on the way down the build has to
+/// reach (`pending`). Refused when a written element left the document or the root element or
+/// body was written (they have no box of their own to put back).
+struct RestylePlan {
+    roots: Vec<usize>,
+    path: std::collections::HashSet<usize>,
+    pending: HashMap<usize, usize>,
+}
+
+fn restyle_plan(document: &Document, written: &[usize]) -> Result<RestylePlan, &'static str> {
+    let body = document.body().map(|body| body.id.raw());
+    let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+    for raw in written {
+        let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+            return Err("a written element left the document");
+        };
+        let mut chain = Vec::new();
+        let mut parent = node.parent();
+        while let Some(p) = parent {
+            chain.push(p.id.raw());
+            parent = p.parent();
+        }
+        above.insert(*raw, chain);
+    }
+    let written_set: std::collections::HashSet<usize> = written.iter().copied().collect();
+    let roots: Vec<usize> = written
+        .iter()
+        .copied()
+        .filter(|raw| !above[raw].iter().any(|up| written_set.contains(up)))
+        .collect();
+    let mut path = std::collections::HashSet::new();
+    for root in &roots {
+        // The root element and body have no box of their own to patch.
+        if !body.is_some_and(|body| above[root].contains(&body)) {
+            return Err("the root element or body was written");
+        }
+        path.extend(above[root].iter().copied());
+    }
+    let mut pending: HashMap<usize, usize> = HashMap::new();
+    let mut steps = std::collections::HashSet::new();
+    for root in &roots {
+        let mut child = *root;
+        for parent in &above[root] {
+            if steps.insert((*parent, child)) {
+                *pending.entry(*parent).or_insert(0) += 1;
+            }
+            child = *parent;
+        }
+    }
+    Ok(RestylePlan { roots, path, pending })
+}
+
+/// Where two box trees as built (before layout) first differ, as the path of child indices to it
+/// and what differs; `None` when they are the same box for box, element numbers included (#1247 R1
+/// item 3: they are document order, and a splice must number its boxes as a full build would).
+fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> Option<String> {
+    let at = |path: &[usize], what: String| format!("at {path:?} (node {:?}): {what}", a.node_id);
+    if a.node_id != b.node_id {
+        return Some(at(path, format!("node {:?} vs {:?}", a.node_id, b.node_id)));
+    }
+    if !same_computed_style(&a.style, &b.style) {
+        return Some(at(path, "style".to_string()));
+    }
+    let shallow = |x: &LayoutBox| {
+        let mut x = x.clone();
+        x.children.clear();
+        x.style = Box::new(ComputedStyle::new());
+        format!("{x:?}")
+    };
+    let (sa, sb) = (shallow(a), shallow(b));
+    if sa != sb {
+        return Some(at(path, format!("box {sa} vs {sb}")));
+    }
+    if a.children.len() != b.children.len() {
+        return Some(at(path, format!("{} children vs {}", a.children.len(), b.children.len())));
+    }
+    for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
+        path.push(i);
+        if let Some(difference) = first_box_difference(ca, cb, path) {
+            return Some(difference);
+        }
+        path.pop();
+    }
+    None
+}
+
+/// A spliced tree's element numbers, as a full build gives them (#1247 R1 item 3). A full build
+/// numbers each element's box as it builds it, before its children (`attach_identity`), so in the
+/// order of the tree; a box split in two (an inline around a block) shares its element's number.
+/// Each number met is given the next one in that order, and a number met again its first one. The
+/// numbers on entry must tell elements apart (`number_spliced_boxes`). The layout memo, the
+/// intrinsic-size cache, the incremental layout's comparison and the grid read these numbers:
+/// renumbered, they read what a full build would give them. boxes-verify compares them.
+fn number_in_document_order(tree: &mut LayoutBox) {
+    fn walk(b: &mut LayoutBox, seen: &mut HashMap<usize, usize>) {
+        if let Some(identity) = b.identity.as_mut() {
+            let next = seen.len() + 1;
+            let number = *seen.entry(identity.element_id).or_insert(next);
+            identity.element_id = number;
+            b.element_id = Some(number);
+        }
+        for c in b.children.iter_mut() {
+            walk(c, seen);
+        }
+    }
+    walk(tree, &mut HashMap::new());
+}
+
+/// The largest element number in `tree`.
+fn max_element_id(tree: &LayoutBox) -> usize {
+    tree.children
+        .iter()
+        .map(max_element_id)
+        .fold(tree.element_id().unwrap_or(0), usize::max)
+}
+
+/// A spliced subtree's element numbers: a build of a few elements numbers them from 1, so each box
+/// takes the number its kept box had (`adopt_build_ids`) and any other one a number no box in the
+/// tree has.
+fn number_spliced_boxes(fresh: &mut LayoutBox, kept: Option<&LayoutBox>, next: &mut usize) {
+    fn mark(b: &mut LayoutBox) {
+        if let Some(identity) = b.identity.as_mut() {
+            identity.element_id = usize::MAX;
+            b.element_id = Some(usize::MAX);
+        }
+        b.children.iter_mut().for_each(mark);
+    }
+    fn fill(b: &mut LayoutBox, next: &mut usize) {
+        if let Some(identity) = b.identity.as_mut() {
+            if identity.element_id == usize::MAX {
+                identity.element_id = *next;
+                b.element_id = Some(*next);
+                *next += 1;
+            }
+        }
+        for c in b.children.iter_mut() {
+            fill(c, next);
+        }
+    }
+    mark(fresh);
+    if let Some(kept) = kept {
+        adopt_build_ids(fresh, kept);
+    }
+    fill(fresh, next);
 }
 
 fn box_of_node(tree: &LayoutBox, raw: usize) -> Option<&LayoutBox> {
@@ -48690,6 +49078,19 @@ struct BoxPositioning {
 /// Neither of those can change between the two builds a memo spans: it is
 /// armed only inside `load_subresources`, after the sheets are assigned and
 /// before any script runs, and it is gone when that returns.
+///
+/// Retained styles (TREE-REUSE) keep a memo across script writes, so any
+/// input a cascade reads that a script write does not record must be here,
+/// or must reach the build only through a relayout script did not ask for
+/// (which starts the styles over). Not here today, because none can change:
+/// - `:target`: the matcher answers it false (`pseudo_class_is_static_false`).
+///   When it is implemented, the target element (a hash change records no DOM
+///   write) belongs in this key.
+/// - `prefers-color-scheme`: the media evaluator answers `light` always
+///   (`rustkit-css` `media.rs`); a live scheme belongs in this key.
+/// - Page zoom: the engine has no zoom input; a zoom that changes the viewport
+///   or the device pixel ratio arrives as a resize, a relayout script did not
+///   ask for.
 #[derive(Clone, PartialEq, Debug)]
 struct StyleMemoKey {
     view: Option<EngineViewId>,
@@ -49094,6 +49495,12 @@ fn memoized_element_style(
 }
 
 /// In a retained build, `node` animates or may: its children and its pseudos cascade.
+///
+/// Cost: "may" includes declaring a transition, so `transition: all` (or any
+/// transition) on a page wrapper makes its whole subtree cascade on every
+/// script relayout, as without retained styles; the retained build saves
+/// nothing under it. Telling a transition on a non-inherited property (or one
+/// that is not running) apart would recover that; it is left conservative.
 fn note_retained_animating(node: rustkit_dom::NodeId) {
     STYLE_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut() {

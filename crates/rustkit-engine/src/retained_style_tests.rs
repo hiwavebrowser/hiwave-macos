@@ -85,24 +85,36 @@ const DUMP: &str = "(function () { var out = []; var all = document.querySelecto
     out.push([all[i].tagName, all[i].id, s.display, s.color, s.fontSize, s.left, s.marginTop, \
     s.backgroundColor, s.width].join('|')); } return out.join('\\n'); })()";
 
-/// The display list after each of `frames` frames with retained styles `mode`, the element
-/// cascades the frames ran, and every element's computed style at the end. The page writes in its
-/// first `frames - 2` frames only (`window.STOP`), so the last frame's relayout takes the last
-/// writes and script reads the styles of a clean document: a read between frames would force a
-/// build of its own, which retained styles do not serve.
-fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, usize, String) {
+/// What one run of a page shows: the display list after each frame, every element's computed
+/// style at the end, and the element cascades and element builds the frames ran.
+struct Run {
+    lists: Vec<String>,
+    styles: String,
+    cascades: usize,
+    built: usize,
+    /// Builds spliced into the kept box tree, and why the last that could did not.
+    splices: (usize, String),
+}
+
+/// [`Run`] of `frames` frames with retained styles `mode`. The page writes in its first
+/// `frames - 2` frames only (`window.STOP`), so the last frame's relayout takes the last writes and
+/// script reads the styles of a clean document: a read between frames would force a build of its
+/// own, which retained styles do not serve.
+fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
-    let (mut lists, mut cascades) = (Vec::new(), 0);
+    let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
+    let spliced = splices_for_test().0;
     for i in 0..frames {
         if i == frames - 2 {
             engine
                 .execute_script(view, "window.STOP = true")
                 .expect("stop");
         }
-        let before = cascades_for_test();
+        let (c, b) = (cascades_for_test(), built_elements_for_test());
         frame(&mut engine, view);
-        cascades += cascades_for_test() - before;
+        cascades += cascades_for_test() - c;
+        built += built_elements_for_test() - b;
         lists.push(format!(
             "{:?}",
             engine.views[&view]
@@ -120,28 +132,105 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, usize, 
         "the read of a clean document built nothing"
     );
     set_retained_styles_for_test(None);
-    (lists, cascades, styles)
+    let (now, miss) = splices_for_test();
+    Run {
+        lists,
+        styles,
+        cascades,
+        built,
+        splices: (now - spliced, miss),
+    }
 }
 
+/// The three arms give the same display lists and computed styles, and the retained arms did their
+/// work: the styles arm replayed styles and the kept-boxes arm spliced into its kept tree. (How many
+/// elements each arm built is no measure: the arms need not relayout the same number of times.)
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
-    let (on_lists, on, on_styles) = run(page, 8, RetainedStyles::On);
-    let (off_lists, off, off_styles) = run(page, 8, RetainedStyles::Off);
-    // Not vacuous: the retained run replayed styles.
-    assert!(
-        on < off,
-        "{name}: retained styles ran {on} cascades, a full cascade {off}"
+    assert_same_as_a_full_build(name, page, Some(true))
+}
+
+/// [`assert_same_as_a_full_cascade`]; with `splices` `Some(false)` the kept-boxes arms must not
+/// splice (their relayouts build in full: while animations run, a kept box would hold last frame's
+/// values), and with `None` they may or may not (a transition that may have ended before the
+/// frames measured). Either way boxes-verify must find no splice that differs from a full build.
+fn assert_same_as_a_full_build(name: &str, page: &str, splices: Option<bool>) {
+    let full = run(page, 8, RetainedStyles::Off);
+    let styles = run(page, 8, RetainedStyles::On);
+    let boxes = run(page, 8, RetainedStyles::Boxes);
+    // The gate's arm: each splice is compared with a full build beside it.
+    let mismatches = splice_mismatches_for_test();
+    let checked = run(page, 8, RetainedStyles::BoxesVerify);
+    let mismatches = splice_mismatches_for_test() - mismatches;
+    assert_eq!(
+        mismatches, 0,
+        "{name}: splices boxes-verify found different from a full build"
     );
-    for i in 0..on_lists.len() {
+    assert!(
+        splices.is_none_or(|splices| (checked.splices.0 > 0) == splices),
+        "{name}: the boxes-verify run spliced {} builds (last miss {:?})",
+        checked.splices.0,
+        checked.splices.1
+    );
+    // Not vacuous: the retained runs replayed styles, and the kept-boxes run spliced.
+    assert!(
+        styles.cascades < full.cascades,
+        "{name}: retained styles ran {} cascades, a full cascade {}",
+        styles.cascades,
+        full.cascades
+    );
+    assert!(
+        splices.is_none_or(|splices| (boxes.splices.0 > 0) == splices),
+        "{name}: the kept-boxes run spliced {} builds, expected {} (built {} elements; last miss {:?})",
+        boxes.splices.0,
+        match splices {
+            Some(true) => "some",
+            Some(false) => "none",
+            None => "any",
+        },
+        boxes.built,
+        boxes.splices.1
+    );
+    for (arm, got) in [
+        ("retained styles", &styles),
+        ("kept boxes", &boxes),
+        ("boxes-verify", &checked),
+    ] {
+        for i in 0..full.lists.len() {
+            assert!(
+                got.lists[i] == full.lists[i],
+                "{name}, {arm}, frame {i}: the display list differs from a full build's"
+            );
+        }
         assert!(
-            on_lists[i] == off_lists[i],
-            "{name}, frame {i}: the display list differs from a full cascade's"
+            got.styles == full.styles,
+            "{name}, {arm}: computed styles differ from a full build's
+  {arm}: {}
+  full: {}",
+            got.styles,
+            full.styles
         );
     }
+}
+
+/// PR 3's red test: with the box tree kept too, the same tune frame builds the written tiles (and
+/// the path down to them), not the stage's 1,000 tiles.
+#[test]
+fn a_tune_frame_with_kept_boxes_builds_the_written_tiles_alone() {
+    set_retained_styles_for_test(Some(RetainedStyles::Boxes));
+    let (mut engine, view, _server) = load(&tiles(1_000, 10, TUNE));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    let mut per_frame = Vec::new();
+    for _ in 0..5 {
+        let before = built_elements_for_test();
+        frame(&mut engine, view);
+        per_frame.push(built_elements_for_test() - before);
+    }
+    set_retained_styles_for_test(None);
     assert!(
-        on_styles == off_styles,
-        "{name}: computed styles differ from a full cascade's
-  retained: {on_styles}
-  full:     {off_styles}"
+        per_frame.iter().all(|&b| b > 0 && b <= 20),
+        "elements built per frame (3 tiles written of 1,000): {per_frame:?}"
     );
 }
 
@@ -177,18 +266,33 @@ fn tiles_shown_hidden_and_moved_keep_a_full_cascades_styles() {
 /// origin is the load's real time: two plain full runs give colours one step apart), so their
 /// display lists are not compared frame by frame. The check is inside one run: `verify` cascades
 /// every element afresh beside its replay, and no replay that would have served may differ. The
-/// run must have animated: its frames' display lists differ from each other.
-fn assert_replays_match_a_fresh_cascade(name: &str, page: &str) {
+/// run must have animated: its frames' display lists differ from each other. The kept box tree is
+/// checked the same way: `boxes-verify` compares each splice with a full build beside it, and no
+/// splice may differ; `splices` is as in [`assert_same_as_a_full_build`].
+fn assert_replays_match_a_fresh_cascade(name: &str, page: &str, splices: Option<bool>) {
     let before = retained_mismatches_for_test();
-    let (lists, _, _) = run(page, 8, RetainedStyles::Verify);
+    let verified = run(page, 8, RetainedStyles::Verify);
     assert_eq!(
         retained_mismatches_for_test() - before,
         0,
         "{name}: replays that would have served differ from a fresh cascade"
     );
     assert!(
-        lists.windows(2).any(|w| w[0] != w[1]),
+        verified.lists.windows(2).any(|w| w[0] != w[1]),
         "{name}: nothing animated in the frames measured"
+    );
+    let before = splice_mismatches_for_test();
+    let checked = run(page, 8, RetainedStyles::BoxesVerify);
+    assert_eq!(
+        splice_mismatches_for_test() - before,
+        0,
+        "{name}: splices boxes-verify found different from a full build"
+    );
+    assert!(
+        splices.is_none_or(|splices| (checked.splices.0 > 0) == splices),
+        "{name}: the boxes-verify run spliced {} builds (last miss {:?})",
+        checked.splices.0,
+        checked.splices.1
     );
 }
 
@@ -206,6 +310,7 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
             "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
              document.getElementById('w').style.width = (10 + n % 50) + 'px';",
         ),
+        None,
     );
 }
 
@@ -220,6 +325,7 @@ fn a_running_animation_on_an_inherited_property_reaches_the_children() {
             "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
             "document.getElementById('w').style.width = (10 + n % 50) + 'px';",
         ),
+        Some(false),
     );
 }
 
@@ -234,8 +340,8 @@ fn verify_counts_only_replays_that_would_have_served() {
         "document.getElementById('p').className = n % 2 ? 'b' : 'a';",
     );
     let before = retained_mismatches_for_test();
-    let (_, cascades, _) = run(&page, 8, RetainedStyles::Verify);
-    assert!(cascades > 0, "the verify run built");
+    let verified = run(&page, 8, RetainedStyles::Verify);
+    assert!(verified.cascades > 0, "the verify run built");
     assert_eq!(
         retained_mismatches_for_test() - before,
         0,
@@ -335,7 +441,11 @@ fn a_hidden_elements_style_answers_after_its_write() {
 #[ignore]
 fn measure_a_tune_frames_build_with_and_without_retained_styles() {
     for &n in &[1_000usize, 4_000, 8_000] {
-        for mode in [RetainedStyles::Off, RetainedStyles::On] {
+        for mode in [
+            RetainedStyles::Off,
+            RetainedStyles::On,
+            RetainedStyles::Boxes,
+        ] {
             set_retained_styles_for_test(Some(mode));
             let (mut engine, view, _server) = load(&tiles(n, 10, TUNE));
             for _ in 0..3 {
@@ -354,6 +464,149 @@ fn measure_a_tune_frames_build_with_and_without_retained_styles() {
             );
         }
     }
+}
+
+#[test]
+fn an_insert_and_a_removal_among_block_siblings_splice() {
+    assert_same_as_a_full_cascade(
+        "block siblings",
+        &page(
+            "#u>div{height:10px} #u>div:nth-child(2n){width:30px;background-color:rgb(255,0,0)} \
+             #u>div:first-child{margin-top:7px} #u>div:last-child{width:50px}",
+            "<div id=u><div id=d1></div><div id=d2></div><div id=d3></div><div id=d4></div></div><p id=after>p</p>",
+            "var u = document.getElementById('u'); if (n % 2) { var d = document.createElement('div'); \
+             u.insertBefore(d, u.firstChild); } else { u.removeChild(u.firstChild); }",
+        ),
+    );
+}
+
+/// #1247 R1 item 1: a list item that is shown or hidden renumbers the items after it, and the dirty
+/// set never marks them (a counter is not a selector). A box that comes or goes among list items is
+/// not spliced. (RustKit draws no list markers and no `counter()` yet, so the display lists agree
+/// either way; the refusal is what keeps them agreeing once it does.)
+#[test]
+fn a_list_item_shown_and_hidden_builds_in_full() {
+    assert_same_as_a_full_build(
+        "list item shown and hidden",
+        &page(
+            "li{height:10px}",
+            "<ol id=o><li id=a>a</li><li id=b>b</li><li id=c>c</li></ol><p id=after>p</p>",
+            "document.getElementById('a').style.display = n % 2 ? 'none' : '';",
+        ),
+        Some(false),
+    );
+}
+
+/// An item inserted into or removed from a list: the write marks the list, so the splice builds the
+/// whole list afresh (its root is the `<ol>`) and every item is numbered as a full build numbers it.
+#[test]
+fn an_insert_among_list_items_rebuilds_the_list() {
+    assert_same_as_a_full_build(
+        "list insert",
+        &page(
+            "li{height:10px}",
+            "<ol id=o><li id=a>a</li><li id=b>b</li><li id=c>c</li></ol><p id=after>p</p>",
+            "var o = document.getElementById('o'); if (n % 2) { var li = document.createElement('li'); \
+             li.textContent = 'new'; o.insertBefore(li, o.firstChild); } else { o.removeChild(o.firstChild); }",
+        ),
+        None,
+    );
+}
+
+/// #1247 R1 item 1, counters: block siblings that number themselves with `counter-increment` and
+/// show the count in `::before`. The counter properties and `counter()` generate nothing in RustKit
+/// yet (`rustkit_css::content::content_string`), so this pins that a splice still agrees with a full
+/// build here; `spliced_build` says what must refuse it once counters are drawn.
+#[test]
+fn an_insert_among_counted_siblings_matches_a_full_build() {
+    assert_same_as_a_full_build(
+        "counters",
+        &page(
+            "#u{counter-reset:c} #u>div{height:10px;counter-increment:c} #u>div::before{content:counter(c) '.'}",
+            "<div id=u><div id=d1></div><div id=d2></div><div id=d3></div></div>",
+            "var u = document.getElementById('u'); if (n % 2) { var d = document.createElement('div'); \
+             u.insertBefore(d, u.firstChild); } else { u.removeChild(u.firstChild); }",
+        ),
+        None,
+    );
+}
+
+/// #1247 R1 item 2: an animation that ran while the kept tree was built and has ended since leaves
+/// its value on boxes no write reaches. `#a` animates its opacity for 100 ms from one write and is not
+/// written again; `#w` is written every frame except for the 15 after that write, so the animation
+/// runs and ends in frames with no script relayout. Every splice after it must agree with a full
+/// build, and the frames after it do splice.
+#[test]
+fn an_animation_that_ended_since_the_kept_build_leaves_no_value_behind() {
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, _server) = load(&page(
+        "@keyframes fade{from{opacity:0.2} to{opacity:0.8}} #a{width:50px;height:50px;background-color:rgb(0,0,255)} \
+         #a.go{animation:fade 100ms linear} #w{width:10px;height:5px}",
+        "<div id=a></div><div id=w></div>",
+        "if (window.GO && !window.WENT) { document.getElementById('a').className = 'go'; window.WENT = n; } \
+         if (!window.WENT || window.WENT == n || n - window.WENT > 15) { \
+         document.getElementById('w').style.width = (10 + n % 50) + 'px'; }",
+    ));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    engine.execute_script(view, "window.GO = true").expect("go");
+    let (mismatches, splices) = (splice_mismatches_for_test(), splices_for_test().0);
+    for _ in 0..30 {
+        frame(&mut engine, view);
+    }
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "splices after the animation differ from a full build"
+    );
+    assert!(
+        now > splices,
+        "the frames after the animation ended splice (last miss {miss:?})"
+    );
+}
+
+/// #1247 delta R1: a script animation (`element.animate`) is applied in the build from the view's
+/// script layer, and can start, run and fill in frames no build sees. `#a` is animated once to
+/// opacity 0 (filled, 100 ms) in a frame with no other write, and `#w`, written every frame before,
+/// is written again only 15 frames later: every splice must agree with a full build, and the frames
+/// after the animation has filled splice again.
+#[test]
+fn a_script_animation_started_after_the_kept_build_leaves_no_value_behind() {
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, _server) = load(&page(
+        "#a{width:50px;height:50px;background-color:rgb(0,0,255)} #w{width:10px;height:5px}",
+        "<div id=a></div><div id=w></div>",
+        "if (window.GO && !window.WENT) { document.getElementById('a').animate([{opacity:1},{opacity:0}], \
+         {duration:100, fill:'forwards'}); window.WENT = n; } \
+         if (!window.WENT || n - window.WENT > 15) { \
+         document.getElementById('w').style.width = (10 + n % 50) + 'px'; }",
+    ));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    engine.execute_script(view, "window.GO = true").expect("go");
+    let (mismatches, _) = (splice_mismatches_for_test(), ());
+    for _ in 0..20 {
+        frame(&mut engine, view);
+    }
+    let splices = splices_for_test().0;
+    for _ in 0..5 {
+        frame(&mut engine, view);
+    }
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "splices around a script animation differ from a full build"
+    );
+    assert!(
+        now > splices,
+        "the frames after the animation filled splice (last miss {miss:?})"
+    );
 }
 
 /// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes

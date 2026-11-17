@@ -655,6 +655,19 @@ pub(crate) struct ViewLayout {
     /// tree. `None` after any full build that was not asked to keep it.
     pub(crate) script_unlaid: RefCell<Option<rustkit_layout::LayoutBox>>,
     pub(crate) want_script_unlaid: Cell<bool>,
+    /// TREE-REUSE (PR 3): the elements this relayout's script writes reached, when its build may
+    /// build them alone and splice them into `script_unlaid` (`Engine::relayout` sets it while
+    /// `RUSTKIT_RETAINED_STYLES=boxes`; the relayout's own build takes it).
+    pub(crate) splice_roots: RefCell<Option<Vec<usize>>>,
+    /// A transition or animation was moving when the kept tree (`script_unlaid`) was built, so
+    /// boxes no later write reaches may hold a value it has moved on from, or that went when it
+    /// ended: the kept tree is not spliced into (#1247 R1 item 2).
+    pub(crate) script_unlaid_animated: Cell<bool>,
+    /// The script animation layer's generation (`animated.generation`) when the kept tree was
+    /// built. Script animations (`element.animate`) are applied in the build from that layer and
+    /// can start, move or fill in paint-only frames no build sees; when the layer has been written
+    /// since, the kept tree is not spliced into (#1247 delta R1).
+    pub(crate) script_unlaid_generation: Cell<u64>,
     /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
     /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
     /// kept tree, since the published boxes were not laid out from it.
@@ -698,6 +711,7 @@ impl ViewLayout {
     /// tree (its node ids were the old document's), no cooldown, and no run of misses (LPF3 R1).
     pub(crate) fn forget_script_restyle(&self) {
         self.script_unlaid.borrow_mut().take();
+        self.script_unlaid_animated.set(false);
         self.want_script_unlaid.set(false);
         self.script_cooldown.set(0);
         self.script_last_cooldown.set(None);
