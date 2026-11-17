@@ -92,6 +92,8 @@ struct Run {
     styles: String,
     cascades: usize,
     built: usize,
+    /// Builds spliced into the kept box tree, and why the last that could did not.
+    splices: (usize, String),
 }
 
 /// [`Run`] of `frames` frames with retained styles `mode`. The page writes in its first
@@ -102,6 +104,7 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
     let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
+    let spliced = splices_for_test().0;
     for i in 0..frames {
         if i == frames - 2 {
             engine
@@ -129,19 +132,24 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
         "the read of a clean document built nothing"
     );
     set_retained_styles_for_test(None);
+    let (now, miss) = splices_for_test();
     Run {
         lists,
         styles,
         cascades,
         built,
+        splices: (now - spliced, miss),
     }
 }
 
+/// The three arms give the same display lists and computed styles, and the retained arms did their
+/// work: the styles arm replayed styles and the kept-boxes arm spliced into its kept tree. (How many
+/// elements each arm built is no measure: the arms need not relayout the same number of times.)
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
     let full = run(page, 8, RetainedStyles::Off);
     let styles = run(page, 8, RetainedStyles::On);
     let boxes = run(page, 8, RetainedStyles::Boxes);
-    // Not vacuous: the retained runs replayed styles, and kept boxes built fewer elements.
+    // Not vacuous: the retained runs replayed styles, and the kept-boxes run spliced.
     assert!(
         styles.cascades < full.cascades,
         "{name}: retained styles ran {} cascades, a full cascade {}",
@@ -149,10 +157,10 @@ fn assert_same_as_a_full_cascade(name: &str, page: &str) {
         full.cascades
     );
     assert!(
-        boxes.built < styles.built,
-        "{name}: kept boxes built {} elements, a full build {}",
+        boxes.splices.0 > 0,
+        "{name}: the kept-boxes run spliced no build (built {} elements; last miss {:?})",
         boxes.built,
-        styles.built
+        boxes.splices.1
     );
     for (arm, got) in [("retained styles", &styles), ("kept boxes", &boxes)] {
         for i in 0..full.lists.len() {
@@ -336,4 +344,18 @@ fn measure_a_tune_frames_build_with_and_without_retained_styles() {
             );
         }
     }
+}
+
+#[test]
+fn an_insert_and_a_removal_among_block_siblings_splice() {
+    assert_same_as_a_full_cascade(
+        "block siblings",
+        &page(
+            "#u>div{height:10px} #u>div:nth-child(2n){width:30px;background-color:rgb(255,0,0)} \
+             #u>div:first-child{margin-top:7px} #u>div:last-child{width:50px}",
+            "<div id=u><div id=d1></div><div id=d2></div><div id=d3></div><div id=d4></div></div><p id=after>p</p>",
+            "var u = document.getElementById('u'); if (n % 2) { var d = document.createElement('div'); \
+             u.insertBefore(d, u.firstChild); } else { u.removeChild(u.firstChild); }",
+        ),
+    );
 }

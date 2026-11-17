@@ -647,6 +647,10 @@ pub(crate) struct ViewLayout {
     /// tree. `None` after any full build that was not asked to keep it.
     pub(crate) script_unlaid: RefCell<Option<rustkit_layout::LayoutBox>>,
     pub(crate) want_script_unlaid: Cell<bool>,
+    /// TREE-REUSE (PR 3): the elements this relayout's script writes reached, when its build may
+    /// build them alone and splice them into `script_unlaid` (`Engine::relayout` sets it while
+    /// `RUSTKIT_RETAINED_STYLES=boxes`; the relayout's own build takes it).
+    pub(crate) splice_roots: RefCell<Option<Vec<usize>>>,
     /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
     /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
     /// kept tree, since the published boxes were not laid out from it.
