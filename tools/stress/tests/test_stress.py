@@ -580,6 +580,9 @@ def test_the_engine_flags_are_what_the_engine_process_is_started_with():
         "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}
     # The app is also started with its test hooks off.
     assert run.engine_flags("hiwave", asked, inherited={})["HIWAVE_TEST_HOOKS"] == "0"
+    # And with its sidebar closed, unless the run asked for it open.
+    assert run.engine_flags("hiwave", asked, inherited=shell)["HIWAVE_TEST_SIDEBAR"] == "closed"
+    assert run.engine_flags("hiwave", {"HIWAVE_TEST_SIDEBAR": "open"}, inherited={})["HIWAVE_TEST_SIDEBAR"] == "open"
     # Chrome reads none of them.
     assert run.engine_flags("chrome", asked, inherited=shell) == {}
 

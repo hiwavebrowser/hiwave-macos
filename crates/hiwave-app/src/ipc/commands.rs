@@ -1450,7 +1450,11 @@ fn handle_get_sidebar_width(state: &Arc<Mutex<AppState>>) -> IpcResponse {
 pub(crate) const TEST_SIDEBAR_ENV: &str = "HIWAVE_TEST_SIDEBAR";
 
 fn sidebar_open_at_startup(saved_default_open: bool, test_switch: Option<&str>) -> bool {
-    saved_default_open
+    match test_switch {
+        Some("closed") => false,
+        Some("open") => true,
+        _ => saved_default_open,
+    }
 }
 
 // Export/Import handlers

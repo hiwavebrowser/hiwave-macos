@@ -288,6 +288,11 @@ NET_LOG_ENV = {"HIWAVE_CONSOLE_LOG": "1", "RUST_LOG": "warn,hiwave=info,rustkit_
 # is unset (hiwave-app main.rs).
 FORCED_ENV = {"HIWAVE_RUSTKIT_CHROME": "1"}
 DROPPED_ENV = ("HIWAVE_CONTENT_THREAD",)
+# The app starts with its sidebar closed, whatever the profile's
+# settings.json says (hiwave-app ipc/commands.rs, sidebar_open_at_startup):
+# a score is not to carry the sidebar's 220 px or its UI work. A default,
+# not forced: `--env HIWAVE_TEST_SIDEBAR=open` runs a look with it open.
+SIDEBAR_ENV = {"HIWAVE_TEST_SIDEBAR": "closed"}
 
 
 def suite_env(suite, asked):
@@ -316,6 +321,7 @@ def engine_flags(engine, extra_env, inherited=None, turn_budget=None):
     env = {k: v for k, v in inherited.items() if k not in dropped}
     if engine == "hiwave":
         env["HIWAVE_TEST_HOOKS"] = "0"  # start_hiwave
+        env.update(SIDEBAR_ENV)  # start_hiwave
     env.update(forced)
     env.pop(TURN_BUDGET_ENV, None)
     if engine == "hiwave" and turn_budget is not None:
@@ -614,6 +620,7 @@ def start_hiwave(binary, url, work, extra_env, on_pid=lambda pid: None, turn_bud
                          "Start HiWave once on this machine, or point STRESS_FILTER_LISTS at a copy" % FILTER_LISTS)
     forced, dropped = engine_env(extra_env)
     env = {"HIWAVE_TEST_HOOKS": "0"}
+    env.update(SIDEBAR_ENV)
     env.update(forced)
     env.update(app_turn_budget_env(turn_budget))
     for name in dropped:
