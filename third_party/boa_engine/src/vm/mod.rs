@@ -101,6 +101,21 @@ pub mod flowgraph;
 #[cfg(test)]
 mod tests;
 
+/// HIWAVE PATCH (array-like-length): the most arguments a call takes. Chrome 148 refuses a call whose
+/// arguments do not fit its stack (about 120,000 at the top, fewer deeper down) with
+/// `RangeError: Maximum call stack size exceeded`; this is a fixed bound a little above that.
+pub(crate) const MAX_ARGUMENTS: usize = 1 << 17;
+
+/// HIWAVE PATCH (array-like-length): refuses a call with more than [`MAX_ARGUMENTS`] arguments.
+pub(crate) fn check_argument_count(count: usize) -> JsResult<()> {
+    if count > MAX_ARGUMENTS {
+        return Err(JsNativeError::range()
+            .with_message("Maximum call stack size exceeded")
+            .into());
+    }
+    Ok(())
+}
+
 /// Virtual Machine.
 #[derive(Debug)]
 pub struct Vm {
