@@ -105,3 +105,23 @@ fn the_report_page_comes_to_rest() {
 fn the_browser_interface_page_comes_to_rest() {
     assert_comes_to_rest("chrome", &crate::chrome_html_with_bridge(), true);
 }
+
+/// The browser-interface page's script ran in this harness (#1236 R1): a page whose script stopped
+/// early would come to rest too. Its state hook (`__hiwaveApplyState`, which the app's state
+/// updates call) is set, and none of its scripts threw.
+#[test]
+fn the_browser_interface_pages_script_runs_in_the_idle_harness() {
+    let (mut engine, view) = page(&crate::chrome_html_with_bridge(), true);
+    turns(&mut engine, view, 10);
+    let hook = engine
+        .execute_script(view, "String(typeof window.__hiwaveApplyState)")
+        .expect("script");
+    assert_eq!(hook, r#"String("function")"#, "the page's script did not reach its state hook");
+    let log = engine.script_log(view).expect("script log");
+    assert!(!log.is_empty(), "no script of the page's ran");
+    let threw: Vec<_> = log
+        .iter()
+        .filter(|record| matches!(record.outcome, rustkit_engine::ScriptOutcome::Threw(_)))
+        .collect();
+    assert!(threw.is_empty(), "the page's scripts threw: {threw:#?}");
+}

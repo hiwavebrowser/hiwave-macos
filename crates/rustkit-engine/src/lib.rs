@@ -421,6 +421,8 @@ mod window_error_event_tests;
 #[cfg(test)]
 mod frame_canvas_tests;
 #[cfg(test)]
+mod frame_stage_timer_tests;
+#[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
 mod inspector_tests;
@@ -9608,9 +9610,11 @@ impl Engine {
             // `src`): that one gets one more wait of the same length, and
             // no further round, so the window's `load` is at most two
             // budgets behind the scripts whatever the handlers do.
-            let mut round = 0;
-            while source == "event:load" {
-                round += 1;
+            // Only before `load`, at most two rounds (`source` does not change in the loop: the
+            // condition was a `while` on it, which clippy refuses as a loop condition that never
+            // changes).
+            let rounds = if source == "event:load" { 2 } else { 0 };
+            for _round in 1..=rounds {
                 self.note_image_writes_of(id, bindings);
                 if after_load && !leaving {
                     match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
@@ -9644,9 +9648,6 @@ impl Engine {
                     return;
                 }
                 self.refresh_layout_for_script(id, bindings);
-                if round == 2 {
-                    break;
-                }
             }
             info!(%source, "Running page lifecycle step");
             load_phase(source);
@@ -25637,6 +25638,12 @@ impl Engine {
             .hwnd(view.viewhost_id)
     }
 
+    /// Whether `id` is a frame's document (nested browsing contexts): a view some other view lists
+    /// among its frames.
+    fn is_frame_view(&self, id: EngineViewId) -> bool {
+        self.views.values().any(|view| view.frames.values().any(|frame| frame.view == id))
+    }
+
     /// Render a view (internal).
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
@@ -25757,6 +25764,13 @@ impl Engine {
             self.presenter.as_mut().unwrap().commit(id, commit);
         }
         if self.presenter.is_none() {
+            return Ok(());
+        }
+        // A frame's document is an offscreen view with no surface or texture of its own: its
+        // parent's frame draws it. Until FRAME-STAGES its present failed ("Surface not found"),
+        // which ended every relayout of a frame's document in an error after the work was done:
+        // no relayout line, no stats.
+        if self.is_frame_view(id) {
             return Ok(());
         }
 
