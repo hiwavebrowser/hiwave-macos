@@ -2094,6 +2094,24 @@ thread_local! {
     static PRESAMPLED_FRAME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
+/// The animation clock a turn leaves (ANIM-UPDATE-ORDER): the frame's stamp `clock`, or the time
+/// the turn updated its animations to before its round (`presampled`) when the stamp is within a
+/// millisecond of it (the stamp carries the clock's reads), so the settle does not draw the same
+/// frame again. Never below the presampled time: the animations were already drawn at it, and a
+/// stamp read lower (a real clock against the grid) would step the painted time back.
+fn turn_animation_clock(clock: f64, presampled: Option<f64>) -> f64 {
+    match presampled {
+        Some(at) if (clock - at).abs() < 1.0 => at,
+        Some(at) => clock.max(at),
+        None => clock,
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+pub(crate) fn turn_animation_clock_for_tests(clock: f64, presampled: Option<f64>) -> f64 {
+    turn_animation_clock(clock, presampled)
+}
+
 fn one_animation_round() -> bool {
     ONE_ANIMATION_ROUND.with(|c| {
         c.get().unwrap_or_else(|| {
@@ -7040,7 +7058,8 @@ impl Engine {
     /// ANIM-UPDATE-ORDER (one round a turn): when the turn `elapsed_ms` on will run an animation
     /// frame, update the animations of `id` and of its frames to that frame's time first, as HTML's
     /// update-the-rendering does before the animation frame callbacks, so a computed read in a
-    /// callback (or in a task of the turn, whose timeline is that frame's) is the frame's value.
+    /// callback (or in a task of the turn, whose timeline is that frame's) is the frame's value,
+    /// and the frame's animation events reach script before the callbacks.
     /// The after-turn settle then has nothing left to draw unless script wrote. Returns the time.
     fn presample_animations(&mut self, id: EngineViewId, elapsed_ms: u64) -> Option<f64> {
         let at = self
@@ -7053,7 +7072,7 @@ impl Engine {
             views.extend(v.frames.values().map(|f| f.view));
         }
         for vid in views {
-            let needs_frame = {
+            {
                 let Some(view) = self.views.get(&vid) else { continue };
                 let mut anims = view.lay.animations.borrow_mut();
                 if !anims.active() {
@@ -7062,19 +7081,12 @@ impl Engine {
                 if at > anims.clock_ms {
                     anims.clock_ms = at;
                 }
-                anims.last_build_clock != Some(anims.clock_ms)
-            };
-            if !needs_frame {
-                continue;
             }
-            match self.paint_animation_frame(vid) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if let Err(e) = self.relayout_for(vid, RelayoutCause::Animation) {
-                        debug!(error = %e, "the turn's animation update failed");
-                    }
-                }
-                Err(e) => debug!(error = %e, "the turn's animation frame failed"),
+            // Draw the frame at that time and send its animation and transition events, before
+            // the round (Chrome 148: every event before its frame's rAF callbacks,
+            // `anim_event_order_probe_cft148.json`); what their listeners write is laid out.
+            if let Err(e) = self.settle_animations(vid) {
+                debug!(error = %e, "the turn's animation update failed");
             }
         }
         Some(at)
@@ -7256,10 +7268,7 @@ impl Engine {
         // round keeps that time when the frame's stamp is within a millisecond of it (the stamp
         // carries the clock's reads), so the settle below does not draw the same frame again.
         let clock = bindings.animation_clock_ms();
-        view.doc.lay.animations.borrow_mut().clock_ms = match PRESAMPLED_FRAME.with(|p| p.get()) {
-            Some(at) if (clock - at).abs() < 1.0 => at,
-            _ => clock,
-        };
+        view.doc.lay.animations.borrow_mut().clock_ms = turn_animation_clock(clock, PRESAMPLED_FRAME.with(|p| p.get()));
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
