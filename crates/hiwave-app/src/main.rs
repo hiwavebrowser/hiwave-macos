@@ -677,6 +677,29 @@ mod rustkit_chrome_flag_tests {
     }
 }
 
+/// Whether the main window shows its pages: not while it is minimised or hidden. (A window fully
+/// covered by others still counts as shown: tao 0.31 reports no occlusion.)
+fn window_shows_pages(window_visible: bool, minimized: bool) -> bool {
+    window_visible && !minimized
+}
+
+/// Tell the RustKit pages of the main window (the chrome and the content page) whether the window
+/// shows them (`PageCmd::SetVisible`). Each view sends only when its answer changes.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn sync_page_visibility(window: &tao::window::Window, chrome: &ChromeView, content: &UnifiedContentWebView) {
+    let shown = window_shows_pages(window.is_visible(), window.is_minimized());
+    let mut changed = false;
+    if let ChromeView::RustKit(chrome) = chrome {
+        changed |= chrome.set_page_visible(shown);
+    }
+    if let UnifiedContentWebView::RustKit(content) = content {
+        changed |= content.set_page_visible(shown);
+    }
+    if changed {
+        info!(shown, "Main window pages visibility");
+    }
+}
+
 /// The chrome document for a RustKit view: the bridge and the outside-click
 /// helper (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
@@ -4205,10 +4228,22 @@ fn main() {
                     }
                 }
             }
+            // Minimised, restored, hidden or shown again: the main window's pages hear it. A
+            // minimise and a restore each move the focus, and a restore resizes.
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
+            Event::WindowEvent {
+                event: WindowEvent::Focused(_),
+                window_id,
+                ..
+            } if window_id == main_window_id => {
+                sync_page_visibility(&window, &chrome_for_events, &content_for_events);
+            }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_new_size),
                 ..
             } => {
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                sync_page_visibility(&window, &chrome_for_events, &content_for_events);
                 let ch = *chrome_height_for_events.lock().unwrap();
                 let sh = *shelf_height_for_events.lock().unwrap();
                 let ih = *inspector_height_for_events.lock().unwrap();

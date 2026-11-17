@@ -112,7 +112,7 @@ pub struct RustKitView {
     app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
-    /// Visibility state.
+    /// What the page was last told about being shown ([`Self::set_page_visible`]).
     visible: RefCell<bool>,
     /// Loading state.
     loading: RefCell<bool>,
@@ -778,6 +778,28 @@ impl RustKitView {
         } else {
             self.submit(PageCmd::SetAppOwned { owned: true });
         }
+    }
+
+    /// Tell the page whether it is shown (`PageCmd::SetVisible`): false while the window is
+    /// minimised or hidden, true when it shows again. The page starts out shown, and the command
+    /// goes only when the answer changes. Returns whether it went.
+    pub fn set_page_visible(&self, visible: bool) -> bool {
+        if *self.visible.borrow() == visible || !self.is_open() {
+            return false;
+        }
+        *self.visible.borrow_mut() = visible;
+        if let Some(thread) = &self.content {
+            thread.enqueue(PageCmd::SetVisible { visible });
+        } else {
+            self.submit(PageCmd::SetVisible { visible });
+        }
+        true
+    }
+
+    /// What [`Self::set_page_visible`] last told the page (true until it is called). Tests only.
+    #[cfg(test)]
+    pub fn page_visible(&self) -> bool {
+        *self.visible.borrow()
     }
 
     /// Whether [`Self::set_app_owned`] made this an app-owned view.
