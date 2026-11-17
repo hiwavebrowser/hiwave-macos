@@ -2970,15 +2970,33 @@ impl Pieces {
     pub(crate) fn units(&mut self, units: &[u16]) -> JsResult<()> {
         if self.grow(units.len())? {
             self.literal.extend_from_slice(units);
+            if self.literal.len() >= Self::FLUSH_AT {
+                self.flush();
+            }
         }
         Ok(())
     }
 
+    /// A string this short is copied into the literal run rather than kept as its own part: a
+    /// reference per part would cost more than the text (a `join` of 2^28 one-unit elements).
+    const SHARE_FROM: usize = 64;
+    /// The literal run becomes a part of its own once it is this long, so it is never reallocated
+    /// past this size and its copy is stored compactly.
+    const FLUSH_AT: usize = 1 << 16;
+
     pub(crate) fn string(&mut self, string: JsString) -> JsResult<()> {
-        if self.grow(string.len())? && !string.is_empty() {
-            self.flush();
-            self.parts.push(string);
+        if !self.grow(string.len())? || string.is_empty() {
+            return Ok(());
         }
+        if string.len() < Self::SHARE_FROM {
+            self.literal.extend(string.iter());
+            if self.literal.len() >= Self::FLUSH_AT {
+                self.flush();
+            }
+            return Ok(());
+        }
+        self.flush();
+        self.parts.push(string);
         Ok(())
     }
 

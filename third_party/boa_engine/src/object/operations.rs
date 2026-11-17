@@ -1466,6 +1466,8 @@ impl JsValue {
         // 5. Let index be 0.
         // 6. Repeat, while index < len,
         for index in 0..len {
+            // HIWAVE PATCH (array-like-length): up to 2^27 reads; the turn budget can stop them.
+            context.check_interrupt()?;
             // a. Let indexName be ! ToString(𝔽(index)).
             // b. Let next be ? Get(obj, indexName).
             let next = obj.get(index, context)?;
@@ -1502,6 +1504,8 @@ impl JsValue {
         }
         let mut list = Vec::with_capacity((len as usize).min(1 << 12));
         for index in 0..len {
+            // A long list is a long loop of reads; the turn budget can stop it.
+            context.check_interrupt()?;
             let next = obj.get(index, context)?;
             if list.len() < crate::vm::MAX_ARGUMENTS {
                 list.push(next);

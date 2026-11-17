@@ -1139,3 +1139,13 @@ getter called), ordinary calls unchanged, the argument bound (131,073 refused af
 and the largest single allocation while sorting a sparse array of 2^24 slots under 1 MiB (it was
 128 MiB). Red without the patch: `apply` asked for 32 GiB and the process aborted, `Array.of.apply` over 2^27 elements aborted at 1 GiB, and `Math.max` took 131,073
 spread arguments.
+
+**Follow-ups (R1 on #1250).** Both list builders read the interrupt word on every element (up to 2^27
+reads otherwise unstoppable; `crates/rustkit-js/tests/argument_list_stop.rs`, red before: the reads ran
+to the end). A Proxy's `ownKeys` result goes through the same builder, so more than 2^27 keys are refused
+at once with `RangeError: Invalid array length`, as Chrome 148 does (pinned). `%TypedArray%.prototype.join`
+and `toLocaleString` build with `string::Pieces` (refused past the maximum string length, as Chrome; not
+reserved from the length: `new Uint8Array(2 ** 20).join('x'.repeat(2 ** 12))` asked for 4 GiB and aborted),
+and `toLocaleString` joins with "," as V8 does in every locale (Chrome: "1,2,3"; the ICU list pattern
+gave ", "). `Pieces` copies a part shorter than 64 units into its literal run and makes the run a part of
+its own every 65,536 units, so its memory follows the text's length, not the number of parts.
