@@ -354,12 +354,18 @@ pub use content_thread::{
 };
 mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
+mod frame_stages;
+pub use frame_stages::{
+    frame_stage_line, frame_stage_totals, set_frame_stage_timing, FrameStageTotals, FRAME_STAGE_FIELDS,
+};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_commit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wgate_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_stages_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -6978,6 +6984,9 @@ impl Engine {
             // The turn's frame still comes (#776): the tree's due animation
             // frame callbacks run once before it returns.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                // The callbacks are page script: the W-gate hold and the frame stage totals
+                // charge their time to the script bucket, not to the turn's `other`.
+                let _script = wgate::script_turn();
                 if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
                     debug!(error = %e, "frames: the tree's animation round failed");
                 }

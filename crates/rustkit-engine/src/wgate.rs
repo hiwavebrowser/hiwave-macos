@@ -198,11 +198,15 @@ fn charge() {
     ACTIVE.with(|active| {
         if let Some((bucket, since)) = active.get() {
             let now = Instant::now();
+            let ms = now.duration_since(since).as_secs_f64() * 1000.0;
             HOLD_MS.with(|c| {
                 let mut hold = c.get();
-                hold.buckets[bucket as usize] += now.duration_since(since).as_secs_f64() * 1000.0;
+                hold.buckets[bucket as usize] += ms;
                 c.set(hold);
             });
+            if bucket == HoldBucket::Script {
+                crate::frame_stages::add_script(ms);
+            }
             active.set(Some((bucket, now)));
         }
     });
@@ -462,6 +466,10 @@ pub(crate) fn clear_last() {
 pub(crate) fn add(stage: HoldStage, ms: f64) {
     charge();
     let around = ACTIVE.with(|active| active.get()).map(|(bucket, _)| bucket);
+    crate::frame_stages::add_stage(stage, ms);
+    if around == Some(HoldBucket::Script) && (stage as usize) < RELAYOUT_STAGES {
+        crate::frame_stages::add_script(-ms);
+    }
     HOLD_MS.with(|c| {
         let mut hold = c.get();
         hold.add(stage, ms);
@@ -473,6 +481,17 @@ pub(crate) fn add(stage: HoldStage, ms: f64) {
         }
         c.set(hold);
     });
+}
+
+/// `ms` of the inline SVG pre-pass, which the hold has no stage for (its
+/// time stays in the hold's `other_ms`): only the FRAME-STAGES totals take
+/// it, out of the script turn it ran in, as `add` does for a stage.
+pub(crate) fn add_svg_total(ms: f64) {
+    charge();
+    crate::frame_stages::add_svg(ms);
+    if ACTIVE.with(|active| active.get()).is_some_and(|(bucket, _)| bucket == HoldBucket::Script) {
+        crate::frame_stages::add_script(-ms);
+    }
 }
 
 /// Times one presenter stage until dropped.

@@ -135,6 +135,13 @@ struct Args {
     #[arg(long)]
     window_thread_pacing: bool,
 
+    /// With `--live-ms`: print one `Frame stages ...` line per live turn to stderr
+    /// (`rustkit_engine::frame_stage_line`): the turn's busy time and the wait before it, and what
+    /// its script, canvas raster, build, layout, display list, render and the rest took. For a
+    /// stress run's stage split (tools/stress `--frame-stages`); numbers and names only.
+    #[arg(long, requires = "live_ms")]
+    frame_stages: bool,
+
     /// Load as the app does: what the page asks of the network after its
     /// `load` event is the live loop's (`--live-ms`), not the load's
     /// (`EngineConfig::post_load_requests_live`).
@@ -762,11 +769,28 @@ fn run_live(
     };
     let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
+    let frame_stages = FRAME_STAGES.load(std::sync::atomic::Ordering::Relaxed);
+    if frame_stages {
+        // The canvas raster's per-draw clock, off unless a stage line is printed.
+        rustkit_engine::set_frame_stage_timing(true);
+    }
+    let mut last_end: Option<Instant> = None;
     loop {
         let started = Instant::now();
         let elapsed_ms = clock.turn(started);
+        let totals_before = frame_stages.then(rustkit_engine::frame_stage_totals);
         // Real time has passed (`elapsed_ms`), as in the app's loops (CLOCK3).
         let turn = rt.block_on(engine.pump_live_real(view_id, elapsed_ms));
+        if let Some(before) = totals_before {
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            let wait = last_end.map_or(0.0, |end| ms(started.saturating_duration_since(end)));
+            let d = rustkit_engine::frame_stage_totals().since(&before);
+            eprintln!(
+                "{}",
+                rustkit_engine::frame_stage_line(stats.turns as u64 + 1, ms(started - began), ms(started.elapsed()), wait, &d)
+            );
+            last_end = Some(Instant::now());
+        }
         stats.turns += 1;
         stats.timer_callbacks += turn.timers_ran as u64;
         stats.requests += turn.requests as u64;
@@ -819,8 +843,12 @@ struct LayoutStats {
 /// (`Instant + Duration`) can hold.
 const MAX_LIVE_TURN_BUDGET_MS: u64 = 3_600_000;
 
+/// `--frame-stages`, for the live loop (`run_live`): set once in `main`.
+static FRAME_STAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
     let args = Args::parse();
+    FRAME_STAGES.store(args.frame_stages, std::sync::atomic::Ordering::Relaxed);
     if let Some(budget) = args.live_turn_budget_ms {
         eprintln!(
             "WARNING: the live turn's script watchdog is {budget} ms, not the engine's {} ms \
@@ -2420,6 +2448,15 @@ mod tests {
         assert_eq!(parsed(&["--live-ms", "20000"]).live_ms, Some(20_000));
         assert!(!capture_config(&parsed(&[]), None).post_load_requests_live);
         assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
+    }
+
+    /// FRAME-STAGES: the per-turn stage lines are asked for, and only with a live loop to turn.
+    #[test]
+    fn frame_stage_lines_are_printed_only_when_asked_and_only_for_a_live_loop() {
+        assert!(!parsed(&["--live-ms", "1000"]).frame_stages);
+        assert!(parsed(&["--live-ms", "1000", "--frame-stages"]).frame_stages);
+        let argv = ["parity-capture", "--url", "https://example.test/", "--frame-stages"];
+        assert!(Args::try_parse_from(argv).is_err(), "--frame-stages without --live-ms");
     }
 
     /// The heights of every box in a `--dump-layout` file, rounded.
