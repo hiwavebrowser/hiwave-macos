@@ -2347,6 +2347,9 @@ fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
 mod inspector_page_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod idle_page_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod close_tab_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
