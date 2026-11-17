@@ -11266,7 +11266,7 @@ impl Engine {
         // PR 3: a relayout whose styles were kept may splice what its writes built into the
         // kept box tree; every full build keeps its tree for the next.
         if let Some(view) = self.views.get(&id) {
-            let boxes = retained_styles_mode() == RetainedStyles::Boxes;
+            let boxes = retained_styles_mode().keeps_boxes();
             if boxes {
                 view.lay.want_script_unlaid.set(true);
             }
@@ -11411,8 +11411,8 @@ impl Engine {
         let mut memo = view
             .retained_styles
             .take()
-            .unwrap_or_else(|| StyleMemo::retained(mode == RetainedStyles::Verify));
-        memo.verify = mode == RetainedStyles::Verify;
+            .unwrap_or_else(|| StyleMemo::retained(mode.verifies()));
+        memo.verify = mode.verifies();
         let trusted = memo.key.is_some()
             && memo.controls == controls
             && dirty.is_some_and(|d| d.full.is_none())
@@ -13085,6 +13085,11 @@ impl layout_ctx::LayoutCtx {
         let Some(mut tree) = lay.script_unlaid.borrow_mut().take() else {
             return miss("no kept tree");
         };
+        // A running transition or animation moves boxes no write reached: their kept boxes hold
+        // last frame's values (#1246 R1 item 1, carried into the splice).
+        if lay.animations.borrow().running() {
+            return miss("animations running");
+        }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
             Err(why) => return miss(why),
@@ -13222,9 +13227,19 @@ impl layout_ctx::LayoutCtx {
                     }
                     _ => None,
                 };
-                spliced.unwrap_or_else(|| {
-                    self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
-                })
+                match spliced {
+                    Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
+                        let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            tracing::error!(%difference, "Kept box tree: the splice differs from a full build");
+                            #[cfg(test)]
+                            SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        }
+                        full
+                    }
+                    Some(spliced) => spliced,
+                    None => self.build_layout_from_document(document, external_stylesheets, javascript_enabled),
+                }
             })
         };
         // LPF1: the tree as built, before layout writes into it, for script paint writes to
@@ -48171,7 +48186,15 @@ thread_local! {
     static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Builds this thread spliced into a kept box tree (PR 3), for tests.
     static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
+    static SPLICE_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Splices `boxes-verify` builds on this thread found different from a full build so far (tests).
+#[cfg(test)]
+pub(crate) fn splice_mismatches_for_test() -> usize {
+    SPLICE_MISMATCHES.with(std::cell::Cell::get)
 }
 
 /// Builds this thread has spliced into a kept box tree so far, and why the last one that could
@@ -48211,6 +48234,20 @@ pub(crate) enum RetainedStyles {
     /// `On`, and the view keeps its last build's box tree too: a relayout builds the elements the
     /// writes reached and splices them into it (TREE-REUSE, `INCREMENTAL_RESTYLE.md` PR 3).
     Boxes,
+    /// `Boxes`, checked: every element cascades (as `Verify`), and after each splice a full build
+    /// runs beside it; the two box trees are compared and the first difference is logged and
+    /// counted, and the full build's tree is the one laid out. The gate for turning `Boxes` on.
+    BoxesVerify,
+}
+
+impl RetainedStyles {
+    fn keeps_boxes(self) -> bool {
+        matches!(self, RetainedStyles::Boxes | RetainedStyles::BoxesVerify)
+    }
+
+    fn verifies(self) -> bool {
+        matches!(self, RetainedStyles::Verify | RetainedStyles::BoxesVerify)
+    }
 }
 
 fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
@@ -48218,6 +48255,7 @@ fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
         Some("on") | Some("1") => RetainedStyles::On,
         Some("verify") => RetainedStyles::Verify,
         Some("boxes") => RetainedStyles::Boxes,
+        Some("boxes-verify") => RetainedStyles::BoxesVerify,
         _ => RetainedStyles::Off,
     }
 }
@@ -48552,6 +48590,44 @@ fn restyle_plan(document: &Document, written: &[usize]) -> Result<RestylePlan, &
         }
     }
     Ok(RestylePlan { roots, path, pending })
+}
+
+/// Where two box trees as built (before layout) first differ, as the path of child indices to it
+/// and what differs; `None` when they are the same box for box. Element numbers are not compared:
+/// a spliced tree numbers its new boxes apart from a full build's walk order.
+fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> Option<String> {
+    let at = |path: &[usize], what: String| format!("at {path:?} (node {:?}): {what}", a.node_id);
+    if a.node_id != b.node_id {
+        return Some(at(path, format!("node {:?} vs {:?}", a.node_id, b.node_id)));
+    }
+    if !same_computed_style(&a.style, &b.style) {
+        return Some(at(path, "style".to_string()));
+    }
+    let shallow = |x: &LayoutBox| {
+        let mut x = x.clone();
+        x.children.clear();
+        x.style = Box::new(ComputedStyle::new());
+        x.element_id = None;
+        if let Some(identity) = x.identity.as_mut() {
+            identity.element_id = 0;
+        }
+        format!("{x:?}")
+    };
+    let (sa, sb) = (shallow(a), shallow(b));
+    if sa != sb {
+        return Some(at(path, format!("box {sa} vs {sb}")));
+    }
+    if a.children.len() != b.children.len() {
+        return Some(at(path, format!("{} children vs {}", a.children.len(), b.children.len())));
+    }
+    for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
+        path.push(i);
+        if let Some(difference) = first_box_difference(ca, cb, path) {
+            return Some(difference);
+        }
+        path.pop();
+    }
+    None
 }
 
 /// The largest element number in `tree`.

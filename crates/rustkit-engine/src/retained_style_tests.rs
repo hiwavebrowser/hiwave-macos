@@ -146,15 +146,31 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
 /// work: the styles arm replayed styles and the kept-boxes arm spliced into its kept tree. (How many
 /// elements each arm built is no measure: the arms need not relayout the same number of times.)
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
-    assert_same_as_a_full_build(name, page, true)
+    assert_same_as_a_full_build(name, page, Some(true))
 }
 
-/// [`assert_same_as_a_full_cascade`]; with `splices` false the kept-boxes arm must not splice (its
-/// relayouts build in full: while animations run, a kept box would hold last frame's values).
-fn assert_same_as_a_full_build(name: &str, page: &str, splices: bool) {
+/// [`assert_same_as_a_full_cascade`]; with `splices` `Some(false)` the kept-boxes arms must not
+/// splice (their relayouts build in full: while animations run, a kept box would hold last frame's
+/// values), and with `None` they may or may not (a transition that may have ended before the
+/// frames measured). Either way boxes-verify must find no splice that differs from a full build.
+fn assert_same_as_a_full_build(name: &str, page: &str, splices: Option<bool>) {
     let full = run(page, 8, RetainedStyles::Off);
     let styles = run(page, 8, RetainedStyles::On);
     let boxes = run(page, 8, RetainedStyles::Boxes);
+    // The gate's arm: each splice is compared with a full build beside it.
+    let mismatches = splice_mismatches_for_test();
+    let checked = run(page, 8, RetainedStyles::BoxesVerify);
+    let mismatches = splice_mismatches_for_test() - mismatches;
+    assert_eq!(
+        mismatches, 0,
+        "{name}: splices boxes-verify found different from a full build"
+    );
+    assert!(
+        splices.is_none_or(|splices| (checked.splices.0 > 0) == splices),
+        "{name}: the boxes-verify run spliced {} builds (last miss {:?})",
+        checked.splices.0,
+        checked.splices.1
+    );
     // Not vacuous: the retained runs replayed styles, and the kept-boxes run spliced.
     assert!(
         styles.cascades < full.cascades,
@@ -163,14 +179,22 @@ fn assert_same_as_a_full_build(name: &str, page: &str, splices: bool) {
         full.cascades
     );
     assert!(
-        (boxes.splices.0 > 0) == splices,
+        splices.is_none_or(|splices| (boxes.splices.0 > 0) == splices),
         "{name}: the kept-boxes run spliced {} builds, expected {} (built {} elements; last miss {:?})",
         boxes.splices.0,
-        if splices { "some" } else { "none" },
+        match splices {
+            Some(true) => "some",
+            Some(false) => "none",
+            None => "any",
+        },
         boxes.built,
         boxes.splices.1
     );
-    for (arm, got) in [("retained styles", &styles), ("kept boxes", &boxes)] {
+    for (arm, got) in [
+        ("retained styles", &styles),
+        ("kept boxes", &boxes),
+        ("boxes-verify", &checked),
+    ] {
         for i in 0..full.lists.len() {
             assert!(
                 got.lists[i] == full.lists[i],
@@ -250,7 +274,7 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
             "document.getElementById('p').className = 'on'; \
              document.getElementById('w').style.width = (10 + n % 50) + 'px';",
         ),
-        false,
+        None,
     );
 }
 
@@ -265,7 +289,7 @@ fn a_running_animation_on_an_inherited_property_reaches_the_children() {
             "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
             "document.getElementById('w').style.width = (10 + n % 50) + 'px';",
         ),
-        false,
+        Some(false),
     );
 }
 
