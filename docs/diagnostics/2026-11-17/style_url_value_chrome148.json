@@ -4,6 +4,16 @@
  "cases": [
   {
    "css": "url(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -11,6 +21,19 @@
   },
   {
    "css": "url(ok.png)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    111,
+    107,
+    46,
+    112,
+    110,
+    103,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url(ok.png)",
    "kept_via_attribute": true,
@@ -18,6 +41,16 @@
   },
   {
    "css": "URL(a b)",
+   "css_units": [
+    85,
+    82,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -25,6 +58,22 @@
   },
   {
    "css": "none, url(a(b)",
+   "css_units": [
+    110,
+    111,
+    110,
+    101,
+    44,
+    32,
+    117,
+    114,
+    108,
+    40,
+    97,
+    40,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -32,6 +81,18 @@
   },
   {
    "css": "\\75rl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -39,6 +100,19 @@
   },
   {
    "css": "\\75 rl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    32,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -46,6 +120,18 @@
   },
   {
    "css": "u\\72l(a b)",
+   "css_units": [
+    117,
+    92,
+    55,
+    50,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -53,6 +139,18 @@
   },
   {
    "css": "ur\\6c(a b)",
+   "css_units": [
+    117,
+    114,
+    92,
+    54,
+    99,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -60,6 +158,19 @@
   },
   {
    "css": "\\55 RL(a b)",
+   "css_units": [
+    92,
+    53,
+    53,
+    32,
+    82,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -67,6 +178,22 @@
   },
   {
    "css": "\\55\\52\\4c(a b)",
+   "css_units": [
+    92,
+    53,
+    53,
+    92,
+    53,
+    50,
+    92,
+    52,
+    99,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -74,6 +201,22 @@
   },
   {
    "css": "\\75\\72\\6c(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    92,
+    55,
+    50,
+    92,
+    54,
+    99,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -81,6 +224,22 @@
   },
   {
    "css": "\\000075rl(a b)",
+   "css_units": [
+    92,
+    48,
+    48,
+    48,
+    48,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -88,6 +247,22 @@
   },
   {
    "css": "\\00075 rl(a b)",
+   "css_units": [
+    92,
+    48,
+    48,
+    48,
+    55,
+    53,
+    32,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -95,6 +270,17 @@
   },
   {
    "css": "u\\rl(a b)",
+   "css_units": [
+    117,
+    92,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -102,6 +288,19 @@
   },
   {
    "css": "\\u\\r\\l(a b)",
+   "css_units": [
+    92,
+    117,
+    92,
+    114,
+    92,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -109,6 +308,19 @@
   },
   {
    "css": "U\\52 L(a b)",
+   "css_units": [
+    85,
+    92,
+    53,
+    50,
+    32,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -116,6 +328,21 @@
   },
   {
    "css": "\\75rl(ok.png)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    111,
+    107,
+    46,
+    112,
+    110,
+    103,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "\\75rl(ok.png)",
    "kept_via_attribute": true,
@@ -123,6 +350,21 @@
   },
   {
    "css": "u\\72l(ok.png)",
+   "css_units": [
+    117,
+    92,
+    55,
+    50,
+    108,
+    40,
+    111,
+    107,
+    46,
+    112,
+    110,
+    103,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "u\\72l(ok.png)",
    "kept_via_attribute": true,
@@ -130,6 +372,18 @@
   },
   {
    "css": "\\75rx(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    120,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "\\75rx(a b)",
    "kept_via_attribute": true,
@@ -137,6 +391,19 @@
   },
   {
    "css": "x\\75rl(a b)",
+   "css_units": [
+    120,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "x\\75rl(a b)",
    "kept_via_attribute": true,
@@ -144,6 +411,19 @@
   },
   {
    "css": "-\\75rl(a b)",
+   "css_units": [
+    45,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "-\\75rl(a b)",
    "kept_via_attribute": true,
@@ -151,6 +431,18 @@
   },
   {
    "css": "\\-url(a b)",
+   "css_units": [
+    92,
+    45,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "\\-url(a b)",
    "kept_via_attribute": true,
@@ -158,6 +450,21 @@
   },
   {
    "css": "f(\\75rl(a b))",
+   "css_units": [
+    102,
+    40,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -165,6 +472,20 @@
   },
   {
    "css": "\"\\75rl(a b)\"",
+   "css_units": [
+    34,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    34
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "\"\\75rl(a b)\"",
    "kept_via_attribute": true,
@@ -172,6 +493,17 @@
   },
   {
    "css": "url(a\\ b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    92,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url(a\\ b)",
    "kept_via_attribute": true,
@@ -179,6 +511,19 @@
   },
   {
    "css": "\\75rl(a\\ b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    92,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "\\75rl(a\\ b)",
    "kept_via_attribute": true,
@@ -186,6 +531,18 @@
   },
   {
    "css": "u\\\nrl(a b)",
+   "css_units": [
+    117,
+    92,
+    10,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "u\\\nrl(a b)",
    "kept_via_attribute": true,
@@ -193,6 +550,18 @@
   },
   {
    "css": "\\75rl(a\"b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    34,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -200,6 +569,22 @@
   },
   {
    "css": "/* url(a b) */",
+   "css_units": [
+    47,
+    42,
+    32,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    32,
+    42,
+    47
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "",
    "kept_via_attribute": true,
@@ -207,6 +592,16 @@
   },
   {
    "css": "url(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    160,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url(a b)",
    "kept_via_attribute": true,
@@ -214,6 +609,21 @@
   },
   {
    "css": "url( ok.png )",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    32,
+    111,
+    107,
+    46,
+    112,
+    110,
+    103,
+    32,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url( ok.png )",
    "kept_via_attribute": true,
@@ -221,6 +631,18 @@
   },
   {
    "css": "url(ok.png",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    111,
+    107,
+    46,
+    112,
+    110,
+    103
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url(ok.png",
    "kept_via_attribute": true,
@@ -228,6 +650,17 @@
   },
   {
    "css": "url(a\\\nb)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    92,
+    10,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -235,6 +668,16 @@
   },
   {
    "css": "url(a\u0001b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    1,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -242,6 +685,16 @@
   },
   {
    "css": "url(a\tb)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    9,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -249,6 +702,17 @@
   },
   {
    "css": "#url(a b)",
+   "css_units": [
+    35,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "#url(a b)",
    "kept_via_attribute": true,
@@ -256,6 +720,17 @@
   },
   {
    "css": "1url(a b)",
+   "css_units": [
+    49,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "1url(a b)",
    "kept_via_attribute": true,
@@ -263,6 +738,15 @@
   },
   {
    "css": "url(a b",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -270,6 +754,17 @@
   },
   {
    "css": "url(\ta b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    9,
+    97,
+    32,
+    98,
+    41
+   ],
    "kept_via_setProperty": false,
    "value_via_setProperty": "before",
    "kept_via_attribute": false,
@@ -277,6 +772,20 @@
   },
   {
    "css": "url( 'a b' )",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    32,
+    39,
+    97,
+    32,
+    98,
+    39,
+    32,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url( 'a b' )",
    "kept_via_attribute": true,
@@ -284,10 +793,941 @@
   },
   {
    "css": "url(a)b(c d)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    41,
+    98,
+    40,
+    99,
+    32,
+    100,
+    41
+   ],
    "kept_via_setProperty": true,
    "value_via_setProperty": "url(a)b(c d)",
    "kept_via_attribute": true,
    "value_via_attribute": "url(a)b(c d)"
+  },
+  {
+   "css": " url(a b)",
+   "css_units": [
+    160,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": " url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": " url(a b)"
+  },
+  {
+   "css": "·url(a b)",
+   "css_units": [
+    183,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "·url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "·url(a b)"
+  },
+  {
+   "css": " \\75rl(a b)",
+   "css_units": [
+    160,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": " \\75rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": " \\75rl(a b)"
+  },
+  {
+   "css": "\\75\r\nrl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    13,
+    10,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75\frl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    12,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\75\rrl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    13,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "\\d800rl(a b)",
+   "css_units": [
+    92,
+    100,
+    56,
+    48,
+    48,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\d800rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\d800rl(a b)"
+  },
+  {
+   "css": "\\0000075rl(a b)",
+   "css_units": [
+    92,
+    48,
+    48,
+    48,
+    48,
+    48,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\0000075rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\0000075rl(a b)"
+  },
+  {
+   "css": "\\110000rl(a b)",
+   "css_units": [
+    92,
+    49,
+    49,
+    48,
+    48,
+    48,
+    48,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\110000rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\110000rl(a b)"
+  },
+  {
+   "css": "url/**/(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    47,
+    42,
+    42,
+    47,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url/**/(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url/**/(a b)"
+  },
+  {
+   "css": "@\\75rl(a b)",
+   "css_units": [
+    64,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "@\\75rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "@\\75rl(a b)"
+  },
+  {
+   "css": "@url(a b)",
+   "css_units": [
+    64,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "@url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "@url(a b)"
+  },
+  {
+   "css": "+\\75rl(a b)",
+   "css_units": [
+    43,
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "+url(a b)",
+   "css_units": [
+    43,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url(a\\",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    92
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a�)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a�)"
+  },
+  {
+   "css": "url(a\\ ",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    92,
+    32
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a�)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a�)"
+  },
+  {
+   "css": "\\75rl(a\\",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    92
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75rl(a�)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75rl(a�)"
+  },
+  {
+   "css": "/* url(a b)",
+   "css_units": [
+    47,
+    42,
+    32,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "",
+   "kept_via_attribute": true,
+   "value_via_attribute": ""
+  },
+  {
+   "css": "\"url(a b)",
+   "css_units": [
+    34,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\"url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\"url(a b)"
+  },
+  {
+   "css": "a\\",
+   "css_units": [
+    97,
+    92
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "a�",
+   "kept_via_attribute": true,
+   "value_via_attribute": "a�"
+  },
+  {
+   "css": "url(a\u0000b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    0,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a\u0000b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a\u0000b)"
+  },
+  {
+   "css": "\\75\u0000rl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    0,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75\u0000rl(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75\u0000rl(a b)"
+  },
+  {
+   "css": "url(a�b)",
+   "css_lossy": true,
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    55296,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a�b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a�b)"
+  },
+  {
+   "css": "�url(a b)",
+   "css_lossy": true,
+   "css_units": [
+    55296,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "�url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "�url(a b)"
+  },
+  {
+   "css": "url(",
+   "css_units": [
+    117,
+    114,
+    108,
+    40
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url("
+  },
+  {
+   "css": "url( ",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    32
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url("
+  },
+  {
+   "css": "url(\"a b\")",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    34,
+    97,
+    32,
+    98,
+    34,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(\"a b\")",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(\"a b\")"
+  },
+  {
+   "css": "url(\"a b\" )",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    34,
+    97,
+    32,
+    98,
+    34,
+    32,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(\"a b\" )",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(\"a b\" )"
+  },
+  {
+   "css": "\\75rl(\"a b\")",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    34,
+    97,
+    32,
+    98,
+    34,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "\\75rl(\"a b\")",
+   "kept_via_attribute": true,
+   "value_via_attribute": "\\75rl(\"a b\")"
+  },
+  {
+   "css": "U\\52L(a b)",
+   "css_units": [
+    85,
+    92,
+    53,
+    50,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "ur\\l(a b)",
+   "css_units": [
+    117,
+    114,
+    92,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url\\(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    92,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "u\\72l(a.png)",
+   "css_units": [
+    117,
+    92,
+    55,
+    50,
+    108,
+    40,
+    97,
+    46,
+    112,
+    110,
+    103,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "u\\72l(a.png)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "u\\72l(a.png)"
+  },
+  {
+   "css": "image-set(url(a b) 1x)",
+   "css_units": [
+    105,
+    109,
+    97,
+    103,
+    101,
+    45,
+    115,
+    101,
+    116,
+    40,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    32,
+    49,
+    120,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "before",
+   "kept_via_attribute": false,
+   "value_via_attribute": null
+  },
+  {
+   "css": "url( a.png )",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    32,
+    97,
+    46,
+    112,
+    110,
+    103,
+    32,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url( a.png )",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url( a.png )"
+  }
+ ],
+ "by_property": [
+  {
+   "property": "background-image",
+   "css": "url(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "u\\72l(a b)",
+   "css_units": [
+    117,
+    92,
+    55,
+    50,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "\\75rl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "\\55 RL(a b)",
+   "css_units": [
+    92,
+    53,
+    53,
+    32,
+    82,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "\\75 rl(a b)",
+   "css_units": [
+    92,
+    55,
+    53,
+    32,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "U\\52L(a b)",
+   "css_units": [
+    85,
+    92,
+    53,
+    50,
+    76,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "ur\\l(a b)",
+   "css_units": [
+    117,
+    114,
+    92,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "url\\(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    92,
+    40,
+    97,
+    32,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "u\\72l(a.png)",
+   "css_units": [
+    117,
+    92,
+    55,
+    50,
+    108,
+    40,
+    97,
+    46,
+    112,
+    110,
+    103,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(\"a.png\")"
+  },
+  {
+   "property": "background-image",
+   "css": "url(a\\\nb)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    92,
+    10,
+    98,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "image-set(url(a b) 1x)",
+   "css_units": [
+    105,
+    109,
+    97,
+    103,
+    101,
+    45,
+    115,
+    101,
+    116,
+    40,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    32,
+    49,
+    120,
+    41
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
+  },
+  {
+   "property": "background-image",
+   "css": "url( a.png )",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    32,
+    97,
+    46,
+    112,
+    110,
+    103,
+    32,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(\"a.png\")"
+  },
+  {
+   "property": "background-image",
+   "css": "\"url(a b)\"",
+   "css_units": [
+    34,
+    117,
+    114,
+    108,
+    40,
+    97,
+    32,
+    98,
+    41,
+    34
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": ""
   }
  ],
  "replaced_builtins": "before"

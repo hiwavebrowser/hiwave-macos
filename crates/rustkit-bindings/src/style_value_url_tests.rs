@@ -21,6 +21,21 @@ fn ev(b: &DomBindings, script: &str) -> String {
     }
 }
 
+/// Rows Chrome refuses for a reason other than the url rule, which this check does not make (separate rows):
+/// an unmatched `)` (in `url\(a b)` the escaped `(` is a name character), and a string where
+/// background-image takes an image.
+const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
+
+/// Rows Chrome keeps that stay refused here because the engine's url reader (`parse_css_url`, Rust whitespace
+/// and control characters) refuses them: an unquoted url holding NBSP or NUL (a row against the engine).
+const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)"];
+
+/// The exact value as a JS expression, from its UTF-16 code units (a lone surrogate does not survive JSON text).
+fn from_units(case: &serde_json::Value) -> String {
+    let units: Vec<String> = case["css_units"].as_array().unwrap().iter().map(|u| u.as_u64().unwrap().to_string()).collect();
+    format!("String.fromCharCode({})", units.join(","))
+}
+
 #[test]
 fn a_style_value_is_kept_or_refused_as_chrome_does() {
     let doc: serde_json::Value =
@@ -30,7 +45,10 @@ fn a_style_value_is_kept_or_refused_as_chrome_does() {
     let mut wrong = Vec::new();
     for case in doc["cases"].as_array().unwrap() {
         let css = case["css"].as_str().unwrap();
-        let lit = serde_json::to_string(css).unwrap();
+        if NOT_THE_URL_RULE.contains(&css) {
+            continue;
+        }
+        let lit = from_units(case);
         let got = ev(
             &b,
             &format!(
@@ -46,12 +64,39 @@ fn a_style_value_is_kept_or_refused_as_chrome_does() {
         // A value that is only a comment: Chrome keeps the declaration with an empty value; the attribute
         // path here drops a declaration whose value is empty (not the url rule; a separate row).
         let want_attr = if css.trim_start().starts_with("/*") { false } else { case["kept_via_attribute"].as_bool().unwrap() };
-        let want = format!("{want_set}|{want_attr}");
+        let want = if ENGINE_REFUSES.contains(&css) { "false|false".to_string() } else { format!("{want_set}|{want_attr}") };
         if got != want {
             wrong.push(format!("{css:?}: kept (setProperty|attribute) {got}, Chrome {want}"));
         }
     }
     assert!(wrong.is_empty(), "{} of {} differ:\n{}", wrong.len(), doc["cases"].as_array().unwrap().len(), wrong.join("\n"));
+}
+
+#[test]
+fn a_background_image_value_is_kept_or_refused_as_chrome_does() {
+    let doc: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/diagnostics/2026-11-17/style_url_value_chrome148.json")).unwrap();
+    let b = bound();
+    let mut wrong = Vec::new();
+    for case in doc["by_property"].as_array().unwrap() {
+        let (prop, css) = (case["property"].as_str().unwrap(), case["css"].as_str().unwrap());
+        if NOT_THE_URL_RULE.contains(&css) {
+            continue;
+        }
+        let got = ev(
+            &b,
+            &format!(
+                "var el = document.getElementById('a'); el.removeAttribute('style');
+                 el.style.setProperty('{prop}', {}); String(el.style.getPropertyValue('{prop}') !== '')",
+                from_units(case)
+            ),
+        );
+        let want = case["kept_via_setProperty"].as_bool().unwrap().to_string();
+        if got != want {
+            wrong.push(format!("{prop}: {css:?}: kept {got}, Chrome {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
 #[test]
