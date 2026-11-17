@@ -351,10 +351,13 @@ stays until text is in the bitmap (A2, text row) and is then retired.
   source bitmap as it was at the call (the source is brought up to date first,
   so a canvas drawn onto itself copies what it showed at the call).
 - **Memory bound:** pending operations are counted in bytes (the operation, its
-  path, dash, gradient stops, image and put bytes); past
+  path, dash, gradient stops, image and put bytes), and so is everything they
+  share, once per distinct thing while a pending operation holds it: each
+  pattern bitmap (a `fillStyle = pattern` holds its own copy of the source's
+  pixels), each clip's path and the mask its replay builds. Past
   `PENDING_BYTE_BUDGET` the context replays them into the bitmap and drops
   them. A page that draws forever without reading or presenting holds at most
-  the budget plus one bitmap.
+  the budget plus one bitmap (plus the one operation that crossed it).
 - **What it changes:** nothing on screen or in reads. Where the raster time is
   spent moves from the draw call (script) to the first read after it: on a
   presented frame that is the display list build (`premultiplied_pixels`).
@@ -398,6 +401,22 @@ stays until text is in the bitmap (A2, text row) and is then retired.
   CPU picture for display (decided at A1 by measuring which is simpler and
   whether any page uses them; the bindings do not expose
   `globalCompositeOperation` yet). The clip: the clip paths into a stencil.
+- **Its own place in the recording.** At A0 the CPU replay drops what it
+  has drawn. At A1 the recording keeps two positions, the CPU's and the
+  GPU's, and drops an operation only when both have passed it (a full clear
+  or a resize lets both drop everything before it). A CPU replay forced by a
+  read no longer drops what the GPU has not drawn yet. When the GPU is behind
+  and the kept operations pass the cap (a canvas drawn without a frame being
+  presented, a hidden page), the CPU side replays and drops as at A0 and the
+  GPU side falls back for that canvas: the next frame uploads the CPU bitmap
+  into the texture (today's path) and the GPU position jumps to the CPU's.
+- **Texture limits.** A canvas wider or taller than the device's
+  `max_texture_dimension_2d` stays on today's path (CPU bitmap). Canvas
+  textures are counted per page against a budget; past it, the canvases
+  drawn longest ago give up their texture and show their CPU bitmap until
+  they draw again. On device loss every GPU canvas falls back the same way
+  (the CPU replay is the source of truth, so no content is lost) and gets a
+  new texture on its next frame once the device is back.
 - **Not on the GPU at A1:** text (still the overlay, as today), shadows and
   image smoothing settings (not implemented in either picture yet).
 - **Risks:** screen and `getImageData` differ at edges (expected, bounded by
@@ -478,6 +497,11 @@ picture is compared with Chrome for Testing 148 per pixel:
 - **Tests:** the 18 shapes of section 3 plus `canvas_raster_cases` drawn
   through the GPU replay; a self-test of the metric (an image one pixel
   shifted fails; Chrome's GPU image passes against Chrome's software one).
+- **Where they run:** they need a GPU adapter. The Mac batch gate has one
+  (the headless engine already renders offscreen on it) and is where they
+  gate. A run with no adapter (a CI runner without one) reports them as not
+  run, by name, never as passed; the metric's self-test and the CPU replay
+  tests need no adapter and run everywhere.
 - **On:** A3 is what lets A1's switch default on; it changes no behaviour.
 
 ### A4: the stage-tool receipt
