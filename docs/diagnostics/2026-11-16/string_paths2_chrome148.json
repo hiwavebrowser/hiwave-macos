@@ -1,0 +1,85 @@
+{
+ "chrome": "148.0.7778.216",
+ "cases": {
+  "json_strings": {
+   "value": "RangeError: Invalid string length",
+   "ms": 544
+  },
+  "json_tojson_calls": {
+   "value": "RangeError after 65536",
+   "ms": 778
+  },
+  "json_object_values": {
+   "value": "RangeError: Invalid string length",
+   "ms": 554
+  },
+  "json_gap": {
+   "value": "15429666",
+   "ms": 42
+  },
+  "json_under": {
+   "value": "1051649",
+   "ms": 2
+  },
+  "string_raw": {
+   "value": "RangeError: Invalid string length",
+   "ms": 17
+  },
+  "string_raw_subs": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "escape_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 128
+  },
+  "encodeuri_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1176
+  },
+  "encodeuricomp_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1148
+  },
+  "upper_sharp_s": {
+   "value": "RangeError: Invalid string length",
+   "ms": 277
+  },
+  "locale_upper_sharp_s": {
+   "value": "RangeError: Invalid string length",
+   "ms": 277
+  },
+  "normalize_nfkd": {
+   "tab": "still running after 60 s"
+  },
+  "anchor_quotes": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1836
+  },
+  "link_long": {
+   "value": "RangeError: Invalid string length",
+   "ms": 101
+  },
+  "fromcharcode_many": {
+   "error": "RangeError",
+   "message": "Maximum call stack size exceeded",
+   "ms": 2
+  },
+  "upper_under": {
+   "value": "STRASSE",
+   "ms": 0
+  },
+  "escape_under": {
+   "value": "a%20b%u0100",
+   "ms": 0
+  },
+  "encode_under": {
+   "value": "a%20b%E0%A0%80",
+   "ms": 0
+  },
+  "normalize_under": {
+   "value": "18",
+   "ms": 0
+  }
+ }
+}
