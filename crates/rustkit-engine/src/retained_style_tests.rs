@@ -23,7 +23,14 @@ fn rt() -> tokio::runtime::Runtime {
 
 fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
     let server = serve_routes(vec![("/", "text/html", page.to_string())]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    // Frame stamps on the frame grid, as parity-capture takes them: no real time reaches the
+    // document timeline, so two runs of a page sample a running animation at the same times and
+    // their display lists can be compared frame by frame (#1231).
+    let config = EngineConfig {
+        grid_frame_stamps: true,
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::new(config).expect("engine");
     let view = engine
         .create_headless_view(Bounds {
             x: 0,
@@ -261,15 +268,19 @@ fn tiles_shown_hidden_and_moved_keep_a_full_cascades_styles() {
     assert_same_as_a_full_cascade("tiles", &tiles(200, 10, TUNE));
 }
 
-/// For a page whose animations run while it is measured. Two runs of one page sample a running
-/// animation at different times (since #1231 the animation clock is the document timeline, whose
-/// origin is the load's real time: two plain full runs give colours one step apart), so their
-/// display lists are not compared frame by frame. The check is inside one run: `verify` cascades
-/// every element afresh beside its replay, and no replay that would have served may differ. The
-/// run must have animated: its frames' display lists differ from each other. The kept box tree is
+/// For a page whose animations run while it is measured. Since #1231 the animation clock is the
+/// document timeline; with real-time frame stamps two runs of one page sample a running animation
+/// at different times (two plain full runs gave colours one step apart). `load` puts the stamps on
+/// the frame grid, so the runs are compared frame by frame ([`assert_same_as_a_full_build`]), and
+/// the check is also made inside one run, which no clock can upset: `verify` cascades every element
+/// afresh beside its replay, and no replay that would have served may differ. The run must have
+/// animated: its frames' display lists differ from each other. The kept box tree is
 /// checked the same way: `boxes-verify` compares each splice with a full build beside it, and no
 /// splice may differ; `splices` is as in [`assert_same_as_a_full_build`].
 fn assert_replays_match_a_fresh_cascade(name: &str, page: &str, splices: Option<bool>) {
+    // On the frame grid (`load`) the runs are comparable too: every arm's display lists and styles
+    // match a full build's, frame by frame (#1246 delta R1 follow-up).
+    assert_same_as_a_full_build(name, page, splices);
     let before = retained_mismatches_for_test();
     let verified = run(page, 8, RetainedStyles::Verify);
     assert_eq!(
