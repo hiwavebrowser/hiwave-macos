@@ -698,6 +698,8 @@ mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat22_forced_read_build_tests;
 #[cfg(all(test, feature = "headless"))]
+mod hidden_tiles_build_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
