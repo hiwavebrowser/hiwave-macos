@@ -1,0 +1,279 @@
+{
+ "what": "image_data.html in our engine: develop a8292900 with #1205 merged (scratch build, release), 2026-11-16. Timings are measurements on a shared machine (1-minute load 2.3 to 3.9), not pass criteria.",
+ "headless": {
+  "frames": [
+   {
+    "canvases": 1,
+    "stepped": {
+     "mean_ms": 27,
+     "worst_ms": 27
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 17.1,
+     "worst_ms": 34
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 4,
+    "stepped": {
+     "mean_ms": 107.5,
+     "worst_ms": 118
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 17.5,
+     "worst_ms": 51
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 16,
+    "stepped": {
+     "mean_ms": 425,
+     "worst_ms": 483
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 64,
+    "stepped": {
+     "mean_ms": 1695.4,
+     "worst_ms": 1800
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   }
+  ],
+  "holds": {
+   "svg_natural": "100x100",
+   "png_natural": "100x100",
+   "fresh": {
+    "opaque": 0,
+    "centre": "0,0,0,0",
+    "corner": "0,0,0,0",
+    "inside": "0,0,0,0"
+   },
+   "after_fill": {
+    "opaque": 900,
+    "centre": "255,0,0,255",
+    "corner": "0,0,0,0",
+    "inside": "255,0,0,255"
+   },
+   "after_png": {
+    "opaque": 900,
+    "centre": "32,96,192,255",
+    "corner": "0,0,0,0",
+    "inside": "32,96,192,255"
+   },
+   "after_svg": {
+    "opaque": 900,
+    "centre": "240,192,32,255",
+    "corner": "0,0,0,0",
+    "inside": "32,96,192,255"
+   },
+   "after_put": {
+    "opaque": 910,
+    "centre": "240,192,32,255",
+    "corner": "1,2,3,255",
+    "inside": "32,96,192,255"
+   },
+   "steps_until_blank": 174
+  },
+  "cost_ms": {
+   "whole_step_first": 27.4,
+   "getImageData": 19.238,
+   "putImageData": 6.705,
+   "read_2500_alpha": 0.803,
+   "drawImage_png": 0.058,
+   "drawImage_svg": 0.047,
+   "whole_step": 27.24,
+   "getContext": 0.003
+  }
+ },
+ "real_window": {
+  "frames": [
+   {
+    "canvases": 1,
+    "stepped": {
+     "mean_ms": 31.3,
+     "worst_ms": 33
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 33.2,
+     "worst_ms": 678
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 4,
+    "stepped": {
+     "mean_ms": 107.5,
+     "worst_ms": 118
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 16,
+    "stepped": {
+     "mean_ms": 426.7,
+     "worst_ms": 484
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   },
+   {
+    "canvases": 64,
+    "stepped": {
+     "mean_ms": 1718.3,
+     "worst_ms": 1833
+    },
+    "moved_and_redrawn": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "moved_only": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    },
+    "idle": {
+     "mean_ms": 16.7,
+     "worst_ms": 17
+    }
+   }
+  ],
+  "holds": {
+   "svg_natural": "100x100",
+   "png_natural": "100x100",
+   "fresh": {
+    "opaque": 0,
+    "centre": "0,0,0,0",
+    "corner": "0,0,0,0",
+    "inside": "0,0,0,0"
+   },
+   "after_fill": {
+    "opaque": 900,
+    "centre": "255,0,0,255",
+    "corner": "0,0,0,0",
+    "inside": "255,0,0,255"
+   },
+   "after_png": {
+    "opaque": 900,
+    "centre": "32,96,192,255",
+    "corner": "0,0,0,0",
+    "inside": "32,96,192,255"
+   },
+   "after_svg": {
+    "opaque": 900,
+    "centre": "240,192,32,255",
+    "corner": "0,0,0,0",
+    "inside": "32,96,192,255"
+   },
+   "after_put": {
+    "opaque": 910,
+    "centre": "240,192,32,255",
+    "corner": "1,2,3,255",
+    "inside": "32,96,192,255"
+   },
+   "steps_until_blank": 174
+  },
+  "cost_ms": {
+   "whole_step_first": 27.3,
+   "getImageData": 19.238,
+   "putImageData": 6.792,
+   "read_2500_alpha": 0.808,
+   "drawImage_png": 0.061,
+   "drawImage_svg": 0.048,
+   "whole_step": 27.67,
+   "getContext": 0.003
+  }
+ },
+ "frame": {
+  "framed": {
+   "svg": {
+    "natural": "100x100",
+    "after_fill": 25,
+    "after_image": 0
+   },
+   "png": {
+    "natural": "100x100",
+    "after_fill": 25,
+    "after_image": 0
+   }
+  },
+  "top": {
+   "svg": {
+    "natural": "100x100",
+    "after_fill": 25,
+    "after_image": 900
+   },
+   "png": {
+    "natural": "100x100",
+    "after_fill": 25,
+    "after_image": 900
+   }
+  }
+ }
+}

@@ -1734,7 +1734,10 @@ impl RegExp {
         // 17. Return the string-concatenation of accumulatedResult and the substring of S from nextSourcePosition.
 
         // 13. Let accumulatedResult be the empty String.
-        let mut accumulated_result = vec![];
+        // HIWAVE PATCH (string-length): shared pieces; a result over the limit is refused after every
+        // match's steps have run (Chrome 148 calls every replacer first), and is never built.
+        let mut accumulated_result = string::Pieces::deferred();
+        let mut too_long = false;
 
         // 14. Let nextSourcePosition be 0.
         let mut next_source_position = 0;
@@ -1820,7 +1823,9 @@ impl RegExp {
                     }
 
                     // ii. Let replacement be ? GetSubstitution(matched, S, position, captures, namedCaptures, replaceValue).
-                    string::get_substitution(
+                    // HIWAVE PATCH (string-length): a substitution over the limit is refused after the
+                    // remaining matches' steps, as Chrome 148 does.
+                    match string::get_substitution(
                         &matched,
                         &s,
                         position,
@@ -1828,7 +1833,13 @@ impl RegExp {
                         &named_captures,
                         replace_value,
                         context,
-                    )?
+                    )? {
+                        Some(replacement) => replacement,
+                        None => {
+                            too_long = true;
+                            js_string!()
+                        }
+                    }
                 }
             };
 
@@ -1840,8 +1851,8 @@ impl RegExp {
                 //    In such cases, the corresponding substitution is ignored.
 
                 // ii. Set accumulatedResult to the string-concatenation of accumulatedResult, the substring of S from nextSourcePosition to position, and replacement.
-                accumulated_result.extend(s.get_expect(next_source_position..position).iter());
-                accumulated_result.extend(replacement.iter());
+                accumulated_result.string(s.get_expect(next_source_position..position))?;
+                accumulated_result.string(replacement)?;
 
                 // iii. Set nextSourcePosition to position + matchLength.
                 next_source_position = position + match_length;
@@ -1849,16 +1860,14 @@ impl RegExp {
         }
 
         // 16. If nextSourcePosition ≥ lengthS, return accumulatedResult.
-        if next_source_position >= length_s {
-            return Ok(js_string!(&accumulated_result[..]).into());
-        }
-
         // 17. Return the string-concatenation of accumulatedResult and the substring of S from nextSourcePosition.
-        Ok(js_string!(
-            &JsString::from(&accumulated_result[..]),
-            &s.get_expect(next_source_position..)
-        )
-        .into())
+        if next_source_position < length_s {
+            accumulated_result.string(s.get_expect(next_source_position..))?;
+        }
+        match accumulated_result.finish() {
+            Some(result) if !too_long => Ok(result.into()),
+            _ => Err(string::String::invalid_length()),
+        }
     }
 
     /// `RegExp.prototype[ @@search ]( string )`
