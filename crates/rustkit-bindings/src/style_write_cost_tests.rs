@@ -77,3 +77,31 @@ fn inline_style_writes_stay_cheap() {
     assert_eq!(seen, OPS.len(), "child output: {text}{}", String::from_utf8_lossy(&out.stderr));
     assert!(over.is_empty(), "{over:?}");
 }
+
+/// The quick answer for a value with no `url(` changes no result: a bad url in any letter case is still
+/// refused (the earlier value stands, CH2.E29), a good one is kept, and a value with none is written
+/// without the per-character walk (counted as calls to the page's `substr`, which the walk made once per
+/// character).
+#[test]
+fn a_bad_url_is_still_refused_in_any_case() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html("<html><body><div id=a></div></body></html>").unwrap()))
+        .unwrap();
+    let got = b
+        .evaluate(
+            "var st = document.getElementById('a').style, out = [];
+             st.backgroundImage = 'url(ok.png)'; out.push(st.backgroundImage);
+             ['url(a b)', 'URL(a b)', 'uRl(a\"b)', 'none, url(a(b)'].forEach(function (v) { st.backgroundImage = v; out.push(st.backgroundImage); });
+             var calls = 0, sub = String.prototype.substr;
+             String.prototype.substr = function () { calls++; return sub.apply(this, arguments); };
+             st.transform = 'rotate(3deg)'; out.push(st.transform);
+             String.prototype.substr = sub;
+             out.push(calls); out.join('|')",
+        )
+        .unwrap();
+    let got = match got {
+        JsValue::String(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(got, "url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|rotate(3deg)|0");
+}
