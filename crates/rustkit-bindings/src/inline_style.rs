@@ -193,10 +193,20 @@ pub(crate) fn parse_decls(text: &str) -> Vec<Decl> {
         if name.is_empty() || value.is_empty() || has_bad_url(&value) {
             continue;
         }
-        out.retain(|d| d.name != name);
+        out.retain(|d| {
+            #[cfg(test)]
+            DEDUP_COMPARISONS.with(|c| c.set(c.get() + 1));
+            d.name != name
+        });
         out.push(Decl { name, value, important });
     }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test probe: name comparisons `parse_decls` made to keep the last declaration of each name.
+    pub(crate) static DEDUP_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// `serializeDecls`.
@@ -598,6 +608,35 @@ mod tests {
         ] {
             assert!(!has_bad_url(fine), "{fine:?} holds no bad url");
         }
+    }
+
+    /// #1264 R1 blocker: a host call cannot be stopped by the script budget, so reading a style attribute
+    /// must cost time linear in its text. 4,000 distinct names, each then repeated: keeping the last of
+    /// each name may compare a few times per declaration, not once per pair.
+    #[test]
+    fn keeping_the_last_of_each_name_is_linear() {
+        let n = 4_000u64;
+        let mut text = String::new();
+        for round in 0..2 {
+            for i in 0..n {
+                text.push_str(&format!("p{i}: {round}px;"));
+            }
+        }
+        DEDUP_COMPARISONS.with(|c| c.set(0));
+        let decls = parse_decls(&text);
+        let comparisons = DEDUP_COMPARISONS.with(|c| c.get());
+        assert_eq!(decls.len() as u64, n);
+        assert_eq!(decls[0], Decl { name: "p0".into(), value: "1px".into(), important: false });
+        assert!(comparisons <= 4 * 2 * n, "{comparisons} name comparisons for {} declarations", 2 * n);
+    }
+
+    /// CSS Syntax 3 §4.3.8: a backslash at the end of the value is an escape (of U+FFFD), so a url body
+    /// that ends with one is a url, not a bad url (#1266 and Chrome keep it).
+    #[test]
+    fn a_backslash_at_the_end_is_an_escape() {
+        assert!(!has_bad_url("url(a\\"), "url(a then a backslash at the end");
+        assert!(!has_bad_url("u\\72l(a\\"), "the same with an escaped name");
+        assert!(has_bad_url("url(a\\\nb)"), "a backslash before a newline is still no escape");
     }
 
     #[test]
