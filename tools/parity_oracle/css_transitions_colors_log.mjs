@@ -43,9 +43,9 @@ await probe('outline-color red->currentcolor', `#h{color:rgb(0,0,255);outline:2p
 await probe('outline-color currentcolor, color jumps', `#h{color:rgb(0,0,255);outline:2px solid;transition:outline-color 100ms linear}#h.on{color:rgb(255,0,0)}`, 'outline-color');
 await probe('outline-color transparent->red', `#h{outline:2px solid transparent;${T}}#h.on{outline-color:rgb(255,0,0)}`, 'outline-color');
 await probe('outline shorthand named', `#h{outline:2px solid rgb(0,0,255);transition:outline 100ms linear}#h.on{outline-color:rgb(255,0,0)}`, 'outline-color');
-await probe('text-decoration-color rgb', `#h{text-decoration:underline rgb(0,0,255);${T}}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
-await probe('text-decoration-color transparent->red', `#h{text-decoration:underline transparent;${T}}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
-await probe('text-decoration shorthand named', `#h{text-decoration:underline rgb(0,0,255);transition:text-decoration 100ms linear}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
+await probe('text-decoration-color rgb', `#h{text-decoration:underline;text-decoration-color:rgb(0,0,255);${T}}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
+await probe('text-decoration-color transparent->red', `#h{text-decoration:underline;text-decoration-color:transparent;${T}}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
+await probe('text-decoration shorthand named', `#h{text-decoration:underline;text-decoration-color:rgb(0,0,255);transition:text-decoration 100ms linear}#h.on{text-decoration-color:rgb(255,0,0)}`, 'text-decoration-color');
 await probe('fill rgb', `.r{fill:rgb(0,0,255);${T}}.r.on{fill:rgb(255,0,0)}`, 'fill', 's');
 await probe('fill none->red', `.r{fill:none;${T}}.r.on{fill:rgb(255,0,0)}`, 'fill', 's');
 await probe('stroke rgb', `.r{stroke:rgb(0,0,255);${T}}.r.on{stroke:rgb(255,0,0)}`, 'stroke', 's');

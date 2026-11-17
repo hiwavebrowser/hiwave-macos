@@ -7,7 +7,10 @@
 //!
 //! Oracle: Chrome for Testing 148.0.7778.216 through
 //! `tools/parity_oracle/css_transitions_colors_log.mjs`, read at
-//! currentTime 50 of a 100 ms linear transition:
+//! currentTime 50 of a 100 ms linear transition. The decoration colour
+//! is set by its longhand here: the `text-decoration` shorthand's colour
+//! is not read by the cascade yet (a separate gap, not an interpolation
+//! one):
 //!
 //! ```text
 //! outline-color rgb: rgb(128, 0, 128) | anims [outline-color]
@@ -203,7 +206,7 @@ fn the_outline_shorthand_covers_outline_color() {
 #[test]
 fn text_decoration_color_interpolates() {
     let (value, names, mut engine, view) = midway(
-        "#h{text-decoration:underline rgb(0,0,255)}#h.on{text-decoration-color:rgb(255,0,0)}",
+        "#h{text-decoration:underline;text-decoration-color:rgb(0,0,255)}#h.on{text-decoration-color:rgb(255,0,0)}",
         LINEAR,
         "text-decoration-color",
     );
@@ -224,7 +227,7 @@ fn text_decoration_color_interpolates() {
 #[test]
 fn text_decoration_color_from_transparent_interpolates_premultiplied() {
     let (value, _, ..) = midway(
-        "#h{text-decoration:underline transparent}#h.on{text-decoration-color:rgb(255,0,0)}",
+        "#h{text-decoration:underline;text-decoration-color:transparent}#h.on{text-decoration-color:rgb(255,0,0)}",
         LINEAR,
         "text-decoration-color",
     );
@@ -238,7 +241,7 @@ fn text_decoration_color_from_transparent_interpolates_premultiplied() {
 #[test]
 fn the_text_decoration_shorthand_covers_its_colour() {
     let (value, names, ..) = midway(
-        "#h{text-decoration:underline rgb(0,0,255)}#h.on{text-decoration-color:rgb(255,0,0)}",
+        "#h{text-decoration:underline;text-decoration-color:rgb(0,0,255)}#h.on{text-decoration-color:rgb(255,0,0)}",
         "text-decoration 100ms linear",
         "text-decoration-color",
     );
