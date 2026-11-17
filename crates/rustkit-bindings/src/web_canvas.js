@@ -67,10 +67,11 @@
         return typeof g.DOMException === 'function' ? new g.DOMException(message, name) : new Error(message);
     }
     function need(n, args, iface, member) {
-        if (args.length < n) {
-            throw new TypeError("Failed to execute '" + member + "' on '" + iface + "': " + n +
-                ' argument' + (n === 1 ? '' : 's') + ' required, but only ' + args.length + ' present.');
-        }
+        if (args.length < n) tooFew(n, args.length, iface, member);
+    }
+    function tooFew(n, got, iface, member) {
+        throw new TypeError("Failed to execute '" + member + "' on '" + iface + "': " + n +
+            ' argument' + (n === 1 ? '' : 's') + ' required, but only ' + got + ' present.');
     }
 
     // ---- HTMLCanvasElement: width/height reflect the attributes (default
@@ -143,6 +144,16 @@
         if (!d) throw new TypeError('Illegal invocation');
         return d;
     }
+    function illegalCall() { throw new TypeError('Illegal invocation'); }
+    // CANVAS-SHIM: the members MotionMark's canvas tests and charting
+    // libraries call thousands of times a frame look their record up
+    // inline (`DATA.get(this)`; a WeakMap answers undefined for a
+    // non-object), call the host directly with the arguments the operation
+    // reads, and count their arguments in strict mode: a sloppy function
+    // that reads `arguments` makes a mapped arguments object on every call,
+    // the dearest part of a call in Boa. Same checks, same order (arity,
+    // then the receiver, then each argument's conversion, left to right),
+    // same host operations.
     function call(d, op, a, b, c, e, f, h, i, j) {
         return C(d.gen, d.id, op, a, b, c, e, f, h, i, j);
     }
@@ -164,12 +175,33 @@
     });
 
     // ---- Transforms (non-finite arguments are ignored, in Rust)
-    [['scale', 2], ['rotate', 1], ['translate', 2], ['transform', 6]].forEach(function (m) {
-        method(P, m[0], function () {
-            need(m[1], arguments, 'CanvasRenderingContext2D', m[0]);
-            var d = data(this), a = arguments;
-            call(d, m[0], +a[0], +a[1], +a[2], +a[3], +a[4], +a[5]);
-        });
+    method(P, 'scale', function (x, y) {
+        'use strict';
+        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'scale');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'scale', +x, +y);
+    });
+    method(P, 'rotate', function (a) {
+        'use strict';
+        if (arguments.length < 1) tooFew(1, arguments.length, 'CanvasRenderingContext2D', 'rotate');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'rotate', +a);
+    });
+    method(P, 'translate', function (x, y) {
+        'use strict';
+        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'translate');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'translate', +x, +y);
+    });
+    method(P, 'transform', function (a, b, c, e, f, h) {
+        'use strict';
+        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'transform');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'transform', +a, +b, +c, +e, +f, +h);
     });
     method(P, 'setTransform', function setTransform(a, b, c, e, f, h) {
         var d = data(this);
@@ -189,7 +221,13 @@
     // ---- Fill and stroke styles: a colour string or a CanvasGradient
     function style(name, colorOp, gradientOp) {
         accessor(P, name, function () { return data(this).st[name]; }, function (v) {
-            var d = data(this);
+            var d = DATA.get(this), out;
+            if (d === undefined) illegalCall();
+            if (typeof v === 'string') {
+                out = C(d.gen, d.id, colorOp, v);
+                if (typeof out === 'string') d.st[name] = out;
+                return;
+            }
             var gi = v !== null && typeof v === 'object' ? GRAD.get(v) : undefined;
             if (gi !== undefined) {
                 if (gi.radial) call(d, gradientOp.replace('Gradient', 'Radial'), gi.x0, gi.y0, gi.r0, gi.x1, gi.y1, gi.r1, gi.stops.join('|'));
@@ -248,10 +286,12 @@
     // ---- Line styles
     function numeric(name, valid) {
         accessor(P, name, function () { return data(this).st[name]; }, function (v) {
-            var d = data(this), n = +v;
+            var d = DATA.get(this);
+            if (d === undefined) illegalCall();
+            var n = +v;
             if (!valid(n)) return;
             d.st[name] = n;
-            call(d, name, n);
+            C(d.gen, d.id, name, n);
         });
     }
     numeric('lineWidth', function (n) { return isFinite(n) && n > 0; });
@@ -260,11 +300,12 @@
     numeric('globalAlpha', function (n) { return isFinite(n) && n >= 0 && n <= 1; });
     function keyword(name, values) {
         accessor(P, name, function () { return data(this).st[name]; }, function (v) {
-            var d = data(this);
+            var d = DATA.get(this);
+            if (d === undefined) illegalCall();
             v = String(v);
             if (values.indexOf(v) < 0) return;
             d.st[name] = v;
-            call(d, name, v);
+            C(d.gen, d.id, name, v);
         });
     }
     keyword('lineCap', ['butt', 'round', 'square']);
@@ -325,19 +366,51 @@
     // ---- Rects
     ['fillRect', 'strokeRect', 'clearRect'].forEach(function (name) {
         method(P, name, function (x, y, w, h) {
-            need(4, arguments, 'CanvasRenderingContext2D', name);
-            call(data(this), name, +x, +y, +w, +h);
+            'use strict';
+            if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', name);
+            var d = DATA.get(this);
+            if (d === undefined) illegalCall();
+            C(d.gen, d.id, name, +x, +y, +w, +h);
         });
     });
 
     // ---- Paths
-    [['beginPath', 0], ['closePath', 0], ['moveTo', 2], ['lineTo', 2], ['quadraticCurveTo', 4],
-     ['bezierCurveTo', 6], ['rect', 4]].forEach(function (m) {
-        method(P, m[0], function () {
-            need(m[1], arguments, 'CanvasRenderingContext2D', m[0]);
-            var a = arguments;
-            call(data(this), m[0], +a[0], +a[1], +a[2], +a[3], +a[4], +a[5]);
+    ['beginPath', 'closePath'].forEach(function (name) {
+        method(P, name, function () {
+            var d = DATA.get(this);
+            if (d === undefined) illegalCall();
+            C(d.gen, d.id, name);
         });
+    });
+    ['moveTo', 'lineTo'].forEach(function (name) {
+        method(P, name, function (x, y) {
+            'use strict';
+            if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', name);
+            var d = DATA.get(this);
+            if (d === undefined) illegalCall();
+            C(d.gen, d.id, name, +x, +y);
+        });
+    });
+    method(P, 'quadraticCurveTo', function (a, b, c, e) {
+        'use strict';
+        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'quadraticCurveTo');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'quadraticCurveTo', +a, +b, +c, +e);
+    });
+    method(P, 'bezierCurveTo', function (a, b, c, e, f, h) {
+        'use strict';
+        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'bezierCurveTo');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'bezierCurveTo', +a, +b, +c, +e, +f, +h);
+    });
+    method(P, 'rect', function (x, y, w, h) {
+        'use strict';
+        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'rect');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'rect', +x, +y, +w, +h);
     });
     function indexSize(out, name) {
         if (out === 'IndexSizeError') {
@@ -345,8 +418,11 @@
         }
     }
     method(P, 'arc', function arc(x, y, r, a0, a1, ccw) {
-        need(5, arguments, 'CanvasRenderingContext2D', 'arc');
-        indexSize(call(data(this), 'arc', +x, +y, +r, +a0, +a1, !!ccw), 'arc');
+        'use strict';
+        if (arguments.length < 5) tooFew(5, arguments.length, 'CanvasRenderingContext2D', 'arc');
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        if (C(d.gen, d.id, 'arc', +x, +y, +r, +a0, +a1, !!ccw) === 'IndexSizeError') indexSize('IndexSizeError', 'arc');
     });
     method(P, 'arcTo', function arcTo(x1, y1, x2, y2, r) {
         need(5, arguments, 'CanvasRenderingContext2D', 'arcTo');
@@ -364,8 +440,16 @@
         }
         return v;
     }
-    method(P, 'fill', function fill(r) { var d = data(this); call(d, 'fill', rule(r)); });
-    method(P, 'stroke', function stroke() { call(data(this), 'stroke'); });
+    method(P, 'fill', function fill(r) {
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'fill', r === undefined ? 'nonzero' : rule(r));
+    });
+    method(P, 'stroke', function stroke() {
+        var d = DATA.get(this);
+        if (d === undefined) illegalCall();
+        C(d.gen, d.id, 'stroke');
+    });
     method(P, 'clip', function clip(r) { var d = data(this); call(d, 'clip', rule(r)); });
 
     // ---- Pixels: the bitmap rasterized behind the recording (STR-7).
