@@ -444,21 +444,36 @@ fn an_insert_and_a_removal_among_block_siblings_splice() {
     );
 }
 
-/// #1247 R1 item 1: inserting or removing a list item renumbers the items after it, and the dirty
+/// #1247 R1 item 1: a list item that is shown or hidden renumbers the items after it, and the dirty
 /// set never marks them (a counter is not a selector). A box that comes or goes among list items is
 /// not spliced. (RustKit draws no list markers and no `counter()` yet, so the display lists agree
 /// either way; the refusal is what keeps them agreeing once it does.)
 #[test]
-fn an_insert_among_list_items_builds_in_full() {
+fn a_list_item_shown_and_hidden_builds_in_full() {
     assert_same_as_a_full_build(
-        "list items",
+        "list item shown and hidden",
+        &page(
+            "li{height:10px}",
+            "<ol id=o><li id=a>a</li><li id=b>b</li><li id=c>c</li></ol><p id=after>p</p>",
+            "document.getElementById('a').style.display = n % 2 ? 'none' : '';",
+        ),
+        Some(false),
+    );
+}
+
+/// An item inserted into or removed from a list: the write marks the list, so the splice builds the
+/// whole list afresh (its root is the `<ol>`) and every item is numbered as a full build numbers it.
+#[test]
+fn an_insert_among_list_items_rebuilds_the_list() {
+    assert_same_as_a_full_build(
+        "list insert",
         &page(
             "li{height:10px}",
             "<ol id=o><li id=a>a</li><li id=b>b</li><li id=c>c</li></ol><p id=after>p</p>",
             "var o = document.getElementById('o'); if (n % 2) { var li = document.createElement('li'); \
              li.textContent = 'new'; o.insertBefore(li, o.firstChild); } else { o.removeChild(o.firstChild); }",
         ),
-        Some(false),
+        None,
     );
 }
 

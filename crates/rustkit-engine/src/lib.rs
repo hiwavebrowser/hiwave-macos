@@ -13090,6 +13090,12 @@ impl layout_ctx::LayoutCtx {
         if lay.animations.borrow().running() {
             return miss("animations running");
         }
+        // One that moved while the kept tree was built may have moved on or ended since, in frames
+        // no build saw (a paint-only animation frame patches the laid-out tree, not the kept one):
+        // the boxes no write reaches would keep its value (#1247 R1 item 2).
+        if lay.script_unlaid_animated.get() {
+            return miss("the kept tree was built while animations ran");
+        }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
             Err(why) => return miss(why),
@@ -13120,11 +13126,20 @@ impl layout_ctx::LayoutCtx {
         let block_level = |b: &LayoutBox| {
             !b.style.display.is_inline_level() && b.style.display != rustkit_css::Display::Contents
         };
-        // A parent whose boxes are its element children at block level, in a block box.
+        let list_item = |b: &LayoutBox| b.style.display_modifier == rustkit_css::DisplayModifier::ListItem;
+        // A parent whose boxes are its element children at block level, in a block box, none of
+        // them a list item: a list item that comes or goes renumbers the ones after it, which no
+        // write reached (#1247 R1 item 1).
+        //
+        // CSS counters (`counter-reset`/`-increment`/`-set`, `counter()` in `content`) number
+        // later boxes the same way, and anywhere in the document. RustKit computes and draws none
+        // of them yet (`rustkit_css::content::content_string`); when it does, a box that comes or
+        // goes, or a written box whose counter properties changed, must refuse the splice the same
+        // way when the kept tree uses counters.
         let plain_parent = |b: &LayoutBox| {
             matches!(b.box_type, BoxType::Block)
                 && block_level(b)
-                && b.children.iter().all(|c| c.node_id.is_some() && block_level(c))
+                && b.children.iter().all(|c| c.node_id.is_some() && block_level(c) && !list_item(c))
         };
         for root in &plan.roots {
             let fresh = found.remove(root).filter(|f| f.node_id.is_some());
@@ -13142,6 +13157,9 @@ impl layout_ctx::LayoutCtx {
                         || kept.style.display == rustkit_css::Display::Contents
                     {
                         return miss("a box changed level");
+                    }
+                    if list_item(kept) != list_item(&fresh) {
+                        return miss("a box became or stopped being a list item");
                     }
                     number_spliced_boxes(&mut fresh, Some(kept), &mut next_id);
                     *kept = fresh;
@@ -13171,6 +13189,9 @@ impl layout_ctx::LayoutCtx {
                     if !block_level(&fresh) {
                         return miss("an inline box came");
                     }
+                    if list_item(&fresh) {
+                        return miss("a list item came");
+                    }
                     // After the box of the nearest earlier sibling that has one.
                     let siblings = parent.children();
                     let before: Vec<usize> = siblings
@@ -13194,6 +13215,7 @@ impl layout_ctx::LayoutCtx {
                 }
             }
         }
+        number_in_document_order(&mut tree);
         #[cfg(test)]
         SPLICES.with(|c| c.set(c.get() + 1));
         Some(tree)
@@ -13231,7 +13253,8 @@ impl layout_ctx::LayoutCtx {
                     Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
                         let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
                         if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
-                            tracing::error!(%difference, "Kept box tree: the splice differs from a full build");
+                            let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
                             #[cfg(test)]
                             SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
                         }
@@ -13247,6 +13270,7 @@ impl layout_ctx::LayoutCtx {
         if let Some(lay) = lay.as_ref() {
             let keep = lay.want_script_unlaid.get() && lay.retain_script_unlaid_now.get();
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+            lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
         }
 
         // Layout computation
@@ -48191,6 +48215,16 @@ thread_local! {
     static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
 }
 
+/// Splices `boxes-verify` builds in this process found different from the full build beside them.
+static SPLICE_DIFFERENCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many splices `RUSTKIT_RETAINED_STYLES=boxes-verify` has found different from a full build in
+/// this process: the number the batch gate reads (0 to turn `boxes` on). Each one is also logged
+/// as an error, `Kept box tree: the splice differs from a full build`, with the running `total`.
+pub fn splice_differences() -> usize {
+    SPLICE_DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Splices `boxes-verify` builds on this thread found different from a full build so far (tests).
 #[cfg(test)]
 pub(crate) fn splice_mismatches_for_test() -> usize {
@@ -48624,6 +48658,28 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
         path.pop();
     }
     None
+}
+
+/// A spliced tree's element numbers, as a full build gives them (#1247 R1 item 3). A full build
+/// numbers each element's box as it builds it, before its children (`attach_identity`), so in the
+/// order of the tree; a box split in two (an inline around a block) shares its element's number.
+/// Each number met is given the next one in that order, and a number met again its first one. The
+/// numbers on entry must tell elements apart (`number_spliced_boxes`). The layout memo, the
+/// intrinsic-size cache, the incremental layout's comparison and the grid read these numbers:
+/// renumbered, they read what a full build would give them. boxes-verify compares them.
+fn number_in_document_order(tree: &mut LayoutBox) {
+    fn walk(b: &mut LayoutBox, seen: &mut HashMap<usize, usize>) {
+        if let Some(identity) = b.identity.as_mut() {
+            let next = seen.len() + 1;
+            let number = *seen.entry(identity.element_id).or_insert(next);
+            identity.element_id = number;
+            b.element_id = Some(number);
+        }
+        for c in b.children.iter_mut() {
+            walk(c, seen);
+        }
+    }
+    walk(tree, &mut HashMap::new());
 }
 
 /// The largest element number in `tree`.
