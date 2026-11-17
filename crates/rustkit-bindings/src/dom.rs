@@ -4945,6 +4945,15 @@ const WRAPPERS_JS: &str = r#"
     function propertyName(name) { return urlLower(cssTrim(toDOMString(name))); }
     function cssNewline(c) { return c === 10 || c === 13 || c === 12; }
     function cssSpace(c) { return c === 32 || c === 9 || cssNewline(c); }
+    // A value without its leading and trailing CSS whitespace (space, tab, newlines; not NBSP or the other
+    // characters JavaScript's trim takes, which CSS reads as name characters).
+    var cssSlice = uncurry(String.prototype.slice);
+    function cssTrimValue(v) {
+        var a = 0, b = v.length;
+        while (a < b && cssSpace(urlCode(v, a))) a++;
+        while (b > a && cssSpace(urlCode(v, b - 1))) b--;
+        return a === 0 && b === v.length ? v : cssSlice(v, a, b);
+    }
     function hexValue(c) {
         if (c >= 48 && c <= 57) return c - 48;
         if (c >= 65 && c <= 70) return c - 55;
@@ -4968,6 +4977,13 @@ const WRAPPERS_JS: &str = r#"
         if (j + 1 < n && urlCode(value, j) === 13 && urlCode(value, j + 1) === 10) return j + 2;
         if (j < n && cssSpace(urlCode(value, j))) return j + 1;
         return j;
+    }
+    // Characters the engine's url reader (`rustkit_css::mask::parse_css_url`: Rust's `char::is_whitespace` and
+    // `is_control`) refuses in an unquoted url although CSS does not (NUL reads as U+FFFD, NBSP is a url
+    // character): refused here too while the engine does, so a value kept here is one the engine reads alike.
+    function engineRefusesInUrl(c) {
+        return c === 0 || (c >= 0x7f && c <= 0x9f) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+            c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
     }
     function hasBadUrl(value) {
         if (urlIndexOf(urlLower(value), 'url(') < 0 && urlIndexOf(value, '\\') < 0) return false;
@@ -5031,6 +5047,7 @@ const WRAPPERS_JS: &str = r#"
                     continue;
                 }
                 if (c === 34 || c === 39 || c === 40 || c <= 8 || c === 11 || (c >= 14 && c <= 31) || c === 127) return true;
+                if (engineRefusesInUrl(c)) return true;
                 if (c === 92) {
                     if (!validEscape(value, i)) return true;
                     i = escapeEnd(value, i) - 1;
@@ -5157,7 +5174,7 @@ const WRAPPERS_JS: &str = r#"
         splitDecls(text).forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
-            var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
+            var name = d.slice(0, i).trim().toLowerCase(), value = cssTrimValue(d.slice(i + 1));
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
@@ -5264,7 +5281,7 @@ const WRAPPERS_JS: &str = r#"
         },
         setProperty: function (name, value, priority) {
             name = propertyName(name);
-            value = value == null ? '' : cssTrim(toDOMString(value));
+            value = value == null ? '' : cssTrimValue(toDOMString(value));
             // Plain strings from here on: what is serialised is what is kept and checked.
             if (typeof name !== 'string') name = '' + name;
             if (typeof value !== 'string') value = '' + value;
