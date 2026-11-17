@@ -1087,15 +1087,26 @@ with `RangeError: Invalid string length` (`tools/parity_oracle/string_paths2_log
 **What.** `JSON.stringify` counts the text as it serializes it (each value as it is produced, and each
 object's and array's punctuation, keys and indentation at its join). Past the limit it stops keeping
 what it builds but goes on serializing, so every `toJSON`, getter and replacer still runs as in Chrome,
-and refuses at the end. `String.raw` collects shared pieces with their length counted (`Pieces`). The URI
+and refuses at the end. A string value or key is counted at its quoted length (`quoted_len`: six
+units for a control character, two for a quote or backslash) before it is quoted. An array whose
+shortest text (one character per element, the commas and the brackets) already passes the limit is
+refused before any element is read, as Chrome does (a Proxy can report a length of 2^53 - 1); the
+element list is not reserved from that length, and the element loop reads the interrupt word, so the
+turn budget can stop a long array. `String.raw` collects shared pieces with their length counted (`Pieces`). The URI
 encoders and case mapping count the result's exact length before building it. The locale case forms
-also check the result, since a locale's tailoring can change the length by a few units.
+also check the result, since a locale's tailoring can change the length by a few units; a string under
+a third of the limit skips the count (a code point maps to at most three units). `normalize` counts
+its result first when it could pass the limit (input length x 18, U+FDFA's decomposition), streaming
+it without building it, and refuses past the limit. Chrome had not finished that case after 120 s, so
+the refusal is this engine's choice, the same as on every other path.
 
 **Not here.** `escape` and the HTML methods (`anchor`, `link`, ...) are Annex B, which this build does
-not enable. `normalize` builds its result in one ICU call; NFKD can expand a code unit up to 18 times,
-and Chrome did not finish the probe's case within 60 s, so it has no pin yet.
+not enable.
 
 **Pin.** `crates/rustkit-js/tests/string_length_limit_more.rs`: each path past the limit, the moment
 `JSON.stringify` refuses (after all 65,536 `toJSON` calls, as Chrome), and results under the limit
-unchanged (Chrome's lengths for two JSON texts). Red without the patch: `JSON.stringify` asked for 2 GiB
-in one allocation and the process aborted; `String.raw` and `encodeURI` built strings Chrome refuses.
+unchanged (Chrome's lengths for two JSON texts and for 2^24 U+FDFA normalized), a huge array length
+and quoted strings refused before they are built; `crates/rustkit-js/tests/json_array_stop.rs`: the
+interrupt word stops a long array's serialization. Red without the patch: `JSON.stringify` asked for
+2 GiB, 4 GiB and 96 GiB in one allocation and the process aborted; `String.raw`, `encodeURI` and
+`normalize` built strings Chrome refuses; the serialization ran past the interrupt.

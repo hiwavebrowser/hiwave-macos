@@ -1792,6 +1792,11 @@ impl String {
     /// HIWAVE PATCH (string-length): the length of `string` after the Unicode Default Case
     /// Conversion, in code units, counted without building it. Unpaired surrogates stay as they are.
     fn case_mapped_length<const UPPER: bool>(string: &JsString) -> u64 {
+        // A code point maps to at most three code units: a string under a third of the limit needs no
+        // count.
+        if string.len() as u64 * 3 <= Self::MAX_STRING_LENGTH as u64 {
+            return string.len() as u64;
+        }
         string
             .code_points()
             .map(|cp| match cp {
@@ -2250,6 +2255,32 @@ impl String {
         };
 
         let s = s.iter().collect::<Vec<_>>();
+
+        // HIWAVE PATCH (string-length): a decomposition can be up to 18 times its input (U+FDFA).
+        // When that could pass the limit, the result's length is counted first, without building it,
+        // stopping as soon as it passes.
+        if s.len() as u64 * 18 > Self::MAX_STRING_LENGTH as u64 {
+            fn passes(output: impl Iterator<Item = char>) -> bool {
+                let mut len = 0u64;
+                for c in output {
+                    len += c.len_utf16() as u64;
+                    if len > String::MAX_STRING_LENGTH as u64 {
+                        return true;
+                    }
+                }
+                false
+            }
+            let chars = || char::decode_utf16(s.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}'));
+            let too_long = match normalization {
+                Normalization::Nfc => passes(normalizers.nfc.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfd => passes(normalizers.nfd.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfkc => passes(normalizers.nfkc.as_borrowed().normalize_iter(chars())),
+                Normalization::Nfkd => passes(normalizers.nfkd.as_borrowed().normalize_iter(chars())),
+            };
+            if too_long {
+                return Err(Self::invalid_length());
+            }
+        }
 
         let result = match normalization {
             Normalization::Nfc => normalizers.nfc.as_borrowed().normalize_utf16(&s),
