@@ -229,6 +229,9 @@ pub fn raster_totals() -> RasterTotals {
     TOTALS.with(|t| t.get())
 }
 
+/// Red stub (FRAME-STAGES follow-up): not yet a switch.
+pub fn set_raster_timing(_on: bool) {}
+
 /// One draw into a bitmap, timed until dropped: two `Instant` reads and a
 /// thread-local add.
 struct Timed(std::time::Instant);
@@ -721,23 +724,33 @@ pub(crate) fn put_span(
 
 #[cfg(test)]
 mod raster_totals_tests {
-    use crate::{raster_totals, CanvasRenderingContext2D};
+    use crate::{raster_totals, set_raster_timing, CanvasRenderingContext2D};
 
-    /// Every draw that reaches the bitmap is one more on this thread's
+    /// Every draw that paints into the bitmap is one more on this thread's
     /// totals (the per-frame stage line reads the difference across a
-    /// turn). Counts, not milliseconds: no wall-clock bound.
+    /// turn); a draw that returns before painting, and a clip, are not.
+    /// Counts, not milliseconds: no wall-clock bound.
     #[test]
-    fn each_draw_into_the_bitmap_counts_once_on_the_thread_totals() {
+    fn each_draw_painted_into_the_bitmap_counts_once_on_the_thread_totals() {
+        set_raster_timing(true);
         let before = raster_totals();
+        // Nothing drawn yet: the clear returns before painting.
+        let mut fresh = CanvasRenderingContext2D::new(20, 20);
+        fresh.clear_rect(0.0, 0.0, 3.0, 3.0);
+        assert_eq!(raster_totals().draws, before.draws, "a clear of a bitmap never drawn paints nothing");
         let mut ctx = CanvasRenderingContext2D::new(20, 20);
         ctx.fill_rect(1.0, 1.0, 5.0, 5.0);
         ctx.stroke_rect(2.0, 2.0, 6.0, 6.0);
         ctx.clear_rect(0.0, 0.0, 3.0, 3.0);
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 10.0, 10.0);
+        ctx.clip();
         let after = raster_totals();
-        assert_eq!(after.draws - before.draws, 3, "fill, stroke and clear: one each");
+        assert_eq!(after.draws - before.draws, 3, "fill, stroke and clear: one each; the clip is none");
         assert!(after.ms >= before.ms, "the time only grows");
         // Another thread's draws are not this thread's.
         let other = std::thread::spawn(|| {
+            set_raster_timing(true);
             let mut ctx = CanvasRenderingContext2D::new(4, 4);
             ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
             raster_totals().draws
@@ -746,6 +759,31 @@ mod raster_totals_tests {
         .unwrap();
         assert_eq!(other, 1);
         assert_eq!(raster_totals().draws, after.draws);
+        set_raster_timing(false);
+    }
+
+    /// Off (the default for every thread), a draw keeps no totals: no
+    /// count and no clock read reaches them.
+    #[test]
+    fn with_raster_timing_off_draws_keep_no_totals() {
+        let draws = std::thread::spawn(|| {
+            let mut ctx = CanvasRenderingContext2D::new(8, 8);
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+            ctx.stroke_rect(1.0, 1.0, 4.0, 4.0);
+            ctx.clear_rect(0.0, 0.0, 2.0, 2.0);
+            raster_totals()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(draws, crate::RasterTotals::default());
+        // Turned off again after being on: the totals stand still.
+        set_raster_timing(true);
+        let mut ctx = CanvasRenderingContext2D::new(8, 8);
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        set_raster_timing(false);
+        let held = raster_totals();
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        assert_eq!(raster_totals(), held);
     }
 }
 
