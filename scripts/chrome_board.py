@@ -57,6 +57,18 @@ PIXEL_GATE_PCT = 0.5
 # differs only by rasterisation (CoreText vs Skia anti-aliasing).
 GEOMETRY_PIXEL_GATE_PCT = 1.5
 TOP_N = 3
+# T34: one oracle. The board's Chromium arm is the pinned Chrome for Testing
+# (docs/GATES.md; the same pin as realsite_board.py, interactive_board.py and
+# the probes), not the Chromium the installed Playwright bundles (143.0.7499.4
+# with playwright 1.57), which drifts with the npm package. PARITY_CHROME_PATH
+# overrides where the pin lives; `--oracle bundled` is for local iteration and
+# is named on the board.
+PINNED_CHROME_VERSION = "148.0.7778.216"
+DEFAULT_CHROME = (
+    Path.home()
+    / "Repos/hiwave/hiwave-macos/.browsers/chrome/mac_arm-148.0.7778.216"
+    / "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+)
 
 
 def green_rule(row: Dict[str, Any]) -> Optional[str]:
@@ -244,9 +256,35 @@ def rustkit_command(row: Row, binary: Path) -> List[str]:
     ]
 
 
-def _run(cmd: List[str], timeout: int, cwd: Path = REPO_ROOT) -> Dict[str, Any]:
+def resolve_oracle(mode: str) -> Optional[str]:
+    """The Chromium binary for the board's Chromium arm: the pin (env
+    PARITY_CHROME_PATH, else DEFAULT_CHROME) or None for Playwright's bundled
+    Chromium. A missing pin is a BoardError, never a silent fallback."""
+    if mode == "bundled":
+        return None
+    path = os.environ.get("PARITY_CHROME_PATH") or str(DEFAULT_CHROME)
+    if not Path(path).exists():
+        raise BoardError(
+            f"pinned Chrome for Testing {PINNED_CHROME_VERSION} not found at {path}; set "
+            "PARITY_CHROME_PATH to it, or pass --oracle bundled for an unpinned local run")
+    return path
+
+
+def chromium_env(oracle: Optional[str]) -> Dict[str, str]:
+    """NODE_ENV with PARITY_CHROME_PATH set to the oracle, or removed for the
+    bundled Chromium (deterministic.mjs launches whatever it names)."""
+    env = dict(NODE_ENV)
+    env.pop("PARITY_CHROME_PATH", None)
+    if oracle:
+        env["PARITY_CHROME_PATH"] = oracle
+    return env
+
+
+def _run(cmd: List[str], timeout: int, cwd: Path = REPO_ROOT,
+         env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=NODE_ENV)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                              env=NODE_ENV if env is None else env)
     except subprocess.TimeoutExpired:
         return {"status": "timeout", "error": f"timeout ({timeout}s)"}
     except OSError as exc:
@@ -266,10 +304,11 @@ def _run(cmd: List[str], timeout: int, cwd: Path = REPO_ROOT) -> Dict[str, Any]:
     return record
 
 
-def capture(row: Row, binary: Path) -> Dict[str, Any]:
-    """Both arms for one row, then the diffs. Pure function of the row."""
+def capture(row: Row, binary: Path, oracle: Optional[str] = None) -> Dict[str, Any]:
+    """Both arms for one row, then the diffs. Pure function of the row.
+    `oracle` is the Chromium binary (resolve_oracle); None = bundled."""
     row.out_dir.mkdir(parents=True, exist_ok=True)
-    chromium = _run(chromium_command(row), timeout=120)
+    chromium = _run(chromium_command(row), timeout=120, env=chromium_env(oracle))
     rustkit = _run(rustkit_command(row, binary), timeout=180)
     result: Dict[str, Any] = {"chromium": chromium, "rustkit": rustkit}
     chrome_png = row.out_dir / "chrome.png"
@@ -483,6 +522,16 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         f"`{board_json['run'].get('base') or '?'}` · oracle Chromium "
         f"{board_json['run'].get('chromium') or '?'} · parity-capture `{board_json['run']['parity_capture']}`",
         "",
+    ]
+    run = board_json["run"]
+    if run.get("oracle") == "bundled" or run.get("oracle_mismatch"):
+        lines += [
+            f"**Oracle: Chromium {run.get('chromium') or '?'} is NOT the pinned oracle "
+            f"(Chrome for Testing {run.get('oracle_pin') or PINNED_CHROME_VERSION}, docs/GATES.md); "
+            "this board does not gate and does not compare with pinned boards.**",
+            "",
+        ]
+    lines += [
         f"Gate (PLAN-z CH0, docs/GATES.md): a row is {gate_text()} "
         "(geometry matching Chrome leaves only rasterisation; a row whose geometry compare did not run "
         "or whose join failed has only the first rule). "
@@ -597,6 +646,10 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     ap.add_argument("--census", help="CSS census JSON (default: newest docs/census/CSS_PROPERTY_CENSUS_*.json)")
     ap.add_argument("--report-only", action="store_true",
                     help="rewrite BOARD.md from <out>/board.json with the census named by --census; no captures")
+    ap.add_argument("--oracle", choices=("pinned", "bundled"), default="pinned",
+                    help="pinned (default): Chrome for Testing " + PINNED_CHROME_VERSION + " at PARITY_CHROME_PATH "
+                         "or the default pin location, refused if missing; bundled: Playwright's own Chromium, "
+                         "for local iteration only (named on the board, never gates)")
     ap.add_argument("--rescore", metavar="BOARD_JSON",
                     help="print a board.json's green count before/after the current gate; no captures, no writes")
     args = ap.parse_args(argv)
@@ -613,6 +666,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         if args.report_only:
             return report_only(board, out, Path(args.census) if args.census else latest_census())
         rows = plan(board, REPO_ROOT, work, only=args.only)
+        oracle = resolve_oracle(args.oracle)
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -626,13 +680,15 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     entries = []
     chromium_version = None
     for i, row in enumerate(rows, 1):
-        result = capture(row, binary)
+        result = capture(row, binary, oracle=oracle)
         chromium_version = chromium_version or result.get("chromium", {}).get("browser")
         entry = summarize(row, result)
         entries.append(entry)
         print(f"[{i}/{len(rows)}] {row.case_id}: {entry['status']} "
               f"pixel={_fmt_pct(entry['pixel_diff_pct'])}% geo={entry['geometry_diffs']}", flush=True)
 
+    mismatch = (args.oracle == "pinned" and chromium_version is not None
+                and chromium_version != PINNED_CHROME_VERSION)
     census_path = Path(args.census) if args.census else latest_census()
     board_json = {
         "run": {
@@ -640,6 +696,9 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
             "sha": git_sha(REPO_ROOT),
             "base": git_develop_base(REPO_ROOT),
             "chromium": chromium_version,
+            "oracle": args.oracle,
+            "oracle_pin": PINNED_CHROME_VERSION,
+            "oracle_mismatch": mismatch,
             "parity_capture": str(binary),
             "gate_pct": PIXEL_GATE_PCT,
             "gate_geometry_pixel_pct": GEOMETRY_PIXEL_GATE_PCT,
@@ -653,6 +712,10 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     scored = [e for e in entries if e["status"] == "ok"]
     green = sum(1 for e in entries if row_is_green(e))
     print(f"board: {green}/{len(entries)} rows green ({gate_text()}) → {out / 'BOARD.md'}")
+    if mismatch:
+        print(f"oracle mismatch: Chromium {chromium_version} answered, the pin is {PINNED_CHROME_VERSION}; "
+              "the board is written but does not pass", file=sys.stderr)
+        return 3
     return 0
 
 
