@@ -600,8 +600,9 @@ impl Animations {
     /// style (css-transitions-1 §3: a transition on an element that no
     /// longer has one is cancelled). A build that took the kept box tree
     /// (`reused_tree`) visited no element at all, and a pointer restyle's
-    /// partial build (`partial_build`) visited only what is under the
-    /// changed elements; the rest are all still there with their styles:
+    /// or a kept-tree splice's partial build (`partial_build`) visited only
+    /// what is under the changed elements; the rest are all still there
+    /// with their styles:
     /// nothing is cancelled and the before-change values stay for the
     /// next change. (The restyle itself misses to a full build when a
     /// changed element left the document.)
