@@ -80,6 +80,31 @@
    "name": "inner_name_after_outer_reassigned",
    "js": "{ let C = class Inner { static field = () => eval('Inner'); }; const D = C; C = null; D.field() === D }",
    "chrome": "true"
+  },
+  {
+   "name": "nested_class_method_reads_outer_let",
+   "js": "{ let x = 8; class A { m() { class B { n() { return eval('x'); } } return new B().n(); } } new A().m() }",
+   "chrome": "8"
+  },
+  {
+   "name": "class_in_method_field_reads_method_let",
+   "js": "{ class A { m() { let y = 9; class B { f = eval('y'); } return new B().f; } } new A().m() }",
+   "chrome": "9"
+  },
+  {
+   "name": "computed_key_reads_outer_let",
+   "js": "{ let x = 'k10'; class C { [eval('x')]() { return 10; } } new C().k10() }",
+   "chrome": "10"
+  },
+  {
+   "name": "computed_static_key_reads_outer_let",
+   "js": "{ let x = 'k11'; class C { static [eval('x')] = 11; } C.k11 }",
+   "chrome": "11"
+  },
+  {
+   "name": "class_expression_method_reads_outer_let",
+   "js": "{ let x = 12; const C = class { m() { return eval('x'); } }; new C().m() }",
+   "chrome": "12"
   }
  ],
  "chrome_version": "148.0.7778.216"
