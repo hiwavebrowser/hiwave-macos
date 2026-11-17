@@ -2346,6 +2346,19 @@ fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod inspector_page_tests;
 
+#[cfg(test)]
+mod page_visibility_tests {
+    use super::window_shows_pages;
+
+    #[test]
+    fn a_minimised_or_hidden_window_shows_no_page() {
+        assert!(window_shows_pages(true, false));
+        assert!(!window_shows_pages(true, true), "minimised");
+        assert!(!window_shows_pages(false, false), "hidden");
+        assert!(!window_shows_pages(false, true));
+    }
+}
+
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod close_tab_tests;
 

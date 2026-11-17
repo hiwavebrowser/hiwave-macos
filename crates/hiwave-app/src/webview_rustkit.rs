@@ -1839,6 +1839,21 @@ mod tests {
         RustKitView::headless(Bounds::new(0, 0, 400, 300))
     }
 
+    /// The page is told when it stops being shown and when it shows again, once per change, on
+    /// both kinds of view (the page thread and the flag-off inline page), and it keeps running.
+    #[test]
+    fn the_page_is_told_when_it_is_hidden_and_shown_once_per_change() {
+        for (kind, view) in [("inline", view()), ("content thread", RustKitView::headless_content(Bounds::new(0, 0, 400, 300)))] {
+            assert!(view.page_visible(), "{kind}: a page starts out shown");
+            assert!(!view.set_page_visible(true), "{kind}: shown again is no change");
+            assert!(view.set_page_visible(false), "{kind}: hiding is sent");
+            assert!(!view.page_visible(), "{kind}");
+            assert!(!view.set_page_visible(false), "{kind}: hidden twice is sent once");
+            assert!(view.set_page_visible(true), "{kind}: showing is sent");
+            assert!(view.page_visible(), "{kind}");
+        }
+    }
+
     /// #739 / Pete's item 4: the window took no click while a page loaded,
     /// because the load ran to its end inside the event handler.
     #[test]
