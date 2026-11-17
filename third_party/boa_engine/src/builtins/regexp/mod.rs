@@ -51,6 +51,14 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// How many UCS-2 code units this thread keeps for a Latin-1 regexp input (see `LATIN1_INPUT`); 0 when
+/// none is kept. For tests.
+#[doc(hidden)]
+#[must_use]
+pub fn kept_input_units() -> usize {
+    LATIN1_INPUT.with(|cell| cell.borrow().as_ref().map_or(0, |(_, units)| units.len()))
+}
+
 /// The UCS-2 code units of `input`, a Latin-1 string (see `LATIN1_INPUT`).
 fn latin1_as_ucs2(input: &JsString) -> Rc<[u16]> {
     const KEEP_FROM: usize = 256;
