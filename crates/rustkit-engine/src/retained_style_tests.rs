@@ -491,6 +491,72 @@ fn an_insert_and_a_removal_among_block_siblings_splice() {
     );
 }
 
+/// BOXES-DIFF (board report.html, `#error-container` emptied by `innerHTML = ''`): a written element
+/// whose box a full build drops (an empty block with nothing visible about it) is not spliced in. The
+/// restyle build kept the root's box before its parent's build decides to keep it, so the splice put
+/// a box where a full build has none.
+#[test]
+fn a_written_empty_block_a_full_build_drops_is_not_spliced_in() {
+    assert_same_as_a_full_build(
+        "written empty block",
+        &page(
+            "#u>.h{height:10px}",
+            "<div id=u><div class=h id=a></div><div id=e></div><div class=h id=b></div></div>",
+            "document.getElementById('e').setAttribute('data-n', n); \
+             document.getElementById('b').style.width = (n % 50 + 10) + 'px';",
+        ),
+        Some(true),
+    );
+}
+
+/// The same, from both sides: the written element is emptied and filled in turn, so its box goes
+/// and comes, as a full build drops and keeps it.
+#[test]
+fn a_written_block_emptied_and_filled_matches_a_full_build() {
+    assert_same_as_a_full_build(
+        "block emptied and filled",
+        &page(
+            "#u>.h{height:10px}",
+            "<div id=u><div class=h id=a></div><div id=e></div><div class=h id=b></div></div>",
+            "document.getElementById('e').innerHTML = n % 2 ? '<p>error</p>' : '';",
+        ),
+        None,
+    );
+}
+
+/// BOXES-DIFF item 1 (the board's element-number-only differences): a full build numbers a box a
+/// parent then drops, here a `display: contents` wrapper, so its later elements' numbers have a gap a
+/// splice cannot know of. With the box tree kept, a full build numbers in tree order as a splice
+/// does: the written element after the wrapper has one number either way.
+#[test]
+fn an_element_after_a_contents_wrapper_has_one_number_spliced_or_built() {
+    assert_same_as_a_full_build(
+        "after a contents wrapper",
+        &page(
+            "#u .h{height:10px}",
+            "<div id=u><div style=\"display:contents\"><div class=h id=a></div></div><div class=h id=b></div></div>",
+            "document.getElementById('b').style.width = (n % 50 + 10) + 'px';",
+        ),
+        Some(true),
+    );
+}
+
+/// A written inline holding only a block is a culled inline: a full build makes it a block box
+/// (`rebox_culled_inline`) before its parent keeps it. The splice's box for it must be that box.
+#[test]
+fn a_written_culled_inline_matches_a_full_build() {
+    assert_same_as_a_full_build(
+        "written culled inline",
+        &page(
+            "#u>.h{height:10px} #s>div{height:12px}",
+            "<div id=u><div class=h id=a></div><span id=s><div id=in>in</div></span><div class=h id=b></div></div>",
+            "document.getElementById('s').setAttribute('data-n', n); \
+             document.getElementById('in').style.width = (n % 50 + 10) + 'px';",
+        ),
+        None,
+    );
+}
+
 /// #1247 R1 item 1: a list item that is shown or hidden renumbers the items after it, and the dirty
 /// set never marks them (a counter is not a selector). A box that comes or goes among list items is
 /// not spliced. (RustKit draws no list markers and no `counter()` yet, so the display lists agree
@@ -698,5 +764,41 @@ fn a_stretch_without_script_relayouts_lets_the_styles_go() {
         held(&engine) > 200,
         "script relayouts keep them again: {}",
         held(&engine)
+    );
+}
+
+/// BOXES-DIFF: the tune frames above, from fixed points of the tune (the frame counter `n` decides
+/// which tiles come and go; it runs during the load, so the test above meets a different point each
+/// run). A tile coming or going is a miss for the paint-only path, and two in a row start its
+/// cooldown, which let the kept box tree go: the next relayout found `no kept tree` and built the
+/// page (1,002 elements). With the box tree kept, the cooldown keeps it. Which points build the page
+/// also depends on which tiles the load left shown, so this takes five: on develop a sweep of the
+/// points 0 to 39 built the page from 35, and a run of this test from 7; with the fix the sweep kept
+/// the tree from every point.
+#[test]
+fn a_paint_only_miss_cooldown_keeps_the_box_tree() {
+    let mut built_the_page = Vec::new();
+    for start in [7, 11, 12, 25, 35] {
+        set_retained_styles_for_test(Some(RetainedStyles::Boxes));
+        let (mut engine, view, _server) = load(&tiles(1_000, 10, TUNE));
+        engine.execute_script(view, &format!("n = {start}")).expect("n");
+        for _ in 0..3 {
+            frame(&mut engine, view);
+        }
+        let mut per_frame = Vec::new();
+        for _ in 0..5 {
+            let before = built_elements_for_test();
+            frame(&mut engine, view);
+            per_frame.push(built_elements_for_test() - before);
+        }
+        set_retained_styles_for_test(None);
+        if !per_frame.iter().all(|&b| b > 0 && b <= 20) {
+            built_the_page.push(format!("from n = {start}: {per_frame:?} (last miss {:?})", splices_for_test().1));
+        }
+    }
+    assert!(
+        built_the_page.is_empty(),
+        "elements built per frame (3 tiles written of 1,000):\n{}",
+        built_the_page.join("\n")
     );
 }
