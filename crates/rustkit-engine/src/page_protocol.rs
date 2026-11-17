@@ -1311,7 +1311,7 @@ impl EndpointSide {
                     }
                     // Aimed early by this thread's sleep overshoot when the wait is exact; a wake
                     // before the due instant sleeps the rest, so nothing runs early (LINKS-SLOW).
-                    let aimed = if exact.is_some() { overshoot.aim(due).max(now) } else { due };
+                    let aimed = runtime_wait_until(now, due, exact.is_some(), &overshoot);
                     if tracing {
                         traced_due = Some((due, aimed, exact.is_some()));
                     }
@@ -1553,6 +1553,30 @@ fn trace_turn(
         exact,
         (fraction_ms * 1000.0) as i64
     );
+}
+
+/// LINKS-SLOW part 2: an exact wait leaves the runtime's timer this long before its due instant
+/// and ends with a thread sleep. The runtime's timer keeps whole milliseconds: a sleep to a
+/// fraction of one ended 1.4 ms late on average, spread over a millisecond
+/// (`docs/diagnostics/2026-11-16/links_slow_part2_windows.md`). Longer than that overshoot's usual
+/// spread, so the runtime wakes before the due instant; the content thread is blocked at most this
+/// long per wait.
+pub const PRECISE_TAIL: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// LINKS-SLOW: until when the content loop's wait for `due` sleeps on the runtime (where commands
+/// and sockets keep their turn), from `now`. An exact wait is aimed early by the thread's
+/// overshoot.
+pub fn runtime_wait_until(
+    now: std::time::Instant,
+    due: std::time::Instant,
+    exact: bool,
+    overshoot: &OvershootEstimate,
+) -> std::time::Instant {
+    if exact {
+        overshoot.aim(due).max(now)
+    } else {
+        due
+    }
 }
 
 /// LINKS-SLOW: after an aimed sleep that ended at `woke`, the instant to sleep until again so the
