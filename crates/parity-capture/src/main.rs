@@ -1027,6 +1027,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         interceptor.allow(rustkit_net::intercept::UrlPattern::prefix(
             &format!("{}/", origin.ascii_serialization()),
         ));
+        interceptor.restrict_origin(origin);
         builder = builder.request_interceptor(interceptor);
     } else if let Some(interceptor) = shield_interceptor(args) {
         builder = builder.request_interceptor(interceptor);
