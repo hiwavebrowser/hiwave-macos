@@ -1628,7 +1628,13 @@ pub async fn runtime_wait(
 
 /// LINKS-SLOW part 2 delta R1: clear a wake permit a command's sender left (`Notify::notify_one`
 /// with no waiter) once the loop has taken that command another way.
-pub fn clear_stale_wake(_wake: Option<&tokio::sync::Notify>) {}
+pub fn clear_stale_wake(wake: Option<&tokio::sync::Notify>) {
+    use futures::FutureExt;
+    if let Some(wake) = wake {
+        // Ready only on a stored permit, which it takes; pending otherwise, and dropped unregistered.
+        let _ = wake.notified().now_or_never();
+    }
+}
 
 /// LINKS-SLOW part 2 R1: how long before a timer's due instant an exact wait leaves the runtime.
 /// The tail has to cover how late the runtime's timer wakes (it keeps whole milliseconds), or the
@@ -1702,7 +1708,7 @@ pub fn finish_exact_wait(
     due: std::time::Instant,
     overshoot: &mut OvershootEstimate,
     clock: &mut impl TailClock,
-    _command: impl FnMut() -> bool,
+    mut command: impl FnMut() -> bool,
 ) -> Option<std::time::Duration> {
     let mut spin_from = None;
     loop {
@@ -1721,6 +1727,9 @@ pub fn finish_exact_wait(
         clock.sleep(aimed - now);
         let woke = clock.now();
         overshoot.observe(aimed, woke);
+        if command() {
+            return None;
+        }
     }
 }
 
