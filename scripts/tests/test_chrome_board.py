@@ -24,7 +24,19 @@ sys.path.insert(0, str(REPO / "scripts"))
 BOARD_PATH = REPO / "tools" / "parity_oracle" / "chrome_fixtures" / "board.json"
 
 
-class TestChromeBoard(unittest.TestCase):
+class _AnyOracle:
+    """Fake-capture tests are about the board, not the oracle: point the pin
+    at a file that exists on every host (T34 refuses a missing pin)."""
+
+    def setUp(self):
+        from unittest import mock
+
+        patcher = mock.patch.dict("os.environ", {"PARITY_CHROME_PATH": sys.executable})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TestChromeBoard(_AnyOracle, unittest.TestCase):
     def test_board_matrix_names_pages_states_and_sizes(self):
         board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
         self.assertEqual(sorted(board["pages"]), ["chrome", "inspector", "report", "settings", "shelf"])
@@ -159,7 +171,7 @@ def _row(pixel, geo, join=0, status="ok"):
             "top": [], "notes": []}
 
 
-class GateTests(unittest.TestCase):
+class GateTests(_AnyOracle, unittest.TestCase):
     """Pete 2026-11-06: green at <= 0.5 % pixels, OR at 0 geometry diffs and
     <= 1.5 % pixels. Geometry that matches Chrome leaves only rasterisation."""
 
@@ -269,6 +281,119 @@ class GateTests(unittest.TestCase):
             self.assertIn("before 1/3", text)
             self.assertIn("after 2/3", text)
             self.assertIn("newly green: shelf default 1280x800 1.200% geo 0", text)
+
+
+class OracleTests(unittest.TestCase):
+    """T34: one oracle. The board's Chromium arm is the pinned Chrome for
+    Testing 148 (docs/GATES.md), not whatever Chromium the installed
+    Playwright bundles (143.0.7499.4 with playwright 1.57): before T34 the
+    batch board scored against 143 while pins and probes used CfT 148."""
+
+    OK = {"status": "ok", "chromium": {"status": "ok", "browser": "148.0.7778.216"}, "rustkit": {"status": "ok"},
+          "pixels": {"diffPercent": 0.1, "top": []},
+          "geometry": {"geometry_failures": 0, "join_failures": 0, "worst_selectors": []}}
+
+    def _main(self, tmp, extra, capture, env_chrome=None, pin=None):
+        from unittest import mock
+
+        from scripts import chrome_board
+
+        env = {k: v for k, v in __import__("os").environ.items() if k != "PARITY_CHROME_PATH"}
+        if env_chrome:
+            env["PARITY_CHROME_PATH"] = env_chrome
+        with mock.patch.dict("os.environ", env, clear=True), \
+                mock.patch.object(chrome_board, "DEFAULT_CHROME", Path(pin or "/nonexistent/cft-148/chrome")):
+            return chrome_board.main(
+                ["--parity-capture", sys.executable, "--board", str(BOARD_PATH), "--only", "shelf",
+                 "--work", str(Path(tmp) / "work"), "--out", str(Path(tmp) / "out")] + extra,
+                capture=capture,
+            )
+
+    def test_the_chromium_arm_runs_the_pinned_cft_by_default(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pin = Path(tmp) / "pinned-chrome"
+            pin.write_text("", encoding="utf-8")
+            rc = self._main(tmp, [], lambda *a, **k: (seen.append(k.get("oracle")), self.OK)[1], pin=str(pin))
+            self.assertEqual(rc, 0)
+            self.assertTrue(seen)
+            self.assertEqual(set(seen), {str(pin)}, "every row's Chromium arm gets the pinned binary")
+            run = json.loads((Path(tmp) / "out" / "board.json").read_text(encoding="utf-8"))["run"]
+            self.assertEqual(run["oracle"], "pinned")
+            self.assertEqual(run["oracle_pin"], "148.0.7778.216")
+            self.assertEqual(run["chromium"], "148.0.7778.216")
+            self.assertFalse(run["oracle_mismatch"])
+
+    def test_parity_chrome_path_overrides_the_default_pin_location(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = self._main(tmp, [], lambda *a, **k: (seen.append(k.get("oracle")), self.OK)[1],
+                            env_chrome=sys.executable)
+            self.assertEqual(rc, 0)
+            self.assertEqual(set(seen), {sys.executable})
+
+    def test_a_missing_pin_is_refused_before_any_capture(self):
+        import contextlib
+        import io
+
+        captured = []
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(err):
+            rc = self._main(tmp, [], lambda *a, **k: captured.append(a))
+            self.assertEqual(rc, 2)
+            self.assertEqual(captured, [], "no row is captured against an unpinned Chromium")
+            self.assertFalse((Path(tmp) / "out" / "BOARD.md").exists())
+        self.assertIn("148.0.7778.216", err.getvalue())
+        self.assertIn("--oracle bundled", err.getvalue())
+
+    def test_bundled_is_opt_in_and_named_on_the_board(self):
+        seen = []
+        bundled = dict(self.OK, chromium={"status": "ok", "browser": "143.0.7499.4"})
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = self._main(tmp, ["--oracle", "bundled"],
+                            lambda *a, **k: (seen.append(k.get("oracle", "absent")), bundled)[1])
+            self.assertEqual(rc, 0)
+            self.assertEqual(set(seen), {None}, "bundled: no executable path, Playwright picks its own")
+            run = json.loads((Path(tmp) / "out" / "board.json").read_text(encoding="utf-8"))["run"]
+            self.assertEqual(run["oracle"], "bundled")
+            self.assertEqual(run["chromium"], "143.0.7499.4")
+            md = (Path(tmp) / "out" / "BOARD.md").read_text(encoding="utf-8")
+            self.assertIn("NOT the pinned oracle", md)
+
+    def test_a_pinned_run_whose_chromium_is_not_the_pin_is_flagged(self):
+        wrong = dict(self.OK, chromium={"status": "ok", "browser": "143.0.7499.4"})
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = self._main(tmp, [], lambda *a, **k: wrong, env_chrome=sys.executable)
+            self.assertEqual(rc, 3, "a board scored against another Chromium is written but does not pass")
+            run = json.loads((Path(tmp) / "out" / "board.json").read_text(encoding="utf-8"))["run"]
+            self.assertTrue(run["oracle_mismatch"])
+            md = (Path(tmp) / "out" / "BOARD.md").read_text(encoding="utf-8")
+            self.assertIn("NOT the pinned oracle", md)
+
+    def test_real_capture_hands_the_pin_to_the_chromium_arm_only(self):
+        from unittest import mock
+
+        from scripts import chrome_board
+
+        calls = []
+
+        def fake_run(cmd, timeout, cwd=None, env=None):
+            calls.append((cmd[1] if len(cmd) > 1 else cmd[0], (env or {}).get("PARITY_CHROME_PATH")))
+            return {"status": "error", "error": "stop"}
+
+        board = chrome_board.load_board(BOARD_PATH)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(chrome_board, "_run", fake_run):
+            row = chrome_board.plan(board, REPO, Path(tmp) / "w", only="shelf")[0]
+            chrome_board.capture(row, Path(sys.executable), oracle="/pinned/chrome")
+            chrome_board.capture(row, Path(sys.executable), oracle=None)
+        self.assertEqual(calls[0], (str(chrome_board.CHROMIUM_ARM), "/pinned/chrome"))
+        self.assertIsNone(calls[2][1], "bundled: PARITY_CHROME_PATH is removed for the Chromium arm")
+
+    def test_gates_doc_names_the_pinned_oracle_for_the_chrome_board(self):
+        text = (REPO / "docs" / "GATES.md").read_text(encoding="utf-8")
+        row = next(l for l in text.splitlines() if l.startswith("| Chrome board (our own UI pages"))
+        self.assertIn("148.0.7778.216", row)
+        self.assertNotIn("Chromium 143", row)
 
 
 class RealSiteGateTests(unittest.TestCase):
