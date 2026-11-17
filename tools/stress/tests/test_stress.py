@@ -7,6 +7,7 @@ of the page channel, and the score readers.
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -687,3 +688,128 @@ def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
     progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
                 {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
     assert run.frames_by_test(progress) == {"Multiply": {"samples": 3}}
+
+
+# The spans the engine's code opens: `info_span!("name", ..)` and its siblings at every level,
+# `span!(Level::X, "name", ..)`, and `#[instrument]` (the span is named after the function unless the
+# attribute gives `name = ".."`). Comment lines are not code.
+SPAN_MACRO = re.compile(r'\b(?:(?:trace|debug|info|warn|error)_span|span)!\s*\(')
+SPAN_MACRO_NAME = re.compile(
+    r'\b(?:(?:trace|debug|info|warn|error)_span!\s*\(|span!\s*\(\s*(?:target\s*:\s*"[^"]*"\s*,\s*)?(?:tracing::)?Level::[A-Z]+\s*,)'
+    r'\s*(?:target\s*:\s*"[^"]*"\s*,\s*)?(?:parent\s*:\s*[^,]+,\s*)?"([^"]+)"')
+INSTRUMENT = re.compile(r'#\[\s*(?:tracing::)?instrument\b(\s*\((?:[^()]|\([^()]*\))*\))?\s*\]')
+INSTRUMENT_NAME = re.compile(r'\bname\s*=\s*"([^"]+)"')
+INSTRUMENTED_FN = re.compile(r'(?:\s*(?:#\[[^\]]*\]|pub(?:\([^)]*\))?|const|async|unsafe|extern\s*"[^"]*"))*\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def span_names(source):
+    """The names of the spans a Rust source opens, and how many span sites it has that gave no name
+    this could read (a name that is not a string literal)."""
+    code = "\n".join("" if line.lstrip().startswith("//") else line for line in source.splitlines())
+    names, unread = set(), 0
+    for m in SPAN_MACRO.finditer(code):
+        named = SPAN_MACRO_NAME.match(code, m.start())
+        if named:
+            names.add(named.group(1))
+        else:
+            unread += 1
+    for m in INSTRUMENT.finditer(code):
+        given = INSTRUMENT_NAME.search(m.group(1) or "")
+        fn = INSTRUMENTED_FN.match(code, m.end())
+        if given:
+            names.add(given.group(1))
+        elif fn:
+            names.add(fn.group(1))
+        else:
+            unread += 1
+    return names, unread
+
+
+def test_the_span_collector_reads_every_form_a_span_is_opened_in():
+    names, unread = span_names('''
+        let _a = tracing::info_span!("first", ?id).entered();
+        let _b = debug_span!(
+            "second"
+        );
+        let _c = trace_span!(target: "x", "third", n = 1);
+        let _d = span!(Level::WARN, "fourth");
+        let _e = tracing::span!(tracing::Level::INFO, "fifth", a = 1);
+        // let _f = info_span!("in a comment");
+        #[tracing::instrument(skip(self), fields(view_id = ?id))]
+        /// A comment between the attribute and the function.
+        #[inline]
+        pub(crate) fn sixth(&mut self) {}
+        #[instrument(name = "seventh", skip_all)]
+        async fn not_this_name() {}
+        #[instrument]
+        fn eighth() {}
+        let table_span = TableSpan::default();
+        let _g = info_span!(NAME_IN_A_CONST);
+    ''')
+    assert names == {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"}
+    assert unread == 1
+
+
+def test_every_span_the_engine_opens_is_one_the_reader_knows():
+    # The reader takes a console record only behind the spans it knows by name (ENGINE_SPAN). A span
+    # added to the engine and not to that list would drop every record written inside it, silently:
+    # this reads the spans out of the engine's source and holds the list to them.
+    crates = pathlib.Path(__file__).resolve().parents[3] / "crates"
+    found, unread = {}, []
+    for path in sorted(crates.rglob("*.rs")):
+        if "target" in path.relative_to(crates).parts:
+            continue
+        names, n = span_names(path.read_text(errors="replace"))
+        for name in names:
+            found.setdefault(name, str(path.relative_to(crates)))
+        if n:
+            unread.append(str(path.relative_to(crates)))
+    assert not unread, "a span whose name is not a string literal: the reader cannot be held to it: %s" % unread
+    # The collector found the engine's code at all.
+    assert {"relayout", "render", "renderer_execute"} <= set(found), sorted(found)
+    missing = {name: where for name, where in found.items() if name not in run.ENGINE_SPAN_NAMES}
+    assert not missing, "spans the stress reader does not know (add them to ENGINE_SPAN_NAMES in tools/stress/run.py): %s" % missing
+    # And every name on the list is one the pattern takes as a prefix.
+    stamp = "2026-11-16T17:00:00.000000Z"
+    for name in run.ENGINE_SPAN_NAMES:
+        line = stamp + "  INFO " + name + ": hiwave::console: uncaught Error: x at inline#1:1:1"
+        assert run.ENGINE_CONSOLE_RECORD.search(line), name
+
+
+def test_console_lines_with_a_prefix_the_reader_refused_are_counted(tmp_path):
+    # A line that carries the console target and an uncaught record's words, but not behind the engine's
+    # own prefix, is not listed. It is counted, so a record lost to a span the reader does not know (or
+    # text made to look like a record) shows in the run record as a number that is not zero.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    log.write_text(
+        stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)}: hiwave::console: uncaught Error: inside a span at inline#1:1:1\n"
+        + stamp + "  INFO hiwave::console: uncaught Error: first\\n" + stamp + "  INFO hiwave::console: uncaught Error: quoted in a message at inline#1:1:1\n"
+        + stamp + "  INFO hiwave::console: console log inline#1:2:3 uncaught is only a word here\n"
+        + stamp + "  INFO rustkit_engine: Style share verify=false\n"
+        + stamp + "  INFO a_new_span{id=EngineViewId(1)}: hiwave::console: uncaught Error: behind a span the reader does not know at inline#9:1:1\n"
+        + stamp + "  WARN rustkit_engine: Web font not loaded family=x " + stamp + "  INFO hiwave::console: unhandled rejection Error: in the middle at inline#9:1:1\n"
+        + "hiwave::console: uncaught Error: no prefix at inline#9:1:1\n"
+        + "\x1b[2m" + stamp + "\x1b[0m \x1b[32m INFO\x1b[0m page{title=x}: \x1b[2mhiwave::console\x1b[0m\x1b[2m:\x1b[0m unhandled rejection Error: coloured at inline#2:1:1\n")
+    assert len(run.log_uncaught(log)) == 3
+    assert run.log_console_refused(log) == 4
+    clean = tmp_path / "clean.log"
+    clean.write_text(stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n")
+    assert run.log_console_refused(clean) == 0
+    assert run.log_console_refused(tmp_path / "missing.log") == 0
+
+
+REFUSED_LINE = ('print("2026-11-16T17:00:00.000000Z  INFO hiwave::console: uncaught Error: listed at inline#1:1:1", flush=True); '
+                'print("2026-11-16T17:00:00.000000Z  INFO a_new_span: hiwave::console: uncaught Error: refused at inline#9:1:1", flush=True)')
+
+
+def test_the_run_record_carries_the_count_of_refused_console_lines(monkeypatch, tmp_path, capsys):
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "one", REFUSED_LINE)
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_errors"] == ["uncaught Error: listed at inline#1:1:1"]
+    assert rec["engine_errors_refused"] == 1, rec
+    assert "engine_errors_refused=1" in capsys.readouterr().out
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "none", "")
+    assert code == 0 and rec["engine_errors_refused"] == 0, outcome(code, rec)
+    assert "engine_errors_refused" not in capsys.readouterr().out
