@@ -6,6 +6,10 @@ suite's frame load at all).
 
 The full real-window run scored Images 1.00 at about 22 fps, with the complexity moving between 1 and 6.
 
+**Update, same day: IMG-F1 (#1215) and IMG-F2 (#1218) have landed, and the test left the floor. The
+numbers are in "After IMG-F1 and IMG-F2" at the end. Everything between here and there is the note as
+written before the fixes and describes the engine before them.**
+
 ## Summary
 
 1. **The page never reaches its real work in our engine.** The test runs in a frame, and in a frame
@@ -153,3 +157,40 @@ Not on the list, because measured and small: layout for moved canvases, `drawIma
 - No score is predicted for after F1 and F2.
 - Tooling, seen on the way: the app log cuts a console line near 1,000 characters, so a probe should log
   short lines.
+
+## After IMG-F1 and IMG-F2
+
+Both fixes landed together (the batch whose develop head is c3df9b75): #1215, a frame's canvas draws
+images, and #1218, pixels cross the host boundary as bytes. The batch ran MotionMark in the real window
+on the Mac with two builds, base (develop before the batch) and head (the batch), alternating base and
+head for the Images-only runs.
+
+| MotionMark Images, real window | base | head |
+|---|---|---|
+| Images only, run 1 | 1.00 | 16.77 |
+| Images only, run 2 | 1.00 | 16.85 |
+| Images only, run 3 | 1.00 | 18.44 |
+| inside a full suite run | 1.00 | 18.74 |
+
+What the runner recorded frame by frame (its `frames` record, complexity in steps):
+
+- base: 23 ms a frame (about 44 fps) at complexity 1, 44 ms at 2, slower from there. It never holds a
+  60 fps frame at any complexity, which is the 1.00.
+- head: 16.7 ms a frame (60 fps) while the complexity ramps from 1 to about 18 to 20; past that the
+  frame time rises (about 18.6 ms at 18 to 22, 19 to 21 ms in the mid 20s). The score is where the
+  controller settles around that edge.
+
+How this sits against the note's expectations: F1 alone was expected to leave the score where it was,
+and the two were not measured apart. For F2 the note expected "on the order of ten canvases in a 60 fps
+frame" from the 1.3 ms of script left per canvas; the measured edge is nearer twenty. What is left per
+canvas per frame is the script loop (IMG-F3, the interpreter row) and the paint of many canvases written
+by `putImageData` in one frame (item 4 of the plan), which these runs do not separate.
+
+Limits of these numbers:
+
+- All eight runs had the runner's turn budget raised to 60,000 ms (the run records say so and mark the
+  scores as not default-engine scores). Base and head ran under the same setting, so the comparison
+  holds; the absolute scores are not suite scores for the default engine.
+- One machine, one session, 1-minute load between 1.5 and 2.8 at the start of each run; three
+  Images-only runs an arm.
+- Chrome's Images score on this machine is not in this note.
