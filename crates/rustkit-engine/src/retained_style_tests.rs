@@ -110,6 +110,14 @@ struct Run {
 fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
+    // The arms are compared frame by frame, so each must start from the same point of the page's
+    // writes: none written during the load, whose frame count follows the machine's speed (300 idle,
+    // 193 to 204 under load), and the first written in the first frame measured.
+    assert_eq!(
+        engine.execute_script(view, "String(n)").expect("n"),
+        "String(\"0\")",
+        "the page wrote during the load"
+    );
     let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
     let spliced = splices_for_test().0;
     for i in 0..frames {
