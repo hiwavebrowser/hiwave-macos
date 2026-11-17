@@ -353,6 +353,8 @@ pub use content_thread::{
 };
 mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
+mod frame_stages;
+pub use frame_stages::{frame_stage_line, frame_stage_totals, FrameStageTotals, FRAME_STAGE_FIELDS};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]

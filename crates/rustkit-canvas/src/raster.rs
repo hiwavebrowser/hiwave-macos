@@ -210,6 +210,45 @@ fn band_clip(size: (u32, u32), clip: Option<&Mask>, band: Rect, t: Transform) ->
     Some(m)
 }
 
+/// What this thread has rasterized so far (FRAME-STAGES): the draws that
+/// reached a bitmap and the milliseconds they took, never reset. The
+/// per-frame stage line reads the difference across a turn; draws run
+/// inside the page's script, so this is a breakdown of its script time.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RasterTotals {
+    pub draws: u64,
+    pub ms: f64,
+}
+
+thread_local! {
+    static TOTALS: std::cell::Cell<RasterTotals> = const { std::cell::Cell::new(RasterTotals { draws: 0, ms: 0.0 }) };
+}
+
+/// This thread's [`RasterTotals`].
+pub fn raster_totals() -> RasterTotals {
+    TOTALS.with(|t| t.get())
+}
+
+/// One draw into a bitmap, timed until dropped: two `Instant` reads and a
+/// thread-local add.
+struct Timed(std::time::Instant);
+
+fn timed() -> Timed {
+    Timed(std::time::Instant::now())
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        TOTALS.with(|t| {
+            let mut v = t.get();
+            v.draws += 1;
+            v.ms += ms;
+            t.set(v);
+        });
+    }
+}
+
 impl Raster {
     /// Drops the pixels (a resize, a context reset).
     pub(crate) fn reset(&mut self) {
@@ -257,6 +296,7 @@ impl Raster {
 
     /// Fills `path` (canvas path commands, in user space under `t`).
     pub(crate) fn fill(&mut self, ctx: &Ctx, path: &[PathCommand], even_odd: bool, style: &CanvasStyle, t: &Transform2D) {
+        let _timed = timed();
         let Some(path) = build_path(path) else {
             return;
         };
@@ -266,6 +306,7 @@ impl Raster {
 
     /// Strokes `path` with `line`.
     pub(crate) fn stroke(&mut self, ctx: &Ctx, path: &[PathCommand], line: &StrokeStyle, style: &CanvasStyle, t: &Transform2D) {
+        let _timed = timed();
         let Some(path) = build_path(path) else {
             return;
         };
@@ -300,6 +341,7 @@ impl Raster {
 
     /// Clears the rect `x, y, w, h` under `t` to transparent black.
     pub(crate) fn clear(&mut self, clip: Option<&Mask>, x: f32, y: f32, w: f32, h: f32, t: &Transform2D) {
+        let _timed = timed();
         let Some(pm) = self.pixmap.as_mut() else {
             return; // nothing drawn yet: already clear
         };
@@ -316,6 +358,7 @@ impl Raster {
     /// destination rect `dst` (user space under `t`), smoothed (bilinear,
     /// Chrome's default "low" quality).
     pub(crate) fn draw_image(&mut self, ctx: &Ctx, image: &CanvasBitmap, src: [f32; 4], dst: [f32; 4], t: &Transform2D) {
+        let _timed = timed();
         let [sx, sy, sw, sh] = src;
         let [dx, dy, dw, dh] = dst;
         if sw == 0.0 || sh == 0.0 || dw == 0.0 || dh == 0.0 {
@@ -372,6 +415,7 @@ impl Raster {
     /// are (no transform, clip, alpha or compositing) at `dx, dy`, the
     /// part inside `dirty` (`x, y, w, h` in the image, already cut to it).
     pub(crate) fn put(&mut self, size: (u32, u32), rgba: &[u8], width: u32, dx: i32, dy: i32, dirty: [i32; 4]) {
+        let _timed = timed();
         let Some(pm) = self.pixmap(size.0, size.1) else {
             return;
         };
@@ -446,6 +490,7 @@ impl Raster {
 /// The clip mask after clipping to `path` (HTML §4.12.5.1.10: the new
 /// clip is the old one intersected with the path), on a `size` bitmap.
 pub(crate) fn clip_to(size: (u32, u32), old: Option<&Mask>, path: &[PathCommand], even_odd: bool, t: &Transform2D) -> ClipMask {
+    let _timed = timed();
     let rule = if even_odd { FillRule::EvenOdd } else { FillRule::Winding };
     let ts = transform(t);
     let path = build_path(path);

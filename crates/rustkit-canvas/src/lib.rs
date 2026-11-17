@@ -29,7 +29,7 @@ use std::f32::consts::PI;
 use thiserror::Error;
 
 mod raster;
-pub use raster::CanvasBitmap;
+pub use raster::{raster_totals, CanvasBitmap, RasterTotals};
 
 /// The largest canvas bitmap, in pixels: Chrome 148 draws on a 16384 x 16384
 /// canvas and not on one pixel more (it reads back zeros).

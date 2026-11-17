@@ -56,13 +56,21 @@ fn the_frame_stage_line_names_every_field_once_in_order() {
 #[test]
 fn live_turns_of_an_animating_page_count_its_canvas_draws_and_renders() {
     let (mut engine, view, _server, rt) = load(PAGE);
+    // The frames the page has run (the load's settle ran some too).
+    let mut count = |engine: &mut Engine| -> u64 {
+        let shown = engine.execute_script(view, "String(n)").unwrap();
+        shown.trim_matches(|c: char| !c.is_ascii_digit()).parse().expect(&shown)
+    };
+    let ran_before = count(&mut engine);
     let before = frame_stage_totals();
     for _ in 0..5 {
         rt.block_on(engine.pump_live(view, 16));
     }
     let d = frame_stage_totals().since(&before);
-    assert!(d.canvas_draws >= 15, "clear, fill and stroke in each of 5 frames: {d:?}");
-    assert!(d.renders >= 5, "one render per frame that moved: {d:?}");
+    let frames = count(&mut engine) - ran_before;
+    assert!(frames >= 3, "{frames} frames in 5 turns");
+    assert_eq!(d.canvas_draws, 3 * frames, "clear, fill and stroke in each frame: {d:?}");
+    assert!(d.renders >= frames, "one render per frame that moved: {d:?}");
 }
 
 /// A relayout stage that runs inside a script turn (a forced layout) is

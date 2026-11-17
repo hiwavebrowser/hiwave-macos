@@ -432,7 +432,10 @@ impl Drop for StageTimer {
             Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
             Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
             Stage::Render => crate::wgate::HoldStage::Render,
-            Stage::Svg => return,
+            Stage::Svg => {
+                crate::wgate::add_svg_total(ms);
+                return;
+            }
         };
         crate::wgate::add(hold, ms);
     }
