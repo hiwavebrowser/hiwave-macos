@@ -154,11 +154,17 @@ fn the_animation_round_a_stopped_frame_tree_turn_still_runs_is_script_time() {
     let d = frame_stage_totals().since(&before);
     let spent: f64 = read(&mut engine, "f.contentWindow.spent").parse().unwrap();
     let rafs: f64 = read(&mut engine, "f.contentWindow.rafs").parse().unwrap();
+    let timers: f64 = read(&mut engine, "f.contentWindow.k").parse().unwrap();
     assert!(stopped > 0 && rafs > 0.0, "no turn stopped for its frame ({stopped}), or no frame ran ({rafs})");
+    // The page's clock ticks in tenths of a millisecond, so each span it
+    // measured may read up to one tick long; and 1% for the two clocks'
+    // reads not landing on the same instants. The red this pins was 22%
+    // short (422.5 of 540.2 ms), far outside both.
+    let tolerance = 0.1 * (timers + rafs) + 0.01 * spent;
     assert!(
-        d.script_ms >= spent,
+        d.script_ms >= spent - tolerance,
         "the turns' script time {:.1} ms is less than the page's callbacks measured themselves spending, {spent:.1} ms \
-         ({rafs} frames, {stopped} stopped turns): {d:?}",
+         less {tolerance:.1} ms ({rafs} frames, {timers} timers, {stopped} stopped turns): {d:?}",
         d.script_ms
     );
 }
