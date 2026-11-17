@@ -2422,6 +2422,15 @@ mod tests {
         assert!(capture_config(&parsed(&["--post-load-live"]), None).post_load_requests_live);
     }
 
+    /// FRAME-STAGES: the per-turn stage lines are asked for, and only with a live loop to turn.
+    #[test]
+    fn frame_stage_lines_are_printed_only_when_asked_and_only_for_a_live_loop() {
+        assert!(!parsed(&["--live-ms", "1000"]).frame_stages);
+        assert!(parsed(&["--live-ms", "1000", "--frame-stages"]).frame_stages);
+        let argv = ["parity-capture", "--url", "https://example.test/", "--frame-stages"];
+        assert!(Args::try_parse_from(argv).is_err(), "--frame-stages without --live-ms");
+    }
+
     /// The heights of every box in a `--dump-layout` file, rounded.
     fn layout_heights(layout: &str) -> Vec<i64> {
         fn walk(v: &serde_json::Value, out: &mut Vec<i64>) {
