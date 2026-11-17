@@ -1,0 +1,73 @@
+<!doctype html><html><head><meta charset="utf-8"><title>canvas image data probe</title>
+<style>#stage { position: relative; width: 800px; height: 500px; background: #000; overflow: hidden; }
+#stage canvas { position: absolute; transform: translateZ(0); }</style></head><body><div id="stage"></div>
+<script>
+// Our own probe for the shape "many small canvases, each read back, changed in script and written
+// again every frame, redrawn from an image when it has gone transparent". Records what a canvas holds
+// after an image is drawn into it (the part an engine must agree on), then what each step costs and
+// what a frame costs as the number of canvases grows (measurements, never pass criteria).
+var out = { holds: {}, cost_ms: {}, frames: [] };
+var W = 50, H = 50, stage = document.getElementById("stage");
+function load(src) { return new Promise(function (ok) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = function () { ok(null); }; i.src = src; }); }
+function canvas() { var c = document.createElement("canvas"); c.width = W; c.height = H; c.style.width = W + "px"; c.style.height = H + "px"; stage.appendChild(c); return c; }
+function shown(ctx) { var d = ctx.getImageData(0, 0, W, H).data, n = 0; for (var i = 3; i < d.length; i += 4) if (d[i] !== 0) n++; var m = (25 * W + 25) * 4; return { opaque: n, centre: [d[m], d[m + 1], d[m + 2], d[m + 3]].join(), corner: [d[0], d[1], d[2], d[3]].join(), inside: [d[(12 * W + 12) * 4], d[(12 * W + 12) * 4 + 1], d[(12 * W + 12) * 4 + 2], d[(12 * W + 12) * 4 + 3]].join() }; }
+var seed = 12345; function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+// One step of the shape: every shown pixel takes a near neighbour's colour (mostly its own).
+function step(ctx) {
+  var img = ctx.getImageData(0, 0, W, H), d = img.data, n = d.length, drew = false;
+  for (var j = 0; j < n; j += 4) {
+    if (d[j + 3] === 0) continue;
+    var a = rnd(), b = rnd(), k = (j + 4 * (a < 0.04 ? -1 : a >= 0.96 ? 1 : 0) + 4 * W * (b < 0.04 ? -1 : b >= 0.96 ? 1 : 0)) % n;
+    d[j] = d[k]; d[j + 1] = d[k + 1]; d[j + 2] = d[k + 2]; d[j + 3] = d[k + 3]; drew = true;
+  }
+  if (drew) ctx.putImageData(img, 0, 0);
+  return drew;
+}
+// Mean cost of f over up to n calls, stopping early after a quarter of a second.
+function time(n, f) { var t = performance.now(), i = 0, d = 0; while (i < n && d < 250) { f(i); i++; d = performance.now() - t; } return Math.round(d / i * 1000) / 1000; }
+// Short lines as it goes (a log may cut a long one); the whole record is the last line and window.__out.
+function note(what, part) { console.log("STAGE " + what + " " + JSON.stringify(part)); }
+function frames(n, each) { return new Promise(function (ok) { var t0 = 0, left = n, worst = 0, last = 0; requestAnimationFrame(function tick(ts) { if (!t0) { t0 = ts; last = ts; } else { if (ts - last > worst) worst = ts - last; last = ts; left--; } if (left <= 0) { ok({ mean_ms: Math.round((ts - t0) / n * 10) / 10, worst_ms: Math.round(worst) }); return; } each(); requestAnimationFrame(tick); }); }); }
+(async function () {
+  var svg = await load("image_data_shape.svg"), png = await load("image_data_shape.png");
+  out.holds.svg_natural = svg ? svg.naturalWidth + "x" + svg.naturalHeight : "error";
+  out.holds.png_natural = png ? png.naturalWidth + "x" + png.naturalHeight : "error";
+  var c = canvas(), ctx = c.getContext("2d");
+  out.holds.fresh = shown(ctx);
+  ctx.fillStyle = "#ff0000"; ctx.fillRect(10, 10, 30, 30); out.holds.after_fill = shown(ctx);
+  ctx.clearRect(0, 0, W, H); if (png) ctx.drawImage(png, 0, 0, W, H); out.holds.after_png = shown(ctx);
+  ctx.clearRect(0, 0, W, H); if (svg) ctx.drawImage(svg, 0, 0, W, H); out.holds.after_svg = shown(ctx);
+  var img = ctx.getImageData(0, 0, W, H); for (var i = 0; i < 40; i += 4) { img.data[i] = 1; img.data[i + 1] = 2; img.data[i + 2] = 3; img.data[i + 3] = 255; }
+  ctx.putImageData(img, 0, 0); out.holds.after_put = shown(ctx);
+  // How many steps one drawn image lasts before nothing is shown (the redraw interval of the shape).
+  ctx.clearRect(0, 0, W, H); if (svg) ctx.drawImage(svg, 0, 0, W, H);
+  note("holds", out.holds); out.cost_ms.whole_step_first = time(1, function () { step(ctx); }); note("first step", out.cost_ms);
+  var lasted = 1; while (lasted < 400 && step(ctx)) lasted++; out.holds.steps_until_blank = lasted;
+  note("lasted", out.holds.steps_until_blank);
+  // What each step costs.
+  var d = ctx.getImageData(0, 0, W, H);
+  out.cost_ms.getImageData = time(200, function () { ctx.getImageData(0, 0, W, H); });
+  out.cost_ms.putImageData = time(200, function () { ctx.putImageData(d, 0, 0); });
+  out.cost_ms.read_2500_alpha = time(200, function () { var x = d.data, n = 0; for (var j = 0; j < x.length; j += 4) if (x[j + 3] === 0) n++; });
+  if (png) out.cost_ms.drawImage_png = time(200, function () { ctx.drawImage(png, 0, 0, W, H); });
+  if (svg) out.cost_ms.drawImage_svg = time(200, function () { ctx.drawImage(svg, 0, 0, W, H); });
+  if (svg) { ctx.clearRect(0, 0, W, H); ctx.drawImage(svg, 0, 0, W, H); }
+  out.cost_ms.whole_step = time(50, function () { if (!step(ctx) && svg) ctx.drawImage(svg, 0, 0, W, H); });
+  out.cost_ms.getContext = time(200, function () { c.getContext("2d"); });
+  note("costs", out.cost_ms);
+  // What a frame costs as canvases are added: (a) each canvas stepped, (b) each canvas moved and redrawn.
+  var all = [c], counts = [1, 4, 16, 64];
+  for (var q = 0; q < counts.length; q++) {
+    while (all.length < counts[q]) { var e = canvas(); e.style.left = (all.length % 16) * W + "px"; e.style.top = Math.floor(all.length / 16) * H + "px"; all.push(e); }
+    all.forEach(function (e) { var x = e.getContext("2d"); x.clearRect(0, 0, W, H); if (svg) x.drawImage(svg, 0, 0, W, H); });
+    var a = await frames(40, function () { for (var i = 0; i < all.length; i++) { var x = all[i].getContext("2d"); if (!step(x) && svg) x.drawImage(svg, 0, 0, W, H); } });
+    var b = await frames(40, function () { for (var i = 0; i < all.length; i++) { var e = all[i]; e.style.top = Math.floor(rnd() * 9) * H + "px"; e.style.left = Math.floor(rnd() * 15) * W + "px"; if (svg) e.getContext("2d").drawImage(svg, 0, 0, W, H); } });
+    var m = await frames(40, function () { for (var i = 0; i < all.length; i++) { var e = all[i]; e.style.top = Math.floor(rnd() * 9) * H + "px"; e.style.left = Math.floor(rnd() * 15) * W + "px"; } });
+    var idle = await frames(40, function () {});
+    out.frames.push({ canvases: counts[q], stepped: a, moved_and_redrawn: b, moved_only: m, idle: idle });
+    note("frames", out.frames[out.frames.length - 1]);
+  }
+  window.__out = JSON.stringify(out);
+  console.log("PROBE " + window.__out);
+})();
+</script></body></html>

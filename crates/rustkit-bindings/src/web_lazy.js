@@ -49,7 +49,16 @@
             h.reportError = reporting.reportError;
             h.unsupported = reporting.unsupported;
         }
-        if (key === 'animations') h.animatedStyle = host.animatedStyle;
+        if (key === 'animations') {
+            h.animatedStyle = host.animatedStyle;
+            // The realm's page clock, as an eagerly installed script reads it: the timers' clock,
+            // the document timeline (TIMELINE1) and this document's origin on the tree's clock
+            // (TIMELINE2). Without them a frame's timeline was its last frame's stamp in every
+            // task, and its CSS animations' start times were off by its origin.
+            h.now = host.now;
+            h.timelineNow = host.timelineNow;
+            h.timeOrigin = host.timeOrigin;
+        }
         if (key === 'intl') h.likelySubtags = host.likelySubtags;
         if (key === 'canvas') {
             h.pixelsOut = host.pixelsOut;
