@@ -14405,6 +14405,8 @@ impl layout_ctx::LayoutCtx {
                     // Return an empty block for hidden elements
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
+                #[cfg(test)]
+                BUILT_ELEMENTS.with(|c| c.set(c.get() + 1));
 
                 // Rules of other trees that reach this element: its shadow
                 // tree's `:host` rules, its slot's `::slotted` rules.
@@ -48006,7 +48008,15 @@ pub(crate) fn last_restyle_miss_for_test() -> String {
 thread_local! {
     /// Element cascades run on this thread (`compute_style_for_element`), for tests.
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Elements the builds on this thread walked into (the element arm of the build), for tests.
+    static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Elements this thread's builds have walked into so far (tests).
+#[cfg(test)]
+pub(crate) fn built_elements_for_test() -> usize {
+    BUILT_ELEMENTS.with(std::cell::Cell::get)
 }
 
 /// Element cascades this thread has run so far (tests).
@@ -48024,12 +48034,16 @@ pub(crate) enum RetainedStyles {
     Off,
     On,
     Verify,
+    /// `On`, and the view keeps its last build's box tree too: a relayout builds the elements the
+    /// writes reached and splices them into it (TREE-REUSE, `INCREMENTAL_RESTYLE.md` PR 3).
+    Boxes,
 }
 
 fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
     match value {
         Some("on") | Some("1") => RetainedStyles::On,
         Some("verify") => RetainedStyles::Verify,
+        Some("boxes") => RetainedStyles::Boxes,
         _ => RetainedStyles::Off,
     }
 }

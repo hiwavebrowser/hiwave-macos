@@ -85,24 +85,33 @@ const DUMP: &str = "(function () { var out = []; var all = document.querySelecto
     out.push([all[i].tagName, all[i].id, s.display, s.color, s.fontSize, s.left, s.marginTop, \
     s.backgroundColor, s.width].join('|')); } return out.join('\\n'); })()";
 
-/// The display list after each of `frames` frames with retained styles `mode`, the element
-/// cascades the frames ran, and every element's computed style at the end. The page writes in its
-/// first `frames - 2` frames only (`window.STOP`), so the last frame's relayout takes the last
-/// writes and script reads the styles of a clean document: a read between frames would force a
-/// build of its own, which retained styles do not serve.
-fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, usize, String) {
+/// What one run of a page shows: the display list after each frame, every element's computed
+/// style at the end, and the element cascades and element builds the frames ran.
+struct Run {
+    lists: Vec<String>,
+    styles: String,
+    cascades: usize,
+    built: usize,
+}
+
+/// [`Run`] of `frames` frames with retained styles `mode`. The page writes in its first
+/// `frames - 2` frames only (`window.STOP`), so the last frame's relayout takes the last writes and
+/// script reads the styles of a clean document: a read between frames would force a build of its
+/// own, which retained styles do not serve.
+fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
-    let (mut lists, mut cascades) = (Vec::new(), 0);
+    let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
     for i in 0..frames {
         if i == frames - 2 {
             engine
                 .execute_script(view, "window.STOP = true")
                 .expect("stop");
         }
-        let before = cascades_for_test();
+        let (c, b) = (cascades_for_test(), built_elements_for_test());
         frame(&mut engine, view);
-        cascades += cascades_for_test() - before;
+        cascades += cascades_for_test() - c;
+        built += built_elements_for_test() - b;
         lists.push(format!(
             "{:?}",
             engine.views[&view]
@@ -120,28 +129,68 @@ fn run(page: &str, frames: usize, mode: RetainedStyles) -> (Vec<String>, usize, 
         "the read of a clean document built nothing"
     );
     set_retained_styles_for_test(None);
-    (lists, cascades, styles)
+    Run {
+        lists,
+        styles,
+        cascades,
+        built,
+    }
 }
 
 fn assert_same_as_a_full_cascade(name: &str, page: &str) {
-    let (on_lists, on, on_styles) = run(page, 8, RetainedStyles::On);
-    let (off_lists, off, off_styles) = run(page, 8, RetainedStyles::Off);
-    // Not vacuous: the retained run replayed styles.
+    let full = run(page, 8, RetainedStyles::Off);
+    let styles = run(page, 8, RetainedStyles::On);
+    let boxes = run(page, 8, RetainedStyles::Boxes);
+    // Not vacuous: the retained runs replayed styles, and kept boxes built fewer elements.
     assert!(
-        on < off,
-        "{name}: retained styles ran {on} cascades, a full cascade {off}"
+        styles.cascades < full.cascades,
+        "{name}: retained styles ran {} cascades, a full cascade {}",
+        styles.cascades,
+        full.cascades
     );
-    for i in 0..on_lists.len() {
+    assert!(
+        boxes.built < styles.built,
+        "{name}: kept boxes built {} elements, a full build {}",
+        boxes.built,
+        styles.built
+    );
+    for (arm, got) in [("retained styles", &styles), ("kept boxes", &boxes)] {
+        for i in 0..full.lists.len() {
+            assert!(
+                got.lists[i] == full.lists[i],
+                "{name}, {arm}, frame {i}: the display list differs from a full build's"
+            );
+        }
         assert!(
-            on_lists[i] == off_lists[i],
-            "{name}, frame {i}: the display list differs from a full cascade's"
+            got.styles == full.styles,
+            "{name}, {arm}: computed styles differ from a full build's
+  {arm}: {}
+  full: {}",
+            got.styles,
+            full.styles
         );
     }
+}
+
+/// PR 3's red test: with the box tree kept too, the same tune frame builds the written tiles (and
+/// the path down to them), not the stage's 1,000 tiles.
+#[test]
+fn a_tune_frame_with_kept_boxes_builds_the_written_tiles_alone() {
+    set_retained_styles_for_test(Some(RetainedStyles::Boxes));
+    let (mut engine, view, _server) = load(&tiles(1_000, 10, TUNE));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    let mut per_frame = Vec::new();
+    for _ in 0..5 {
+        let before = built_elements_for_test();
+        frame(&mut engine, view);
+        per_frame.push(built_elements_for_test() - before);
+    }
+    set_retained_styles_for_test(None);
     assert!(
-        on_styles == off_styles,
-        "{name}: computed styles differ from a full cascade's
-  retained: {on_styles}
-  full:     {off_styles}"
+        per_frame.iter().all(|&b| b > 0 && b <= 20),
+        "elements built per frame (3 tiles written of 1,000): {per_frame:?}"
     );
 }
 
@@ -264,7 +313,11 @@ fn a_hidden_elements_style_answers_after_its_write() {
 #[ignore]
 fn measure_a_tune_frames_build_with_and_without_retained_styles() {
     for &n in &[1_000usize, 4_000, 8_000] {
-        for mode in [RetainedStyles::Off, RetainedStyles::On] {
+        for mode in [
+            RetainedStyles::Off,
+            RetainedStyles::On,
+            RetainedStyles::Boxes,
+        ] {
             set_retained_styles_for_test(Some(mode));
             let (mut engine, view, _server) = load(&tiles(n, 10, TUNE));
             for _ in 0..3 {
