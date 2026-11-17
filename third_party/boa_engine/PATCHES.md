@@ -1187,7 +1187,7 @@ before, 2 / 6 / 12 ms after; `split` 116 / 471 / 1871 ms before, 1 / 1 / 3 ms af
 that does, keeps them all, so the eval can find them by name at run time. For a class element the
 answer was always no: method bodies were skipped, a field was asked only about its name, and a
 static block not at all. So `{ let x = 1; class C { m() { return eval('x'); } } }` left `x` in a
-register, and the eval's lookup went to an environment that was not there. It now answers as a
+register, where the eval could not find it by name. It now answers as a
 nested function does: a method by its `contains_direct_eval`, and a field, private field or static
 field initializer and a static block by what they contain. Every other symbol keeps the spec's
 ComputedPropertyContains rule (only a computed name is looked at).
