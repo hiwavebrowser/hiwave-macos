@@ -5,11 +5,18 @@
 //!
 //! Paths keep their curves here (the recording flattens them): arcs and
 //! ellipses become cubic Béziers of at most a quarter turn each.
+//!
+//! GPU canvas A0 (docs/design/GPU_CANVAS_2D.md): a draw is not rasterized
+//! at the call. It is recorded as an [`Op`] holding everything the raster
+//! takes, and the pending ops are replayed into the bitmap, oldest first and
+//! through the same calls, when something reads it ([`Recorded::flush`]), or
+//! when they pass [`crate::PENDING_BYTE_BUDGET`]. A clip is recorded as its
+//! path ([`Clip`]); its mask is built when a replay first needs it.
 
 use crate::{CanvasStyle, CompositeOperation, LineCap, LineJoin, PathCommand, PatternRepetition, Transform2D};
 use rustkit_css::Color;
 use std::f32::consts::{PI, TAU};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, GradientStop, Mask, Paint, PathBuilder, PathStroker, Pixmap, Point, Rect,
     Shader, SpreadMode, Stroke, StrokeDash, Transform,
@@ -49,9 +56,95 @@ impl CanvasBitmap {
     }
 }
 
-/// The clip a draw is cut to: the context's clip mask, if any (shared by
-/// the saved states that hold it).
-pub(crate) type ClipMask = Option<Arc<Mask>>;
+/// The clip a draw is cut to: the context's clip, if any (shared by the
+/// saved states and the recorded ops that hold it).
+pub(crate) type ClipMask = Option<Arc<Clip>>;
+
+/// The most clips a chain holds with no mask built: past it the newest
+/// clip's mask is built at the `clip()` call, which lets go of the chain
+/// before it (a page clipping forever without a restore stays bounded).
+const CLIP_CHAIN_MAX: usize = 32;
+
+/// One `clip()`: the path, its rule and transform, cut from the clip in
+/// force before it (`parent`) on a `size` bitmap (HTML §4.12.5.1.10: the new
+/// clip is the old one intersected with the path). Its coverage mask is
+/// built on first use, by the same tiny-skia calls the clip used to make at
+/// the call, so the pixels are the same.
+#[derive(Debug)]
+pub(crate) struct Clip {
+    /// The clip before this one, until this one's mask is built.
+    parent: Mutex<ClipMask>,
+    /// Clips in the chain up to this one with no mask built (this one included).
+    unbuilt: usize,
+    size: (u32, u32),
+    path: Vec<PathCommand>,
+    even_odd: bool,
+    t: Transform2D,
+    /// `None` inside: no mask (the bitmap has no area), so nothing clips.
+    mask: OnceLock<Option<Mask>>,
+}
+
+impl Clip {
+    /// The coverage mask, built (with every unbuilt clip before it, oldest
+    /// first, without recursion) on first use.
+    pub(crate) fn mask(&self) -> Option<&Mask> {
+        if self.mask.get().is_none() {
+            // The unbuilt ancestors, newest first; built oldest first, each
+            // let go of as soon as its child has its mask (a child's build
+            // drops its parent), so at most two masks of the chain are alive.
+            let mut chain: Vec<Arc<Clip>> = Vec::new();
+            let mut next = self.parent.lock().ok().and_then(|p| p.clone());
+            while let Some(c) = next {
+                if c.mask.get().is_some() {
+                    break;
+                }
+                next = c.parent.lock().ok().and_then(|p| p.clone());
+                chain.push(c);
+            }
+            while let Some(c) = chain.pop() {
+                c.build();
+            }
+            self.build();
+        }
+        self.mask.get().and_then(|m| m.as_ref())
+    }
+
+    /// Builds the mask from the parent's (already built, or none) and drops
+    /// the parent.
+    fn build(&self) {
+        let parent = self.parent.lock().ok().and_then(|mut p| p.take());
+        self.mask.get_or_init(|| {
+            let rule = if self.even_odd { FillRule::EvenOdd } else { FillRule::Winding };
+            let ts = transform(&self.t);
+            let path = build_path(&self.path);
+            let old = match &parent {
+                // A parent with no mask (no area): as if there were no clip.
+                Some(p) => p.mask.get().and_then(|m| m.as_ref()),
+                None => None,
+            };
+            let mut m = match old {
+                Some(m) => m.clone(),
+                None => {
+                    let mut m = Mask::new(self.size.0, self.size.1)?;
+                    if let Some(p) = &path {
+                        m.fill_path(p, rule, true, ts);
+                    }
+                    return Some(m);
+                }
+            };
+            match &path {
+                Some(p) => m.intersect_path(p, rule, true, ts),
+                None => m.clear(),
+            }
+            Some(m)
+        });
+    }
+}
+
+/// The mask of `clip`, built if it was not.
+pub(crate) fn clip_mask(clip: &ClipMask) -> Option<&Mask> {
+    clip.as_deref().and_then(Clip::mask)
+}
 
 /// What every draw takes from the context besides its geometry.
 pub(crate) struct Ctx<'a> {
@@ -211,6 +304,27 @@ fn band_clip(size: (u32, u32), clip: Option<&Mask>, band: Rect, t: Transform) ->
 }
 
 impl Raster {
+    /// Replays one recorded op.
+    pub(crate) fn apply(&mut self, op: &Op) {
+        match op {
+            Op::Fill { d, path, even_odd, style } => self.fill(&d.ctx(), path, *even_odd, style, &d.t),
+            Op::Stroke { d, path, line, style } => {
+                let line = StrokeStyle {
+                    width: line.width,
+                    cap: line.cap,
+                    join: line.join,
+                    miter_limit: line.miter_limit,
+                    dash: &line.dash,
+                    dash_offset: line.dash_offset,
+                };
+                self.stroke(&d.ctx(), path, &line, style, &d.t)
+            }
+            Op::Clear { clip, rect, t } => self.clear(clip_mask(clip), rect[0], rect[1], rect[2], rect[3], t),
+            Op::Image { d, image, src, dst } => self.draw_image(&d.ctx(), image, *src, *dst, &d.t),
+            Op::Put { size, rgba, width, dx, dy, dirty } => self.put(*size, rgba, *width, *dx, *dy, *dirty),
+        }
+    }
+
     /// Drops the pixels (a resize, a context reset).
     pub(crate) fn reset(&mut self) {
         self.pixmap = None;
@@ -443,27 +557,194 @@ impl Raster {
     }
 }
 
-/// The clip mask after clipping to `path` (HTML §4.12.5.1.10: the new
-/// clip is the old one intersected with the path), on a `size` bitmap.
-pub(crate) fn clip_to(size: (u32, u32), old: Option<&Mask>, path: &[PathCommand], even_odd: bool, t: &Transform2D) -> ClipMask {
-    let rule = if even_odd { FillRule::EvenOdd } else { FillRule::Winding };
-    let ts = transform(t);
-    let path = build_path(path);
-    let mut m = match old {
-        Some(m) => m.clone(),
-        None => {
-            let mut m = Mask::new(size.0, size.1)?;
-            if let Some(p) = &path {
-                m.fill_path(p, rule, true, ts);
-            }
-            return Some(Arc::new(m));
-        }
-    };
-    match &path {
-        Some(p) => m.intersect_path(p, rule, true, ts),
-        None => m.clear(),
+/// The clip after clipping to `path` (HTML §4.12.5.1.10: the new clip is
+/// the old one intersected with the path), on a `size` bitmap. Recorded:
+/// the mask is built when first used (see [`Clip`]).
+pub(crate) fn clip_to(size: (u32, u32), old: &ClipMask, path: &[PathCommand], even_odd: bool, t: &Transform2D) -> ClipMask {
+    let unbuilt = 1 + old.as_ref().map_or(0, |c| if c.mask.get().is_some() { 0 } else { c.unbuilt });
+    let clip = Arc::new(Clip {
+        parent: Mutex::new(old.clone()),
+        unbuilt,
+        size,
+        path: path.to_vec(),
+        even_odd,
+        t: *t,
+        mask: OnceLock::new(),
+    });
+    if unbuilt > CLIP_CHAIN_MAX {
+        clip.mask();
     }
-    Some(Arc::new(m))
+    Some(clip)
+}
+
+/// A draw's context at the call: what [`Ctx`] borrows, owned.
+#[derive(Debug)]
+pub(crate) struct DrawCtx {
+    pub size: (u32, u32),
+    pub op: CompositeOperation,
+    pub clip: ClipMask,
+    pub alpha: f32,
+    pub t: Transform2D,
+}
+
+impl DrawCtx {
+    fn ctx(&self) -> Ctx<'_> {
+        Ctx { size: self.size, op: self.op, clip: clip_mask(&self.clip), alpha: self.alpha }
+    }
+}
+
+/// [`StrokeStyle`], owned.
+#[derive(Debug)]
+pub(crate) struct Line {
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    pub miter_limit: f32,
+    pub dash: Vec<f32>,
+    pub dash_offset: f32,
+}
+
+/// One recorded raster operation: everything the raster takes for it,
+/// resolved at the call.
+#[derive(Debug)]
+pub(crate) enum Op {
+    Fill { d: DrawCtx, path: Vec<PathCommand>, even_odd: bool, style: CanvasStyle },
+    Stroke { d: DrawCtx, path: Vec<PathCommand>, line: Line, style: CanvasStyle },
+    Clear { clip: ClipMask, rect: [f32; 4], t: Transform2D },
+    /// drawImage: the source bitmap as it was at the call.
+    Image { d: DrawCtx, image: CanvasBitmap, src: [f32; 4], dst: [f32; 4] },
+    /// putImageData: the unpremultiplied rows of `width` it writes at
+    /// `dx, dy` (the part of the image it writes, already cut), `dirty`
+    /// in them.
+    Put { size: (u32, u32), rgba: Vec<u8>, width: u32, dx: i32, dy: i32, dirty: [i32; 4] },
+}
+
+impl Op {
+    /// The clip the op draws under.
+    fn clip(&self) -> Option<&Arc<Clip>> {
+        match self {
+            Op::Fill { d, .. } | Op::Stroke { d, .. } | Op::Image { d, .. } => d.clip.as_ref(),
+            Op::Clear { clip, .. } => clip.as_ref(),
+            Op::Put { .. } => None,
+        }
+    }
+
+    /// The heap the op holds, estimated: the op itself and what it owns
+    /// (a pattern's shared bitmap is not counted; a clip's mask is counted
+    /// by [`Recorded::push`], once per clip).
+    pub(crate) fn bytes(&self) -> usize {
+        fn style(s: &CanvasStyle) -> usize {
+            match s {
+                CanvasStyle::LinearGradient(g) => g.stops.len() * std::mem::size_of::<crate::ColorStop>(),
+                CanvasStyle::RadialGradient(g) => g.stops.len() * std::mem::size_of::<crate::ColorStop>(),
+                _ => 0,
+            }
+        }
+        let path = |p: &[PathCommand]| p.len() * std::mem::size_of::<PathCommand>();
+        std::mem::size_of::<Op>()
+            + match self {
+                Op::Fill { path: p, style: s, .. } => path(p) + style(s),
+                Op::Stroke { path: p, line, style: s, .. } => path(p) + style(s) + line.dash.len() * 4,
+                Op::Clear { .. } => 0,
+                Op::Image { image, .. } => image.0.data().len(),
+                Op::Put { rgba, .. } => rgba.len(),
+            }
+    }
+}
+
+/// A put's bytes cut to what it writes (`put_span`), as the rows of a
+/// smaller image put at the same place: the same pixels written.
+pub(crate) fn put_op(size: (u32, u32), rgba: &[u8], width: u32, dx: i32, dy: i32, dirty: [i32; 4]) -> Op {
+    let height = if width == 0 { 0 } else { (rgba.len() / 4 / width as usize).min(u32::MAX as usize) as u32 };
+    let none = Op::Put { size, rgba: Vec::new(), width: 0, dx: 0, dy: 0, dirty: [0, 0, 0, 0] };
+    if !crate::bitmap_fits(size.0, size.1) {
+        return none;
+    }
+    let Some((rows, cols)) = put_span((width, height), size, dx, dy, dirty) else {
+        return none;
+    };
+    let cw = (cols.end - cols.start) as usize;
+    let mut out = Vec::with_capacity(cw * (rows.end - rows.start) as usize * 4);
+    for row in rows.clone() {
+        let i = ((row * width as i64 + cols.start) * 4) as usize;
+        out.extend_from_slice(&rgba[i..i + cw * 4]);
+    }
+    let (ch, cw) = ((rows.end - rows.start) as i32, cw as i32);
+    Op::Put {
+        size,
+        rgba: out,
+        width: cw as u32,
+        dx: (dx as i64 + cols.start) as i32,
+        dy: (dy as i64 + rows.start) as i32,
+        dirty: [0, 0, cw, ch],
+    }
+}
+
+/// The bitmap and the draws recorded since it was last brought up to date.
+#[derive(Debug, Default)]
+pub(crate) struct Recorded {
+    raster: Raster,
+    ops: Vec<Op>,
+    bytes: usize,
+    /// The clip of the last op pushed: each other clip a pending op holds
+    /// counts its mask's bytes (one per pixel), which the replay builds.
+    last_clip: Option<Arc<Clip>>,
+    /// Tests: rasterize at the call, as before the recording.
+    immediate: bool,
+}
+
+impl Recorded {
+    pub(crate) fn push(&mut self, op: Op) {
+        if self.immediate {
+            self.raster.apply(&op);
+            return;
+        }
+        self.bytes += op.bytes();
+        if let Some(c) = op.clip() {
+            if !self.last_clip.as_ref().is_some_and(|l| Arc::ptr_eq(l, c)) {
+                self.bytes += c.size.0 as usize * c.size.1 as usize;
+                self.last_clip = Some(c.clone());
+            }
+        }
+        self.ops.push(op);
+        if self.bytes > crate::PENDING_BYTE_BUDGET {
+            self.flush();
+        }
+    }
+
+    /// The bitmap with every pending op replayed into it.
+    pub(crate) fn flush(&mut self) -> &mut Raster {
+        for op in self.ops.drain(..) {
+            self.raster.apply(&op);
+        }
+        self.bytes = 0;
+        self.last_clip = None;
+        &mut self.raster
+    }
+
+    /// The pixels dropped (a resize, a context reset): nothing pending is
+    /// left to replay.
+    pub(crate) fn reset(&mut self) {
+        self.ops.clear();
+        self.bytes = 0;
+        self.last_clip = None;
+        self.raster.reset();
+    }
+
+    pub(crate) fn pending_ops(&self) -> usize {
+        self.ops.len()
+    }
+
+    pub(crate) fn pending_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub(crate) fn set_immediate(&mut self, on: bool) {
+        if on {
+            self.flush();
+        }
+        self.immediate = on;
+    }
 }
 
 /// Skia's unpremultiply (SkUnPreMultiply): `c * 255 / a`, rounded.
