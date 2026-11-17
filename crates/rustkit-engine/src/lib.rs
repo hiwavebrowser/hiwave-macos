@@ -630,6 +630,14 @@ mod display_inherit_apply_tests;
 #[cfg(test)]
 mod border_medium_apply_tests;
 #[cfg(test)]
+mod script_restyle_cooldown_tests;
+#[cfg(test)]
+mod keeps_what_it_establishes_tests;
+#[cfg(test)]
+mod forced_read_prop_log_tests;
+#[cfg(test)]
+mod script_time_dup_unit_tests;
+#[cfg(test)]
 mod appearance_apply_tests;
 #[cfg(test)]
 mod pointer_reads_has_tests;
@@ -11924,11 +11932,7 @@ impl Engine {
             // writes keep changing layout pays neither an attempt nor a kept copy every frame. A
             // miss is in a row when no hit (and no idle stretch or navigation) came since the last
             // one; relayouts the path refused between them do not end the run (R1).
-            let cooldown = view
-                .lay
-                .script_last_cooldown
-                .get()
-                .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
+            let cooldown = script_restyle_cooldown_after_miss(view.lay.script_last_cooldown.get());
             view.lay.script_last_cooldown.set(Some(cooldown));
             view.lay.script_cooldown.set(cooldown);
             view.lay.want_script_unlaid.set(cooldown == 0);
@@ -47809,11 +47813,7 @@ fn forced_read_probe(
             .flatten()
             // Keyframe keys are the page's: only names of the engine's own
             // animation property table are logged; any other is `other`.
-            .map(|(prop, _, _)| match prop {
-                p if p.starts_with("--") => "--custom".to_string(),
-                p if !animations::prop_indices(p).is_empty() => p.to_ascii_lowercase(),
-                _ => "other".to_string(),
-            })
+            .map(|(prop, _, _)| animated_prop_for_log(prop))
             .collect();
         props.sort();
         props.dedup();
@@ -47948,6 +47948,22 @@ const SCRIPT_RESTYLE_IDLE: u32 = 8;
 /// LPF1: past this many written elements a relayout takes the full build (the path walks every
 /// written element's ancestors).
 const SCRIPT_RESTYLE_MAX_WRITTEN: usize = 256;
+
+/// LPF3: the cooldown a miss sits out after the last one in its run (`None` = one-off, sits out
+/// nothing). Misses in a row double: 0 → 1 → 2 → 4 … up to [`SCRIPT_RESTYLE_COOLDOWN`].
+pub(crate) fn script_restyle_cooldown_after_miss(last: Option<u32>) -> u32 {
+    last.map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN))
+}
+
+/// FORCED-READ / LAT22: keyframe keys are the page's. Only names of the engine's animation
+/// property table are logged; custom properties as `--custom`, anything else as `other`.
+pub(crate) fn animated_prop_for_log(prop: &str) -> String {
+    match prop {
+        p if p.starts_with("--") => "--custom".to_string(),
+        p if !animations::prop_indices(p).is_empty() => p.to_ascii_lowercase(),
+        _ => "other".to_string(),
+    }
+}
 
 /// LPF1's trust check, the one every script short path calls: the written elements to build alone,
 /// or why the relayout is not one for the short path. Every cause is a script one; the dirty set,
@@ -48297,7 +48313,7 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 /// paint: the box keeps its stacking context and its containing block for fixed and absolute
 /// descendants (Chrome, `transform_paint_probe_cft148.json`), and layout reads neither (the painter
 /// does, from the style). One that comes or goes is not: it falls to [`restyle_needs_layout`].
-fn keeps_what_it_establishes(kept: &ComputedStyle, fresh: &ComputedStyle) -> bool {
+pub(crate) fn keeps_what_it_establishes(kept: &ComputedStyle, fresh: &ComputedStyle) -> bool {
     kept.transform.ops.is_empty() == fresh.transform.ops.is_empty() && (kept.opacity < 1.0) == (fresh.opacity < 1.0)
 }
 
