@@ -84,7 +84,10 @@ fn script_relayouts(host: Host, framed: bool) -> Vec<String> {
 }
 
 fn assert_stages_booked(lines: &[String], what: &str) {
-    assert!(lines.len() >= 5, "{what}: too few script relayouts: {lines:#?}");
+    // At least one: the page's 30 writes all ran (checked by `__done` above), but how many relayouts
+    // they fold into depends on how long each relayout takes, so a count above one would test the
+    // machine's speed, not the stage booking.
+    assert!(!lines.is_empty(), "{what}: no script relayout: {lines:#?}");
     let full: Vec<&String> = lines.iter().filter(|l| l.contains("layout_skipped=false") && !l.contains("script_restyle=hit")).collect();
     assert!(!full.is_empty(), "{what}: no relayout that laid out: {lines:#?}");
     for line in &full {
