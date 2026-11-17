@@ -1321,6 +1321,12 @@ impl EndpointSide {
                         if leave > now {
                             tail_estimate.observe(leave, woke);
                         }
+                        // A command that came while the runtime waited (or in its yield) is taken
+                        // before the tail, not after it (R1).
+                        if let Ok(cmd) = self.rx.try_recv() {
+                            self.deferred.push_back(cmd);
+                            continue;
+                        }
                         if tracing {
                             traced_due = Some((due, woke, true));
                         }
@@ -1569,21 +1575,28 @@ pub fn runtime_wait_until(
 pub fn exact_wait(
     next_timer_ms: Option<u64>,
     exact_us: Option<u64>,
-    _visible: bool,
+    visible: bool,
 ) -> Option<std::time::Duration> {
+    // A background view's timers are not worth a blocking tail and a spin: they wait whole
+    // milliseconds on the runtime, as before LINKS-SLOW part 2.
     exact_us
+        .filter(|_| visible)
         .filter(|us| next_timer_ms == Some(us.div_ceil(1000)))
         .map(|us| std::time::Duration::from_micros(us.min(50_000)))
 }
 
 /// LINKS-SLOW part 2: the content loop's wait on the runtime from `now` until `leave`, ended early
-/// by a command (`wake`). `false` when a command ended it.
+/// by a command (`wake`). `false` when a command ended it. A wait with nothing left on the runtime
+/// (an exact wait shorter than its tail) still yields once: the runtime's tasks, timers and
+/// sockets get their turn before the thread blocks in the tail (R1: a 1 ms interval otherwise
+/// never parked).
 pub async fn runtime_wait(
     now: std::time::Instant,
     leave: std::time::Instant,
     wake: Option<&tokio::sync::Notify>,
 ) -> bool {
     if leave <= now {
+        tokio::task::yield_now().await;
         return true;
     }
     match wake {
@@ -1598,6 +1611,12 @@ pub async fn runtime_wait(
 }
 
 /// LINKS-SLOW part 2 R1: how long before a timer's due instant an exact wait leaves the runtime.
+/// The tail has to cover how late the runtime's timer wakes (it keeps whole milliseconds), or the
+/// timer runs that late; past the wake the thread is blocked until the due instant, so the tail is
+/// no longer than this machine needs. It tracks a high quantile of the runtime wake's lateness (a
+/// sample above pulls it halfway up at once, one below a thirty-second of the way down), plus the
+/// thread sleep's overshoot and a margin, and is at most [`PRECISE_TAIL`]. It starts there.
+/// Windows with 1 ms timers: the runtime woke 0.7-2.0 ms late (mean 1.4), so the tail stays 2 ms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TailEstimate {
     ms: f64,
@@ -1610,13 +1629,22 @@ impl Default for TailEstimate {
 }
 
 impl TailEstimate {
+    /// Added to the two estimates: what they miss.
+    pub const MARGIN_MS: f64 = 0.1;
+
     /// The tail for the next exact wait.
-    pub fn tail(&self, _overshoot: &OvershootEstimate) -> std::time::Duration {
-        PRECISE_TAIL
+    pub fn tail(&self, overshoot: &OvershootEstimate) -> std::time::Duration {
+        let ms = (self.ms + overshoot.ms + Self::MARGIN_MS).min(PRECISE_TAIL.as_secs_f64() * 1000.0);
+        std::time::Duration::from_secs_f64(ms / 1000.0)
     }
 
     /// A runtime wait asked to end at `leave` ended at `woke`.
-    pub fn observe(&mut self, _leave: std::time::Instant, _woke: std::time::Instant) {}
+    pub fn observe(&mut self, leave: std::time::Instant, woke: std::time::Instant) {
+        let cap = PRECISE_TAIL.as_secs_f64() * 1000.0;
+        let sample = (woke.saturating_duration_since(leave).as_secs_f64() * 1000.0).min(2.0 * cap);
+        let step = if sample > self.ms { 0.5 } else { 1.0 / 32.0 };
+        self.ms = (self.ms + (sample - self.ms) * step).clamp(0.0, cap);
+    }
 }
 
 /// LINKS-SLOW part 2 R1: the most of an exact wait's tail spent spinning.
@@ -1644,31 +1672,32 @@ impl TailClock for ThreadTail {
     }
 }
 
-/// LINKS-SLOW part 2: the end of an exact wait, after the runtime: a thread sleep aimed early by
-/// `overshoot`, then a spin to `due`. Returns only at or after `due` (never early), and how long it
-/// spun.
+/// LINKS-SLOW part 2: the end of an exact wait, after the runtime: thread sleeps aimed early by
+/// `overshoot`, then a spin of at most [`SPIN_CAP`] to `due`. Returns only at or after `due` (never
+/// early), and how long it spun. With more than the cap left and the estimate past it (a few long
+/// sleeps), it sleeps to the cap's distance first rather than spinning the rest (R1).
 pub fn finish_exact_wait(
     due: std::time::Instant,
     overshoot: &mut OvershootEstimate,
     clock: &mut impl TailClock,
 ) -> std::time::Duration {
-    let from = clock.now();
-    let aimed = overshoot.aim(due).max(from);
-    // Only a real sleep says how late sleeps end: one aimed at or before now returns at once and
-    // would read as no overshoot (LINKS-SLOW R1).
-    if aimed > from {
-        clock.sleep(aimed - from);
-        let woke = clock.now();
-        overshoot.observe(aimed, woke);
-    }
     let mut spin_from = None;
     loop {
         let now = clock.now();
-        if after_wake(due, now).is_none() {
+        let Some(due) = after_wake(due, now) else {
             return spin_from.map_or(std::time::Duration::ZERO, |f| now.saturating_duration_since(f));
+        };
+        if due - now <= SPIN_CAP {
+            spin_from.get_or_insert(now);
+            clock.spin();
+            continue;
         }
-        spin_from.get_or_insert(now);
-        clock.spin();
+        let aimed = overshoot.aim(due);
+        let aimed = if aimed > now { aimed } else { due - SPIN_CAP };
+        // Only a real sleep says how late sleeps end (LINKS-SLOW R1): this one is aimed past now.
+        clock.sleep(aimed - now);
+        let woke = clock.now();
+        overshoot.observe(aimed, woke);
     }
 }
 
