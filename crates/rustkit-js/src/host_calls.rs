@@ -62,6 +62,12 @@ struct Table {
     open: Vec<f64>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many operation keys this thread computed (a test's count).
+    static OP_KEYS: Cell<u64> = const { Cell::new(0) };
+}
+
 thread_local! {
     static TIMING: Cell<bool> = const { Cell::new(false) };
     static TOTALS: Cell<HostCallTotals> = const { Cell::new(HostCallTotals { calls: 0, ms: 0.0 }) };
@@ -140,6 +146,8 @@ pub fn host_call_rows_since(before: &[HostCallRow]) -> Vec<HostCallRow> {
 /// The operation key of a dispatcher's argument: up to the first `:`, an
 /// identifier of at most 32 characters, else `?`.
 pub(crate) fn op_key(op: Option<&str>) -> &str {
+    #[cfg(test)]
+    OP_KEYS.with(|n| n.set(n.get() + 1));
     let Some(op) = op else { return "" };
     let op = op.split(':').next().unwrap_or("");
     let ident = !op.is_empty() && op.len() <= 32 && op.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
@@ -266,11 +274,12 @@ mod tests {
         runtime.register_host_function("__hc_plain", 0, Box::new(|_| JsValue::Number(1.0))).unwrap();
         let script = "for (var i = 0; i < 3; i++) __hc_op('arc', i); __hc_op('fill'); __hc_op('two words'); \
                       __hc_op(7); __hc_plain(); __hc_plain();";
-        // Off (the default): nothing kept.
-        let (rows, totals) = (host_call_rows(), host_call_totals());
+        // Off (the default): nothing kept, and no operation key computed.
+        let (rows, totals, keys) = (host_call_rows(), host_call_totals(), OP_KEYS.with(|n| n.get()));
         runtime.evaluate_script(script).unwrap();
         assert_eq!(host_call_totals(), totals);
         assert!(host_call_rows_since(&rows).is_empty());
+        assert_eq!(OP_KEYS.with(|n| n.get()), keys, "an operation key was computed with timing off");
         set_host_call_timing(true);
         let (rows, totals) = (host_call_rows(), host_call_totals());
         runtime.evaluate_script(script).unwrap();
