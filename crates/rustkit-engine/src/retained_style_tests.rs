@@ -41,6 +41,10 @@ fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt().block_on(engine.load_url(view, url)).expect("load_url");
+    // The page's writes start now (`page`): the load runs as many frames as its time allows.
+    engine
+        .execute_script(view, "window.WRITES = true")
+        .expect("start the writes");
     (engine, view, server)
 }
 
@@ -49,11 +53,13 @@ fn frame(engine: &mut Engine, view: EngineViewId) {
 }
 
 /// `body` with an animation-frame loop that runs `write` (with `n` the frame number) each frame
-/// until `window.STOP`. The load itself runs a few hundred frames, so `n` starts large.
+/// from the first frame after the load (`load` sets `window.WRITES`) until `window.STOP`. The load
+/// runs as many frames as its time allows, so a loop that counted them would start each run at
+/// another point of its writes.
 fn page(style: &str, body: &str, write: &str) -> String {
     format!(
         "<!doctype html><style>body{{margin:0;font:14px sans-serif}}{style}</style>{body}\
-         <script>var n = 0; requestAnimationFrame(function f() {{ n++; if (!window.STOP) {{ {write} }} requestAnimationFrame(f); }});</script>"
+         <script>var n = 0; requestAnimationFrame(function f() {{ if (window.WRITES) {{ n++; if (!window.STOP) {{ {write} }} }} requestAnimationFrame(f); }});</script>"
     )
 }
 
