@@ -629,9 +629,18 @@ impl Op {
         }
     }
 
+    /// The pattern bitmap the op fills or strokes with, if any.
+    fn pattern(&self) -> Option<&Arc<CanvasBitmap>> {
+        match self {
+            Op::Fill { style: CanvasStyle::Pattern(p), .. } | Op::Stroke { style: CanvasStyle::Pattern(p), .. } => Some(&p.bitmap),
+            _ => None,
+        }
+    }
+
     /// The heap the op holds, estimated: the op itself and what it owns
-    /// (a pattern's shared bitmap is not counted; a clip's mask is counted
-    /// by [`Recorded::push`], once per clip).
+    /// alone. What it shares (a pattern's bitmap, a clip's path and mask)
+    /// is counted by [`Recorded::push`], once for every pending op that
+    /// holds it.
     pub(crate) fn bytes(&self) -> usize {
         fn style(s: &CanvasStyle) -> usize {
             match s {
@@ -686,9 +695,12 @@ pub(crate) struct Recorded {
     raster: Raster,
     ops: Vec<Op>,
     bytes: usize,
-    /// The clip of the last op pushed: each other clip a pending op holds
-    /// counts its mask's bytes (one per pixel), which the replay builds.
-    last_clip: Option<Arc<Clip>>,
+    /// What the pending ops share, by address, each counted once in
+    /// `bytes` (and kept alive here, so an address is not reused while
+    /// counted): clips (their path, and the mask the replay builds, one byte
+    /// per pixel) and pattern bitmaps.
+    clips: std::collections::HashMap<usize, Arc<Clip>>,
+    patterns: std::collections::HashMap<usize, Arc<CanvasBitmap>>,
     /// Tests: rasterize at the call, as before the recording.
     immediate: bool,
 }
@@ -701,9 +713,15 @@ impl Recorded {
         }
         self.bytes += op.bytes();
         if let Some(c) = op.clip() {
-            if !self.last_clip.as_ref().is_some_and(|l| Arc::ptr_eq(l, c)) {
-                self.bytes += c.size.0 as usize * c.size.1 as usize;
-                self.last_clip = Some(c.clone());
+            if let std::collections::hash_map::Entry::Vacant(e) = self.clips.entry(Arc::as_ptr(c) as usize) {
+                self.bytes += c.size.0 as usize * c.size.1 as usize + c.path.len() * std::mem::size_of::<PathCommand>();
+                e.insert(c.clone());
+            }
+        }
+        if let Some(p) = op.pattern() {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.patterns.entry(Arc::as_ptr(p) as usize) {
+                self.bytes += p.0.data().len();
+                e.insert(p.clone());
             }
         }
         self.ops.push(op);
@@ -718,7 +736,8 @@ impl Recorded {
             self.raster.apply(&op);
         }
         self.bytes = 0;
-        self.last_clip = None;
+        self.clips.clear();
+        self.patterns.clear();
         &mut self.raster
     }
 
@@ -727,7 +746,8 @@ impl Recorded {
     pub(crate) fn reset(&mut self) {
         self.ops.clear();
         self.bytes = 0;
-        self.last_clip = None;
+        self.clips.clear();
+        self.patterns.clear();
         self.raster.reset();
     }
 
