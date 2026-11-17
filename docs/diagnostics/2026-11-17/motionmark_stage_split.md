@@ -6,6 +6,10 @@ headed (28x to 740x per subtest). Those are scores; this is where the time of on
 frame goes, per stage, at fixed element counts, so the gap can be assigned to a
 stage and a design change priced against it.
 
+Script is split further, into the engine's JS execution and the time inside
+host calls, in [Script split](#script-split-js-execution-vs-host-calls-script-split)
+below (SCRIPT-SPLIT).
+
 ## What could not be measured, and why
 
 - **The real window's present and the GPU's own time (HiWave).** Every HiWave
@@ -533,3 +537,110 @@ length at that count (per callback).
 
 **1000 elements**: HiWave NOT MEASURED (1 presented frame(s) in the interval; run hung)
 
+## Script split: JS execution vs host calls (SCRIPT-SPLIT)
+
+The script column above is everything the page's script turns took. This
+splits it at the bindings boundary: **host** is the time inside host functions
+(the Rust natives the DOM, CSSOM, canvas and other bindings call:
+`__rustkit_dom_write`, `__rustkit_canvas`, ...), from the native's entry
+(argument conversion included) to its return, outermost calls only; **JS** is
+script less host: Boa executing the page's JavaScript *and the bindings' own
+JavaScript shims* (`web_canvas.js`, the inline style declaration, the wrappers
+around `__rustkit_dom_write`). The canvas raster runs inside the canvas host
+calls, so it is part of host. A forced layout inside a host call (a geometry
+read) is the layout stages' time, out of both.
+
+**Method.** parity-capture `--frame-stages` from branch `atlas/script-split`
+(head `cfe4285b`, parity profile), headless, same suite copy and fixed
+controller as above, each run started at a 1-minute load below 3, one at a
+time, N = 1 per cell. The stage line carries `host_ms` and `host_calls`;
+every 5 turns parity-capture prints the running per-host-function rows (by
+operation for the canvas dispatcher and the DOM write/info dispatchers:
+identifiers only), and `frame_stages.py` gives per-presented-frame medians and
+rows over the same steady frames. Chrome's script column is from the runs
+above (its trace does not split V8 from Blink bindings here).
+
+| subtest | N | presented frames | script ms/frame | JS ms | host ms | of host: canvas raster | host calls/frame | JS share of script | Chrome script ms/frame |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Multiply | 100 | 69 | 95.61 | 92.98 | 2.60 | 0 | 2214 | 97% | 0.069 |
+| Multiply | 1000 | 6 (hung) | 1032.16 | 1005.00 | 27.31 | 0 | 22014 | 97% | 0.506 |
+| Canvas Arcs | 100 | 432 | 4.64 | 1.61 | 2.99 | 2.73 | 531 | 35% | 0.034 |
+| Canvas Arcs | 1000 | 147 | 64.73 | 21.30 | 42.11 | 38.27 | 10494 | 33% | 0.197 |
+| Leaves | 100 | 81 | 85.66 | 84.60 | 1.07 | 0 | 2076 | 99% | 0.067 |
+| Leaves | 1000 | 19 | 869.23 | 856.57 | 12.93 | 0 | 20686 | 99% | 0.513 |
+| Paths | 100 | 432 | 1.29 | 0.85 | 0.43 | 0.33 | 342 | 66% | 0.032 |
+| Paths | 1000 | 610 | 12.29 | 7.78 | 4.50 | 3.46 | 3497 | 63% | 0.122 |
+| Canvas Lines | 100 | 431 | 2.53 | 1.44 | 1.09 | 0.89 | 649 | 57% | 0.035 |
+| Canvas Lines | 1000 | 231 | 41.76 | 24.34 | 17.28 | 13.97 | 12090 | 58% | 0.248 |
+| Images | 100 | 6 (hung) | 345.91 | 343.33 | 2.61 | 0.95 | 414 | 99% | 1.113 |
+| Images | 100 (first run) | 47 | 121.52 | 119.49 | 1.90 | 0.96 | 421 | 98% | 1.113 |
+| Design | 100 | 89 | 43.66 | 42.96 | 0.70 | 0 | 1670 | 98% | 0.097 |
+| Design | 1000 | 24 | 487.51 | 476.55 | 11.10 | 0 | 19646 | 98% | 0.600 |
+| Suits | 100 | 98 | 2.58 | 2.23 | 0.34 | 0 | 236 | 86% | 0.100 |
+
+Images 1000 and Suits 1000: no measurable frame (hung, as above). Images 100
+hung on the second run (6 frames, script 346 ms) and not on the first (47
+frames, 122 ms; the first run's rows were not printed densely enough to read,
+fixed since); both are shown.
+
+**The read.**
+
+- **On the DOM subtests the gap is JavaScript, not the natives.** JS is 97-99%
+  of script on Multiply, Leaves, Design and Images (86% on Suits); host calls are
+  1-3%. Per element per frame that is ~930 µs (Multiply), ~850 µs (Leaves),
+  ~430-480 µs (Design) of JS against ~22, ~21 and ~17-20 host calls. The 1,100x
+  per-element gap to Chrome on Multiply is not in the Rust DOM/CSSOM code.
+- **Where that JS is (a follow-up probe, same build, a page that times one
+  call at a time; scratch, not a suite run):** one `el.style.transform = ...`
+  costs **~108 µs**, one `el.style.backgroundColor = ...` **~127 µs**, against
+  `el.setAttribute('data-x', ...)` 3.2 µs, `el.style` (getting the object)
+  2.2 µs, a plain JS object property set 0.4 µs. Multiply writes `transform` and
+  `backgroundColor` on every tile every frame; the inline-style host write
+  under them (`__rustkit_dom_write` setAttr) is 1.5-5.8 µs of self time. So the
+  per-frame cost of Multiply/Leaves/Design is the bindings' JavaScript for
+  inline style writes (the style declaration shim and the JS wrappers a DOM
+  write passes through), not Boa's speed on the page's own code and not the
+  host side. That is the first place to aim, on the bindings' JS side
+  (inline style declaration) before the JS-to-host boundary.
+- **Canvas subtests: host is 33-65% of script, and the CPU raster is 77-91%
+  of host.** Per call (µs, 1000 elements): `stroke` 21.7 on Arcs, 7.2-7.5 on
+  Lines and Paths; `fill` 16.3; every other canvas call 0.21-0.46 (`strokeColor`
+  0.42-0.45, `beginPath` 0.24, `arc` 0.23, `lineWidth` 0.21-0.27, `moveTo`/
+  `lineTo` 0.21). JS is the other 35-67%: the page's JS plus `web_canvas.js`. A
+  probe of 1000 MotionMark arcs per frame (same build, scratch page) puts the
+  shim at ~1.9 µs of Boa per canvas call against ~0.25 µs of the arcs' own JS
+  per call: the shim, not the page, is most of canvas JS.
+- **DOM host calls, per call:** `__rustkit_dom_write` setAttr 1.5-2.2 µs on
+  Leaves/Design/Suits and 5.8 µs on Multiply (its style attribute is longer),
+  `__rustkit_dom_attr` 0.22-0.29, `__rustkit_dom_info` 0.15-0.19.
+- **The instrument's own cost** (on only with `--frame-stages`): script per
+  frame against the runs above (canvas clock only), N = 1 each: +2.8% Arcs
+  1000, +3.0% Lines 1000, +4.4% Paths 1000, -3.5% Leaves 1000, -0.5% Design
+  1000; about 0.1 µs per host call (two clock reads and a table add).
+
+Per-host-function rows, per presented frame (1000 elements; the most time
+first):
+
+| subtest | host function / operation | calls/frame | ms/frame | µs/call |
+|---|---|---:|---:|---:|
+| Multiply | `__rustkit_dom_write` setAttr | 3600 | 20.99 | 5.83 |
+| Multiply | `__rustkit_dom_attr` | 9001 | 2.43 | 0.27 |
+| Multiply | `__rustkit_dom_info` local / type | 3600 / 3600 | 0.66 / 0.56 | 0.18 / 0.16 |
+| Leaves | `__rustkit_dom_write` setAttr | 4132 | 9.25 | 2.24 |
+| Leaves | `__rustkit_dom_attr` | 8286 | 2.25 | 0.27 |
+| Design | `__rustkit_dom_write` setAttr | 3874 | 7.60 | 1.96 |
+| Design | `__rustkit_dom_attr` | 7870 | 2.29 | 0.29 |
+| Canvas Arcs | `__rustkit_canvas` stroke | 1522 | 33.04 | 21.71 |
+| Canvas Arcs | `__rustkit_canvas` fill | 478 | 7.78 | 16.27 |
+| Canvas Arcs | `__rustkit_canvas` strokeColor / beginPath / arc / lineWidth | 1522 / 2000 / 2000 / 1522 | 0.69 / 0.49 / 0.46 / 0.42 | 0.45 / 0.24 / 0.23 / 0.27 |
+| Canvas Lines | `__rustkit_canvas` stroke | 2008 | 14.42 | 7.18 |
+| Canvas Lines | `__rustkit_canvas` strokeColor / beginPath / moveTo / lineWidth / lineTo | ~2000 each | 0.84 / 0.49 / 0.43 / 0.43 / 0.41 | 0.42 / 0.24 / 0.21 / 0.21 / 0.21 |
+| Paths | `__rustkit_canvas` stroke | 494 | 3.73 | 7.54 |
+| Paths | `__rustkit_canvas` strokeColor / beginPath / lineWidth / lineTo / moveTo | ~500 each | 0.21 / 0.12 / 0.11 / 0.11 / 0.11 | 0.42 / 0.24 / 0.23 / 0.21 / 0.21 |
+| Images (100) | `__rustkit_canvas` putImageData / getImageData | 163 / 163 | 1.59 / 1.15 | 9.78 / 7.10 |
+
+**Not split here.** JS is not split into the page's own code and the bindings'
+JS shims by the instrument (both run in Boa); the per-call probe above is how
+the style writes were found. The rows cover the dispatchers' operations only
+for the canvas, DOM write and DOM info dispatchers; other host functions are
+one row each.
