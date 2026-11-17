@@ -688,6 +688,8 @@ mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_timeline_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod layout_per_frame_tests;
@@ -1763,6 +1765,8 @@ impl ViewState {
     fn summarize_relayouts_for_navigation(&mut self) {
         let stats = std::mem::take(&mut self.relayout_stats);
         self.relayout_pending = PendingCauses::default();
+        // FORCED-READ: the outgoing document's forced builds, by stage.
+        let (forced_build_ms, forced_layout_ms) = self.lay.forced_stage_ms.take();
         if stats.relayouts == 0 {
             return;
         }
@@ -1772,7 +1776,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1} forced_build_ms={:.1} forced_layout_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1784,7 +1788,9 @@ impl ViewState {
             stats.animation_frames_painted,
             stats.animation_paint_ms,
             stats.forced_layouts,
-            stats.forced_ms
+            stats.forced_ms,
+            forced_build_ms,
+            forced_layout_ms
         );
         // LAT22 probe: why the document's forced reads built the tree.
         let reasons = std::mem::take(&mut *self.lay.forced_build_reasons.borrow_mut());
@@ -6297,6 +6303,9 @@ impl Engine {
             if load_stopped {
                 log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(())));
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6321,7 +6330,8 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_ms);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -6339,6 +6349,9 @@ impl Engine {
             if timer_stopped {
                 log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(_)));
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6363,7 +6376,8 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_ms);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -6817,6 +6831,9 @@ impl Engine {
                 }
             }
             if let Some(frame) = self.views.get_mut(&fid) {
+                // The frame's first layout starts its animations: at the timeline's time now,
+                // not at the tree clock's zero, before the frame was made (TIMELINE2).
+                frame.doc.lay.animations.borrow_mut().clock_ms = child.animation_clock_ms();
                 frame.doc.bindings = Some(child);
             }
             if let Err(e) = self.relayout_for(fid, RelayoutCause::InitialLoad) {
@@ -6986,6 +7003,16 @@ impl Engine {
         // The turn's instant: on the real clock its timers count from here, not from when the
         // timer slice begins after the turn's own work (CLOCK3 R1).
         let turn_began = std::time::Instant::now();
+        let tracing = links_trace_on();
+        if tracing {
+            LINKS_TRACE.with(|t| {
+                let mut v = t.get();
+                if v[0].is_none() {
+                    v[0] = Some(turn_began);
+                }
+                t.set(v);
+            });
+        }
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -7065,6 +7092,15 @@ impl Engine {
         let timer_stopped = if defer_post_load_timers {
             false
         } else {
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    if v[1].is_none() {
+                        v[1] = Some(std::time::Instant::now());
+                    }
+                    t.set(v);
+                });
+            }
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -7092,15 +7128,23 @@ impl Engine {
                 }
                 Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    v[2] = Some(std::time::Instant::now());
+                    t.set(v);
+                });
+            }
             // What the timers threw or left rejected is theirs in the Inspector.
             inspector_glue::drain_errors(bindings, &view.inspector, "timers");
             timer_stopped
         };
         out.yielded_for_frame = frame_yield.get();
-        // The animation clock is the timer clock as the timers left it, so
-        // the layout below (and the one `settle_animations` makes) reads
-        // the transitions at this turn's time.
-        view.doc.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
+        // The animation clock is the document timeline as the timers left
+        // it (TIMELINE2: the frame's time once this turn's frame ran), so
+        // the layout below (and the one `settle_animations` makes) reads the
+        // transitions at the time script animations read.
+        view.doc.lay.animations.borrow_mut().clock_ms = bindings.animation_clock_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -9617,7 +9661,11 @@ impl Engine {
             );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
+            // The step's time is recorded once: on its own record when it
+            // has one, else on the first error it reported (SCRIPT-TIME-DUP).
+            let mut step_ms = step_started.elapsed().as_millis() as u64;
             if record.outcome != ScriptOutcome::Ran {
+                step_ms = 0;
                 inspector_glue::log_script(log, &inspector, record);
             }
             if poisoned.get() {
@@ -9653,11 +9701,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: step_started.elapsed().as_millis() as u64,
+                    elapsed_ms: std::mem::take(&mut step_ms),
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_ms);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -9726,12 +9774,17 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
-                timers_ms += step_started.elapsed().as_millis() as u64;
+                let slice_ms = step_started.elapsed().as_millis() as u64;
+                // A slice that ends in a record of its own (stopped, threw)
+                // has its time there, not in the errors' (SCRIPT-TIME-DUP).
+                if !(stopped || matches!(caught, Ok(Err(_)) | Err(_))) {
+                    timers_ms += slice_ms;
+                }
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
                 if stopped && !matches!(caught, Err(_)) {
-                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    let elapsed_ms = slice_ms;
                     log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
                     inspector_glue::log_script(
                         log,
@@ -10235,6 +10288,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -10761,6 +10815,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -11194,6 +11249,11 @@ impl Engine {
         // no layout, no subtree or sibling restyle) may build those elements alone.
         let cooling = self.views.get(&id).is_some_and(|view| {
             let left = view.lay.script_cooldown.get();
+            // The cooldown's last relayout keeps its tree, for the attempt after it (LPF3: a
+            // `no kept tree` miss followed every cooldown).
+            if left == 1 {
+                view.lay.want_script_unlaid.set(true);
+            }
             if left > 0 {
                 view.lay.script_cooldown.set(left - 1);
             }
@@ -11224,6 +11284,8 @@ impl Engine {
                         if idle >= SCRIPT_RESTYLE_IDLE {
                             view.lay.want_script_unlaid.set(false);
                             view.lay.script_unlaid.borrow_mut().take();
+                            // ... and the run of misses has ended (LPF3).
+                            view.lay.script_last_cooldown.set(None);
                         }
                     }
                 }
@@ -11853,9 +11915,22 @@ impl Engine {
         }
         if let Some(why) = why {
             view.layout = Some(laid);
-            // More than paint changed: sit out the next relayouts, and keep no tree for them.
-            view.lay.want_script_unlaid.set(false);
-            view.lay.script_cooldown.set(SCRIPT_RESTYLE_COOLDOWN);
+            // More than paint changed. A one-off miss sits out nothing: the full build that follows
+            // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
+            // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
+            // `no kept tree` miss after them). Misses in a row sit out 1, 2, 4, ... relayouts, up to
+            // the cap and then at it, keeping no tree until the last of them, so a page whose
+            // writes keep changing layout pays neither an attempt nor a kept copy every frame. A
+            // miss is in a row when no hit (and no idle stretch or navigation) came since the last
+            // one; relayouts the path refused between them do not end the run (R1).
+            let cooldown = view
+                .lay
+                .script_last_cooldown
+                .get()
+                .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
+            view.lay.script_last_cooldown.set(Some(cooldown));
+            view.lay.script_cooldown.set(cooldown);
+            view.lay.want_script_unlaid.set(cooldown == 0);
             return miss(&why);
         }
         {
@@ -11874,6 +11949,7 @@ impl Engine {
             }
         }
         *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        view.lay.script_last_cooldown.set(None);
         laid.forget_hit_overflow();
         let display_list = self.display_list_for(id, &laid);
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -13674,6 +13750,7 @@ impl layout_ctx::LayoutCtx {
                 &element_ids,
                 false,
             );
+            self.with_building_lay(|lay| lay.last_build_elements.set(element_ids.get() as u32));
             // CSS 2.1 §14.2: the CANVAS background comes from the html
             // element, or from body when html's is transparent. The root box
             // paints it across the whole viewport (see the post-layout
@@ -26159,7 +26236,6 @@ impl Engine {
                     None => "no published boxes".into(),
                 }
             };
-            forced_read_probe(id, &lay, &document, &writes.probe, &why);
             let started = std::time::Instant::now();
             // LAT19: nothing a forced layout builds is painted, so the
             // animation baseline (what the view painted of each animated
@@ -26181,6 +26257,11 @@ impl Engine {
             // wrote: this build neither replays nor records. The memo goes
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
+            // FORCED-READ: what this build costs, for its log line. The stage timers the build
+            // runs under are read before and after it; nothing is taken from them.
+            let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let stages_before = relayout_cause::stage_ms_so_far();
+            let passes_before = lay.layout_builds.get();
             let built = lctx.lay_out_document(
                 building.for_build(),
                 &document,
@@ -26198,7 +26279,19 @@ impl Engine {
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             incremental_layout::adopt(&lay, &built);
-            debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
+            let stages = relayout_cause::stage_ms_so_far();
+            let cost = ForcedBuildCost {
+                took_ms: started.elapsed().as_secs_f64() * 1000.0,
+                prepare_ms,
+                build_ms: stages.build - stages_before.build,
+                layout_ms: stages.layout - stages_before.layout,
+                elements: lay.last_build_elements.get(),
+                passes: lay.layout_builds.get().saturating_sub(passes_before),
+            };
+            let (build_sum, layout_sum) = lay.forced_stage_ms.get();
+            lay.forced_stage_ms.set((build_sum + cost.build_ms, layout_sum + cost.layout_ms));
+            forced_read_probe(id, &lay, &document, &writes.probe, &why, &cost);
+            debug!(?id, ms = cost.took_ms, "Forced layout");
             // The geometry is built on the first read that needs it, as
             // `publish_geometry` does: a scrollTo after the write needs only
             // `max_scroll`. Each element's computed style is formatted on
@@ -47659,18 +47752,35 @@ fn forced_animation_frame(
     })
 }
 
+/// FORCED-READ: what one forced build cost. `took_ms` is the whole of it, from the decision to
+/// build to the built tree. Inside it: `prepare_ms` (fonts and the SVG caches, before the build),
+/// `build_ms` (the build stage: sheets, the rule index, the style of every element, the boxes) and
+/// `layout_ms` (the layout stage), each summed over the build's passes (`passes`: more than one on
+/// a page with container queries). `elements` is how many elements the last pass walked.
+struct ForcedBuildCost {
+    took_ms: f64,
+    prepare_ms: f64,
+    build_ms: f64,
+    layout_ms: f64,
+    elements: u32,
+    passes: u32,
+}
+
 /// LAT22 probe: one info line for a read that builds the tree, and the
 /// view's count of the reason. Shapes only: the reason, the read and write
 /// kinds, the names of the properties Web Animations' layer holds (those of
 /// the engine's animation property table; custom properties as `--custom`,
 /// any other key as `other`), and whether the animated elements and the
 /// element read are inside shadow trees. No text, no URLs, no values.
+///
+/// FORCED-READ: written after the build, with what it cost (`ForcedBuildCost`).
 fn forced_read_probe(
     id: EngineViewId,
     lay: &layout_ctx::ViewLayout,
     document: &Document,
     probe: &rustkit_bindings::ForcedReadProbe,
     why: &str,
+    cost: &ForcedBuildCost,
 ) {
     let in_shadow = |raw: usize| {
         document
@@ -47716,6 +47826,12 @@ fn forced_read_probe(
         animated_elements = animated,
         animated_in_shadow,
         read_in_shadow,
+        elements = cost.elements,
+        passes = cost.passes,
+        took_ms = %format!("{:.2}", cost.took_ms),
+        prepare_ms = %format!("{:.2}", cost.prepare_ms),
+        build_ms = %format!("{:.2}", cost.build_ms),
+        layout_ms = %format!("{:.2}", cost.layout_ms),
         "Forced read builds the tree"
     );
     let mut counts = lay.forced_build_reasons.borrow_mut();
@@ -47810,7 +47926,8 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
-/// LPF1: the relayouts the script restyle path sits out after a write that changed more than paint.
+/// LPF1: the most relayouts the script restyle path sits out after writes that changed more than
+/// paint (LPF3: reached only by misses in a row; a one-off miss sits out none).
 const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
 /// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
 const SCRIPT_RESTYLE_IDLE: u32 = 8;
@@ -47960,6 +48077,9 @@ thread_local! {
     /// LINKS-SLOW: the real time the content loop's clock kept from this turn (see
     /// [`Engine::pump_live_real_at`]).
     static LIVE_FRACTION_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// LINKS-SLOW part 2, diagnostics only (`HIWAVE_LINKS_TRACE`): this pump's first live turn's
+    /// entry, and its timer slice's start and end ([`links_trace_take`]).
+    static LINKS_TRACE: std::cell::Cell<[Option<std::time::Instant>; 3]> = const { std::cell::Cell::new([None; 3]) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -47967,6 +48087,18 @@ thread_local! {
     /// builds with the compare and the patch, the display list, the
     /// geometry snapshot, the render.
     static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// LINKS-SLOW part 2, diagnostics only: whether `HIWAVE_LINKS_TRACE` is set (read once).
+pub(crate) fn links_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIWAVE_LINKS_TRACE").is_some())
+}
+
+/// LINKS-SLOW part 2, diagnostics only: the stamps the last pump left (its first live turn's
+/// entry, its timer slice's start and end), cleared for the next.
+pub(crate) fn links_trace_take() -> [Option<std::time::Instant>; 3] {
+    LINKS_TRACE.with(|t| t.replace([None; 3]))
 }
 
 /// Whether the build in progress is a pointer restyle's partial build

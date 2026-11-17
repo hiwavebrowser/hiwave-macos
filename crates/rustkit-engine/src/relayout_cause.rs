@@ -449,6 +449,12 @@ pub(crate) fn snapshot_total_ms() -> f64 {
     SNAPSHOT_TOTAL_MS.with(|t| t.get())
 }
 
+/// The stage times since the last take, left as they are (a forced read reads them before and
+/// after its build: the difference is that build's).
+pub(crate) fn stage_ms_so_far() -> StageMs {
+    STAGE_MS.with(|c| c.get())
+}
+
 /// The stage times since the last take, and a fresh start.
 pub(crate) fn take_stage_ms() -> StageMs {
     STAGE_MS.with(|c| c.replace(StageMs::default()))

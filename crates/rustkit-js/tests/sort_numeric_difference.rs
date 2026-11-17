@@ -40,6 +40,31 @@ fn numeric_difference_comparators_answer_as_chrome_does() {
     );
 }
 
+/// Forms that look like `a - b` but are not an ordinary function: answers from Chrome for Testing 148.0.7778.216.
+#[test]
+fn comparators_that_are_not_plain_functions_answer_as_chrome_does() {
+    let src = r#"var r = [];
+function t(name, f) { try { r.push(name + '=' + f()); } catch (e) { r.push(name + '=' + e.constructor.name); } }
+class C { constructor(a, b) { return a - b; } }
+t('class', () => [3,1,2].sort(C).join());
+t('bound', () => [3,1,2].sort(function(a,b){return a-b;}.bind(null)).join());
+var calls = 0; var px = new Proxy(function(a,b){return a-b;}, { apply(t, th, args) { calls++; return Reflect.apply(t, th, args); } });
+t('proxy', () => [3,1,2].sort(px).join() + ',' + (calls > 0));
+var o = { m(a, b) { return a - b; } };
+t('method', () => [3,1,2].sort(o.m).join());
+function* g(a, b) { return a - b; }
+t('generator', () => [3,1,2].sort(g).join());
+async function as(a, b) { return a - b; }
+t('async', () => [3,1,2].sort(as).join());
+t('arrow-async', () => [3,1,2].sort(async (a, b) => a - b).join());
+t('class-toSorted', () => [3,1,2].toSorted(C).join());
+r.join('|')"#;
+    assert_eq!(
+        run(src),
+        "class=TypeError|bound=1,2,3|proxy=1,2,3,true|method=1,2,3|generator=3,1,2|async=3,1,2|arrow-async=3,1,2|class-toSorted=TypeError"
+    );
+}
+
 /// Counted in VM opcodes in a child process (the counter switch is read once per process).
 #[test]
 fn a_numeric_difference_comparator_is_not_called_per_pair() {
@@ -53,7 +78,7 @@ fn a_numeric_difference_comparator_is_not_called_per_pair() {
     let line = text.lines().find(|l| l.contains("COST|")).unwrap_or_else(|| panic!("child: {text}{}", String::from_utf8_lossy(&out.stderr)));
     let v: Vec<u64> = line[line.find("COST|").unwrap() + 5..].split('|').map(|x| x.trim().parse().unwrap()).collect();
     let (matched, swapped, other, mixed) = (v[0], v[1], v[2], v[3]);
-    assert!(matched < 20_000 && swapped < 20_000, "matched comparators still call: {matched} {swapped}");
+    assert!(matched < 100 && swapped < 100, "matched comparators still call: {matched} {swapped}");
     assert!(other > 100_000, "an unmatched comparator is called per pair: {other}");
     assert!(mixed > 100_000, "pairs that are not Numbers are called: {mixed}");
 }

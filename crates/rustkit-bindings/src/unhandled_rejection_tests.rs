@@ -94,18 +94,17 @@ fn turns_until(b: &DomBindings, done: &str) {
     panic!("`{done}` was not true after 5000 turns");
 }
 
-/// What the engine reported as an unhandled rejection, as a browser's console names it: an
-/// error's message, else the value's text.
-fn reported(b: &DomBindings) -> Vec<String> {
-    b.take_error_reports()
-        .into_iter()
-        .filter(|r| r.rejection)
-        .map(|r| r.message.unwrap_or_else(|| r.value.to_string()))
-        .collect()
+/// What the engine reported as an unhandled rejection, as a browser's console names it (an
+/// error's message, else the value's text), in two lists: those a console shows, and those whose
+/// event the page canceled, which the engine keeps with a mark for its own log only.
+fn reported(b: &DomBindings) -> (Vec<String>, Vec<String>) {
+    let (canceled, shown): (Vec<_>, Vec<_>) = b.take_error_reports().into_iter().filter(|r| r.rejection).partition(|r| r.canceled);
+    let names = |reports: Vec<rustkit_js::ErrorReport>| reports.into_iter().map(|r| r.message.unwrap_or_else(|| r.value.to_string())).collect();
+    (names(shown), names(canceled))
 }
 
-/// The probe here: each scenario's answer, and the rejections reported, in order.
-fn ours() -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
+/// The probe here: each scenario's answer, and the rejections reported, in order (shown, canceled).
+fn ours() -> (serde_json::Map<String, serde_json::Value>, (Vec<String>, Vec<String>)) {
     let b = page();
     b.set_error_details(true, true).unwrap();
     b.evaluate_as_page_script("window.__noWorkers = true;").unwrap();
@@ -141,8 +140,8 @@ fn rejection_events_come_as_in_chrome() {
 }
 
 /// The console's side: what Chrome reported as uncaught (`pageErrors`), less the one exception a
-/// listener threw, is the rejections reported here, in the same order. A rejection whose event
-/// was canceled is in neither.
+/// listener threw, is the rejections reported here without the mark, in the same order. A
+/// rejection whose event was canceled is not in Chrome's; here it is reported with the mark.
 #[test]
 fn a_rejection_is_reported_unless_its_event_was_canceled() {
     let pin = object(CHROME);
@@ -157,8 +156,14 @@ fn a_rejection_is_reported_unless_its_event_was_canceled() {
     for canceled in ["prevented-P", "prevented-F", "L2"] {
         assert!(!chrome.contains(&canceled.to_string()), "{canceled} was canceled in Chrome: {chrome:?}");
     }
-    let (_, ours) = ours();
-    assert_eq!(ours, chrome);
+    let (_, (shown, marked)) = ours();
+    assert_eq!(shown, chrome);
+    // The marked ones are the probe's canceled rejections (these three and its
+    // flood's), and none of them is one Chrome reported.
+    for canceled in ["prevented-P", "prevented-F", "L2"] {
+        assert!(marked.contains(&canceled.to_string()), "{canceled} is not marked: {marked:?}");
+    }
+    assert!(marked.iter().all(|name| !chrome.contains(name)), "{marked:?}");
 }
 
 /// The events do not wait for an embedder that records errors: with error details off (the
@@ -186,11 +191,11 @@ fn reports_are_as_before_for_a_page_with_no_listener() {
     let b = page();
     b.set_error_details(true, true).unwrap();
     b.evaluate_as_page_script("Promise.reject(new Error('handled')).catch(function () {}); Promise.reject(new RangeError('left'));").unwrap();
-    assert_eq!(reported(&b), ["left"]);
-    assert!(reported(&b).is_empty(), "reported once");
+    assert_eq!(reported(&b), (vec!["left".to_string()], Vec::new()));
+    assert_eq!(reported(&b), (Vec::new(), Vec::new()), "reported once");
     // A handler added later does not report it again, and takes nothing back.
     b.evaluate_as_page_script("Promise.reject(new Error('late')).catch(function () {});").unwrap();
-    assert!(reported(&b).is_empty());
+    assert_eq!(reported(&b), (Vec::new(), Vec::new()));
 }
 
 /// Announcing a rejection calls none of these when a page has replaced them: the event

@@ -743,3 +743,36 @@ fn a_scripts_error_detail_and_the_sort_shortcut_do_not_mix() {
     let message = ev(&b, "seen.length + ' ' + seen[0].split('|')[1]");
     assert!(message.starts_with("1 Uncaught TypeError"), "{message}");
 }
+
+/// An error the page cancels is among the embedder's error reports as it
+/// would be had the page left it alone, with one mark more: nothing else
+/// is added to what a report says, for the page's own script and for
+/// another origin's (whose report holds what it held before: shapes and
+/// the engine's own name for the script, no text).
+#[test]
+fn a_cancelled_errors_report_differs_from_an_uncancelled_one_only_by_its_mark() {
+    for (name, url, muted) in [("inline#2", DOC, false), ("script#1", "https://other.test/lib.js", true)] {
+        let reports = |cancel: bool| {
+            let b = page();
+            b.set_error_details(true, false).unwrap();
+            if cancel {
+                b.evaluate_named("window.onerror = function () { return true; };", "inline#9").unwrap();
+            }
+            b.register_script(name, url, muted);
+            let _ = b.take_error_reports();
+            let _ = b.evaluate_named("setTimeout(function () { throw new RangeError('in a timer'); }, 0); throw new TypeError('at the top');", name);
+            b.advance_timers(20, 10).unwrap();
+            (b.take_error_reports(), b.take_reported_errors())
+        };
+        let (plain, plain_texts) = reports(false);
+        let (cancelled, cancelled_texts) = reports(true);
+        assert_eq!(plain.len(), 2, "{name}: {plain:?}");
+        assert!(plain.iter().all(|report| !report.canceled) && cancelled.iter().all(|report| report.canceled), "{name}");
+        let unmarked: Vec<_> = cancelled.iter().cloned().map(|report| rustkit_js::ErrorReport { canceled: false, ..report }).collect();
+        assert_eq!(unmarked, plain, "{name}");
+        assert!(plain.iter().all(|report| report.message.is_none()), "{name}: no text is kept by default");
+        // The embedder's own text log is as before: a cancelled error is not in it.
+        assert_eq!((plain_texts.len(), cancelled_texts.len()), (1, 0), "{name}");
+    }
+}
+

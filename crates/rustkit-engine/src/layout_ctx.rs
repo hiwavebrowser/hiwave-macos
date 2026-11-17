@@ -620,6 +620,11 @@ pub(crate) struct ViewLayout {
     pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
     /// LAT22 probe: the shadow trees' sheet cost in the view's last build.
     pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
+    /// FORCED-READ: the elements the view's last build walked (styled and given an identity).
+    pub(crate) last_build_elements: Cell<u32>,
+    /// FORCED-READ: the document's forced builds so far, the time in their build stage and in
+    /// their layout stage, in ms (the relayout summary takes them).
+    pub(crate) forced_stage_ms: Cell<(f64, f64)>,
     /// Element cascades of the view's last build that had no rule index.
     pub(crate) last_unindexed_cascades: Cell<u32>,
     /// LAT22: the document's shadow tree styles across builds.
@@ -655,6 +660,12 @@ pub(crate) struct ViewLayout {
     /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
     /// not pay for a kept copy of its tree every frame.
     pub(crate) script_cooldown: Cell<u32>,
+    /// LPF3: the cooldown the short path's last miss set, while its run of misses goes on; `None`
+    /// once it has ended (a hit, `SCRIPT_RESTYLE_IDLE` relayouts with no script paint write, a
+    /// navigation). A miss with a run going is one in a row: it sits out twice the last cooldown
+    /// (at least 1, at most `SCRIPT_RESTYLE_COOLDOWN`); a one-off miss sits out none. A relayout
+    /// the path refuses leaves the run as it is (R1: a scroll between two misses ended it).
+    pub(crate) script_last_cooldown: Cell<Option<u32>>,
     /// A window or element scroll happened in the task that dirtied the page: the short path,
     /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
     pub(crate) scrolled_in_task: Cell<bool>,
@@ -677,6 +688,18 @@ pub(crate) struct ViewLayout {
     pub(crate) failed_images: RefCell<FailedImages>,
     /// E54: which `<img>` elements have heard `load`, and for which image.
     pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+impl ViewLayout {
+    /// A navigation committed: the script restyle path starts the new document afresh. No kept
+    /// tree (its node ids were the old document's), no cooldown, and no run of misses (LPF3 R1).
+    pub(crate) fn forget_script_restyle(&self) {
+        self.script_unlaid.borrow_mut().take();
+        self.want_script_unlaid.set(false);
+        self.script_cooldown.set(0);
+        self.script_last_cooldown.set(None);
+        self.script_idle.set(0);
+    }
 }
 
 /// The current document's loaded images, as its script has been told of

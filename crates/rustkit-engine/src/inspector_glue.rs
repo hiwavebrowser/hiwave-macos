@@ -216,9 +216,11 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
 /// After `source` ran: the errors its listeners and timers reported go onto
 /// the log (as before), then, for a listening Inspector only, the page's
 /// error reports and unimplemented members. `elapsed_ms` is the wall time of the step that ran
-/// (its listeners or timer callbacks): the report does not say which callback threw, so each record
-/// carries the step's time, as the step's own record does (H19c). 0 only where the caller has no
-/// step timer.
+/// (its listeners or timer callbacks), as a script's own record carries its time (H19c). The
+/// report does not say which callback threw, and the step is one stretch of time however many
+/// errors it reported: the first of its records carries the step's time and the others 0, so a
+/// total over the log (a capture's script time) counts the step once (SCRIPT-TIME-DUP). 0 for
+/// all where the caller has no step timer.
 pub(crate) fn drain_reports(
     bindings: &DomBindings,
     inspector: &Inspector,
@@ -226,11 +228,11 @@ pub(crate) fn drain_reports(
     source: &str,
     elapsed_ms: u64,
 ) {
-    for message in bindings.take_reported_errors() {
+    for (nth, message) in bindings.take_reported_errors().into_iter().enumerate() {
         log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
-            elapsed_ms,
+            elapsed_ms: if nth == 0 { elapsed_ms } else { 0 },
             outcome: ScriptOutcome::Threw(message),
         });
     }
@@ -287,7 +289,11 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
     }
     let page = file.then(|| crate::console_file::Page::new(inspector.view_id(), &bindings.location().href));
     for report in bindings.take_error_reports() {
-        if let Some(page) = &page {
+        // An error the page cancelled is in no console (Chrome prints none):
+        // not in the console file, not in the Inspector. The engine's own
+        // log has it, marked.
+        let shown = !report.canceled;
+        if let Some(page) = page.as_ref().filter(|_| shown) {
             crate::console_file::page_error(page, &report);
         }
         if mirror {
@@ -296,7 +302,7 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
             });
             crate::console_log::page_error(inspector.view_id(), &report, source, window);
         }
-        if listening {
+        if listening && shown {
             script_error(inspector, &report, source);
         }
     }

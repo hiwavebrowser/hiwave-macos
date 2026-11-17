@@ -584,12 +584,18 @@ impl Diagnostics {
     }
 
     /// A listener or timer threw `value` (the bindings' reporter, called on
-    /// `host`): announced, then reported unless a listener canceled it.
+    /// `host`): announced, then reported unless a listener canceled it (a
+    /// canceled one is still among the error reports, marked).
     /// `withheld`: the answer of the code that threw it.
     pub(crate) fn uncaught(&self, host: Option<&JsObject>, value: &JsValue, withheld: bool, context: &mut Context) {
         if let Some(host) = host.filter(|_| self.error_events.get() && !self.announcing_error.get()) {
             let report = self.describe(value, None, false, context);
             if self.announce(host, value, &report, withheld, context) {
+                // Not reported as the embedder's own text; still described
+                // for the embedder's reports, with the mark.
+                if self.on.get() {
+                    self.push(ErrorReport { canceled: true, ..report });
+                }
                 return;
             }
         }
@@ -633,6 +639,7 @@ impl Diagnostics {
             located: false,
             rejection,
             module: None,
+            canceled: false,
         };
         if let Some(s) = value.as_string() {
             let s = s.to_std_string_escaped();
@@ -806,6 +813,7 @@ impl Diagnostics {
                     located: false,
                     rejection: false,
                     module: None,
+                    canceled: false,
                 }
             }
         }
