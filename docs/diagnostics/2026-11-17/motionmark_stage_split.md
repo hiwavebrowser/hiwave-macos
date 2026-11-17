@@ -560,23 +560,29 @@ identifiers only), and `frame_stages.py` gives per-presented-frame medians and
 rows over the same steady frames. Chrome's script column is from the runs
 above (its trace does not split V8 from Blink bindings here).
 
-| subtest | N | presented frames | script ms/frame | JS ms | host ms | of host: canvas raster | host calls/frame | JS share of script | Chrome script ms/frame |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Multiply | 100 | 69 | 95.61 | 92.98 | 2.60 | 0 | 2214 | 97% | 0.069 |
-| Multiply | 1000 | 6 (hung) | 1032.16 | 1005.00 | 27.31 | 0 | 22014 | 97% | 0.506 |
-| Canvas Arcs | 100 | 432 | 4.64 | 1.61 | 2.99 | 2.73 | 531 | 35% | 0.034 |
-| Canvas Arcs | 1000 | 147 | 64.73 | 21.30 | 42.11 | 38.27 | 10494 | 33% | 0.197 |
-| Leaves | 100 | 81 | 85.66 | 84.60 | 1.07 | 0 | 2076 | 99% | 0.067 |
-| Leaves | 1000 | 19 | 869.23 | 856.57 | 12.93 | 0 | 20686 | 99% | 0.513 |
-| Paths | 100 | 432 | 1.29 | 0.85 | 0.43 | 0.33 | 342 | 66% | 0.032 |
-| Paths | 1000 | 610 | 12.29 | 7.78 | 4.50 | 3.46 | 3497 | 63% | 0.122 |
-| Canvas Lines | 100 | 431 | 2.53 | 1.44 | 1.09 | 0.89 | 649 | 57% | 0.035 |
-| Canvas Lines | 1000 | 231 | 41.76 | 24.34 | 17.28 | 13.97 | 12090 | 58% | 0.248 |
-| Images | 100 | 6 (hung) | 345.91 | 343.33 | 2.61 | 0.95 | 414 | 99% | 1.113 |
-| Images | 100 (first run) | 47 | 121.52 | 119.49 | 1.90 | 0.96 | 421 | 98% | 1.113 |
-| Design | 100 | 89 | 43.66 | 42.96 | 0.70 | 0 | 1670 | 98% | 0.097 |
-| Design | 1000 | 24 | 487.51 | 476.55 | 11.10 | 0 | 19646 | 98% | 0.600 |
-| Suits | 100 | 98 | 2.58 | 2.23 | 0.34 | 0 | 236 | 86% | 0.100 |
+The ms and call columns are **per presented frame**; "ticks" is how many of
+MotionMark's own frames (rAF ticks) a presented HiWave frame carried (the #776
+second round, see Method; the suite's frame length over the presented frame
+interval). Chrome's column is per frame, one tick each: divide a HiWave
+column by its ticks before comparing.
+
+| subtest | N | presented frames | ticks | script ms/frame | JS ms | host ms | of host: canvas raster | host calls/frame | JS share of script | Chrome script ms/frame |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Multiply | 100 | 69 | 1.97 | 95.61 | 92.98 | 2.60 | 0 | 2214 | 97% | 0.069 |
+| Multiply | 1000 | 6 (hung) | - | 1032.16 | 1005.00 | 27.31 | 0 | 22014 | 97% | 0.506 |
+| Canvas Arcs | 100 | 432 | 1.00 | 4.64 | 1.61 | 2.99 | 2.73 | 531 | 35% | 0.034 |
+| Canvas Arcs | 1000 | 147 | 1.94 | 64.73 | 21.30 | 42.11 | 38.27 | 10494 | 33% | 0.197 |
+| Leaves | 100 | 81 | 1.96 | 85.66 | 84.60 | 1.07 | 0 | 2076 | 99% | 0.067 |
+| Leaves | 1000 | 19 | 1.99 | 869.23 | 856.57 | 12.93 | 0 | 20686 | 99% | 0.513 |
+| Paths | 100 | 432 | 1.00 | 1.29 | 0.85 | 0.43 | 0.33 | 342 | 66% | 0.032 |
+| Paths | 1000 | 610 | 1.00 | 12.29 | 7.78 | 4.50 | 3.46 | 3497 | 63% | 0.122 |
+| Canvas Lines | 100 | 431 | 1.00 | 2.53 | 1.44 | 1.09 | 0.89 | 649 | 57% | 0.035 |
+| Canvas Lines | 1000 | 231 | 1.92 | 41.76 | 24.34 | 17.28 | 13.97 | 12090 | 58% | 0.248 |
+| Images | 100 | 6 (hung) | - | 345.91 | 343.33 | 2.61 | 0.95 | 414 | 99% | 1.113 |
+| Images | 100 (first run) | 47 | 1.72 | 121.52 | 119.49 | 1.90 | 0.96 | 421 | 98% | 1.113 |
+| Design | 100 | 89 | 1.99 | 43.66 | 42.96 | 0.70 | 0 | 1670 | 98% | 0.097 |
+| Design | 1000 | 24 | 2.01 | 487.51 | 476.55 | 11.10 | 0 | 19646 | 98% | 0.600 |
+| Suits | 100 | 98 | 1.97 | 2.58 | 2.23 | 0.34 | 0 | 236 | 86% | 0.100 |
 
 Images 1000 and Suits 1000: no measurable frame (hung, as above). Images 100
 hung on the second run (6 frames, script 346 ms) and not on the first (47
@@ -587,9 +593,10 @@ fixed since); both are shown.
 
 - **On the DOM subtests the gap is JavaScript, not the natives.** JS is 97-99%
   of script on Multiply, Leaves, Design and Images (86% on Suits); host calls are
-  1-3%. Per element per frame that is ~930 µs (Multiply), ~850 µs (Leaves),
-  ~430-480 µs (Design) of JS against ~22, ~21 and ~17-20 host calls. The 1,100x
-  per-element gap to Chrome on Multiply is not in the Rust DOM/CSSOM code.
+  1-3%. Per element per MotionMark frame (per tick) that is ~470 µs of JS
+  (Multiply 100), ~430 µs (Leaves), ~215-240 µs (Design), against ~11, ~10-11
+  and ~8-10 host calls. The per-element gap to Chrome on Multiply is not in
+  the Rust DOM/CSSOM code.
 - **Where that JS is (a follow-up probe, same build, a page that times one
   call at a time; scratch, not a suite run):** one `el.style.transform = ...`
   costs **~108 µs**, one `el.style.backgroundColor = ...` **~127 µs**, against
