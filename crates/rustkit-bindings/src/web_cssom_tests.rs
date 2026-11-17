@@ -285,3 +285,9 @@ fn css_escape_follows_cssom_serialize_an_identifier() {
         "a\\ b|\\31 a|-\\31 a|\\-|a\u{fffd}|a\\:b\\.c\\#d|\\7f |é_-x|--a"
     );
 }
+
+#[test]
+fn rule_font_family_discards_invalid_tokens() {
+    let b = bound();
+    assert_eq!(ev(&b, r#"var s = new CSSStyleSheet(); s.insertRule('p { font-family: serif; font-family: 0simple }'); s.cssRules[0].style.fontFamily"#), "serif");
+}
