@@ -393,3 +393,60 @@ fn a_canvas_is_read_and_written_without_a_loop_over_its_pixels() {
     assert_eq!(ev(&b, script), "9,2,3,255,10000,10000,10000,true");
     assert_eq!(ev(&child, script), "9,2,3,255,10000,10000,10000,true");
 }
+
+/// CANVAS-SHIM: the members rewritten to call the host directly keep their
+/// checks. Too few arguments throws Chrome's TypeError text; an argument
+/// passed as undefined counts; a receiver that is not a context is an
+/// illegal invocation, for methods and setters alike; arguments convert left
+/// to right. Every expected value is Chrome for Testing 148.0.7778.216's on
+/// the same script.
+#[test]
+fn canvas_members_keep_their_argument_and_receiver_checks() {
+    let b = bound();
+    ev(&b, "var x = document.getElementById('c').getContext('2d'); \
+            function msg(f) { try { f(); return 'none'; } catch (e) { return e.name + ': ' + e.message; } } 'ok'");
+    for (call, want) in [
+        ("x.arc(1, 2, 3, 4)", "TypeError: Failed to execute 'arc' on 'CanvasRenderingContext2D': 5 arguments required, but only 4 present."),
+        ("x.moveTo(1)", "TypeError: Failed to execute 'moveTo' on 'CanvasRenderingContext2D': 2 arguments required, but only 1 present."),
+        ("x.lineTo()", "TypeError: Failed to execute 'lineTo' on 'CanvasRenderingContext2D': 2 arguments required, but only 0 present."),
+        ("x.clearRect(1, 2, 3)", "TypeError: Failed to execute 'clearRect' on 'CanvasRenderingContext2D': 4 arguments required, but only 3 present."),
+        ("x.rotate()", "TypeError: Failed to execute 'rotate' on 'CanvasRenderingContext2D': 1 argument required, but only 0 present."),
+        ("x.bezierCurveTo(1, 2, 3, 4, 5)", "TypeError: Failed to execute 'bezierCurveTo' on 'CanvasRenderingContext2D': 6 arguments required, but only 5 present."),
+        ("x.arc(1, 2, 3, 4, undefined)", "none"),
+        ("x.beginPath.call({})", "TypeError: Illegal invocation"),
+        ("x.stroke.call(null)", "TypeError: Illegal invocation"),
+        ("x.lineTo.call(5, 1, 2)", "TypeError: Illegal invocation"),
+        ("Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'lineWidth').set.call({}, 3)", "TypeError: Illegal invocation"),
+        ("Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'strokeStyle').set.call({}, 'red')", "TypeError: Illegal invocation"),
+    ] {
+        assert_eq!(ev(&b, &format!("msg(function () {{ {call}; }})")), want, "{call}");
+    }
+    // Left to right, each once.
+    assert_eq!(
+        ev(&b, "var seen = []; function n(v) { return { valueOf: function () { seen.push(v); return v; } }; } \
+                x.arc(n(1), n(2), n(3), n(4), n(5)); x.lineTo(n(6), n(7)); x.translate(n(8), n(9)); \
+                x.lineWidth = n(10); seen.join()"),
+        "1,2,3,4,5,6,7,8,9,10"
+    );
+    // The values still reach the context: a string style reads back serialized, a bad one is ignored.
+    assert_eq!(
+        ev(&b, "x.strokeStyle = 'RED'; x.fillStyle = 'nope'; x.lineWidth = 4; x.lineWidth = -1; x.lineCap = 'round'; \
+                [x.strokeStyle, x.fillStyle, x.lineWidth, x.lineCap].join()"),
+        "#ff0000,#000000,4,round"
+    );
+}
+
+/// CANVAS-SHIM: as WebIDL drops the arguments past a member's own before
+/// converting any (Chrome 148: `moveTo(1, 2, o)` never reads `o`), a path
+/// member converts only its own. Was: every path member converted six.
+#[test]
+fn a_canvas_path_member_converts_only_its_own_arguments() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "var x = document.getElementById('c').getContext('2d'), read = 0; \
+                var o = { valueOf: function () { read++; return 1; } }; \
+                x.beginPath(o); x.closePath(o, o); x.moveTo(1, 2, o); x.lineTo(1, 2, o, o); x.rect(1, 2, 3, 4, o); \
+                x.quadraticCurveTo(1, 2, 3, 4, o); String(read)"),
+        "0"
+    );
+}
