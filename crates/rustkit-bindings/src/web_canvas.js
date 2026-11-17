@@ -35,6 +35,9 @@
         return b;
     })();
     var WM = B.WeakMap, defineOwn = B.defineProperty, newRecord = B.create;
+    // The TypeError the realm had when this script was installed: a page that
+    // replaces the global does not change what the canvas members throw.
+    var TypeErrorAtInstall = B.TypeError;
     function valueOnly(v) { var d = newRecord(null); d.value = v; return d; }
     // A WeakMap whose methods are its own properties: the script's records
     // are found by one direct call, whatever a page puts on
@@ -70,7 +73,7 @@
         if (args.length < n) tooFew(n, args.length, iface, member);
     }
     function tooFew(n, got, iface, member) {
-        throw new TypeError("Failed to execute '" + member + "' on '" + iface + "': " + n +
+        throw new TypeErrorAtInstall("Failed to execute '" + member + "' on '" + iface + "': " + n +
             ' argument' + (n === 1 ? '' : 's') + ' required, but only ' + got + ' present.');
     }
 
@@ -144,16 +147,17 @@
         if (!d) throw new TypeError('Illegal invocation');
         return d;
     }
-    function illegalCall() { throw new TypeError('Illegal invocation'); }
+    function illegalCall() { throw new TypeErrorAtInstall('Illegal invocation'); }
     // CANVAS-SHIM: the members MotionMark's canvas tests and charting
     // libraries call thousands of times a frame look their record up
     // inline (`DATA.get(this)`; a WeakMap answers undefined for a
     // non-object), call the host directly with the arguments the operation
     // reads, and count their arguments in strict mode: a sloppy function
     // that reads `arguments` makes a mapped arguments object on every call,
-    // the dearest part of a call in Boa. Same checks, same order (arity,
-    // then the receiver, then each argument's conversion, left to right),
-    // same host operations.
+    // the dearest part of a call in Boa. The same checks, in Chrome 148's
+    // order (the receiver, then the argument count, then each argument's
+    // conversion, left to right; tools/parity_oracle/canvas_shim_chrome.json),
+    // and the same host operations.
     function call(d, op, a, b, c, e, f, h, i, j) {
         return C(d.gen, d.id, op, a, b, c, e, f, h, i, j);
     }
@@ -177,30 +181,30 @@
     // ---- Transforms (non-finite arguments are ignored, in Rust)
     method(P, 'scale', function (x, y) {
         'use strict';
-        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'scale');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'scale');
         C(d.gen, d.id, 'scale', +x, +y);
     });
     method(P, 'rotate', function (a) {
         'use strict';
-        if (arguments.length < 1) tooFew(1, arguments.length, 'CanvasRenderingContext2D', 'rotate');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 1) tooFew(1, arguments.length, 'CanvasRenderingContext2D', 'rotate');
         C(d.gen, d.id, 'rotate', +a);
     });
     method(P, 'translate', function (x, y) {
         'use strict';
-        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'translate');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', 'translate');
         C(d.gen, d.id, 'translate', +x, +y);
     });
     method(P, 'transform', function (a, b, c, e, f, h) {
         'use strict';
-        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'transform');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'transform');
         C(d.gen, d.id, 'transform', +a, +b, +c, +e, +f, +h);
     });
     method(P, 'setTransform', function setTransform(a, b, c, e, f, h) {
@@ -367,9 +371,9 @@
     ['fillRect', 'strokeRect', 'clearRect'].forEach(function (name) {
         method(P, name, function (x, y, w, h) {
             'use strict';
-            if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', name);
             var d = DATA.get(this);
             if (d === undefined) illegalCall();
+            if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', name);
             C(d.gen, d.id, name, +x, +y, +w, +h);
         });
     });
@@ -385,31 +389,31 @@
     ['moveTo', 'lineTo'].forEach(function (name) {
         method(P, name, function (x, y) {
             'use strict';
-            if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', name);
             var d = DATA.get(this);
             if (d === undefined) illegalCall();
+            if (arguments.length < 2) tooFew(2, arguments.length, 'CanvasRenderingContext2D', name);
             C(d.gen, d.id, name, +x, +y);
         });
     });
     method(P, 'quadraticCurveTo', function (a, b, c, e) {
         'use strict';
-        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'quadraticCurveTo');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'quadraticCurveTo');
         C(d.gen, d.id, 'quadraticCurveTo', +a, +b, +c, +e);
     });
     method(P, 'bezierCurveTo', function (a, b, c, e, f, h) {
         'use strict';
-        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'bezierCurveTo');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 6) tooFew(6, arguments.length, 'CanvasRenderingContext2D', 'bezierCurveTo');
         C(d.gen, d.id, 'bezierCurveTo', +a, +b, +c, +e, +f, +h);
     });
     method(P, 'rect', function (x, y, w, h) {
         'use strict';
-        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'rect');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 4) tooFew(4, arguments.length, 'CanvasRenderingContext2D', 'rect');
         C(d.gen, d.id, 'rect', +x, +y, +w, +h);
     });
     function indexSize(out, name) {
@@ -419,9 +423,9 @@
     }
     method(P, 'arc', function arc(x, y, r, a0, a1, ccw) {
         'use strict';
-        if (arguments.length < 5) tooFew(5, arguments.length, 'CanvasRenderingContext2D', 'arc');
         var d = DATA.get(this);
         if (d === undefined) illegalCall();
+        if (arguments.length < 5) tooFew(5, arguments.length, 'CanvasRenderingContext2D', 'arc');
         if (C(d.gen, d.id, 'arc', +x, +y, +r, +a0, +a1, !!ccw) === 'IndexSizeError') indexSize('IndexSizeError', 'arc');
     });
     method(P, 'arcTo', function arcTo(x1, y1, x2, y2, r) {
