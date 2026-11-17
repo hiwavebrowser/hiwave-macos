@@ -1763,6 +1763,8 @@ impl ViewState {
     fn summarize_relayouts_for_navigation(&mut self) {
         let stats = std::mem::take(&mut self.relayout_stats);
         self.relayout_pending = PendingCauses::default();
+        // FORCED-READ: the outgoing document's forced builds, by stage.
+        let (forced_build_ms, forced_layout_ms) = self.lay.forced_stage_ms.take();
         if stats.relayouts == 0 {
             return;
         }
@@ -1772,7 +1774,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1} forced_build_ms={:.1} forced_layout_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1784,7 +1786,9 @@ impl ViewState {
             stats.animation_frames_painted,
             stats.animation_paint_ms,
             stats.forced_layouts,
-            stats.forced_ms
+            stats.forced_ms,
+            forced_build_ms,
+            forced_layout_ms
         );
         // LAT22 probe: why the document's forced reads built the tree.
         let reasons = std::mem::take(&mut *self.lay.forced_build_reasons.borrow_mut());
@@ -13732,6 +13736,7 @@ impl layout_ctx::LayoutCtx {
                 &element_ids,
                 false,
             );
+            self.with_building_lay(|lay| lay.last_build_elements.set(element_ids.get() as u32));
             // CSS 2.1 §14.2: the CANVAS background comes from the html
             // element, or from body when html's is transparent. The root box
             // paints it across the whole viewport (see the post-layout
@@ -26217,7 +26222,6 @@ impl Engine {
                     None => "no published boxes".into(),
                 }
             };
-            forced_read_probe(id, &lay, &document, &writes.probe, &why);
             let started = std::time::Instant::now();
             // LAT19: nothing a forced layout builds is painted, so the
             // animation baseline (what the view painted of each animated
@@ -26239,6 +26243,11 @@ impl Engine {
             // wrote: this build neither replays nor records. The memo goes
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
+            // FORCED-READ: what this build costs, for its log line. The stage timers the build
+            // runs under are read before and after it; nothing is taken from them.
+            let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let stages_before = relayout_cause::stage_ms_so_far();
+            let passes_before = lay.layout_builds.get();
             let built = lctx.lay_out_document(
                 building.for_build(),
                 &document,
@@ -26256,7 +26265,19 @@ impl Engine {
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             incremental_layout::adopt(&lay, &built);
-            debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
+            let stages = relayout_cause::stage_ms_so_far();
+            let cost = ForcedBuildCost {
+                took_ms: started.elapsed().as_secs_f64() * 1000.0,
+                prepare_ms,
+                build_ms: stages.build - stages_before.build,
+                layout_ms: stages.layout - stages_before.layout,
+                elements: lay.last_build_elements.get(),
+                passes: lay.layout_builds.get().saturating_sub(passes_before),
+            };
+            let (build_sum, layout_sum) = lay.forced_stage_ms.get();
+            lay.forced_stage_ms.set((build_sum + cost.build_ms, layout_sum + cost.layout_ms));
+            forced_read_probe(id, &lay, &document, &writes.probe, &why, &cost);
+            debug!(?id, ms = cost.took_ms, "Forced layout");
             // The geometry is built on the first read that needs it, as
             // `publish_geometry` does: a scrollTo after the write needs only
             // `max_scroll`. Each element's computed style is formatted on
@@ -47717,18 +47738,35 @@ fn forced_animation_frame(
     })
 }
 
+/// FORCED-READ: what one forced build cost. `took_ms` is the whole of it, from the decision to
+/// build to the built tree. Inside it: `prepare_ms` (fonts and the SVG caches, before the build),
+/// `build_ms` (the build stage: sheets, the rule index, the style of every element, the boxes) and
+/// `layout_ms` (the layout stage), each summed over the build's passes (`passes`: more than one on
+/// a page with container queries). `elements` is how many elements the last pass walked.
+struct ForcedBuildCost {
+    took_ms: f64,
+    prepare_ms: f64,
+    build_ms: f64,
+    layout_ms: f64,
+    elements: u32,
+    passes: u32,
+}
+
 /// LAT22 probe: one info line for a read that builds the tree, and the
 /// view's count of the reason. Shapes only: the reason, the read and write
 /// kinds, the names of the properties Web Animations' layer holds (those of
 /// the engine's animation property table; custom properties as `--custom`,
 /// any other key as `other`), and whether the animated elements and the
 /// element read are inside shadow trees. No text, no URLs, no values.
+///
+/// FORCED-READ: written after the build, with what it cost (`ForcedBuildCost`).
 fn forced_read_probe(
     id: EngineViewId,
     lay: &layout_ctx::ViewLayout,
     document: &Document,
     probe: &rustkit_bindings::ForcedReadProbe,
     why: &str,
+    cost: &ForcedBuildCost,
 ) {
     let in_shadow = |raw: usize| {
         document
@@ -47774,6 +47812,12 @@ fn forced_read_probe(
         animated_elements = animated,
         animated_in_shadow,
         read_in_shadow,
+        elements = cost.elements,
+        passes = cost.passes,
+        took_ms = %format!("{:.2}", cost.took_ms),
+        prepare_ms = %format!("{:.2}", cost.prepare_ms),
+        build_ms = %format!("{:.2}", cost.build_ms),
+        layout_ms = %format!("{:.2}", cost.layout_ms),
         "Forced read builds the tree"
     );
     let mut counts = lay.forced_build_reasons.borrow_mut();
