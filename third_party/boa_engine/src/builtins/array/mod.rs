@@ -1049,13 +1049,21 @@ impl Array {
         };
 
         // 5. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        // HIWAVE PATCH (string-length): R's length is counted as it grows and refused once it passes
+        // the limit (Chrome 148 stops reading elements there), and the reservation is not taken from
+        // an array-like's `length` (2^32 - 1 would ask for tens of gigabytes before any element).
+        let mut r = Vec::with_capacity((len as usize).saturating_mul(2).min(1 << 12));
+        let mut r_len: u64 = 0;
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
-                r.push(separator.clone());
+                r_len += separator.len() as u64;
+                super::string::String::check_length(r_len)?;
+                if !separator.is_empty() {
+                    r.push(separator.clone());
+                }
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
             let element = o.get(k, context)?;
@@ -1068,7 +1076,11 @@ impl Array {
                 element.to_string(context)?
             };
             // d. Set R to the string-concatenation of R and next.
-            r.push(next.clone());
+            r_len += next.len() as u64;
+            super::string::String::check_length(r_len)?;
+            if !next.is_empty() {
+                r.push(next);
+            }
             // e. Set k to k + 1.
         }
         // 8. Return R.
@@ -2229,7 +2241,9 @@ impl Array {
         let separator = js_string!(",");
 
         // 4. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        // HIWAVE PATCH (string-length): as `join`: shared pieces, refused once R passes the limit,
+        // and no reservation taken from the array-like's `length`.
+        let mut r = super::string::Pieces::immediate();
 
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
@@ -2237,7 +2251,7 @@ impl Array {
             // a. If k > 0, then
             if k > 0 {
                 // i. Set R to the string-concatenation of R and separator.
-                r.extend(separator.iter());
+                r.string(separator.clone())?;
             }
 
             // b. Let nextElement be ? Get(array, ! ToString(k)).
@@ -2255,12 +2269,12 @@ impl Array {
                     .to_string(context)?;
 
                 // ii. Set R to the string-concatenation of R and S.
-                r.extend(s.iter());
+                r.string(s)?;
             }
             //     d. Increase k by 1.
         }
         // 7. Return R.
-        Ok(js_string!(&r[..]).into())
+        Ok(r.finish().js_expect("an immediate builder has thrown before passing the limit")?.into())
     }
 
     /// Gets the delete count of a splice operation.

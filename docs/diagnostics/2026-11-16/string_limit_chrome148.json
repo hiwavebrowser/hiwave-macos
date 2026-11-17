@@ -1,0 +1,116 @@
+{
+ "chrome": "148.0.7778.216",
+ "cases": {
+  "replace_reduced": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 2
+  },
+  "repeat_max": {
+   "value": 536870888,
+   "ms": 0
+  },
+  "repeat_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 0
+  },
+  "concat_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 0
+  },
+  "concat_max": {
+   "value": 536870888,
+   "ms": 90
+  },
+  "join_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 1
+  },
+  "template_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 0
+  },
+  "pad_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 0
+  },
+  "replace_fn_calls": {
+   "value": "RangeError after 1024",
+   "ms": 0
+  },
+  "replaceall_fn_calls": {
+   "value": "RangeError after 512",
+   "ms": 0
+  },
+  "named_getter_calls": {
+   "value": "RangeError after 16384",
+   "ms": 3
+  },
+  "many_replace_str": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "many_replaceall_str": {
+   "value": "RangeError: Invalid string length",
+   "ms": 9
+  },
+  "many_replaceall_re": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "tolocale_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 3
+  },
+  "concat_method_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "plus_eq_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "pad_start_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 0
+  },
+  "join_sep_over": {
+   "value": "RangeError: Invalid string length",
+   "ms": 1
+  },
+  "repeat_big_ok": {
+   "value": 268435456,
+   "ms": 0
+  },
+  "under_limit_a": {
+   "value": "abababc..x-y",
+   "ms": 0
+  },
+  "under_limit_b": {
+   "value": "aXXaXXXXc",
+   "ms": 0
+  },
+  "join_huge_length": {
+   "value": "RangeError: Invalid string length after 1 getter calls",
+   "ms": 143921
+  },
+  "join_huge_length_empty_sep": {
+   "value": "1 after 1 getter calls",
+   "ms": 34
+  },
+  "join_running": {
+   "value": "RangeError after 32768 getter calls",
+   "ms": 19
+  },
+  "json_over": {
+   "error": "RangeError",
+   "message": "Invalid string length",
+   "ms": 501
+  }
+ }
+}
