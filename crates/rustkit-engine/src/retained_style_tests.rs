@@ -444,6 +444,79 @@ fn an_insert_and_a_removal_among_block_siblings_splice() {
     );
 }
 
+/// #1247 R1 item 1: inserting or removing a list item renumbers the items after it, and the dirty
+/// set never marks them (a counter is not a selector). A box that comes or goes among list items is
+/// not spliced. (RustKit draws no list markers and no `counter()` yet, so the display lists agree
+/// either way; the refusal is what keeps them agreeing once it does.)
+#[test]
+fn an_insert_among_list_items_builds_in_full() {
+    assert_same_as_a_full_build(
+        "list items",
+        &page(
+            "li{height:10px}",
+            "<ol id=o><li id=a>a</li><li id=b>b</li><li id=c>c</li></ol><p id=after>p</p>",
+            "var o = document.getElementById('o'); if (n % 2) { var li = document.createElement('li'); \
+             li.textContent = 'new'; o.insertBefore(li, o.firstChild); } else { o.removeChild(o.firstChild); }",
+        ),
+        Some(false),
+    );
+}
+
+/// #1247 R1 item 1, counters: block siblings that number themselves with `counter-increment` and
+/// show the count in `::before`. The counter properties and `counter()` generate nothing in RustKit
+/// yet (`rustkit_css::content::content_string`), so this pins that a splice still agrees with a full
+/// build here; `spliced_build` says what must refuse it once counters are drawn.
+#[test]
+fn an_insert_among_counted_siblings_matches_a_full_build() {
+    assert_same_as_a_full_build(
+        "counters",
+        &page(
+            "#u{counter-reset:c} #u>div{height:10px;counter-increment:c} #u>div::before{content:counter(c) '.'}",
+            "<div id=u><div id=d1></div><div id=d2></div><div id=d3></div></div>",
+            "var u = document.getElementById('u'); if (n % 2) { var d = document.createElement('div'); \
+             u.insertBefore(d, u.firstChild); } else { u.removeChild(u.firstChild); }",
+        ),
+        None,
+    );
+}
+
+/// #1247 R1 item 2: an animation that ran while the kept tree was built and has ended since leaves
+/// its value on boxes no write reaches. `#a` animates its opacity for 100 ms from one write and is not
+/// written again; `#w` is written every frame except for the 15 after that write, so the animation
+/// runs and ends in frames with no script relayout. Every splice after it must agree with a full
+/// build, and the frames after it do splice.
+#[test]
+fn an_animation_that_ended_since_the_kept_build_leaves_no_value_behind() {
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, _server) = load(&page(
+        "@keyframes fade{from{opacity:0.2} to{opacity:0.8}} #a{width:50px;height:50px;background-color:rgb(0,0,255)} \
+         #a.go{animation:fade 100ms linear} #w{width:10px;height:5px}",
+        "<div id=a></div><div id=w></div>",
+        "if (window.GO && !window.WENT) { document.getElementById('a').className = 'go'; window.WENT = n; } \
+         if (!window.WENT || window.WENT == n || n - window.WENT > 15) { \
+         document.getElementById('w').style.width = (10 + n % 50) + 'px'; }",
+    ));
+    for _ in 0..3 {
+        frame(&mut engine, view);
+    }
+    engine.execute_script(view, "window.GO = true").expect("go");
+    let (mismatches, splices) = (splice_mismatches_for_test(), splices_for_test().0);
+    for _ in 0..30 {
+        frame(&mut engine, view);
+    }
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "splices after the animation differ from a full build"
+    );
+    assert!(
+        now > splices,
+        "the frames after the animation ended splice (last miss {miss:?})"
+    );
+}
+
 /// R1 item 5: the memo holds a style per element. After a stretch of relayouts that script writes
 /// did not ask for, the view lets it go and records none; script writes start it again.
 #[test]

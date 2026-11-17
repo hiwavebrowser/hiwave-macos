@@ -48593,8 +48593,8 @@ fn restyle_plan(document: &Document, written: &[usize]) -> Result<RestylePlan, &
 }
 
 /// Where two box trees as built (before layout) first differ, as the path of child indices to it
-/// and what differs; `None` when they are the same box for box. Element numbers are not compared:
-/// a spliced tree numbers its new boxes apart from a full build's walk order.
+/// and what differs; `None` when they are the same box for box, element numbers included (#1247 R1
+/// item 3: they are document order, and a splice must number its boxes as a full build would).
 fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> Option<String> {
     let at = |path: &[usize], what: String| format!("at {path:?} (node {:?}): {what}", a.node_id);
     if a.node_id != b.node_id {
@@ -48607,10 +48607,6 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
         let mut x = x.clone();
         x.children.clear();
         x.style = Box::new(ComputedStyle::new());
-        x.element_id = None;
-        if let Some(identity) = x.identity.as_mut() {
-            identity.element_id = 0;
-        }
         format!("{x:?}")
     };
     let (sa, sb) = (shallow(a), shallow(b));
