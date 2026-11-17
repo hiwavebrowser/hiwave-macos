@@ -404,7 +404,8 @@ impl String {
         }
 
         // 6. Let stringElements be a new empty List.
-        let mut string_elements = vec![];
+        // HIWAVE PATCH (string-length): shared pieces, refused once past the limit.
+        let mut string_elements = Pieces::immediate();
 
         // 7. Let nextIndex be 0.
         let mut next_index = 0;
@@ -417,13 +418,16 @@ impl String {
             let next_seg = raw.get(next_key, context)?.to_string(context)?;
 
             // c. Append the code unit elements of nextSeg to the end of stringElements.
-            string_elements.extend(next_seg.iter());
+            string_elements.string(next_seg)?;
 
             // d. If nextIndex + 1 = literalSegments, then
             if next_index + 1 == literal_segments {
                 // i. Return the String value whose code units are the elements in the List stringElements.
                 //    If stringElements has no elements, the empty String is returned.
-                return Ok(js_string!(&string_elements[..]).into());
+                return Ok(string_elements
+                    .finish()
+                    .js_expect("an immediate builder has thrown before passing the limit")?
+                    .into());
             }
 
             // e. If nextIndex < numberOfSubstitutions, let next be substitutions[nextIndex].
@@ -439,7 +443,7 @@ impl String {
             let next_sub = next.to_string(context)?;
 
             // h. Append the code unit elements of nextSub to the end of stringElements.
-            string_elements.extend(next_sub.iter());
+            string_elements.string(next_sub)?;
 
             // i. Set nextIndex to nextIndex + 1.
             next_index += 1;
@@ -1762,6 +1766,9 @@ impl String {
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
 
+        // HIWAVE PATCH (string-length): the mapped length is counted before it is built.
+        Self::check_length(Self::case_mapped_length::<UPPER>(&string))?;
+
         // 3. Let sText be ! StringToCodePoints(S).
         // 4. Let upperText be the result of toUppercase(sText), according to
         // the Unicode Default Case Conversion algorithm.
@@ -1780,6 +1787,19 @@ impl String {
         // 5. Let L be ! CodePointsToString(upperText).
         // 6. Return L.
         Ok(text.into())
+    }
+
+    /// HIWAVE PATCH (string-length): the length of `string` after the Unicode Default Case
+    /// Conversion, in code units, counted without building it. Unpaired surrogates stay as they are.
+    fn case_mapped_length<const UPPER: bool>(string: &JsString) -> u64 {
+        string
+            .code_points()
+            .map(|cp| match cp {
+                CodePoint::Unicode(c) if UPPER => c.to_uppercase().map(char::len_utf16).sum::<usize>() as u64,
+                CodePoint::Unicode(c) => c.to_lowercase().map(char::len_utf16).sum::<usize>() as u64,
+                CodePoint::UnpairedSurrogate(_) => 1,
+            })
+            .sum()
     }
 
     /// [`String.prototype.toLocaleLowerCase ( [ locales ] )`][lower] and
@@ -1831,6 +1851,11 @@ impl String {
             // ICU4X already handles locales in the correct way.
             let casemapper = context.intl_provider().case_mapper()?;
 
+            // HIWAVE PATCH (string-length): the default mapping's length is counted before the
+            // mapping is built; a locale's tailoring changes it by a few units at most, and the
+            // result is checked as well.
+            Self::check_length(Self::case_mapped_length::<UPPER>(&string))?;
+
             // 8. Let codePoints be StringToCodePoints(S).
             let result = string.map_valid_segments(|segment| {
                 if UPPER {
@@ -1852,6 +1877,7 @@ impl String {
             });
 
             // 11. Return CodePointsToString(newCodePoints).
+            Self::check_length(result.len() as u64)?; // HIWAVE PATCH (string-length)
             Ok(result.into())
         }
 

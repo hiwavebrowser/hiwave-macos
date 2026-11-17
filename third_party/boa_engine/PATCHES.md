@@ -1075,3 +1075,27 @@ a replacement with no `$` is shared, not copied.
 above, the strings under the limit unchanged, and the refusal points Chrome showed (replacer calls
 1024 of 1024, `replaceAll` after 512, getters 16384 of 16384, `join` after 32768). Red without the
 patch. test262 `staging/sm/String/replace-math.js` now passes.
+
+## Patch: the second set of string paths keeps to the maximum length (`string-length`, part 2)
+
+**Why.** As for part 1, on the paths it did not cover: `JSON.stringify`, `String.raw`, `encodeURI` /
+`encodeURIComponent`, and case mapping (`toUpperCase`, `toLowerCase` and the locale forms), each of which
+can make a result longer than its inputs. Chrome for Testing 148 refuses each past 2^29 - 24 code units
+with `RangeError: Invalid string length` (`tools/parity_oracle/string_paths2_log.mjs`, output in
+`docs/diagnostics/2026-11-16/string_paths2_chrome148.json`).
+
+**What.** `JSON.stringify` counts the text as it serializes it (each value as it is produced, and each
+object's and array's punctuation, keys and indentation at its join). Past the limit it stops keeping
+what it builds but goes on serializing, so every `toJSON`, getter and replacer still runs as in Chrome,
+and refuses at the end. `String.raw` collects shared pieces with their length counted (`Pieces`). The URI
+encoders and case mapping count the result's exact length before building it. The locale case forms
+also check the result, since a locale's tailoring can change the length by a few units.
+
+**Not here.** `escape` and the HTML methods (`anchor`, `link`, ...) are Annex B, which this build does
+not enable. `normalize` builds its result in one ICU call; NFKD can expand a code unit up to 18 times,
+and Chrome did not finish the probe's case within 60 s, so it has no pin yet.
+
+**Pin.** `crates/rustkit-js/tests/string_length_limit_more.rs`: each path past the limit, the moment
+`JSON.stringify` refuses (after all 65,536 `toJSON` calls, as Chrome), and results under the limit
+unchanged (Chrome's lengths for two JSON texts). Red without the patch: `JSON.stringify` asked for 2 GiB
+in one allocation and the process aborted; `String.raw` and `encodeURI` built strings Chrome refuses.
