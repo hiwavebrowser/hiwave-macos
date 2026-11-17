@@ -781,7 +781,9 @@ fn a_paint_only_miss_cooldown_keeps_the_box_tree() {
     for start in [7, 11, 12, 25, 35] {
         set_retained_styles_for_test(Some(RetainedStyles::Boxes));
         let (mut engine, view, _server) = load(&tiles(1_000, 10, TUNE));
-        engine.execute_script(view, &format!("n = {start}")).expect("n");
+        engine
+            .execute_script(view, &format!("n = {start}"))
+            .expect("n");
         for _ in 0..3 {
             frame(&mut engine, view);
         }
@@ -793,7 +795,10 @@ fn a_paint_only_miss_cooldown_keeps_the_box_tree() {
         }
         set_retained_styles_for_test(None);
         if !per_frame.iter().all(|&b| b > 0 && b <= 20) {
-            built_the_page.push(format!("from n = {start}: {per_frame:?} (last miss {:?})", splices_for_test().1));
+            built_the_page.push(format!(
+                "from n = {start}: {per_frame:?} (last miss {:?})",
+                splices_for_test().1
+            ));
         }
     }
     assert!(
