@@ -1,0 +1,126 @@
+{
+ "holds": {
+  "svg_natural": "100x100",
+  "png_natural": "100x100",
+  "fresh": {
+   "opaque": 0,
+   "centre": "0,0,0,0",
+   "corner": "0,0,0,0",
+   "inside": "0,0,0,0"
+  },
+  "after_fill": {
+   "opaque": 900,
+   "centre": "255,0,0,255",
+   "corner": "0,0,0,0",
+   "inside": "255,0,0,255"
+  },
+  "after_png": {
+   "opaque": 900,
+   "centre": "32,96,192,255",
+   "corner": "0,0,0,0",
+   "inside": "32,96,192,255"
+  },
+  "after_svg": {
+   "opaque": 900,
+   "centre": "240,192,32,255",
+   "corner": "0,0,0,0",
+   "inside": "32,96,192,255"
+  },
+  "after_put": {
+   "opaque": 910,
+   "centre": "240,192,32,255",
+   "corner": "1,2,3,255",
+   "inside": "32,96,192,255"
+  },
+  "steps_until_blank": 174
+ },
+ "cost_ms": {
+  "whole_step_first": 0.3,
+  "getImageData": 0.012,
+  "putImageData": 0.001,
+  "read_2500_alpha": 0.005,
+  "drawImage_png": 0,
+  "drawImage_svg": 0.002,
+  "whole_step": 0.024,
+  "getContext": 0.001
+ },
+ "frames": [
+  {
+   "canvases": 1,
+   "stepped": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_and_redrawn": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_only": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "idle": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   }
+  },
+  {
+   "canvases": 4,
+   "stepped": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_and_redrawn": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_only": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "idle": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   }
+  },
+  {
+   "canvases": 16,
+   "stepped": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_and_redrawn": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_only": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "idle": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   }
+  },
+  {
+   "canvases": 64,
+   "stepped": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_and_redrawn": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   },
+   "moved_only": {
+    "mean_ms": 8.3,
+    "worst_ms": 9
+   },
+   "idle": {
+    "mean_ms": 8.3,
+    "worst_ms": 10
+   }
+  }
+ ],
+ "browser": "148.0.7778.216"
+}
