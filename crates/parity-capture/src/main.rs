@@ -138,7 +138,7 @@ struct Args {
     /// With `--live-ms`: print one `Frame stages ...` line per live turn to stderr
     /// (`rustkit_engine::frame_stage_line`): the turn's busy time and the wait before it, and what
     /// its script, canvas raster, build, layout, display list, render and the rest took. For a
-    /// stress run's stage split (tools/stress `--frame-stages`); numbers and names only. Every 25
+    /// stress run's stage split (tools/stress `--frame-stages`); numbers and names only. Every 5
     /// turns and at the end, a `Host calls turn=N rows=...` line: the thread's running host call
     /// rows (host function / operation : calls : ms), for the split of script into JS and host calls.
     #[arg(long, requires = "live_ms")]
@@ -854,7 +854,7 @@ struct LayoutStats {
 const MAX_LIVE_TURN_BUDGET_MS: u64 = 3_600_000;
 
 /// With `--frame-stages`: how many live turns apart the running host call rows are printed.
-const HOST_ROWS_EVERY: u64 = 25;
+const HOST_ROWS_EVERY: u64 = 5;
 
 /// `--frame-stages`, for the live loop (`run_live`): set once in `main`.
 static FRAME_STAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

@@ -30,7 +30,7 @@ STEADY = (0.2, 0.8)
 HIWAVE_STAGES = ["script_ms", "host_ms", "canvas_raster_ms", "build_ms", "layout_ms", "display_list_ms", "snapshot_ms", "svg_ms",
                  "render_ms", "acquire_ms", "execute_ms", "present_ms", "other_ms", "busy_ms", "wait_ms"]
 LINE = re.compile(r"Frame stages ((?:[a-z_]+=[-0-9.]+ ?)+)")
-# SCRIPT-SPLIT: parity-capture's running host call rows, every 25 turns and at the end:
+# SCRIPT-SPLIT: parity-capture's running host call rows, every 5 turns and at the end:
 # `Host calls turn=N rows=name/op:calls:ms,...` (cumulative; names are host functions and operations).
 HOST_LINE = re.compile(r"Host calls turn=([0-9]+) rows=([A-Za-z0-9_/?:.,-]*)")
 
@@ -101,12 +101,13 @@ def host_rows(text, frames):
     if not frames or not blocks:
         return []
     first, last = frames[0]["turn"], frames[-1]["turn"]
-    before = [b for b in blocks if b[0] <= first]
+    # The lines around the steady frames; where there is none before the first (or after the last),
+    # the nearest inside them (a heavy cell has few turns), so the window never reaches into the load.
+    before = [b for b in blocks if b[0] <= first] or [b for b in blocks if first <= b[0] <= last][:1]
     if not before:
         return []
     t0, r0 = before[-1]
-    # The first line at or after the last steady frame; a run cut short has none, then its last line.
-    after = [b for b in blocks if b[0] >= last] or [b for b in blocks if b[0] > t0][-1:]
+    after = [b for b in blocks if b[0] >= last] or [b for b in blocks if t0 < b[0] <= last][-1:]
     if not after:
         return []
     t1, r1 = after[0]
