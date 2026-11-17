@@ -572,6 +572,9 @@
             ['', '-start', '-end'].forEach(function (side) { PROPS[b + axis + side] = true; });
         });
     });
+    __rk.isStyleProperty = function (name) {
+        return Object.prototype.hasOwnProperty.call(PROPS, name);
+    };
     // Mirrors rustkit-css parse_display.
     function displayOk(v) {
         if (/^(block|inline|inline-block|flex|inline-flex|grid|inline-grid|none)$/.test(v)) return true;
