@@ -94,6 +94,35 @@ fn measure_the_content_threads_frame_grid() {
 pub(crate) const LINKS_PAGE: &str =
     include_str!("../../../docs/diagnostics/2026-11-16/links_lateness_probe.html");
 
+/// LINKS-SLOW part 2: how late a sleep to an instant a fraction of a millisecond away ends, on a
+/// current-thread tokio runtime (the content loop's) and with `std::thread::sleep`: 200 sleeps
+/// each, aimed 9.0-9.9 ms ahead in 0.1 ms steps. Prints the overshoot's percentiles in ms.
+#[test]
+#[ignore]
+fn measure_sleep_overshoot() {
+    sleeps_as_on_macos_if_asked();
+    fn pcts(mut xs: Vec<f64>) -> String {
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| xs[((xs.len() as f64 * p) as usize).min(xs.len() - 1)];
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        format!("mean {mean:.3} p10 {:.3} p50 {:.3} p90 {:.3} max {:.3}", q(0.1), q(0.5), q(0.9), xs[xs.len() - 1])
+    }
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut tokio_late = Vec::new();
+    let mut std_late = Vec::new();
+    for i in 0..200u64 {
+        let ahead = Duration::from_micros(9_000 + (i % 10) * 100);
+        let due = Instant::now() + ahead;
+        rt.block_on(async { tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await });
+        tokio_late.push(Instant::now().saturating_duration_since(due).as_secs_f64() * 1000.0);
+        let due = Instant::now() + ahead;
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        std_late.push(Instant::now().saturating_duration_since(due).as_secs_f64() * 1000.0);
+    }
+    eprintln!("SLEEP-OVERSHOOT tokio sleep_until: {}", pcts(tokio_late));
+    eprintln!("SLEEP-OVERSHOOT std::thread::sleep: {}", pcts(std_late));
+}
+
 #[test]
 #[ignore]
 fn measure_the_content_threads_link_lateness() {

@@ -1048,3 +1048,30 @@ difference. `crates/rustkit-js/tests/sort_numeric_difference_stop.rs`: a 3,000,0
 `toSorted` (about 4 s to finish) are stopped by the word set 100 ms in, and end within 2 s of it. Red
 before the check (the sort ran to its end). A sort with no comparator, and `TypedArray.prototype.sort`,
 make no call or check either way and are not changed here.
+
+## Patch: strings are no longer than Chrome's maximum (`string-length`)
+
+**Why.** Upstream allowed strings up to 2^32 - 1 code units and checked that in `repeat` and padding
+only. Chrome for Testing 148 builds strings up to 2^29 - 24 code units (V8's `String::kMaxLength` on
+64-bit) and throws `RangeError: Invalid string length` for one more, on every path that builds one
+(`tools/parity_oracle/string_limit_log.mjs`, output in
+`docs/diagnostics/2026-11-16/string_limit_chrome148.json`). A page should get Chrome's error, not a
+string Chrome would never build.
+
+**What.** `String::MAX_STRING_LENGTH` is 2^29 - 24, and `String::check_length` refuses past it with
+Chrome's message. The check comes before the string is built on every path that can make a string
+longer than its inputs: `+` and `+=` (`JsValue::add`), template literals (`ConcatToString`),
+`String.prototype.concat`, `repeat`, `padStart` / `padEnd`, `replace`, `replaceAll`,
+`RegExp.prototype[@@replace]` (and `GetSubstitution` under them), `Array.prototype.join` and
+`toLocaleString`. Results that grow in steps are collected as shared pieces (`string::Pieces`) with
+their length counted as they grow, and copied once at the end. The moment of the refusal is
+Chrome's, since a page can see it: `RegExp.prototype[@@replace]` calls every replacer and named-group
+getter and then refuses; `replaceAll` with a string pattern and `join` refuse as soon as the result
+passes the limit. Also: `repeat` builds by doubling (about 2 log2(n) pieces, not one reference per
+repetition), `join` and `toLocaleString` no longer reserve memory from an array-like's `length`, and
+a replacement with no `$` is shared, not copied.
+
+**Pin.** `crates/rustkit-js/tests/string_length_limit.rs`: the limit and one past it, each path
+above, the strings under the limit unchanged, and the refusal points Chrome showed (replacer calls
+1024 of 1024, `replaceAll` after 512, getters 16384 of 16384, `join` after 32768). Red without the
+patch. test262 `staging/sm/String/replace-math.js` now passes.

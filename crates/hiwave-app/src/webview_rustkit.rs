@@ -112,7 +112,7 @@ pub struct RustKitView {
     app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
-    /// Visibility state.
+    /// What the page was last told about being shown ([`Self::set_page_visible`]).
     visible: RefCell<bool>,
     /// Loading state.
     loading: RefCell<bool>,
@@ -778,6 +778,28 @@ impl RustKitView {
         } else {
             self.submit(PageCmd::SetAppOwned { owned: true });
         }
+    }
+
+    /// Tell the page whether it is shown (`PageCmd::SetVisible`): false while the window is
+    /// minimised or hidden, true when it shows again. The page starts out shown, and the command
+    /// goes only when the answer changes. Returns whether it went.
+    pub fn set_page_visible(&self, visible: bool) -> bool {
+        if *self.visible.borrow() == visible || !self.is_open() {
+            return false;
+        }
+        *self.visible.borrow_mut() = visible;
+        if let Some(thread) = &self.content {
+            thread.enqueue(PageCmd::SetVisible { visible });
+        } else {
+            self.submit(PageCmd::SetVisible { visible });
+        }
+        true
+    }
+
+    /// What [`Self::set_page_visible`] last told the page (true until it is called). Tests only.
+    #[cfg(test)]
+    pub fn page_visible(&self) -> bool {
+        *self.visible.borrow()
     }
 
     /// Whether [`Self::set_app_owned`] made this an app-owned view.
@@ -1837,6 +1859,21 @@ mod tests {
 
     fn view() -> RustKitView {
         RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// The page is told when it stops being shown and when it shows again, once per change, on
+    /// both kinds of view (the page thread and the flag-off inline page), and it keeps running.
+    #[test]
+    fn the_page_is_told_when_it_is_hidden_and_shown_once_per_change() {
+        for (kind, view) in [("inline", view()), ("content thread", RustKitView::headless_content(Bounds::new(0, 0, 400, 300)))] {
+            assert!(view.page_visible(), "{kind}: a page starts out shown");
+            assert!(!view.set_page_visible(true), "{kind}: shown again is no change");
+            assert!(view.set_page_visible(false), "{kind}: hiding is sent");
+            assert!(!view.page_visible(), "{kind}");
+            assert!(!view.set_page_visible(false), "{kind}: hidden twice is sent once");
+            assert!(view.set_page_visible(true), "{kind}: showing is sent");
+            assert!(view.page_visible(), "{kind}");
+        }
     }
 
     /// #739 / Pete's item 4: the window took no click while a page loaded,

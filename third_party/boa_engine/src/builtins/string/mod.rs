@@ -10,7 +10,7 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String
 
 use crate::{
-    Context, JsArgs, JsExpect, JsResult, JsString, JsValue,
+    Context, JsArgs, JsError, JsExpect, JsResult, JsString, JsValue,
     builtins::{Array, BuiltInObject, Number, RegExp},
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     error::JsNativeError,
@@ -229,8 +229,27 @@ impl String {
     /// The range of allowed values can be described like this: `[0, +∞)`.
     ///
     /// The resulting string can also not be larger than the maximum string size,
-    /// which can differ in JavaScript engines. In Boa it is `2^32 - 1`
-    pub(crate) const MAX_STRING_LENGTH: usize = u32::MAX as usize;
+    /// which can differ in JavaScript engines.
+    // HIWAVE PATCH (string-length): Chrome's limit, 2^29 - 24 code units on 64-bit (V8's
+    // `String::kMaxLength`; Chrome for Testing 148 builds a string of this length and refuses one
+    // more). Upstream Boa allowed 2^32 - 1 and checked it in `repeat` and padding only.
+    pub(crate) const MAX_STRING_LENGTH: usize = (1 << 29) - 24;
+
+    /// HIWAVE PATCH (string-length): refuses a string of `len` code units if it would pass
+    /// [`Self::MAX_STRING_LENGTH`], with Chrome's error. Called before the string is built.
+    pub(crate) fn check_length(len: u64) -> JsResult<()> {
+        if len > Self::MAX_STRING_LENGTH as u64 {
+            return Err(Self::invalid_length());
+        }
+        Ok(())
+    }
+
+    /// HIWAVE PATCH (string-length): Chrome's `RangeError: Invalid string length`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn invalid_length() -> JsError {
+        JsNativeError::range().with_message("Invalid string length").into()
+    }
 
     /// Abstract function `StringCreate( value, prototype )`.
     ///
@@ -660,7 +679,9 @@ impl String {
         for arg in args {
             // a. Let nextString be ? ToString(next).
             // b. Set R to the string-concatenation of R and nextString.
-            string = js_string!(&string, &arg.to_string(context)?);
+            let next = arg.to_string(context)?;
+            Self::check_length(string.len() as u64 + next.len() as u64)?; // HIWAVE PATCH (string-length)
+            string = js_string!(&string, &next);
         }
 
         // 5. Return R.
@@ -718,30 +739,34 @@ impl String {
             return Ok(js_string!().into());
         }
 
-        if u64::try_from(n)
-            .ok()
-            .and_then(|n| n.checked_mul(len as u64))
-            .is_none_or(|total_len| total_len > (Self::MAX_STRING_LENGTH as u64))
-        {
-            return Err(JsNativeError::range()
-                .with_message(
-                    "repeat count must be a positive finite number \
-                        that doesn't overflow the maximum string length (2^32 - 1)",
-                )
-                .into());
-        }
+        let total = u64::try_from(n).ok().and_then(|n| n.checked_mul(len as u64));
+        Self::check_length(total.unwrap_or(u64::MAX))?;
 
         let n = n as usize;
 
         // Charge each repetition against the VM loop-iteration limit.
-        let mut result = Vec::with_capacity(n);
         for _ in 0..n {
             crate::vm::opcode::IncrementLoopIteration::operation((), context)?;
-            result.push(string.as_str());
         }
 
         // 6. Return the String value that is made from n copies of S appended together.
-        Ok(JsString::concat_array(&result).into())
+        // HIWAVE PATCH (string-length): built by doubling (S, SS, SSSS, ...), keeping the powers
+        // that n's binary digits select, so the pieces number about 2 log2(n), not n (a list of n
+        // references was 24 bytes per repetition: gigabytes for a short string repeated 2^28 times).
+        let mut parts = Vec::new();
+        let mut power = string;
+        let mut rest = n;
+        loop {
+            if rest & 1 == 1 {
+                parts.push(power.clone());
+            }
+            rest >>= 1;
+            if rest == 0 {
+                break;
+            }
+            power = js_string!(&power, &power);
+        }
+        Ok(JsString::concat_array(&parts.iter().map(JsString::as_str).collect::<Vec<_>>()).into())
     }
 
     /// `String.prototype.slice( beginIndex [, endIndex] )`
@@ -1094,16 +1119,15 @@ impl String {
                     &replace_value,
                     context,
                 )?
+                .ok_or_else(Self::invalid_length)? // HIWAVE PATCH (string-length)
             }
         };
 
         // 13. Return the string-concatenation of preserved, replacement, and the substring of string from position + searchLength.
-        Ok(js_string!(
-            &preserved,
-            &replacement,
-            &string.get_expect(position + search_length..)
-        )
-        .into())
+        let tail = string.get_expect(position + search_length..);
+        // HIWAVE PATCH (string-length)
+        Self::check_length(preserved.len() as u64 + replacement.len() as u64 + tail.len() as u64)?;
+        Ok(js_string!(&preserved, &replacement, &tail).into())
     }
 
     /// `22.1.3.18 String.prototype.replaceAll ( searchValue, replaceValue )`
@@ -1204,7 +1228,9 @@ impl String {
         let mut end_of_last_match = 0;
 
         // 13. Let result be the empty String.
-        let mut result = Vec::with_capacity(string.len());
+        // HIWAVE PATCH (string-length): shared pieces, refused as soon as the result passes the
+        // limit (Chrome 148 stops calling the replacer at that point).
+        let mut result = Pieces::immediate();
 
         // 14. For each element p of matchPositions, do
         for p in match_positions {
@@ -1239,13 +1265,13 @@ impl String {
                     &JsValue::undefined(),
                     replace_str,
                     context,
-                )
-                .js_expect("GetSubstitution should never fail here.")?,
+                )?
+                .ok_or_else(Self::invalid_length)?, // HIWAVE PATCH (string-length)
             };
 
             // d. Set result to the string-concatenation of result, preserved, and replacement.
-            result.extend(preserved.iter());
-            result.extend(replacement.iter());
+            result.string(preserved)?;
+            result.string(replacement)?;
 
             // e. Set endOfLastMatch to p + searchLength.
             end_of_last_match = p + search_length;
@@ -1254,11 +1280,11 @@ impl String {
         // 15. If endOfLastMatch < the length of string, then
         if end_of_last_match < string.len() {
             // a. Set result to the string-concatenation of result and the substring of string from endOfLastMatch.
-            result.extend(string.get_expect(end_of_last_match..).iter());
+            result.string(string.get_expect(end_of_last_match..))?;
         }
 
         // 16. Return result.
-        Ok(js_string!(&result[..]).into())
+        Ok(result.finish().js_expect("an immediate builder has thrown before passing the limit")?.into())
     }
 
     /// `String.prototype.indexOf( searchValue[, fromIndex] )`
@@ -1557,14 +1583,7 @@ impl String {
         let fill_len = int_max_length - string_length;
 
         // Check if the resulting string would exceed the maximum string length
-        if int_max_length > (Self::MAX_STRING_LENGTH as u64) {
-            return Err(JsNativeError::range()
-                .with_message(format!(
-                    "cannot create a string longer than the maximum allowed length ({})",
-                    Self::MAX_STRING_LENGTH
-                ))
-                .into());
-        }
+        Self::check_length(int_max_length)?;
 
         let filler_len = filler.len() as u64;
 
@@ -2648,7 +2667,7 @@ pub(crate) fn get_substitution(
     named_captures: &JsValue,
     replacement: &JsString,
     context: &mut Context,
-) -> JsResult<JsString> {
+) -> JsResult<Option<JsString>> {
     let mut buf = [0; 2];
     // 1. Assert: Type(matched) is String.
 
@@ -2671,7 +2690,17 @@ pub(crate) fn get_substitution(
     //     from replacement to result while performing replacements as specified in Table 58.
     //     These $ replacements are done left-to-right, and, once such a replacement is performed,
     //     the new replacement text is not subject to further replacements.
-    let mut result = vec![];
+    // HIWAVE PATCH (string-length): the result is collected as pieces (the matched string, slices of
+    // `str` and the captures are shared, not copied) and its length is checked as each piece is
+    // added, so a substitution longer than the limit is never built. It returns `None` for one: the
+    // caller refuses it (at once, or after its remaining steps, as Chrome does on its path).
+    let mut result = Pieces::deferred();
+    // HIWAVE PATCH (string-length): a replacement with no `$` is itself the result: it is shared,
+    // not copied unit by unit.
+    if !replacement.iter().any(|unit| unit == u16::from(b'$')) {
+        result.string(replacement.clone())?;
+        return Ok(result.finish());
+    }
     let mut chars = replacement.code_points().peekable();
 
     while let Some(first) = chars.next() {
@@ -2686,24 +2715,24 @@ pub(crate) fn get_substitution(
                 // $$
                 Some(CodePoint::Unicode('$')) => {
                     // $
-                    result.push('$' as u16);
+                    result.unit('$' as u16)?;
                 }
                 // $&
                 Some(CodePoint::Unicode('&')) => {
                     // matched
-                    result.extend(matched.iter());
+                    result.string(matched.clone())?;
                 }
                 // $`
                 Some(CodePoint::Unicode('`')) => {
                     // The replacement is the substring of str from 0 to position.
-                    result.extend(str.get_expect(..position).iter());
+                    result.string(str.get_expect(..position))?;
                 }
                 // $'
                 Some(CodePoint::Unicode('\'')) => {
                     // If tailPos ≥ stringLength, the replacement is the empty String.
                     // Otherwise the replacement is the substring of str from tailPos.
                     if tail_pos < str_length {
-                        result.extend(str.get_expect(tail_pos..).iter());
+                        result.string(str.get_expect(tail_pos..))?;
                     }
                 }
                 // $nn
@@ -2751,13 +2780,13 @@ pub(crate) fn get_substitution(
                         if let Some(capture) = captures.get(index - 1)
                             && let Some(s) = capture.as_string()
                         {
-                            result.extend(s.iter());
+                            result.string(s)?;
                         }
 
                     // viii. Else,
                     } else {
                         // 1. Let refReplacement be ref.
-                        result.extend_from_slice(&['$' as u16, second as u16]);
+                        result.units(&['$' as u16, second as u16])?;
                     }
                 }
                 // $<
@@ -2765,7 +2794,7 @@ pub(crate) fn get_substitution(
                     // 1. If namedCaptures is undefined, the replacement text is the String "$<".
                     // 2. Else,
                     if named_captures.is_undefined() {
-                        result.extend_from_slice(utf16!("$<"));
+                        result.units(utf16!("$<"))?;
                     } else {
                         // a. Assert: Type(namedCaptures) is Object.
                         let named_captures = named_captures
@@ -2789,8 +2818,8 @@ pub(crate) fn get_substitution(
                         // c. If none is found, the replacement text is the String "$<".
                         #[allow(clippy::if_not_else)]
                         if !found {
-                            result.extend_from_slice(utf16!("$<"));
-                            result.extend_from_slice(&group_name);
+                            result.units(utf16!("$<"))?;
+                            result.units(&group_name)?;
                         // d. Else,
                         } else {
                             // i. Let groupName be the enclosed substring.
@@ -2801,24 +2830,111 @@ pub(crate) fn get_substitution(
                             // iii. If capture is undefined, replace the text through > with the empty String.
                             // iv. Otherwise, replace the text through > with ? ToString(capture).
                             if !capture.is_undefined() {
-                                result.extend(capture.to_string(context)?.iter());
+                                result.string(capture.to_string(context)?)?;
                             }
                         }
                     }
                 }
                 // $?, ? is none of the above
                 _ => {
-                    result.push('$' as u16);
+                    result.unit('$' as u16)?;
                     if let Some(second) = second {
-                        result.extend_from_slice(second.encode_utf16(&mut buf));
+                        result.units(second.encode_utf16(&mut buf))?;
                     }
                 }
             }
         } else {
-            result.extend_from_slice(first.encode_utf16(&mut buf));
+            result.units(first.encode_utf16(&mut buf))?;
         }
     }
 
     // 11. Return result.
-    Ok(js_string!(&result[..]))
+    Ok(result.finish())
+}
+
+/// HIWAVE PATCH (string-length): a string under construction, kept as shared pieces with its length
+/// counted as they are added. Nothing is copied until [`Pieces::finish`], and nothing more is kept
+/// once the length passes [`String::MAX_STRING_LENGTH`].
+///
+/// Chrome refuses at different moments on different paths, and a page can see which (its callbacks
+/// and getters run or not), so there are two modes: [`Pieces::immediate`] throws as soon as the
+/// limit is passed (`String.prototype.replaceAll`); [`Pieces::deferred`] keeps counting, lets the
+/// caller run the rest of its steps, and refuses at [`Pieces::finish`] (`GetSubstitution` and
+/// `RegExp.prototype[@@replace]`: Chrome 148 calls every replacer and named-group getter first).
+pub(crate) struct Pieces {
+    parts: Vec<JsString>,
+    literal: Vec<u16>,
+    len: u64,
+    deferred: bool,
+}
+
+impl Pieces {
+    pub(crate) fn immediate() -> Self {
+        Self { parts: Vec::new(), literal: Vec::new(), len: 0, deferred: false }
+    }
+
+    pub(crate) fn deferred() -> Self {
+        Self { deferred: true, ..Self::immediate() }
+    }
+
+    /// Whether the string has passed the limit (deferred mode; immediate mode has thrown by then).
+    pub(crate) fn too_long(&self) -> bool {
+        self.len > String::MAX_STRING_LENGTH as u64
+    }
+
+    /// Counts `by` more units. Returns whether to keep them.
+    fn grow(&mut self, by: usize) -> JsResult<bool> {
+        self.len = self.len.saturating_add(by as u64);
+        if !self.too_long() {
+            return Ok(true);
+        }
+        if !self.deferred {
+            return Err(String::invalid_length());
+        }
+        self.parts = Vec::new();
+        self.literal = Vec::new();
+        Ok(false)
+    }
+
+    fn flush(&mut self) {
+        if !self.literal.is_empty() {
+            self.parts.push(JsString::from(&self.literal[..]));
+            self.literal.clear();
+        }
+    }
+
+    pub(crate) fn unit(&mut self, unit: u16) -> JsResult<()> {
+        if self.grow(1)? {
+            self.literal.push(unit);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn units(&mut self, units: &[u16]) -> JsResult<()> {
+        if self.grow(units.len())? {
+            self.literal.extend_from_slice(units);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn string(&mut self, string: JsString) -> JsResult<()> {
+        if self.grow(string.len())? && !string.is_empty() {
+            self.flush();
+            self.parts.push(string);
+        }
+        Ok(())
+    }
+
+    /// The string, or `None` if it passed the limit (deferred mode).
+    pub(crate) fn finish(mut self) -> Option<JsString> {
+        if self.too_long() {
+            return None;
+        }
+        self.flush();
+        Some(match self.parts.len() {
+            0 => js_string!(),
+            1 => self.parts.pop().expect("one part"),
+            _ => JsString::concat_array(&self.parts.iter().map(JsString::as_str).collect::<Vec<_>>()),
+        })
+    }
 }
