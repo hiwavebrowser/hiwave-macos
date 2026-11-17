@@ -20,7 +20,8 @@ def scores(rows, reference):
     if rows.keys() != reference.keys():
         raise ValueError("page sets differ")
     for page, row in rows.items():
-        directory = "html/dom" if page.startswith("html/dom/") else page.split("/")[0]
+        parts = page.split("/")
+        directory = "/".join(parts[:2]) if parts[0] in {"css", "html"} else parts[0]
         counts = totals.setdefault(directory, Counter(passed=0, total=0, failed_pages=0))
         total = len(row["subtests"])
         if row["status"] != "OK":
@@ -44,11 +45,16 @@ def subtests(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["compare", "summary"])
+    parser.add_argument("mode", choices=["compare", "summary", "check"])
     parser.add_argument("first", type=Path)
     parser.add_argument("second", type=Path)
     args = parser.parse_args()
     before, after = read(args.first), read(args.second)
+    if args.mode == "check":
+        expected = json.loads(Path(__file__).with_name("wpt_expectations.json").read_text())
+        if scores(before, after) != expected:
+            raise SystemExit("Directory counts differ from committed expectations")
+        return
     if args.mode == "summary":
         print(json.dumps(scores(before, after), sort_keys=True, indent=2))
         return
