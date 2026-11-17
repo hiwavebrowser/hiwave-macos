@@ -93,11 +93,43 @@
         });
         return out;
     }
+    // A font family is a string or a space-separated sequence of identifiers.
+    // Escaped punctuation (including a comma) belongs to the identifier.
+    function fontFamilyOk(value) {
+        if (/^(inherit|initial|unset|revert|revert-layer)$/i.test(value)) return true;
+        if (/\b(?:var|env|attr)\(/i.test(value) && balanced(value)) return true;
+        var ident = /(?:--|-?(?:[a-z_\u0080-\uFFFF]|\\(?:[0-9a-f]{1,6}[\t\n\f\r ]?|[^\n\r\f0-9a-f])))(?:[\w\-\u0080-\uFFFF]|\\(?:[0-9a-f]{1,6}[\t\n\f\r ]?|[^\n\r\f0-9a-f]))*/iy;
+        var string = /"(?:[^"\\\n\r\f]|\\[\s\S])*"|'(?:[^'\\\n\r\f]|\\[\s\S])*'/y;
+        var space = /[\t\n\f\r ]*/y;
+        var pos = 0;
+        function take(pattern) {
+            pattern.lastIndex = pos;
+            var token = pattern.exec(value);
+            if (token) pos = pattern.lastIndex;
+            return token && token[0];
+        }
+        for (;;) {
+            take(space);
+            if (!take(string)) {
+                var first = take(ident);
+                if (!first) return false;
+                take(space);
+                var multiple = false;
+                while (take(ident)) { multiple = true; take(space); }
+                if (!multiple && /^(default|inherit|initial|unset|revert|revert-layer)$/i.test(first)) return false;
+            }
+            take(space);
+            if (pos === value.length) return true;
+            if (value[pos++] !== ',') return false;
+        }
+    }
     function setDecl(list, name, value, important) {
+        if (name === 'font-family' && !fontFamilyOk(value)) return false;
         for (var i = 0; i < list.length; i++) {
-            if (list[i].name === name) { list[i].value = value; list[i].important = important; return; }
+            if (list[i].name === name) { list[i].value = value; list[i].important = important; return true; }
         }
         list.push({ name: name, value: value, important: important });
+        return true;
     }
 
     // ---- CSSStyleDeclaration for a rule (camelCase access through a Proxy,
@@ -121,9 +153,8 @@
         setProperty: function (n, v, prio) {
             n = cssName(String(n));
             if (v == null || String(v) === '') return this.removeProperty(n);
-            setDecl(this[DECLS], n.slice(0, 2) === '--' ? n : n.toLowerCase(), String(v).trim(),
-                String(prio || '').toLowerCase() === 'important');
-            touched(this);
+            if (setDecl(this[DECLS], n.slice(0, 2) === '--' ? n : n.toLowerCase(), String(v).trim(),
+                String(prio || '').toLowerCase() === 'important')) touched(this);
         },
         removeProperty: function (n) {
             var d = findDecl(this, n);
