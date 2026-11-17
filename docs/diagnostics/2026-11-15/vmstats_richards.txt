@@ -1,0 +1,90 @@
+vm stats: 56428480 opcodes executed
+opcodes (top 40):
+  GetPropertyByName                10093625  17.89%
+  This                              8787500  15.57%
+  PushFromRegister                  5845557  10.36%
+  PopIntoRegister                   2699810   4.78%
+  JumpIfFalse                       2694534   4.78%
+  SetPropertyByName                 2534388   4.49%
+  Move                              2295160   4.07%
+  StoreNull                         2138200   3.79%
+  GetNameGlobal                     2065883   3.66%
+  CheckReturn                       2024403   3.59%
+  Return                            2024403   3.59%
+  Call                              2023374   3.59%
+  Eq                                1758200   3.12%
+  SetAccumulator                    1736015   3.08%
+  NotEq                             1442100   2.56%
+  Jump                              1210961   2.15%
+  GetArgument                        832972   1.48%
+  StoreZero                          657504   1.17%
+  BitAnd                             633450   1.12%
+  IncrementLoopIteration             632800   1.12%
+  LogicalOr                          533600   0.95%
+  Pop                                287372   0.51%
+  Inc                                256150   0.45%
+  BitOr                              236551   0.42%
+  GetPropertyByValue                 212629   0.38%
+  JumpIfNotGreaterThan               170700   0.30%
+  JumpIfNotLessThan                  159851   0.28%
+  StoreOne                           148253   0.26%
+  Dec                                 50000   0.09%
+  ShiftRight                          49950   0.09%
+  SetPropertyByValue                  47100   0.08%
+  StoreInt8                           46809   0.08%
+  Add                                 46550   0.08%
+  StoreInt32                          24850   0.04%
+  BitXor                              24850   0.04%
+  New                                  1501   0.00%
+  StoreInt16                            253   0.00%
+  DefineOwnPropertyByName               122   0.00%
+  StoreLiteral                           96   0.00%
+  GetFunction                            83   0.00%
+ic misses (an access that missed its inline cache; hits = executions - misses):
+  GetPropertyByName             1 (not cacheable: misses every time)
+  GetPropertyByName           178 (cacheable: cold, or the shape changed)
+  SetPropertyByName          4938 (not cacheable: misses every time)
+  SetPropertyByName            39 (cacheable: cold, or the shape changed)
+  GetNameGlobal               123 (cacheable: cold, or the shape changed)
+ic misses by site, receiver kind and property name (top 40):
+  SetPropertyByName    object    link                                    703
+  SetPropertyByName    object    id                                      702
+  SetPropertyByName    object    a1                                      403
+  SetPropertyByName    object    a2                                      400
+  SetPropertyByName    object    kind                                    400
+  SetPropertyByName    object    v1                                      308
+  SetPropertyByName    object    state                                   307
+  SetPropertyByName    object    queue                                   304
+  SetPropertyByName    object    priority                                300
+  SetPropertyByName    object    scheduler                               300
+  SetPropertyByName    object    task                                    300
+  SetPropertyByName    object    v2                                      154
+  SetPropertyByName    object    currentTcb                               54
+  SetPropertyByName    object    count                                    51
+  SetPropertyByName    object    currentId                                51
+  SetPropertyByName    object    holdCount                                51
+  SetPropertyByName    object    list                                     51
+  SetPropertyByName    object    queueCount                               51
+  SetPropertyByName    object    blocks                                   50
+  GetPropertyByName    function  prototype                                41
+  GetPropertyByName    object    currentTcb                               14
+  GetPropertyByName    object    v1                                       14
+  GetNameGlobal        global    Scheduler                                12
+  GetPropertyByName    object    scheduler                                11
+  GetNameGlobal        global    Packet                                   10
+  GetNameGlobal        global    TaskControlBlock                         10
+  GetPropertyByName    function  defineProperty                            9
+  GetNameGlobal        global    Object                                    9
+  GetPropertyByName    object    queue                                     8
+  GetPropertyByName    object    state                                     7
+  GetPropertyByName    object    v2                                        7
+  GetNameGlobal        global    globalThis                                7
+  GetPropertyByName    object    link                                      6
+  SetPropertyByName    object    toString                                  6
+  GetNameGlobal        global    KIND_DEVICE                               6
+  GetPropertyByName    object    run                                       5
+  SetPropertyByName    object    run                                       5
+  GetNameGlobal        global    ID_DEVICE_A                               5
+  GetNameGlobal        global    ID_DEVICE_B                               5
+  GetPropertyByName    object    addTask                                   4
+
