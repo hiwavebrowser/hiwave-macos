@@ -173,3 +173,133 @@ GPU AA.
    threads for Canvas Arcs at 1000 (the stage split has them in
    `raster_workers` and `gpu_main`), to know what Chrome spends where we would
    be spending.
+
+## First measurements (2026-11-17, same machine)
+
+Taken after the note, to decide between A, B, C and D without building any
+of them. Scratch tools (a microbenchmark inside rustkit-canvas, a Chrome probe
+through `tools/parity_oracle`'s pinned launch), not committed; numbers below.
+
+### 1. How often pages read canvas pixels back
+
+From the SCRIPT-SPLIT host rows (#1263) for all 8 MotionMark subtests at 100
+and 1000 elements: **only Images reads**: 163 `getImageData` and 163
+`putImageData` per presented frame at 100 elements (1.72 MotionMark frames
+each: ~95 of each per MotionMark frame), 7.1 and 9.8 µs per call. Every other
+subtest makes no `getImageData`, no `drawImage` of a canvas and no
+`createPattern` of one (`toDataURL` is not implemented).
+
+Not measured: the board's pages (the browser's own UI: no canvas) and the
+A/B's 19 live sites (no live loads outside the batch's A/B tool, which does
+not print host rows). Speedometer's chart suites (Chart.js, Observable Plot)
+carry `toDataURL` in their library code, but the headless runs did not get
+past loading (no nested contexts in that run), so their reads are not
+counted.
+
+**For the decision:** MotionMark's canvas subtests never read back, so a
+lazy read path (A) or a GPU readback (B, C) costs them nothing; Images is a
+read-every-frame canvas and needs the CPU mode under B or C.
+
+### 2. What the raster costs, by draw kind and size
+
+One draw on a 200x200 canvas, solid opaque colour, default caps and joins,
+parity profile, 400 repetitions each, µs per draw. "Context" is the whole
+canvas call as the host runs it (tiny-skia AA, recording included); the next
+three fill the same outline three ways; build and outline are the CPU work
+that stays with any design (path build, stroke to outline); px is the pixels
+with any coverage.
+
+| draw | context (AA) | tiny-skia AA fill | tiny-skia non-AA fill | analytic sketch | build | outline | px |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| arc stroke r20 w1 | 17.0 | 15.2 | 1.7 | 3.1 | 0.19 | 1.34 | 183 |
+| arc stroke r20 w5 | 19.2 | 16.6 | 2.2 | 4.9 | 0.19 | 1.29 | 530 |
+| arc stroke r60 w1 | 43.8 | 42.6 | 4.1 | 19.4 | 0.22 | 1.68 | 568 |
+| arc stroke r60 w5 | 48.0 | 46.4 | 3.7 | 23.1 | 0.19 | 1.62 | 1,571 |
+| arc stroke r60 w20 | 51.7 | 50.2 | 4.5 | 38.3 | 0.19 | 1.54 | 5,358 |
+| arc stroke r90 w5 | 69.3 | 67.3 | 5.7 | 45.1 | 0.18 | 1.51 | 2,381 |
+| arc stroke r90 w20 | 74.8 | 74.0 | 6.7 | 64.8 | 0.19 | 1.55 | 8,063 |
+| arc fill r20 | 14.1 | 11.5 | 1.3 | 4.8 | 0.20 | - | 886 |
+| arc fill r60 | 38.3 | 33.5 | 3.2 | 37.2 | 0.18 | - | 7,685 |
+| arc fill r90 | 56.6 | 49.2 | 4.3 | 78.0 | 0.18 | - | 17,192 |
+| line 205 px long, w1 | 36.6 | 37.1 | 2.8 | 24.8 | 0.05 | 0.16 | 482 |
+| line 205 px long, w5 | 38.2 | 38.3 | 2.6 | 28.7 | 0.05 | 0.14 | 1,306 |
+| line 205 px long, w20 | 43.0 | 43.2 | 3.2 | 40.6 | 0.05 | 0.14 | 4,428 |
+| line 36 px long, w5 | 8.6 | 8.2 | 0.9 | 1.8 | 0.05 | 0.14 | 228 |
+| rect 120x91, fractional | 22.0 | 18.8 | 2.1 | 43.5 | 0.09 | - | 11,011 |
+| rect 100x100, aligned | 6.1 | 6.8 | 2.2 | 40.3 | 0.09 | - | 10,000 |
+| quadratic stroke w1 | 42.8 | 43.1 | 3.2 | 19.9 | 0.05 | 0.44 | 558 |
+| quadratic stroke w5 | 45.6 | 45.5 | 3.6 | 23.6 | 0.05 | 0.60 | 1,518 |
+
+- **tiny-skia's AA cost follows the shape's extent and edges, not its
+  painted pixels.** A 1 px diagonal line of 482 painted pixels costs 37 µs
+  (~77 ns per painted pixel); an aligned 100x100 rectangle of 10,000 pixels
+  costs 6.8 µs (0.7 ns per pixel). The 4x supersampled scan over every edge
+  row is the cost; the same fill without AA is 5-17x cheaper on curves and
+  lines.
+- **The CPU work that stays under any design** (path build + stroke outline)
+  is 0.2-1.9 µs per draw: under 5% of today's draw.
+- **The analytic sketch** is a 60-line signed-area accumulator (font-rs
+  style, scalar, every pixel of the bounding box resolved and blended, curves
+  flattened to fixed steps). It is 1.2-5x faster than tiny-skia on thin
+  strokes and lines, but slower on large fills and rectangles (it resolves the
+  whole box; a real one keeps sparse spans and fills interiors by run). It
+  prices D's shape, not D: a production analytic rasterizer would beat it on
+  fills.
+
+### 3. How far edges are from Chrome's, today and per option
+
+The same 18 draws, read back with `getImageData`, against Chrome for Testing
+148.0.7778.216 with the pins' launch (`--disable-accelerated-2d-canvas`: its
+software Skia, analytic AA). Alpha channel (one colour, so coverage), over the
+pixels either side painted: share of painted pixels off by more than 2,
+largest difference, mean difference. "Chrome GPU" is the same Chrome launched
+with Metal and GPU rasterization on (ANGLE Metal, Apple M2 Max), read back the
+same way.
+
+| draw kind | tiny-skia AA (today) | Chrome GPU | analytic sketch | tiny-skia non-AA |
+|---|---|---|---|---|
+| arc strokes (7) | 19.7%, max 138, mean 5.34 | 19.2%, 109, 4.12 | 20.5%, 147, 5.55 | 19.8%, 217, 12.38 |
+| arc fills (3) | 3.8%, 79, 0.58 | 4.1%, 113, 1.06 | 4.5%, 179, 2.41 | 4.3%, 214, 2.65 |
+| lines (4) | 21.6%, 48, 3.50 | 20.7%, 68, 3.47 | 18.8%, 47, 3.06 | 23.2%, 153, 12.50 |
+| quadratic strokes (2) | 46.4%, 116, 9.96 | 49.5%, 115, 15.54 | 55.0%, 160, 22.33 | 50.7%, 206, 31.55 |
+| rects (2) | 0.4%, 11, 0.05 | 0.6%, 39, 0.08 | 0.6%, 13, 0.08 | 1.4%, 128, 1.14 |
+| all 18 | 9.5%, 138, 2.13 | 9.5%, 115, 2.14 | 10.1%, 179, 3.17 | 10.2%, 217, 6.25 |
+
+- **Chrome's own GPU path is as far from Chrome's software path as
+  tiny-skia is** (mean 2.14 against 2.13 over all painted pixels). A GPU
+  canvas that draws like Chrome's GPU canvas would sit at today's distance
+  from the pins; the pins compare with Chrome's software raster.
+- **Non-AA is out**: 3x today's mean difference, and up to 217 on a channel.
+- The analytic sketch is no closer than tiny-skia (its curve flattening and
+  the join at the arc fills' centre are crude); a production one would be
+  measured again.
+
+### 4. The per-frame copy and upload
+
+The engine's copy of a 1200x700 canvas bitmap into a new `CanvasFrame`
+(premultiplied rows, ~3.4 MB): **0.13 ms per frame**. The texture upload is
+not measured: the headless render executed no canvas draw on these frames
+(#1258's note); it needs the real window.
+
+### 5. What Chrome spends on the same frames
+
+From #1258's Chrome traces at 1000 elements (per frame, ms): Canvas Arcs main
+thread script 0.20, compositor 0.16, **GPU process main thread 0.63**,
+display 0.18, raster workers 0; Lines 0.25 / 0.17 / 0.37 / 0.25 / 0; Paths
+0.12 / 0.16 / 0.34 / 0.18 / 0. Chrome's canvas raster is in the GPU process
+(its GPU main thread), under 0.7 ms of CPU a frame for 1000 arcs, against
+~20 ms of tiny-skia per MotionMark frame here.
+
+### What this says about A, B, C, D
+
+- Reads are rare where the time is (MotionMark canvas: none) and constant
+  where they happen (Images: every frame): every option needs a CPU mode for
+  read-heavy canvases, and none pays readback on the canvas subtests.
+- The raster cost is tiny-skia's supersampled AA, 15-74 µs a draw; what any
+  design keeps on the CPU is under 2 µs a draw. GPU options (A, B, C) can take
+  most of the 59/33/28% raster share; D (CPU analytic) has to be a serious
+  rasterizer, not the sketch, to win on fills.
+- On edges, a GPU canvas lands where Chrome's own GPU canvas does: as far from
+  the software-Chrome pins as tiny-skia is now. A's split pictures (GPU on
+  screen, tiny-skia for reads) would differ from each other by about that
+  much at edges, not more.
