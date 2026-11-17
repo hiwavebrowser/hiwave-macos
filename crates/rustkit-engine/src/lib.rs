@@ -11,6 +11,7 @@
 //! 4. **Resource sharing**: Share compositor and network resources
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -701,6 +702,10 @@ mod script_restyle_tests;
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat22_forced_read_build_tests;
+#[cfg(all(test, feature = "headless"))]
+mod hidden_tiles_build_tests;
+#[cfg(all(test, feature = "headless"))]
+mod retained_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1467,6 +1472,9 @@ struct DocState {
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// TREE-REUSE (a): the per-element styles of this view's last build, kept for the next one
+    /// while `RUSTKIT_RETAINED_STYLES` is on (`RetainedStylesScope`).
+    retained_styles: Option<StyleMemo>,
     /// Script wrote to the DOM since the title was last compared with the
     /// document's (`Engine::follow_script_title`).
     title_stale: bool,
@@ -1854,6 +1862,7 @@ impl ViewState {
         self.lay.focus_visible.set(false);
         self.lay.rule_reads.borrow_mut().take();
         self.pending_dirty = None;
+        self.retained_styles = None;
         self.last_dirty = None;
         self.pointer_restyle = false;
         self.restyle_only = false;
@@ -3735,6 +3744,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                retained_styles: None,
                 title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
@@ -3862,6 +3872,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                retained_styles: None,
                 title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
@@ -4006,6 +4017,7 @@ impl Engine {
                 canvas_paints: HashMap::new(),
                 hovered_node: None,
                 pending_dirty: None,
+                retained_styles: None,
                 title_stale: false,
                 last_dirty: None,
                 pointer_restyle: false,
@@ -11295,7 +11307,9 @@ impl Engine {
             script_note = "cooling".to_string();
         }
         let tried = self.views.get(&id).is_some_and(|view| view.lay.script_roots.borrow().is_some());
+        let retained = self.enter_retained_styles(id, &causes, dirty.as_ref());
         let layout_skipped = self.relayout_uncounted(id);
+        self.leave_retained_styles(id, retained);
         let mut script_walked = None;
         if let Some(view) = self.views.get(&id) {
             view.lay.incremental_skip_build.set(false);
@@ -11394,6 +11408,99 @@ impl Engine {
 
     /// The relayout itself: build, lay out, paint. Returns whether the
     /// layout pass was skipped (the build changed only what is painted).
+    /// TREE-REUSE (a): put the view's retained styles where this relayout's build replays them
+    /// (`STYLE_MEMO`), with every element the script writes reached marked stale. They are kept
+    /// only across a relayout that script writes alone asked for and whose writes the dirty set
+    /// covers (`DirtySet::full` is none), with the same script-set control state; any other
+    /// relayout starts them over (the build records). True when they were put in place, for
+    /// [`Engine::leave_retained_styles`].
+    fn enter_retained_styles(
+        &mut self,
+        id: EngineViewId,
+        causes: &PendingCauses,
+        dirty: Option<&restyle_invalidation::DirtySet>,
+    ) -> bool {
+        let mode = retained_styles_mode();
+        let Some(view) = self.views.get_mut(&id) else {
+            return false;
+        };
+        if mode == RetainedStyles::Off {
+            view.retained_styles = None;
+            return false;
+        }
+        // A load's memo span is armed: its builds use that memo.
+        if STYLE_MEMO.with(|m| m.borrow().is_some()) {
+            return false;
+        }
+        let controls = retained_controls_fingerprint(&view.lay);
+        let mut memo = view
+            .retained_styles
+            .take()
+            .unwrap_or_else(|| StyleMemo::retained(mode == RetainedStyles::Verify));
+        memo.verify = mode == RetainedStyles::Verify;
+        let trusted = memo.key.is_some()
+            && memo.controls == controls
+            && dirty.is_some_and(|d| d.full.is_none())
+            && !causes.counts.is_empty()
+            && causes
+                .counts
+                .iter()
+                .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        // A stretch with no script relayouts: let the styles go, and record none.
+        memo.untrusted_run = if trusted { 0 } else { memo.untrusted_run + 1 };
+        let script_caused = causes
+            .counts
+            .iter()
+            .any(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        if memo.untrusted_run > RETAINED_IDLE && !script_caused {
+            let run = memo.untrusted_run;
+            let mut idle = StyleMemo::retained(memo.verify);
+            idle.untrusted_run = run;
+            view.retained_styles = Some(idle);
+            return false;
+        }
+        match (trusted, dirty, view.document.clone()) {
+            (true, Some(dirty), Some(document)) => {
+                for (&raw, &bits) in &dirty.nodes {
+                    let Some(node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+                        continue;
+                    };
+                    memo.stale.insert(node.id);
+                    if bits & (restyle_invalidation::SUBTREE_STYLE | restyle_invalidation::BOX) != 0 {
+                        let mut under = node.children();
+                        while let Some(child) = under.pop() {
+                            memo.stale.insert(child.id);
+                            under.extend(child.children());
+                        }
+                    }
+                }
+            }
+            _ => {
+                memo.key = None;
+                memo.styles.clear();
+                memo.pseudos.clear();
+                memo.stale.clear();
+            }
+        }
+        memo.controls = controls;
+        STYLE_MEMO.with(|m| *m.borrow_mut() = Some(memo));
+        true
+    }
+
+    /// Keep the styles [`Engine::enter_retained_styles`] put in place for the view's next relayout.
+    fn leave_retained_styles(&mut self, id: EngineViewId, entered: bool) {
+        if !entered {
+            return;
+        }
+        let Some(mut memo) = STYLE_MEMO.with(|m| m.borrow_mut().take()) else {
+            return;
+        };
+        memo.in_build = None;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.retained_styles = Some(memo);
+        }
+    }
+
     fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         // This build reads the hovered and pressed chains as they are now.
         let mut restyle_only = false;
@@ -13572,7 +13679,8 @@ impl layout_ctx::LayoutCtx {
         // uninstalled) when the build returns. A replaying build takes its
         // styles from the memo and skips building it; a node the recording
         // missed still cascades correctly, by the unindexed scan.
-        let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
+        let retained_replay = STYLE_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.retained));
+        let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) && !retained_replay {
             true => None,
             false => {
                 let index = self.shared_rule_index(&stylesheets, fingerprint);
@@ -14363,7 +14471,7 @@ impl layout_ctx::LayoutCtx {
                     shadow_tree::OwnRules::install(node, &tag_lower, attributes, ancestors, sib);
                 // Create computed style based on element, attributes, and stylesheets
                 let (mut style, share_id) = style_share_tracked(|| {
-                    memoized_style(node.id, || {
+                    memoized_element_style(node.id, node.parent().map(|p| p.id), || {
                         self.compute_style_for_element(
                             tag_name,
                             attributes,
@@ -14380,7 +14488,14 @@ impl layout_ctx::LayoutCtx {
                 // Transitions: start what this cascade's changes call for
                 // and overlay the running ones (after the memo, so the
                 // memo keeps the cascade's own result).
-                self.animate_style(node.id.raw(), &mut style, stylesheets);
+                let may_animate = self.animate_style(node.id.raw(), &mut style, stylesheets);
+                // Its memo entry is the bare cascade, and transitions and animations are applied
+                // after it: an element that animates, or may (it names an animation or a
+                // transition), hands its children values its entry does not show. A retained
+                // build treats it as changed, so they cascade (#1246 R1 item 1).
+                if may_animate {
+                    note_retained_animating(node.id);
+                }
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -15279,6 +15394,7 @@ impl layout_ctx::LayoutCtx {
                 // line-height, blockification) was a function of the style
                 // and the parent's, so `share_id` still names it.
                 let share_parent = StyleShareParent::enter(children_parent_style, share_id);
+                let retain_parent = RetainParent::enter(node.id);
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
@@ -15491,6 +15607,7 @@ impl layout_ctx::LayoutCtx {
                 }
                 drop(table_hints);
                 drop(share_chain);
+                drop(retain_parent);
                 drop(share_parent);
                 drop(slot_scope);
                 drop(host_scope);
@@ -16350,6 +16467,8 @@ impl layout_ctx::LayoutCtx {
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
+        #[cfg(test)]
+        CASCADES.with(|c| c.set(c.get() + 1));
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
         let _ua_control_border = UaControlBorderScope::enter(tag_name);
         let _border_style_declared = BorderStyleDeclaredScope::enter(tag_name);
@@ -48002,6 +48121,61 @@ pub(crate) fn last_restyle_miss_for_test() -> String {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Replays a verifying retained build found wrong, over all builds on this thread, for tests.
+    static RETAINED_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Element cascades run on this thread (`compute_style_for_element`), for tests.
+    static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Replays verifying retained builds on this thread have found wrong so far (tests).
+#[cfg(test)]
+pub(crate) fn retained_mismatches_for_test() -> usize {
+    RETAINED_MISMATCHES.with(std::cell::Cell::get)
+}
+
+/// Element cascades this thread has run so far (tests).
+#[cfg(test)]
+pub(crate) fn cascades_for_test() -> usize {
+    CASCADES.with(std::cell::Cell::get)
+}
+
+/// TREE-REUSE: `RUSTKIT_RETAINED_STYLES` keeps each view's per-element styles from one build to
+/// the next across script writes, and replays an element's style when nothing it depends on was
+/// written: `on`, `verify` (cascade anyway and count the replays that would differ), or `off`
+/// (default) (`docs/design/INCREMENTAL_RESTYLE.md` §3.3 item 1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RetainedStyles {
+    Off,
+    On,
+    Verify,
+}
+
+fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
+    match value {
+        Some("on") | Some("1") => RetainedStyles::On,
+        Some("verify") => RetainedStyles::Verify,
+        _ => RetainedStyles::Off,
+    }
+}
+
+fn retained_styles_mode() -> RetainedStyles {
+    #[cfg(test)]
+    if let Some(mode) = RETAINED_STYLES_TEST.with(std::cell::Cell::get) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<RetainedStyles> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| retained_styles_from(std::env::var("RUSTKIT_RETAINED_STYLES").ok().as_deref()))
+}
+
+/// Run this thread's builds with retained styles `mode`; `None` goes back to the environment's.
+#[cfg(test)]
+pub(crate) fn set_retained_styles_for_test(mode: Option<RetainedStyles>) {
+    RETAINED_STYLES_TEST.with(|m| m.set(mode));
+}
+
+#[cfg(test)]
 pub(crate) fn set_script_restyle_for_test(on: bool) {
     SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
 }
@@ -48594,9 +48768,69 @@ struct StyleMemo {
     tree_unusable: bool,
     /// Boxes a verifying build found different from the kept tree.
     tree_mismatches: usize,
+    /// TREE-REUSE (a): kept across script writes (`RetainedStylesScope`). Its entries are then
+    /// replayed only for elements outside `stale` whose parents' styles did not change.
+    retained: bool,
+    /// Elements script writes reached since their entry was cascaded.
+    stale: HashSet<rustkit_dom::NodeId>,
+    /// Elements this build cascaded to a style other than their entry's (or with no entry): their
+    /// children cascade too.
+    changed: HashSet<rustkit_dom::NodeId>,
+    /// Elements this build cascaded: their `::before`/`::after` cascade too.
+    recomputed: HashSet<rustkit_dom::NodeId>,
+    /// The script-set control state (checkedness, values) the entries were cascaded with.
+    controls: u64,
+    /// Relayouts in a row the styles were not kept across (`RETAINED_IDLE`).
+    untrusted_run: u32,
+}
+
+/// After this many relayouts in a row that script writes alone did not ask for (an animation, a
+/// resize, a load), a view lets its retained styles go and its builds stop recording them, until
+/// script writes come again: the memo holds a computed style per element (#1246 R1 item 5), and
+/// recording one costs every such build a copy of each.
+const RETAINED_IDLE: u32 = 8;
+
+/// The script-set control state a cascade reads (`:checked`, `:placeholder-shown`): retained
+/// styles cascaded under other control state are not replayed (TREE-REUSE a).
+fn retained_controls_fingerprint(lay: &layout_ctx::ViewLayout) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut checked: Vec<(usize, bool)> = lay.checked_states.borrow().iter().map(|(k, v)| (*k, *v)).collect();
+    checked.sort_unstable();
+    checked.hash(&mut h);
+    let mut values: Vec<(usize, String)> =
+        lay.edit_states.borrow().iter().map(|(k, v)| (*k, v.value())).collect();
+    values.sort_unstable();
+    values.hash(&mut h);
+    h.finish()
 }
 
 impl StyleMemo {
+    /// An empty memo a view keeps across script writes (TREE-REUSE a). It keeps no box tree.
+    fn retained(verify: bool) -> Self {
+        StyleMemo {
+            verify,
+            key: None,
+            styles: HashMap::new(),
+            pseudos: HashMap::new(),
+            in_build: None,
+            hits: 0,
+            misses: 0,
+            mismatches: 0,
+            tree_reuse: TreeReuse::Off,
+            tree: None,
+            tree_images: HashMap::new(),
+            tree_unusable: false,
+            tree_mismatches: 0,
+            retained: true,
+            stale: HashSet::new(),
+            changed: HashSet::new(),
+            recomputed: HashSet::new(),
+            controls: 0,
+            untrusted_run: 0,
+        }
+    }
+
     /// A recording starts: nothing kept for an earlier one describes it.
     fn forget_tree(&mut self) {
         self.tree = None;
@@ -48688,6 +48922,12 @@ impl StyleMemoScope {
                 tree_images: HashMap::new(),
                 tree_unusable: false,
                 tree_mismatches: 0,
+                retained: false,
+                stale: HashSet::new(),
+                changed: HashSet::new(),
+                recomputed: HashSet::new(),
+                controls: 0,
+                untrusted_run: 0,
             })
         });
         Some(StyleMemoScope { owner: true })
@@ -48738,10 +48978,13 @@ impl StyleMemoBuild {
                     memo.key = Some(key);
                     memo.styles.clear();
                     memo.pseudos.clear();
+                    memo.stale.clear();
                     memo.forget_tree();
                     MemoUse::Record
                 }
             };
+            memo.changed.clear();
+            memo.recomputed.clear();
             memo.in_build = Some(use_);
             memo.hits = 0;
             memo.misses = 0;
@@ -48780,6 +49023,120 @@ fn memoized_style(
     node: rustkit_dom::NodeId,
     compute: impl FnOnce() -> ComputedStyle,
 ) -> Box<ComputedStyle> {
+    memoized_element_style(node, None, compute)
+}
+
+/// [`memoized_style`] for an element under `dom_parent`. A retained memo (TREE-REUSE a) replays
+/// the element's entry only when no script write reached it and neither its DOM parent nor the
+/// element whose children are being built (`RetainParent`) cascaded to a new style this build.
+/// Otherwise it cascades, keeps the result, and marks the element changed if the style moved.
+fn memoized_element_style(
+    node: rustkit_dom::NodeId,
+    dom_parent: Option<rustkit_dom::NodeId>,
+    compute: impl FnOnce() -> ComputedStyle,
+) -> Box<ComputedStyle> {
+    // In a retained build: Some(true) replays, Some(false) cascades and keeps.
+    let retained = STYLE_MEMO.with(|m| {
+        let slot = m.borrow();
+        let memo = slot.as_ref()?;
+        if !memo.retained || !matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+            return None;
+        }
+        let parent_changed = |p: Option<rustkit_dom::NodeId>| p.is_some_and(|p| memo.changed.contains(&p));
+        let built_under = RETAIN_PARENTS.with(|s| s.borrow().last().copied());
+        // Built outside every element's scope (body, under the root): any change may be its parent's.
+        let unknown_parent = built_under.is_none() && !memo.changed.is_empty();
+        // A replay would serve the element: no write reached it, it has an entry, and no element its
+        // style inherits from cascaded to a new style this build.
+        let serves = !(memo.stale.contains(&node)
+            || parent_changed(dom_parent)
+            || parent_changed(built_under)
+            || unknown_parent
+            || !memo.styles.contains_key(&node));
+        Some((serves && !memo.verify, serves))
+    });
+    match retained {
+        None => memoized_style_through_memo(node, compute),
+        Some((true, _)) => {
+            let hit = STYLE_MEMO.with(|m| {
+                let mut slot = m.borrow_mut();
+                let memo = slot.as_mut()?;
+                memo.hits += 1;
+                memo.styles.get(&node).cloned()
+            });
+            hit.unwrap_or_else(|| Box::new(compute()))
+        }
+        Some((false, serves)) => {
+            let fresh = Box::new(compute());
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    memo.stale.remove(&node);
+                    let differs = memo.styles.get(&node).is_none_or(|old| !same_computed_style(old, &fresh));
+                    if differs {
+                        memo.changed.insert(node);
+                    }
+                    memo.misses += 1;
+                    // A verifying build counts the elements a replay would have served, and wrongly:
+                    // not the ones a write reached or whose parent changed, which cascade anyway.
+                    if memo.verify && differs && serves {
+                        memo.mismatches += 1;
+                        #[cfg(test)]
+                        RETAINED_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        warn!(?node, "Retained styles: a replay would differ from a fresh cascade");
+                    }
+                    memo.recomputed.insert(node);
+                    memo.styles.insert(node, fresh.clone());
+                }
+            });
+            fresh
+        }
+    }
+}
+
+/// In a retained build, `node` animates or may: its children and its pseudos cascade.
+fn note_retained_animating(node: rustkit_dom::NodeId) {
+    STYLE_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if memo.retained && matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+                memo.changed.insert(node);
+                memo.recomputed.insert(node);
+            }
+        }
+    });
+}
+
+thread_local! {
+    /// The elements whose children the build is building, innermost last (`RetainParent`).
+    static RETAIN_PARENTS: std::cell::RefCell<Vec<rustkit_dom::NodeId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Names `node` as the element whose children are built inside this scope: a child a retained
+/// memo replays must not be under an element whose style changed (TREE-REUSE a).
+struct RetainParent;
+
+impl RetainParent {
+    fn enter(node: rustkit_dom::NodeId) -> Self {
+        RETAIN_PARENTS.with(|s| s.borrow_mut().push(node));
+        RetainParent
+    }
+}
+
+impl Drop for RetainParent {
+    fn drop(&mut self) {
+        // try_: a panic inside a borrow must not become a double panic.
+        RETAIN_PARENTS.with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                s.pop();
+            }
+        });
+    }
+}
+
+fn memoized_style_through_memo(
+    node: rustkit_dom::NodeId,
+    compute: impl FnOnce() -> ComputedStyle,
+) -> Box<ComputedStyle> {
     through_memo(
         |m| &mut m.styles,
         node,
@@ -48797,6 +49154,32 @@ fn memoized_pseudo_style(
     pseudo: Pseudo,
     compute: impl FnOnce() -> Option<ComputedStyle>,
 ) -> Option<ComputedStyle> {
+    // A retained memo (TREE-REUSE a): an element that cascaded this build cascades its pseudos.
+    let retained = STYLE_MEMO.with(|m| {
+        let slot = m.borrow();
+        let memo = slot.as_ref()?;
+        if !memo.retained || !matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+            return None;
+        }
+        Some(memo.recomputed.contains(&node) || memo.verify || !memo.pseudos.contains_key(&(node, pseudo)))
+    });
+    if let Some(must) = retained {
+        if !must {
+            let hit = STYLE_MEMO.with(|m| {
+                m.borrow().as_ref().and_then(|memo| memo.pseudos.get(&(node, pseudo)).map(|s| s.as_deref().cloned()))
+            });
+            if let Some(hit) = hit {
+                return hit;
+            }
+        }
+        let fresh = compute();
+        STYLE_MEMO.with(|m| {
+            if let Some(memo) = m.borrow_mut().as_mut() {
+                memo.pseudos.insert((node, pseudo), fresh.as_ref().map(|s| Box::new(s.clone())));
+            }
+        });
+        return fresh;
+    }
     through_memo(
         |m| &mut m.pseudos,
         (node, pseudo),
