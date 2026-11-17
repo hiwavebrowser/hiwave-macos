@@ -1033,8 +1033,18 @@ flag once; `compare_array_elements` computes the difference itself when both ele
 calls the function otherwise (strings, objects with `valueOf`, BigInts, anything else). The result is
 treated as `ToNumber(call)` is: NaN counts as equal. `TypedArray.prototype.sort` is not changed.
 
-**Pin.** `crates/rustkit-js/tests/sort_numeric_difference.rs`: 20 answers equal Chrome's (numbers,
+**Pin.** `crates/rustkit-js/tests/sort_numeric_difference.rs`: 19 answers equal Chrome's (numbers,
 Infinity, NaN, -0, mixed strings, holes, `undefined`, BigInt, objects with `valueOf`, defaults and
 other shapes that must still be called), and an opcode budget in a child process (4000 numbers: 17
 opcodes with `a - b` or `b - a`, 510,293 for `a - b + 0`, 383,709 when half the elements are strings).
 Red without the fast path (425,247).
+The budget is under 100 opcodes (measured 17). Forms that look like `a - b` but are not an ordinary
+function (class constructor, bound function, Proxy with an `apply` trap, object-literal method, generator,
+async function) are pinned to Chrome's answers in the same file.
+
+**Turn budget.** A compared pair that takes the fast path makes no call, and a call is where the interrupt
+word is read, so the fast path reads it itself (`Context::check_interrupt`, one relaxed load) before each
+difference. `crates/rustkit-js/tests/sort_numeric_difference_stop.rs`: a 3,000,000-number `sort` and
+`toSorted` (about 4 s to finish) are stopped by the word set 100 ms in, and end within 2 s of it. Red
+before the check (the sort ran to its end). A sort with no comparator, and `TypedArray.prototype.sort`,
+make no call or check either way and are not changed here.

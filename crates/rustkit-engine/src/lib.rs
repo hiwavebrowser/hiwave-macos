@@ -6339,6 +6339,9 @@ impl Engine {
             if timer_stopped {
                 log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(_)));
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6363,7 +6366,8 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_ms);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -9726,12 +9730,17 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
-                timers_ms += step_started.elapsed().as_millis() as u64;
+                let slice_ms = step_started.elapsed().as_millis() as u64;
+                // A slice that ends in a record of its own (stopped, threw)
+                // has its time there, not in the errors' (SCRIPT-TIME-DUP).
+                if !(stopped || matches!(caught, Ok(Err(_)) | Err(_))) {
+                    timers_ms += slice_ms;
+                }
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
                 if stopped && !matches!(caught, Err(_)) {
-                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    let elapsed_ms = slice_ms;
                     log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
                     inspector_glue::log_script(
                         log,
@@ -10235,6 +10244,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -10761,6 +10771,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -11194,6 +11205,11 @@ impl Engine {
         // no layout, no subtree or sibling restyle) may build those elements alone.
         let cooling = self.views.get(&id).is_some_and(|view| {
             let left = view.lay.script_cooldown.get();
+            // The cooldown's last relayout keeps its tree, for the attempt after it (LPF3: a
+            // `no kept tree` miss followed every cooldown).
+            if left == 1 {
+                view.lay.want_script_unlaid.set(true);
+            }
             if left > 0 {
                 view.lay.script_cooldown.set(left - 1);
             }
@@ -11224,6 +11240,8 @@ impl Engine {
                         if idle >= SCRIPT_RESTYLE_IDLE {
                             view.lay.want_script_unlaid.set(false);
                             view.lay.script_unlaid.borrow_mut().take();
+                            // ... and the run of misses has ended (LPF3).
+                            view.lay.script_last_cooldown.set(None);
                         }
                     }
                 }
@@ -11853,9 +11871,22 @@ impl Engine {
         }
         if let Some(why) = why {
             view.layout = Some(laid);
-            // More than paint changed: sit out the next relayouts, and keep no tree for them.
-            view.lay.want_script_unlaid.set(false);
-            view.lay.script_cooldown.set(SCRIPT_RESTYLE_COOLDOWN);
+            // More than paint changed. A one-off miss sits out nothing: the full build that follows
+            // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
+            // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
+            // `no kept tree` miss after them). Misses in a row sit out 1, 2, 4, ... relayouts, up to
+            // the cap and then at it, keeping no tree until the last of them, so a page whose
+            // writes keep changing layout pays neither an attempt nor a kept copy every frame. A
+            // miss is in a row when no hit (and no idle stretch or navigation) came since the last
+            // one; relayouts the path refused between them do not end the run (R1).
+            let cooldown = view
+                .lay
+                .script_last_cooldown
+                .get()
+                .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
+            view.lay.script_last_cooldown.set(Some(cooldown));
+            view.lay.script_cooldown.set(cooldown);
+            view.lay.want_script_unlaid.set(cooldown == 0);
             return miss(&why);
         }
         {
@@ -11874,6 +11905,7 @@ impl Engine {
             }
         }
         *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        view.lay.script_last_cooldown.set(None);
         laid.forget_hit_overflow();
         let display_list = self.display_list_for(id, &laid);
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -47810,7 +47842,8 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
-/// LPF1: the relayouts the script restyle path sits out after a write that changed more than paint.
+/// LPF1: the most relayouts the script restyle path sits out after writes that changed more than
+/// paint (LPF3: reached only by misses in a row; a one-off miss sits out none).
 const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
 /// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
 const SCRIPT_RESTYLE_IDLE: u32 = 8;

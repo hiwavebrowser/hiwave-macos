@@ -1,0 +1,89 @@
+vm stats: 27349049 opcodes executed
+opcodes (top 40):
+  Move                              8659570  31.66%
+  GetPropertyByValue                3311577  12.11%
+  Inc                               3309830  12.10%
+  Add                               3211345  11.74%
+  Mul                               2011993   7.36%
+  GetName                           1358849   4.97%
+  SetPropertyByValue                1243512   4.55%
+  Jump                               935867   3.42%
+  IncrementLoopIteration             928772   3.40%
+  JumpIfNotLessThanOrEqual           796382   2.91%
+  Sub                                497920   1.82%
+  StoreOne                           237402   0.87%
+  JumpIfNotLessThan                  237133   0.87%
+  StoreZero                          186467   0.68%
+  GetPropertyByValuePush             116236   0.43%
+  StoreFloat                          98963   0.36%
+  BitOr                               98304   0.36%
+  JumpIfNotGreaterThan                97874   0.36%
+  PushFromRegister                     2908   0.01%
+  Neg                                  2304   0.01%
+  GetArgument                          1668   0.01%
+  Call                                  545   0.00%
+  Pop                                   540   0.00%
+  CheckReturn                           525   0.00%
+  Return                                525   0.00%
+  GetPropertyByName                     438   0.00%
+  StoreInt8                             267   0.00%
+  JumpIfFalse                           147   0.00%
+  StrictEq                              142   0.00%
+  StoreInt16                            130   0.00%
+  DefineOwnPropertyByName               122   0.00%
+  StoreLiteral                           96   0.00%
+  GetFunction                            89   0.00%
+  GetNameGlobal                          84   0.00%
+  DefInitVar                             62   0.00%
+  StoreTrue                              58   0.00%
+  PutLexicalValue                        47   0.00%
+  SetNameByLocator                       45   0.00%
+  GetLocator                             43   0.00%
+  PopIntoRegister                        34   0.00%
+ic misses (an access that missed its inline cache; hits = executions - misses):
+  GetPropertyByName             1 (not cacheable: misses every time)
+  GetPropertyByName            38 (cacheable: cold, or the shape changed)
+  SetPropertyByName            30 (not cacheable: misses every time)
+  GetNameGlobal                46 (cacheable: cold, or the shape changed)
+ic misses by site, receiver kind and property name (top 40):
+  GetPropertyByName    function  prototype                                11
+  GetPropertyByName    function  defineProperty                            9
+  GetNameGlobal        global    Object                                    9
+  GetNameGlobal        global    Array                                     8
+  GetNameGlobal        global    globalThis                                7
+  GetNameGlobal        global    solver                                    6
+  GetPropertyByName    object    setDensity                                3
+  GetPropertyByName    object    setVelocity                               3
+  GetPropertyByName    function  toStringTag                               2
+  GetPropertyByName    object    setResolution                             2
+  SetPropertyByName    object    getDensity                                2
+  SetPropertyByName    object    getXVelocity                              2
+  SetPropertyByName    object    getYVelocity                              2
+  SetPropertyByName    object    height                                    2
+  SetPropertyByName    object    setDensity                                2
+  SetPropertyByName    object    setVelocity                               2
+  SetPropertyByName    object    width                                     2
+  GetNameGlobal        global    Symbol                                    2
+  GetNameGlobal        global    undefined                                 2
+  GetPropertyByName    function  fromAsync                                 1
+  GetPropertyByName    object    FinalizationRegistry                      1
+  GetPropertyByName    object    reset                                     1
+  GetPropertyByName    object    runIteration                              1
+  GetPropertyByName    object    setDisplayFunction                        1
+  GetPropertyByName    object    setIterations                             1
+  GetPropertyByName    object    setUICallback                             1
+  GetPropertyByName    object    sqrt                                      1
+  GetPropertyByName    object    update                                    1
+  SetPropertyByName    object    __bench                                   1
+  SetPropertyByName    object    __data                                    1
+  SetPropertyByName    object    decode                                    1
+  SetPropertyByName    object    encode                                    1
+  SetPropertyByName    object    encodeInto                                1
+  SetPropertyByName    object    getDens                                   1
+  SetPropertyByName    object    isInBrowser                               1
+  SetPropertyByName    object    iterations                                1
+  SetPropertyByName    object    performance                               1
+  SetPropertyByName    object    read                                      1
+  SetPropertyByName    object    reset                                     1
+  SetPropertyByName    object    setDisplayFunction                        1
+

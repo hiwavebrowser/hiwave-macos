@@ -3373,9 +3373,6 @@ impl Array {
     }
 }
 
-/// [`CompareArrayElements ( x, y, comparefn )`][spec]
-///
-/// [spec]: https://tc39.es/ecma262/#sec-comparearrayelements
 /// HIWAVE PATCH (sort-diff): `Some(swapped)` when `comparefn` is an ordinary function whose whole body is
 /// `return a - b` (`swapped`: `return b - a`) over its two plain parameters (see the bytecompiler).
 fn numeric_difference_comparator(comparefn: &JsObject) -> Option<bool> {
@@ -3388,6 +3385,9 @@ fn numeric_difference_comparator(comparefn: &JsObject) -> Option<bool> {
     }
 }
 
+/// [`CompareArrayElements ( x, y, comparefn )`][spec]
+///
+/// [spec]: https://tc39.es/ecma262/#sec-comparearrayelements
 fn compare_array_elements(
     x: &JsValue,
     y: &JsValue,
@@ -3410,6 +3410,9 @@ fn compare_array_elements(
         // HIWAVE PATCH (sort-diff): for `(a, b) => a - b` over two Numbers the call computes exactly this
         // difference and has no other effect, so it is not made. Any other pair of values calls the function.
         if let (Some(swapped), Some(a), Some(b)) = (diff, x.as_number(), y.as_number()) {
+            // A call checks the interrupt word at its entry; this pair makes none, so a huge sort is
+            // stopped here.
+            context.check_interrupt()?;
             let v = if swapped { b - a } else { a - b };
             return Ok(v.partial_cmp(&0.0).unwrap_or(Ordering::Equal));
         }

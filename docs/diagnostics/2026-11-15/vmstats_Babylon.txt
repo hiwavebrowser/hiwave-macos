@@ -1,0 +1,90 @@
+vm stats: 12530955 opcodes executed
+opcodes (top 40):
+  GetPropertyByName                 2125406  16.96%
+  PushFromRegister                  1868623  14.91%
+  This                              1333210  10.64%
+  PopIntoRegister                    678154   5.41%
+  Move                               631925   5.04%
+  Call                               492044   3.93%
+  GetArgument                        448348   3.58%
+  CheckReturn                        423381   3.38%
+  Return                             423381   3.38%
+  SetPropertyByName                  399581   3.19%
+  SetAccumulator                     369086   2.95%
+  StoreInt8                          368351   2.94%
+  JumpIfFalse                        359762   2.87%
+  JumpIfNotLessThan                  274666   2.19%
+  GetName                            249676   1.99%
+  Jump                               214326   1.71%
+  LogicalAnd                         159668   1.27%
+  Case                               148354   1.18%
+  GetLengthProperty                  145851   1.16%
+  StrictEq                           121927   0.97%
+  LogicalOr                          106178   0.85%
+  StoreUndefined                     101813   0.81%
+  IncrementLoopIteration              90055   0.72%
+  StoreInt32                          77656   0.62%
+  Pop                                 76662   0.61%
+  StoreFalse                          72489   0.58%
+  StoreOne                            67367   0.54%
+  LogicalNot                          59895   0.48%
+  New                                 55787   0.45%
+  StoreZero                           52937   0.42%
+  Sub                                 51546   0.41%
+  StoreTrue                           51145   0.41%
+  StoreInt16                          49958   0.40%
+  LessThanOrEq                        47025   0.38%
+  StoreLiteral                        46031   0.37%
+  Add                                 40568   0.32%
+  GetPropertyByValue                  36531   0.29%
+  GreaterThanOrEq                     33917   0.27%
+  JumpIfNotLessThanOrEqual            32267   0.26%
+  GreaterThan                         32170   0.26%
+ic misses (an access that missed its inline cache; hits = executions - misses):
+  GetPropertyByName        216308 (not cacheable: misses every time)
+  GetPropertyByName         50168 (cacheable: cold, or the shape changed)
+  SetPropertyByName        176040 (not cacheable: misses every time)
+  SetPropertyByName         15410 (cacheable: cold, or the shape changed)
+  GetNameGlobal                58 (cacheable: cold, or the shape changed)
+ic misses by site, receiver kind and property name (top 40):
+  GetPropertyByName    object    fullCharCodeAtPos                     45422
+  SetPropertyByName    object    end                                   44286
+  GetPropertyByName    object    match                                 42978
+  SetPropertyByName    object    start                                 36692
+  GetPropertyByName    object    start                                 30494
+  SetPropertyByName    object    type                                  25922
+  GetPropertyByName    object    eat                                   19178
+  SetPropertyByName    object    column                                18998
+  SetPropertyByName    object    line                                  18998
+  SetPropertyByName    object    loc                                   18322
+  SetPropertyByName    object    value                                 10021
+  GetPropertyByName    object    type                                   9913
+  GetPropertyByName    object    curContext                             9621
+  GetPropertyByName    object    isLookahead                            9493
+  GetPropertyByName    object    updateContext                          9460
+  GetPropertyByName    object    finishToken                            9457
+  GetPropertyByName    object    nextToken                              9457
+  GetPropertyByName    object    next                                   9453
+  GetPropertyByName    object    skipSpace                              9437
+  GetPropertyByName    object    readToken                              9429
+  GetPropertyByName    object    loc                                    7604
+  GetPropertyByName    object    trailingComments                       7603
+  GetPropertyByName    object    getTokenFromCode                       5289
+  GetPropertyByName    object    isKeyword                              4143
+  GetPropertyByName    object    readWord                               4140
+  GetPropertyByName    object    readWord1                              4140
+  GetPropertyByName    object    leadingComments                        3743
+  SetPropertyByName    object    identifierName                         3218
+  SetPropertyByName    object    name                                   3218
+  SetPropertyByName    object    computed                               1803
+  SetPropertyByName    object    object                                 1472
+  SetPropertyByName    object    property                               1472
+  GetPropertyByName    object    readToken_dot                          1441
+  GetPropertyByName    object    extra                                   461
+  SetPropertyByName    object    arguments                               447
+  SetPropertyByName    object    callee                                  447
+  SetPropertyByName    object    expression                              431
+  GetPropertyByName    object    finishOp                                377
+  SetPropertyByName    object    key                                     331
+  SetPropertyByName    object    operator                                316
+
