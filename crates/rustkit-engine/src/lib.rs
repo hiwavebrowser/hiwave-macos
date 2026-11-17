@@ -417,6 +417,8 @@ mod script_net_body_size_tests;
 mod frames_stage2_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_at_present_tests;
 mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
