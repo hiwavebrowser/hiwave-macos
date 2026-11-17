@@ -35,6 +35,12 @@ pub(crate) fn js_trim(s: &str) -> &str {
     s.trim_matches(js_space)
 }
 
+/// A value without its leading and trailing CSS whitespace (space, tab, newlines): NBSP, U+FEFF and the
+/// other characters `trim()` takes are name characters to CSS and stay (#1266's `cssTrimValue`).
+pub(crate) fn css_trim_value(s: &str) -> &str {
+    s.trim_matches(css_space)
+}
+
 /// Whether `c` is in the JS name-character class `[\w\-\\\u0080-￿]`.
 fn js_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '\\' || c as u32 >= 0x80
@@ -184,7 +190,7 @@ pub(crate) fn parse_decls(text: &str) -> Vec<Decl> {
             continue;
         };
         let name = js_trim(&piece[..colon]).to_lowercase();
-        let value: Vec<char> = js_trim(&piece[colon + 1..]).chars().collect();
+        let value: Vec<char> = css_trim_value(&piece[colon + 1..]).chars().collect();
         let (value, important) = match important_bang(&value) {
             // `value.replace(/\s*!\s*important$/i, '')`: the whitespace before the `!` goes too.
             Some(bang) => {
@@ -292,7 +298,7 @@ pub(crate) fn reads_back_as_itself(decls: &[Decl]) -> bool {
 /// `removeProperty`; a value holding a bad url changes nothing; so does the declaration it already has.
 pub(crate) fn set_property(decls: &[Decl], name: &str, value: &str, priority: &str) -> Option<Vec<Decl>> {
     let name = js_trim(name).to_lowercase();
-    let value = js_trim(value);
+    let value = css_trim_value(value);
     if value.is_empty() {
         return remove_property(decls, &name).1;
     }
@@ -346,6 +352,17 @@ fn name_char(c: char) -> bool {
 
 fn non_printable(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{e}'..='\u{1f}' | '\u{7f}')
+}
+
+/// Characters the engine's url reader (`rustkit_css::mask::parse_css_url`: Rust's `char::is_whitespace`
+/// and `is_control`) refuses in an unquoted url although CSS does not: refused here while the engine does,
+/// so a value kept here is one the engine reads alike (#1266's `engineRefusesInUrl`).
+fn engine_refuses_in_url(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0}' | '\u{7f}'..='\u{9f}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}'
+            | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
 }
 
 /// §4.3.8: a `\` that starts an escape: any but one before a newline. One at the end of the value is an
@@ -468,7 +485,7 @@ fn url_token(t: &[char], mut i: usize) -> (bool, usize) {
                 }
             }
             '"' | '\'' | '(' => return (true, i),
-            c if non_printable(c) => return (true, i),
+            c if non_printable(c) || engine_refuses_in_url(c) => return (true, i),
             '\\' if valid_escape(t, i - 1) => i = consume_escape(t, i).1,
             '\\' => return (true, i),
             _ => {}
