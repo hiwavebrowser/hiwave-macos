@@ -48906,6 +48906,19 @@ struct BoxPositioning {
 /// Neither of those can change between the two builds a memo spans: it is
 /// armed only inside `load_subresources`, after the sheets are assigned and
 /// before any script runs, and it is gone when that returns.
+///
+/// Retained styles (TREE-REUSE) keep a memo across script writes, so any
+/// input a cascade reads that a script write does not record must be here,
+/// or must reach the build only through a relayout script did not ask for
+/// (which starts the styles over). Not here today, because none can change:
+/// - `:target`: the matcher answers it false (`pseudo_class_is_static_false`).
+///   When it is implemented, the target element (a hash change records no DOM
+///   write) belongs in this key.
+/// - `prefers-color-scheme`: the media evaluator answers `light` always
+///   (`rustkit-css` `media.rs`); a live scheme belongs in this key.
+/// - Page zoom: the engine has no zoom input; a zoom that changes the viewport
+///   or the device pixel ratio arrives as a resize, a relayout script did not
+///   ask for.
 #[derive(Clone, PartialEq, Debug)]
 struct StyleMemoKey {
     view: Option<EngineViewId>,
@@ -49310,6 +49323,12 @@ fn memoized_element_style(
 }
 
 /// In a retained build, `node` animates or may: its children and its pseudos cascade.
+///
+/// Cost: "may" includes declaring a transition, so `transition: all` (or any
+/// transition) on a page wrapper makes its whole subtree cascade on every
+/// script relayout, as without retained styles; the retained build saves
+/// nothing under it. Telling a transition on a non-inherited property (or one
+/// that is not running) apart would recover that; it is left conservative.
 fn note_retained_animating(node: rustkit_dom::NodeId) {
     STYLE_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut() {
