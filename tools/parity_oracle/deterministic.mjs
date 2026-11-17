@@ -35,16 +35,24 @@ const RESET_CSS = getResetCssWithAbsoluteFontPaths();
 // binary recorded in trench/BASELINE-<os>.md. Without it, captures fall back
 // to Playwright's bundled Chromium, whose version drifts with the npm package
 // — fine for local iteration, invalid for pinned-baseline capture.
-function getPinnedExecutablePath() {
+// `required: true` makes an unset PARITY_CHROME_PATH an error instead of the
+// silent bundled-Chromium fallback (the chrome board uses it: its rows were
+// scored against bundled Chromium 143 for exactly that reason).
+export function getPinnedExecutablePath({ required = false } = {}) {
   const p = process.env.PARITY_CHROME_PATH;
-  if (!p) return undefined;
+  if (!p) {
+    if (required) {
+      throw new Error('PARITY_CHROME_PATH not set — refusing to fall back to Playwright\'s bundled Chromium; point it at the pinned Chrome for Testing 148.0.7778.216');
+    }
+    return undefined;
+  }
   if (!existsSync(p)) {
     throw new Error(`PARITY_CHROME_PATH set but not found: ${p}`);
   }
   return p;
 }
 
-export function getDeterministicLaunchOptions() {
+export function getDeterministicLaunchOptions({ requirePinned = false } = {}) {
   // Note: some flags may be ignored depending on platform/Chromium build.
   // We keep them because they reduce variance in practice.
   const args = [
@@ -65,7 +73,7 @@ export function getDeterministicLaunchOptions() {
 
   return {
     headless: true,
-    executablePath: getPinnedExecutablePath(),
+    executablePath: getPinnedExecutablePath({ required: requirePinned }),
     args,
   };
 }

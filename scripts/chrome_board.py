@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
 chrome_board.py — the chrome board (CH3.A1): HiWave's own UI pages in RustKit
-vs the oracle Chromium, per page x state x size.
+vs the oracle Chrome, per page x state x size.
 
-    python3 scripts/chrome_board.py --parity-capture target/release/parity-capture
+    PARITY_CHROME_PATH=<pinned Chrome for Testing 148.0.7778.216> \
+        python3 scripts/chrome_board.py --parity-capture target/release/parity-capture
+
+The oracle is the campaign pin (PARITY_CHROME_PATH), required: unset or
+missing is a refusal, and BOARD.md/board.json record the full browser
+version and path the run used.
 
 Builds nothing. For every row of tools/parity_oracle/chrome_fixtures/board.json:
 
@@ -98,6 +103,26 @@ def _node_env() -> Dict[str, str]:
 
 
 NODE_ENV = _node_env()
+
+# The board's oracle is the campaign pin, Chrome for Testing 148.0.7778.216,
+# the same binary every other oracle uses. Until 2026-11 the board ran with
+# PARITY_CHROME_PATH unset and so scored against Playwright's bundled
+# Chromium 143.0.7499.4; that fallback is now a refusal here and in
+# chrome_board.mjs (getDeterministicLaunchOptions({requirePinned: true})).
+PINNED_CHROME_VERSION = "148.0.7778.216"
+
+
+def pinned_chrome_path(env: Optional[Dict[str, str]] = None) -> Path:
+    """PARITY_CHROME_PATH, required and existing; raises BoardError otherwise."""
+    env = os.environ if env is None else env
+    raw = env.get("PARITY_CHROME_PATH", "")
+    if not raw:
+        raise BoardError("PARITY_CHROME_PATH not set: the chrome board's oracle is the pinned "
+                         f"Chrome for Testing {PINNED_CHROME_VERSION}, never bundled Chromium")
+    path = Path(raw)
+    if not path.exists():
+        raise BoardError(f"PARITY_CHROME_PATH set but not found: {raw}")
+    return path
 
 
 # The oracle context freezes transitions, animations and the caret for every
@@ -469,6 +494,17 @@ def sort_key(entry: Dict[str, Any]):
     return (0 if entry["status"] != "ok" else 1, -(pct if pct is not None else 0.0))
 
 
+def oracle_text(run: Dict[str, Any]) -> str:
+    """The BOARD.md header's oracle: the full browser version, and whether it
+    came from the pin (PARITY_CHROME_PATH) or, in boards from before the pin,
+    Playwright's bundled Chromium."""
+    version = run.get("chromium") or "?"
+    if not run.get("chromium_path"):
+        return f"Chromium {version} (unpinned, Playwright-bundled)"
+    note = "" if version == run.get("chromium_pinned") else f", NOT the pin {run.get('chromium_pinned')}"
+    return f"Chrome for Testing {version} (PARITY_CHROME_PATH{note})"
+
+
 def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "board.json").write_text(json.dumps(board_json, indent=2) + "\n", encoding="utf-8")
@@ -480,8 +516,8 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         "# Chrome board — HiWave's own UI pages, RustKit vs Chromium (CH3.A1)",
         "",
         f"Run: {board_json['run']['at']} · head `{board_json['run']['sha']}` on develop "
-        f"`{board_json['run'].get('base') or '?'}` · oracle Chromium "
-        f"{board_json['run'].get('chromium') or '?'} · parity-capture `{board_json['run']['parity_capture']}`",
+        f"`{board_json['run'].get('base') or '?'}` · oracle {oracle_text(board_json['run'])} "
+        f"· parity-capture `{board_json['run']['parity_capture']}`",
         "",
         f"Gate (PLAN-z CH0, docs/GATES.md): a row is {gate_text()} "
         "(geometry matching Chrome leaves only rasterisation; a row whose geometry compare did not run "
@@ -613,6 +649,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         if args.report_only:
             return report_only(board, out, Path(args.census) if args.census else latest_census())
         rows = plan(board, REPO_ROOT, work, only=args.only)
+        chrome_path = pinned_chrome_path()
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -627,7 +664,11 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     chromium_version = None
     for i, row in enumerate(rows, 1):
         result = capture(row, binary)
-        chromium_version = chromium_version or result.get("chromium", {}).get("browser")
+        row_version = result.get("chromium", {}).get("browser")
+        if chromium_version and row_version and row_version != chromium_version:
+            print(f"refused: oracle changed mid-run ({chromium_version} then {row_version})", file=sys.stderr)
+            return 2
+        chromium_version = chromium_version or row_version
         entry = summarize(row, result)
         entries.append(entry)
         print(f"[{i}/{len(rows)}] {row.case_id}: {entry['status']} "
@@ -640,6 +681,8 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
             "sha": git_sha(REPO_ROOT),
             "base": git_develop_base(REPO_ROOT),
             "chromium": chromium_version,
+            "chromium_path": str(chrome_path),
+            "chromium_pinned": PINNED_CHROME_VERSION,
             "parity_capture": str(binary),
             "gate_pct": PIXEL_GATE_PCT,
             "gate_geometry_pixel_pct": GEOMETRY_PIXEL_GATE_PCT,
