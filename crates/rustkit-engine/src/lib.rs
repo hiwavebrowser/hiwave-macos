@@ -13675,6 +13675,7 @@ impl layout_ctx::LayoutCtx {
     ) -> LayoutBox {
         // Read by `with_building` once this build is over.
         relayout_cause::set_last_build_reused_tree(false);
+        relayout_cause::set_last_build_partial(RESTYLE_BUILD.with(|build| build.borrow().is_some()));
         // A full build replaces the view's styles of boxless elements
         // (`display: contents`, the root). A restyle keeps the ones it does
         // not walk.

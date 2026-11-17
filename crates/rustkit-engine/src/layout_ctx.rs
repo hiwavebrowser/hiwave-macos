@@ -183,9 +183,14 @@ impl LayoutCtx {
         // A pointer restyle sets this before its builds and takes it
         // after them: read before `build`, while it is certainly set.
         let partial_build = crate::restyle_build_active();
+        crate::relayout_cause::set_last_build_partial(false);
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         let built = build();
+        // A kept-tree splice (TREE-REUSE) starts its restyle build inside `build`, so it is not
+        // seen above: its last build says so. A splice that missed after its partial build, and
+        // `boxes-verify`, build in full afterwards, which says otherwise.
+        let partial_build = partial_build || crate::relayout_cause::last_build_partial();
         // What the build did not visit has no computed style: its
         // transitions end here. Not after a build that took the kept box
         // tree (it visited nothing) or a partial restyle build (it skipped
