@@ -42,7 +42,15 @@ fn a_second_measure_pass_over_more_strings_than_the_cap_reshapes_only_the_overfl
     let pass = || {
         let before = TEXT_SHAPES.with(std::cell::Cell::get);
         for i in 0..n {
-            measure_text_with_spacing(&row_text(i), "sans-serif", 16.0, FontWeight(400), FontStyle::Normal, 0.0, 0.0);
+            measure_text_with_spacing(
+                &row_text(i),
+                "sans-serif",
+                16.0,
+                FontWeight(400),
+                FontStyle::Normal,
+                0.0,
+                0.0,
+            );
         }
         TEXT_SHAPES.with(std::cell::Cell::get) - before
     };
@@ -67,7 +75,14 @@ fn a_second_shape_pass_over_more_strings_than_the_cap_reshapes_only_the_overflow
         let before = shape_memo_misses();
         for i in 0..n {
             shaper
-                .shape(&row_text(i), &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .shape(
+                    &row_text(i),
+                    &chain,
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
                 .expect("shape");
         }
         shape_memo_misses() - before
@@ -80,4 +95,62 @@ fn a_second_shape_pass_over_more_strings_than_the_cap_reshapes_only_the_overflow
         second <= OVER + OVER / 10,
         "second pass over {n} distinct strings shaped {second} of them again (cap {SHAPED_TEXT_MEMO_CAP})"
     );
+}
+
+/// Every box's geometry, in tree order.
+fn geometry(b: &crate::LayoutBox, out: &mut Vec<String>) {
+    out.push(format!("{:?}", b.dimensions));
+    for c in &b.children {
+        geometry(c, out);
+    }
+}
+
+/// A block of `n` rows, each a block holding one distinct text.
+fn rows(n: usize) -> crate::LayoutBox {
+    use crate::{BoxType, LayoutBox};
+    let style = rustkit_css::ComputedStyle::new();
+    let mut root = LayoutBox::new(BoxType::Block, style.clone());
+    root.children = (0..n)
+        .map(|i| {
+            let mut row = LayoutBox::new(BoxType::Block, style.clone());
+            row.children
+                .push(LayoutBox::new(BoxType::Text(row_text(i)), style.clone()));
+            row
+        })
+        .collect();
+    root
+}
+
+fn laid_out(n: usize) -> Vec<String> {
+    let mut root = rows(n);
+    let viewport = crate::Dimensions {
+        content: crate::Rect::new(0.0, 0.0, 1280.0, 800.0),
+        ..Default::default()
+    };
+    root.layout(&viewport);
+    let mut out = Vec::new();
+    geometry(&root, &mut out);
+    out
+}
+
+#[test]
+fn geometry_is_the_same_with_the_text_memos_bypassed_cold_and_warm() {
+    // More distinct strings than either memo holds, so the warm pass mixes
+    // hits with strings the memo had to turn away.
+    let n = TEXT_MEASURE_MEMO_CAP.max(SHAPED_TEXT_MEMO_CAP) + OVER;
+    let uncached = crate::text_memo::without_text_memos(|| laid_out(n));
+    let before = TEXT_SHAPES.with(std::cell::Cell::get);
+    let cold = laid_out(n);
+    assert!(
+        TEXT_SHAPES.with(std::cell::Cell::get) - before >= OVER,
+        "the layout never reached the measurement memo"
+    );
+    let warm = laid_out(n);
+    assert_eq!(uncached.len(), cold.len());
+    for (i, (u, c)) in uncached.iter().zip(&cold).enumerate() {
+        assert_eq!(u, c, "box {i}: uncached vs first cached pass");
+    }
+    for (i, (u, w)) in uncached.iter().zip(&warm).enumerate() {
+        assert_eq!(u, w, "box {i}: uncached vs second cached pass");
+    }
 }

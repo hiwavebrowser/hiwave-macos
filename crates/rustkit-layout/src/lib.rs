@@ -29,6 +29,7 @@ pub mod path_data;
 pub mod scroll;
 pub mod table;
 pub mod text;
+mod text_memo;
 
 mod filter;
 pub use filter::{filter_color_matrix, filter_steps, ColorMatrix as FilterColorMatrix, FilterStep};
@@ -14645,8 +14646,12 @@ pub fn measure_text_advanced(
 }
 
 /// Entries the per-thread text-measurement memo of
-/// [`measure_text_with_spacing`] holds at most (bounds its memory on a
-/// text-heavy page).
+/// [`measure_text_with_spacing`] holds in its clock, plus `cap / 16` recently
+/// turned-away ones; past it, entries are evicted one at a time
+/// (`text_memo`), never all at once. An entry is about 200 bytes (a 64-byte
+/// key in an `Rc`, 40 bytes of metrics, map and ring slots, the text and
+/// family name on the heap): about 3.5 MB per thread when full of short
+/// strings.
 pub(crate) const TEXT_MEASURE_MEMO_CAP: usize = 16384;
 
 /// Measure text using the text shaper with letter-spacing and word-spacing.
@@ -14673,16 +14678,9 @@ pub fn measure_text_with_spacing(
     use std::cell::RefCell;
 
     type Key = (String, String, u32, u16, u8, u32, u32);
-    struct Memo {
-        generation: u64,
-        metrics: std::collections::HashMap<Key, TextMetrics>,
-    }
-    const MAX_ENTRIES: usize = TEXT_MEASURE_MEMO_CAP;
     thread_local! {
-        static MEMO: RefCell<Memo> = RefCell::new(Memo {
-            generation: 0,
-            metrics: std::collections::HashMap::new(),
-        });
+        static MEMO: RefCell<text_memo::TextMemo<Key, TextMetrics>> =
+            RefCell::new(text_memo::TextMemo::new(TEXT_MEASURE_MEMO_CAP));
     }
 
     let generation = rustkit_text::webfonts::generation();
@@ -14697,11 +14695,8 @@ pub fn measure_text_with_spacing(
     );
     let cached = MEMO.with(|m| {
         let mut m = m.borrow_mut();
-        if m.generation != generation {
-            m.metrics.clear();
-            m.generation = generation;
-        }
-        m.metrics.get(&key).cloned()
+        m.sync_generation(generation);
+        m.get(&key)
     });
     if let Some(metrics) = cached {
         return metrics;
@@ -14715,13 +14710,7 @@ pub fn measure_text_with_spacing(
         letter_spacing,
         word_spacing,
     );
-    MEMO.with(|m| {
-        let mut m = m.borrow_mut();
-        if m.metrics.len() >= MAX_ENTRIES {
-            m.metrics.clear();
-        }
-        m.metrics.insert(key, metrics.clone());
-    });
+    MEMO.with(|m| m.borrow_mut().insert(key, metrics.clone()));
     metrics
 }
 
