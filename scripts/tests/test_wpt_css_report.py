@@ -1,0 +1,26 @@
+import sys
+import unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from wpt_css_report import summarize
+
+
+def run(status, *tests):
+    return {"status": status, "subtests": [
+        {"name": name, "status": outcome, "message": message} for name, outcome, message in tests
+    ]}
+
+
+class CssReportTests(unittest.TestCase):
+    def test_counts_crashes_without_linking_paths(self):
+        row = {"page": "/css/css-color/private.html", "chrome": run("OK", ("x", "PASS", None)),
+               "hiwave": run("CRASH")}
+        counts, clusters = summarize([row])
+        self.assertEqual(counts["css/css-color"]["hiwave_crashes"], 1)
+        self.assertEqual(counts["css/css-color"]["total"], 1)
+        self.assertFalse(clusters)
+
+    def test_only_reference_passing_subtests_enter_clusters(self):
+        fail = ("paint", "FAIL", "CSSStyleRule is not defined")
+        row = {"page": "/css/cssom/rules.html", "chrome": run("OK", fail), "hiwave": run("OK", fail)}
+        self.assertFalse(summarize([row])[1])
