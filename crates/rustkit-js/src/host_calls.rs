@@ -104,12 +104,6 @@ pub fn host_call_rows() -> Vec<HostCallRow> {
 /// geometry read): taken out of that call's self time and of the thread
 /// total. Nothing when no host call is open (or timing is off).
 pub fn host_call_exclude(ms: f64) {
-    // Red stub (SCRIPT-SPLIT): nothing is excluded yet.
-    #[allow(clippy::needless_return)]
-    if true {
-        let _ = ms;
-        return;
-    }
     let open = TABLE.with(|t| match t.borrow_mut().open.last_mut() {
         Some(inner) => {
             *inner += ms;
@@ -180,8 +174,7 @@ pub(crate) struct HostCall {
 
 /// Opens a host call of `slot`; its clock starts now.
 pub(crate) fn enter(slot: usize) -> HostCall {
-    // Red stub (SCRIPT-SPLIT): no call is timed yet.
-    if true || !TIMING.with(|t| t.get()) {
+    if !TIMING.with(|t| t.get()) {
         return HostCall { open: None, index: None };
     }
     TABLE.with(|t| t.borrow_mut().open.push(0.0));
