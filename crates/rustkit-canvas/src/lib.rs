@@ -31,6 +31,9 @@ use thiserror::Error;
 mod raster;
 pub use raster::CanvasBitmap;
 
+#[cfg(test)]
+mod recording_tests;
+
 /// The largest canvas bitmap, in pixels: Chrome 148 draws on a 16384 x 16384
 /// canvas and not on one pixel more (it reads back zeros).
 pub const MAX_CANVAS_AREA: u64 = 16384 * 16384;
@@ -1573,13 +1576,13 @@ impl CanvasRenderingContext2D {
 
     /// drawImage of a bitmap (another canvas, a decoded image): the source
     /// rect `src` (`sx, sy, sw, sh`) into the destination rect `dst`.
-    pub fn draw_bitmap(&mut self, image: &CanvasBitmap, src: [f32; 4], dst: [f32; 4]) {
+    pub fn draw_bitmap(&mut self, image: CanvasBitmap, src: [f32; 4], dst: [f32; 4]) {
         if src.iter().chain(&dst).any(|v| !v.is_finite()) {
             return;
         }
         let ctx = raster_ctx!(self);
         let raster = &mut self.raster;
-        raster.draw_image(&ctx, image, src, dst, &self.state.transform);
+        raster.draw_image(&ctx, &image, src, dst, &self.state.transform);
         self.generation = next_generation();
     }
 
@@ -1594,6 +1597,22 @@ impl CanvasRenderingContext2D {
     pub fn put_image_data(&mut self, data: ImageData, x: i32, y: i32) {
         self.record(DrawCommand::PutImageData { data, x, y });
     }
+
+    // ==================== The raster recording (GPU canvas A0) ====================
+
+    /// Draws not yet rasterized into the bitmap (stub).
+    pub fn pending_ops(&self) -> usize {
+        0
+    }
+
+    /// The bytes the pending draws hold (stub).
+    pub fn pending_bytes(&self) -> usize {
+        0
+    }
+
+    /// Tests: rasterize at the call (stub).
+    #[doc(hidden)]
+    pub fn set_immediate_raster(&mut self, _on: bool) {}
 
     // ==================== Commands ====================
 
@@ -1733,6 +1752,10 @@ pub fn command_extent(command: &DrawCommand, canvas: [f32; 4]) -> [f32; 4] {
         DrawCommand::Clip { .. } | DrawCommand::DrawImage { .. } | DrawCommand::PutImageData { .. } => canvas,
     }
 }
+
+/// The most a context holds in draws recorded and not yet rasterized
+/// (GPU canvas A0); past it they are replayed into the bitmap.
+pub const PENDING_BYTE_BUDGET: usize = 4 << 20;
 
 /// The most a canvas's recording may hold (estimated by [`command_bytes`]).
 pub const RECORDING_BYTE_BUDGET: usize = 8 << 20;
