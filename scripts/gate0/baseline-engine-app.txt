@@ -1,0 +1,46 @@
+# Gate 0 baseline: cargo check -p rustkit-engine --features headless + cargo check -p hiwave-app --features rustkit
+# (scripts/gate0/warnings.py). Taken at develop 9c0396ad; a change that adds a warning updates this file in the same PR and says why.
+associated function `install` is never used @ crates/rustkit-engine/src/lib.rs
+associated function `load` is never used @ crates/hiwave-app/src/state.rs
+associated functions `inline_svg_markup` and `inline_svg_markup_with` are never used @ crates/rustkit-engine/src/lib.rs
+associated items `image_env` and `serialize_svg_subtree` are never used @ crates/rustkit-engine/src/lib.rs
+constant `AUDIO_DETECTOR` is never used @ crates/hiwave-app/src/main.rs
+constant `AUTOFILL_HELPER` is never used @ crates/hiwave-app/src/main.rs
+constant `CHROME_RUSTKIT_HTML` is never used @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+constant `CONSOLE_INJECT` is never used @ crates/hiwave-app/src/main.rs
+constant `CONTEXT_MENU_HELPER` is never used @ crates/hiwave-app/src/main.rs
+enum `ChromeEvent` is never used @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+field `domain` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `entry` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `id` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `path` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `styles` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `tree` is never read @ crates/hiwave-app/src/ipc/mod.rs
+field `view_focused` is never read @ crates/rustkit-engine/src/lib.rs
+field `visible` is never read @ crates/hiwave-app/src/webview_rustkit.rs
+fields `path` and `styles` are never read @ crates/hiwave-app/src/ipc/mod.rs
+fields `rect`, `angle_rad`, `stops`, `repeating`, and `border_radius` are never read @ crates/rustkit-renderer/src/lib.rs
+fields `rect`, `from_angle_rad`, `center`, `stops`, `repeating`, and `border_radius` are never read @ crates/rustkit-renderer/src/lib.rs
+fields `state` and `event_rx` are never read @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+fields `title` and `favicon` are never read @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+function `active` is never used @ crates/rustkit-engine/src/container_query.rs
+function `snapshot_total_ms` is never used @ crates/rustkit-engine/src/relayout_cause.rs
+method `build_layout_from_document` is never used @ crates/rustkit-engine/src/lib.rs
+method `discover_images` is never used @ crates/rustkit-engine/src/lib.rs
+method `inline_svg_markup_styled` is never used @ crates/rustkit-engine/src/lib.rs
+method `render_linear_gradient_gpu` is never used @ crates/rustkit-renderer/src/lib.rs
+methods `is_app_owned`, `mouse_down_at_point`, `title`, and `view_id` are never used @ crates/hiwave-app/src/webview_rustkit.rs
+methods `register_module` and `get_module` are never used @ crates/rustkit-js/src/module.rs
+multiple associated items are never used @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+multiple fields are never read @ crates/hiwave-app/src/webview_rustkit_chrome.rs
+multiple fields are never read @ crates/rustkit-renderer/src/lib.rs
+unexpected `cfg` condition value: `cargo-clippy` @ crates/hiwave-app/src/main.rs
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-engine/src/text_input.rs
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/lib.rs
+unexpected `cfg` condition value: `cargo-clippy` @ crates/rustkit-viewhost/src/macos.rs
+unused import: `Duration` @ crates/rustkit-engine/src/content_thread.rs
+unused import: `FontLoader` @ crates/rustkit-engine/src/lib.rs
+unused imports: `coalesce` and `runs_mid_load` @ crates/rustkit-engine/src/content_thread.rs
+unused macro definition: `num_prop` @ crates/rustkit-engine/src/animations.rs
+variable `index` is assigned to, but never used @ crates/rustkit-engine/src/lib.rs
+variable does not need to be mutable @ crates/rustkit-engine/src/lib.rs
