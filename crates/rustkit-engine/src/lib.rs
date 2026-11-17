@@ -6990,6 +6990,16 @@ impl Engine {
         // The turn's instant: on the real clock its timers count from here, not from when the
         // timer slice begins after the turn's own work (CLOCK3 R1).
         let turn_began = std::time::Instant::now();
+        let tracing = links_trace_on();
+        if tracing {
+            LINKS_TRACE.with(|t| {
+                let mut v = t.get();
+                if v[0].is_none() {
+                    v[0] = Some(turn_began);
+                }
+                t.set(v);
+            });
+        }
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -7069,6 +7079,15 @@ impl Engine {
         let timer_stopped = if defer_post_load_timers {
             false
         } else {
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    if v[1].is_none() {
+                        v[1] = Some(std::time::Instant::now());
+                    }
+                    t.set(v);
+                });
+            }
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -7095,6 +7114,13 @@ impl Engine {
                     threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
                 }
                 Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
+            }
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    v[2] = Some(std::time::Instant::now());
+                    t.set(v);
+                });
             }
             // What the timers threw or left rejected is theirs in the Inspector.
             inspector_glue::drain_errors(bindings, &view.inspector, "timers");
@@ -47993,6 +48019,9 @@ thread_local! {
     /// LINKS-SLOW: the real time the content loop's clock kept from this turn (see
     /// [`Engine::pump_live_real_at`]).
     static LIVE_FRACTION_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// LINKS-SLOW part 2, diagnostics only (`HIWAVE_LINKS_TRACE`): this pump's first live turn's
+    /// entry, and its timer slice's start and end ([`links_trace_take`]).
+    static LINKS_TRACE: std::cell::Cell<[Option<std::time::Instant>; 3]> = const { std::cell::Cell::new([None; 3]) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -48000,6 +48029,18 @@ thread_local! {
     /// builds with the compare and the patch, the display list, the
     /// geometry snapshot, the render.
     static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// LINKS-SLOW part 2, diagnostics only: whether `HIWAVE_LINKS_TRACE` is set (read once).
+pub(crate) fn links_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIWAVE_LINKS_TRACE").is_some())
+}
+
+/// LINKS-SLOW part 2, diagnostics only: the stamps the last pump left (its first live turn's
+/// entry, its timer slice's start and end), cleared for the next.
+pub(crate) fn links_trace_take() -> [Option<std::time::Instant>; 3] {
+    LINKS_TRACE.with(|t| t.replace([None; 3]))
 }
 
 /// Whether the build in progress is a pointer restyle's partial build
