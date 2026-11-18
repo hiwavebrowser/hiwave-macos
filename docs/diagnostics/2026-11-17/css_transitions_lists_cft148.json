@@ -119,6 +119,96 @@
       "end": "rgba(59, 130, 246, 0.5) 0px 0px 0px 4px"
     },
     {
+      "label": "box-shadow initial",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:initial}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow unset",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:unset}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow revert",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow revert-layer",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow inherit",
+      "css": "body{box-shadow:10px 20px 30px 4px rgb(255,0,0),2px 2px 0px 0px rgb(0,0,255)}#h.on{box-shadow:inherit}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px, rgba(0, 0, 255, 0.5) 1px 1px 0px 0px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px, rgb(0, 0, 255) 2px 2px 0px 0px"
+    },
+    {
+      "label": "box-shadow inherit none",
+      "css": "body{box-shadow:none}#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:inherit}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
       "label": "filter blur",
       "css": "#h{filter:blur(0px)}#h.on{filter:blur(10px)}",
       "read": "filter",

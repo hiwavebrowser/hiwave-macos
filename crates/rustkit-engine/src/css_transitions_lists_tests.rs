@@ -182,6 +182,38 @@ fn run_case_end(css: &str) -> (String, ()) {
     (end, ())
 }
 
+/// The CSS-wide keywords replace the list too (R1 on #1290): `initial`,
+/// `unset` and `revert` (the UA sheet has no shadow) are `none`; `inherit`
+/// is the parent's whole list. Each starts a transition (Chrome 148).
+#[test]
+fn box_shadow_css_wide_keywords_replace_the_list() {
+    let from = "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}";
+    for keyword in ["initial", "unset", "revert", "revert-layer"] {
+        check(
+            &format!("{from}#h.on{{box-shadow:{keyword}}}"),
+            "box-shadow",
+            &BS,
+            "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+            "none",
+        );
+    }
+    check(
+        "body{box-shadow:10px 20px 30px 4px rgb(255,0,0),2px 2px 0px 0px rgb(0,0,255)}\
+         #h.on{box-shadow:inherit}",
+        "box-shadow",
+        &BS,
+        "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px, rgba(0, 0, 255, 0.5) 1px 1px 0px 0px",
+        "rgb(255, 0, 0) 10px 20px 30px 4px, rgb(0, 0, 255) 2px 2px 0px 0px",
+    );
+    check(
+        &format!("body{{box-shadow:none}}{from}#h.on{{box-shadow:inherit}}"),
+        "box-shadow",
+        &BS,
+        "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+        "none",
+    );
+}
+
 // --------------------------------------------- box-shadow, transitions
 
 #[test]
