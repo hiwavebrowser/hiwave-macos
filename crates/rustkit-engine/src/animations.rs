@@ -28,9 +28,9 @@
 //! `AnimValue::CurrentColor`), and transform lists (function by function
 //! when the lists match, `none` as the identity of the other list, else
 //! the two matrices component-wise, which is not the spec's decomposition
-//! and is a stated gap). Not here yet: the individual `translate`/
-//! `rotate`/`scale` properties, `border-radius`, `box-shadow`,
-//! `background-position`, `line-height`, `visibility`'s discrete rule,
+//! and is a stated gap), and the individual `translate`/`rotate`/`scale`
+//! properties (`none` as the identity). Not here yet: `border-radius`,
+//! `box-shadow`, `background-position`, `line-height`, `visibility`'s discrete rule,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
@@ -56,6 +56,9 @@ pub(crate) enum AnimValue {
     /// `color` that is itself animating (a stated gap).
     CurrentColor(Color),
     Transform(TransformList),
+    /// One of the individual transform properties (css-transforms-2 §5:
+    /// `translate`, `rotate`, `scale`); `None` is `none`.
+    Individual(Option<TransformOp>),
 }
 
 impl PartialEq for AnimValue {
@@ -67,9 +70,13 @@ impl PartialEq for AnimValue {
             (Color(a), Color(b)) => a == b,
             (CurrentColor(_), CurrentColor(_)) => true,
             (Transform(a), Transform(b)) => a == b,
+            (Individual(a), Individual(b)) => a == b,
             // Every variant by name: a new one is a compile error here
             // until its equality is decided.
-            (Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_), _) => false,
+            (
+                Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_) | Individual(_),
+                _,
+            ) => false,
         }
     }
 }
@@ -114,6 +121,19 @@ macro_rules! inset_prop {
             set: |s, v| {
                 if let AnimValue::Length(l) = v {
                     s.$field = Some(l.clone());
+                }
+            },
+        }
+    };
+}
+macro_rules! individual_prop {
+    ($name:literal, $field:ident) => {
+        Prop {
+            name: $name,
+            get: |s| AnimValue::Individual(s.$field.clone()),
+            set: |s, v| {
+                if let AnimValue::Individual(op) = v {
+                    s.$field = op.clone();
                 }
             },
         }
@@ -173,6 +193,9 @@ const PROPS: &[Prop] = &[
             }
         },
     },
+    individual_prop!("translate", translate),
+    individual_prop!("rotate", rotate),
+    individual_prop!("scale", scale),
     color_prop!("color", color),
     color_prop!("background-color", background_color),
     color_prop!("border-top-color", border_top_color),
@@ -414,6 +437,36 @@ fn interpolate_transform(a: &TransformList, b: &TransformList, t: f32) -> Transf
     }
 }
 
+/// css-transforms-2 §5 (individual transforms): `none` is the identity of
+/// the other value (`0px`, `0deg`, `1`), and a value interpolates
+/// component by component: `translate` per length (one unit each, as
+/// `interpolate_length` takes them), `rotate` as a number of degrees with
+/// no turn taken off (45deg to 405deg passes 225deg, Chrome 148), and
+/// `scale` per factor. The engine keeps only the 2D forms (`rotate`'s z
+/// axis), so there is no axis to match.
+fn interpolate_individual(
+    a: &Option<TransformOp>,
+    b: &Option<TransformOp>,
+    t: f32,
+) -> Option<Option<TransformOp>> {
+    // The end points are the values themselves: a transition to `none`
+    // ends on `none`, not on the identity it ran to (Chrome 148 reads
+    // `none` once it is over).
+    if t == 0.0 {
+        return Some(a.clone());
+    }
+    if t == 1.0 {
+        return Some(b.clone());
+    }
+    let (a, b) = match (a, b) {
+        (None, None) => return Some(None),
+        (None, Some(b)) => (identity_of(b), b.clone()),
+        (Some(a), None) => (a.clone(), identity_of(a)),
+        (Some(a), Some(b)) => (a.clone(), b.clone()),
+    };
+    interpolate_op(&a, &b, t).map(Some)
+}
+
 fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
     Some(match (a, b) {
         (AnimValue::Number(x), AnimValue::Number(y)) => AnimValue::Number(lerp(*x, *y, t)),
@@ -428,6 +481,9 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
         (AnimValue::CurrentColor(_), AnimValue::CurrentColor(y)) => AnimValue::CurrentColor(*y),
         (AnimValue::Transform(x), AnimValue::Transform(y)) => {
             AnimValue::Transform(interpolate_transform(x, y, t))
+        }
+        (AnimValue::Individual(x), AnimValue::Individual(y)) => {
+            AnimValue::Individual(interpolate_individual(x, y, t)?)
         }
         _ => return None,
     })
@@ -1160,6 +1216,9 @@ pub(crate) fn is_paint_prop(index: usize) -> bool {
         PROPS[index].name,
         "opacity"
             | "transform"
+            | "translate"
+            | "rotate"
+            | "scale"
             | "color"
             | "background-color"
             | "border-top-color"

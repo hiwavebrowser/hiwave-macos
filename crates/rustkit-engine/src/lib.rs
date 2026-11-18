@@ -702,6 +702,8 @@ mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_colors_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_individual_transforms_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_timeline_tests;
@@ -48295,7 +48297,9 @@ fn check_animation_frame(
                 return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
             }
             match animations::prop_name(*index) {
-                "transform" => {
+                // The individual transforms compose into the same matrix
+                // (`effective_transform`), so they come and go the same way.
+                "transform" | "translate" | "rotate" | "scale" => {
                     let identity = |v: &animations::AnimValue| {
                         let mut s = rustkit_css::ComputedStyle::default();
                         animations::set_prop_value(&mut s, *index, v);
