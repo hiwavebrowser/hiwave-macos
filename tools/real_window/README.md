@@ -176,7 +176,13 @@ the page made in the turn its script was stopped in is still answered to it. Two
   log from it (the page view is the one the fixture URL was loaded into).
   In `i0a_layout` that frame is asserted against the same 200 ms; in the
   others the page's thread is knowingly held (a runaway script, a load in
-  progress: LAT15/LAT17), and it is reported for information only. The
+  progress: LAT15/LAT17), and it is reported for information only. A key
+  shortcut is answered when the app writes its line (`New tab - navigating
+  to start page`, `Closed tab`), timed by that line's own UTC stamp from
+  `hwdrive key`'s `req_epoch` (the key-down); only lines stamped after the
+  key-down count, and an hwdrive without `req_epoch` fails the check. Until
+  T37 the driver timed the whole subprocess plus its own 100 ms log poll,
+  and i0a_close flipped 308 → 157 ms between runs with no change. The
   page's stop in `i0a_script` is the content thread's (`Script stopped at the
   script budget source=timers`); the window thread is not held while it
   spins. The resize checks first ran on 2026-11-09 (T36, on develop
