@@ -23,12 +23,14 @@
 //!
 //! What is interpolated: numbers (`opacity`), lengths of one unit (`px`
 //! with `px`, `%` with `%`; `auto` never transitions, as in Chrome),
-//! colours (premultiplied sRGB), and transform lists (function by function
+//! colours (premultiplied sRGB; `outline-color` and
+//! `text-decoration-color` keep `currentcolor` as a value of its own,
+//! `AnimValue::CurrentColor`), and transform lists (function by function
 //! when the lists match, `none` as the identity of the other list, else
 //! the two matrices component-wise, which is not the spec's decomposition
 //! and is a stated gap), and the individual `translate`/`rotate`/`scale`
-//! properties (`none` as the identity). Not here yet: `border-radius`, `box-shadow`,
-//! `background-position`, `line-height`, `visibility`'s discrete rule,
+//! properties (`none` as the identity). Not here yet: `border-radius`,
+//! `box-shadow`, `background-position`, `line-height`, `visibility`'s discrete rule,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
@@ -40,15 +42,38 @@ use rustkit_css::{
 use std::collections::HashMap;
 
 /// A value one of the transitionable properties takes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum AnimValue {
     Number(f32),
     Length(Length),
     Color(Color),
+    /// `currentcolor` of a colour property that keeps it as a keyword
+    /// (`outline-color`, `text-decoration-color`), with the element's
+    /// `color` when it was read. Two of them are equal whatever the colour:
+    /// `currentcolor` before and after is no change (Chrome 148 starts no
+    /// transition when only `color` jumps). Against a colour it
+    /// interpolates as that `color`, which is held where Chrome tracks a
+    /// `color` that is itself animating (a stated gap).
+    CurrentColor(Color),
     Transform(TransformList),
     /// One of the individual transform properties (css-transforms-2 §5:
     /// `translate`, `rotate`, `scale`); `None` is `none`.
     Individual(Option<TransformOp>),
+}
+
+impl PartialEq for AnimValue {
+    fn eq(&self, other: &Self) -> bool {
+        use AnimValue::*;
+        match (self, other) {
+            (Number(a), Number(b)) => a == b,
+            (Length(a), Length(b)) => a == b,
+            (Color(a), Color(b)) => a == b,
+            (CurrentColor(_), CurrentColor(_)) => true,
+            (Transform(a), Transform(b)) => a == b,
+            (Individual(a), Individual(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 struct Prop {
@@ -123,6 +148,24 @@ macro_rules! color_prop {
     };
 }
 
+/// A colour property whose `None` is `currentcolor`.
+macro_rules! current_color_prop {
+    ($name:literal, $($field:ident).+) => {
+        Prop {
+            name: $name,
+            get: |s| match s.$($field).+ {
+                Some(c) => AnimValue::Color(c),
+                None => AnimValue::CurrentColor(s.color),
+            },
+            set: |s, v| match v {
+                AnimValue::Color(c) => s.$($field).+ = Some(*c),
+                AnimValue::CurrentColor(_) => s.$($field).+ = None,
+                _ => {}
+            },
+        }
+    };
+}
+
 /// The properties a transition can run on, by their CSS names.
 const PROPS: &[Prop] = &[
     // Its range is [0, 1]: a `composite: add` past it (`.75 + .5`) clamps,
@@ -154,6 +197,8 @@ const PROPS: &[Prop] = &[
     color_prop!("border-right-color", border_right_color),
     color_prop!("border-bottom-color", border_bottom_color),
     color_prop!("border-left-color", border_left_color),
+    current_color_prop!("outline-color", outline.color),
+    current_color_prop!("text-decoration-color", text_decoration_color),
     len_prop!("width", width),
     len_prop!("height", height),
     len_prop!("min-width", min_width),
@@ -216,6 +261,8 @@ fn expands_to(name: &str) -> &'static [&'static str] {
             "border-left-width",
         ],
         "inset" => &["top", "right", "bottom", "left"],
+        "outline" => &["outline-color"],
+        "text-decoration" => &["text-decoration-color"],
         "background" => &["background-color"],
         "font" => &["font-size"],
         _ => &[],
@@ -421,7 +468,12 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
         (AnimValue::Length(x), AnimValue::Length(y)) => {
             AnimValue::Length(interpolate_length(x, y, t)?)
         }
-        (AnimValue::Color(x), AnimValue::Color(y)) => AnimValue::Color(interpolate_color(x, y, t)),
+        (AnimValue::Color(x), AnimValue::Color(y))
+        | (AnimValue::CurrentColor(x), AnimValue::Color(y))
+        | (AnimValue::Color(x), AnimValue::CurrentColor(y)) => {
+            AnimValue::Color(interpolate_color(x, y, t))
+        }
+        (AnimValue::CurrentColor(_), AnimValue::CurrentColor(y)) => AnimValue::CurrentColor(*y),
         (AnimValue::Transform(x), AnimValue::Transform(y)) => {
             AnimValue::Transform(interpolate_transform(x, y, t))
         }
@@ -1148,6 +1200,7 @@ pub(crate) fn is_paint_prop(index: usize) -> bool {
             | "border-right-color"
             | "border-bottom-color"
             | "border-left-color"
+            | "outline-color"
     )
 }
 
@@ -1908,6 +1961,49 @@ mod tests {
             "transparent black does not darken"
         );
         assert_eq!(mid.a, 0.5);
+    }
+
+    #[test]
+    fn currentcolor_is_its_own_value_and_interpolates_as_the_colour() {
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 1.0,
+        };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        };
+        assert_eq!(
+            AnimValue::CurrentColor(blue),
+            AnimValue::CurrentColor(red),
+            "currentcolor before and after is no change"
+        );
+        assert_ne!(AnimValue::CurrentColor(blue), AnimValue::Color(blue));
+        assert_eq!(
+            interpolate(&AnimValue::CurrentColor(blue), &AnimValue::Color(red), 0.5),
+            Some(AnimValue::Color(Color {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 1.0
+            }))
+        );
+        let mut style = ComputedStyle::new();
+        style.color = blue;
+        let i = prop_indices("outline-color")[0];
+        assert_eq!(prop_value(&style, i), AnimValue::CurrentColor(blue));
+        set_prop_value(&mut style, i, &AnimValue::Color(red));
+        assert_eq!(style.outline.color, Some(red));
+        set_prop_value(&mut style, i, &AnimValue::CurrentColor(blue));
+        assert_eq!(style.outline.color, None);
+        assert_eq!(
+            prop_indices("text-decoration"),
+            prop_indices("text-decoration-color")
+        );
     }
 
     #[test]
