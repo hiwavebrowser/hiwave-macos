@@ -107,6 +107,21 @@ Unicode Character Database (the `unicode-*` crates, `regex-syntax`, `idna`'s
 data); where such a crate ships a Unicode licence file it is reproduced in
 section 5.
 
+### WHATWG HTML named character references (BSD-3-Clause)
+
+Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
+<https://html.spec.whatwg.org/entities.json>,
+<https://html.spec.whatwg.org/multipage/acknowledgements.html#ipr>
+
+- `crates/rustkit-html/src/entities/named.rs`: the HTML named character
+  references table, generated from `entities.json` by
+  `scripts/generate_html_entities.py` (the source's SHA-256 is recorded in the
+  file's header). Data only; the licence as received is kept beside it in
+  `crates/rustkit-html/src/entities/WHATWG-LICENSE.txt`.
+
+Licence text: BSD 3-Clause License, in section 4; "the copyright holder" in
+clause 3 is WHATWG (Apple, Google, Mozilla, Microsoft).
+
 ### SQLite 3.46.0 (public domain)
 
 `libsqlite3-sys 0.30.1` is built with its `bundled` feature (through
