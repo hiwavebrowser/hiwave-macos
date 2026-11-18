@@ -580,6 +580,9 @@ def test_the_engine_flags_are_what_the_engine_process_is_started_with():
         "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}
     # The app is also started with its test hooks off.
     assert run.engine_flags("hiwave", asked, inherited={})["HIWAVE_TEST_HOOKS"] == "0"
+    # And with its sidebar closed, unless the run asked for it open.
+    assert run.engine_flags("hiwave", asked, inherited=shell)["HIWAVE_TEST_SIDEBAR"] == "closed"
+    assert run.engine_flags("hiwave", {"HIWAVE_TEST_SIDEBAR": "open"}, inherited={})["HIWAVE_TEST_SIDEBAR"] == "open"
     # Chrome reads none of them.
     assert run.engine_flags("chrome", asked, inherited=shell) == {}
 
@@ -813,3 +816,116 @@ def test_the_run_record_carries_the_count_of_refused_console_lines(monkeypatch, 
     code, rec = run_with_fake_engine(monkeypatch, tmp_path / "none", "")
     assert code == 0 and rec["engine_errors_refused"] == 0, outcome(code, rec)
     assert "engine_errors_refused" not in capsys.readouterr().out
+
+
+# ── FRAME-STAGES: the per-frame stage split (MotionMark at a fixed complexity) ──
+
+class _Args:
+    only = ["Canvas Arcs"]
+    test_interval = 10
+    complexity = None
+    iterations = None
+
+
+def test_a_fixed_complexity_run_uses_the_suites_fixed_controller():
+    a = _Args()
+    assert "controller=ramp" in run.runner_url("http://h", "motionmark", a)
+    a.complexity = 100
+    url = run.runner_url("http://h", "motionmark", a)
+    assert "controller=fixed&complexity=100" in url and "controller=ramp" not in url
+    assert "test-name=CanvasArcs" in url and "test-interval=10" in url
+
+
+def test_frame_stages_asks_each_engine_for_its_own_account(tmp_path):
+    argv = run.headless_argv(tmp_path / "pc", "http://h/", tmp_path, 30, None, frame_stages=True)
+    assert argv.count("--frame-stages") == 1
+    assert "--frame-stages" not in run.headless_argv(tmp_path / "pc", "http://h/", tmp_path, 30, None)
+    chrome = run.chrome_trace_args(tmp_path / "trace.json", 40)
+    keys = [a.split("=", 1)[0] for a in chrome]
+    assert keys == ["--trace-startup", "--trace-startup-format", "--trace-startup-file", "--trace-startup-duration"]
+    assert "--trace-startup-format=json" in chrome and "--trace-startup-duration=40" in chrome
+
+
+def _engine_frame_stage_fields():
+    """FRAME_STAGE_FIELDS as the engine's source lists them."""
+    src = (HERE.parents[1] / "crates" / "rustkit-engine" / "src" / "frame_stages.py".replace(".py", ".rs")).read_text()
+    body = re.search(r"pub const FRAME_STAGE_FIELDS: &\[&str\] = &\[(.*?)\];", src, re.S).group(1)
+    return re.findall(r'"([a-z_]+)"', body)
+
+
+def _hiwave_line(fields, **values):
+    return "Frame stages " + " ".join("%s=%s" % (k, values.get(k, 0)) for k in fields)
+
+
+def test_the_hiwave_reader_knows_every_stage_the_engine_prints():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    assert fields[:4] == ["turn", "t_ms", "busy_ms", "wait_ms"], fields
+    assert set(frame_stages.HIWAVE_STAGES) <= set(fields), set(frame_stages.HIWAVE_STAGES) - set(fields)
+    assert set(fields) - set(frame_stages.HIWAVE_STAGES) == {"turn", "t_ms", "host_calls", "canvas_draws", "renders"}
+
+
+def test_the_hiwave_reader_takes_the_middle_of_the_longest_run_of_rendering_turns():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    lines = [_hiwave_line(fields, turn=1, t_ms=0, renders=1, script_ms=99)]  # the load, apart
+    for i in range(20):  # the test: 20 rendering turns 20 ms apart, idle turns between
+        lines.append(_hiwave_line(fields, turn=2 + 2 * i, t_ms=5000 + 20 * i, renders=1, script_ms=i, canvas_draws=3))
+        lines.append(_hiwave_line(fields, turn=3 + 2 * i, t_ms=5010 + 20 * i, renders=0))
+    out = frame_stages.hiwave_summary("noise\n" + "\n".join(lines) + "\nmore noise\n")
+    assert out["turns"] == 41 and out["frames"] == 12, out  # 20 frames, the middle 60 %
+    assert out["stages"]["script_ms"] == 9.5 and out["frame_interval_ms"] == 20.0
+    assert out["canvas_draws_per_frame"] == 3
+    assert set(out["stages"]) == set(frame_stages.HIWAVE_STAGES)
+
+
+def test_the_hiwave_reader_splits_script_into_js_and_host_calls_with_per_frame_rows():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    lines, rows = [], {}
+    for i in range(20):  # 20 frames, each 4 arc calls (0.1 ms each) and one fill (0.5 ms)
+        lines.append(_hiwave_line(fields, turn=1 + i, t_ms=1000 + 16 * i, renders=1, script_ms=3.0, host_ms=1.0,
+                                  canvas_raster_ms=0.4, host_calls=5))
+        rows[("__rustkit_canvas", "arc")] = (4 * (i + 1), 0.4 * (i + 1))
+        rows[("__rustkit_canvas", "fill")] = (i + 1, 0.5 * (i + 1))
+        rows[("__rustkit_dom_attr", "")] = (0, 0.0)
+        if (i + 1) % 5 == 0:
+            lines.append("Host calls turn=%d rows=%s" % (i + 1, ",".join(
+                "%s/%s:%d:%.3f" % (n, o, c, m) for (n, o), (c, m) in rows.items())))
+    out = frame_stages.hiwave_summary("\n".join(lines))
+    assert out["js_ms"] == 2.0 and out["host_less_raster_ms"] == 0.6 and out["host_calls_per_frame"] == 5, out
+    by = {(r["name"], r["op"]): r for r in out["host_rows_per_frame"]}
+    assert set(by) == {("__rustkit_canvas", "arc"), ("__rustkit_canvas", "fill")}, by  # no calls: left out
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "arc")]["us_per_call"] == 100.0
+    assert by[("__rustkit_canvas", "fill")]["ms"] == 0.5
+    assert out["host_rows_per_frame"][0]["op"] == "fill"  # the most time first
+    # A heavy cell: no line before the first steady frame; the nearest inside the steady frames is used.
+    late = "\n".join(l for l in lines if not l.startswith("Host calls turn=5 "))
+    by = {(r["name"], r["op"]): r for r in frame_stages.hiwave_summary(late)["host_rows_per_frame"]}
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "fill")]["ms"] == 0.5, by
+
+
+def _x(name, ts, dur, tid=1, pid=10):
+    return {"ph": "X", "name": name, "ts": ts, "dur": dur, "pid": pid, "tid": tid}
+
+
+def test_the_chrome_reader_splits_main_thread_self_time_and_counts_other_threads_tasks():
+    import frame_stages
+    ev = [{"ph": "M", "name": "thread_name", "pid": 10, "tid": 1, "args": {"name": "CrRendererMain"}},
+          {"ph": "M", "name": "thread_name", "pid": 10, "tid": 2, "args": {"name": "Compositor"}},
+          {"ph": "M", "name": "thread_name", "pid": 20, "tid": 3, "args": {"name": "CrGpuMain"}},
+          {"ph": "M", "name": "thread_name", "pid": 30, "tid": 4, "args": {"name": "CrBrowserMain"}}]
+    for i in range(10):  # 10 frames, 16 ms apart
+        t = 1_000_000 + i * 16_000
+        ev += [_x("ProxyMain::BeginMainFrame", t, 5000),
+               _x("FireAnimationFrame", t + 100, 2000), _x("FunctionCall", t + 200, 1500),  # script 2.0 ms
+               _x("UpdateLayoutTree", t + 2200, 1000), _x("Layout", t + 3300, 500), _x("Paint", t + 3900, 400),
+               _x("ThreadControllerImpl::RunTask", t + 5100, 800, tid=2),
+               _x("RunTask", t + 6000, 300, tid=3, pid=20), _x("Inner", t + 6000, 100, tid=3, pid=20),
+               _x("RunTask", t + 6000, 999, tid=4, pid=30)]  # the browser's: left out
+    out = frame_stages.chrome_summary({"traceEvents": ev})
+    s = out["stages"]
+    assert (s["script"], s["style"], s["layout"], s["paint"]) == (2.0, 1.0, 0.5, 0.4), out
+    assert s["main_other"] == 1.1  # BeginMainFrame's own time: 5.0 - 3.9
+    assert (s["compositor"], s["gpu_main"]) == (0.8, 0.3), out  # whole tasks, children once
+    assert out["frame_interval_ms"] == 16.0 and out["frames"] >= 4

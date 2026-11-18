@@ -86,6 +86,15 @@ mod class_list_cost_tests;
 #[cfg(test)]
 mod attr_write_cost_tests;
 #[cfg(test)]
+mod style_set_cost_tests;
+#[cfg(test)]
+mod native_style_tests;
+mod inline_style;
+#[cfg(test)]
+mod style_write_cost_tests;
+#[cfg(test)]
+mod style_value_url_tests;
+#[cfg(test)]
 mod attr_write_tests;
 #[cfg(test)]
 mod node_apis_tests;
@@ -511,8 +520,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
-    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "trust", "userEdit",
+    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
+    "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -620,6 +629,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Q.frameK = 0; Q.inFrame = false;
         // The grid time of the frame whose callbacks run (its timestamp's time, below).
         Q.frameDue = 0;
+        // A frame tree's turn (`__rk.treeTurn`): while one is open, the grid time of the frame
+        // whose round it has run (-1: none yet); -2 outside one (RAF-ONE-ROUND, below).
+        Q.roundAt = -2;
+        // CLOCK-AT-PRESENT: a late round is the frame of the turn's time (`__rk.setOneRound`).
+        Q.oneRound = false;
     }
     var timers = Q.timers;
     // What each document's workers have sent is delivered at the top of
@@ -1011,17 +1025,42 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the order they were asked for, until `max` callbacks have run in
     // the turn (`ran` so far). The round is a table of the engine's own,
     // as the timers are. Returns the new count.
+    //
+    // A frame tree's turn is one presented frame however many calls run its parts (its timers
+    // one at a time, then the #776 round of a turn that stopped for its time): it has one round,
+    // as HTML's "update the rendering" runs the animation frame callbacks once, from the list as
+    // it stood (Chrome: one rAF batch per frame). Once the turn has run a round, a later call
+    // only runs callbacks of that round's frame that a cap left over; a frame they asked for,
+    // due already when the turn ran late, is the next turn's (RAF-ONE-ROUND: it ran in the same
+    // turn, and MotionMark's heavy cells counted two of its frames per presented frame).
     function frameRound(ran, max) {
         Q.inFrame = false;
         var round = objCreate(null), due = 0, latest = -1;
+        var upTo = Q.roundAt >= 0 && Q.roundAt < Q.now ? Q.roundAt : Q.now;
         for (var i = 0; i < Q.count; i++) {
-            if (timers[i].frame && timers[i].due <= Q.now) {
+            if (timers[i].frame && timers[i].due <= upTo) {
                 round[due++] = timers[i];
                 if (timers[i].due > latest) latest = timers[i].due;
             }
         }
+        // CLOCK-AT-PRESENT (with one round a turn): a round a late turn runs is the frame of the
+        // turn's time, the latest grid point at or before it, not the grid point its callbacks were
+        // due at: they are stamped with it, the frame they ask for is the next one after it (not
+        // due already), and between turns the timeline and the CSS animation clock hold at it, as
+        // Chrome's late frame is stamped with its own time (`clock_at_present_probe_cft148.json`:
+        // the stamp is the timeline in the frame and in the task after it, the painted time the
+        // animation's). Without it the callback a late round asked for ran a turn later, stamped
+        // with that older grid point, a turn behind the frame presented with it.
+        if (latest >= 0 && Q.oneRound) {
+            var g = gridAtOrBefore(Q.now), at = frameAt(g);
+            if (at > latest) {
+                latest = at;
+                for (var r = 0; r < due; r++) if (round[r].k < g) round[r].k = g;
+            }
+        }
         // One frame: its time is the latest grid point among its callbacks.
         if (latest >= 0) Q.frameDue = latest;
+        if (latest >= 0 && Q.roundAt === -1) Q.roundAt = latest;
         for (var j = 0; j < due && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
             var at = slotOf(round[j]);
@@ -1212,6 +1251,28 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     __rk.animationRound = function (max) {
         return frameRound(0, max);
     };
+    // A frame tree's turn opens (`true`: it has run no round yet) and closes (`false`), around
+    // every call that runs a part of it (`Engine::pump_live_on`; RAF-ONE-ROUND, `frameRound`).
+    __rk.treeTurn = function (open) {
+        Q.roundAt = open ? -1 : -2;
+    };
+    // One animation round a turn is on for this tree (`Engine` RAF-ONE-ROUND switch): a late round
+    // is the frame of the turn's time (CLOCK-AT-PRESENT, `frameRound`).
+    __rk.setOneRound = function (on) {
+        Q.oneRound = !!on;
+    };
+    // ANIM-UPDATE-ORDER: the time of the frame a turn `delta` ms on will run (the frame of the
+    // turn's time, as `frameRound` makes it with one round a turn), or -1 when no animation frame
+    // callback is due by then. The engine updates the animations to it before the turn's timers
+    // and round run, so the callbacks read the frame's animated style (HTML update the rendering:
+    // animations are updated before the animation frame callbacks run). No clock is read.
+    __rk.turnFrameAt = function (delta) {
+        var target = Q.now + (toNumber(delta) || 0);
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame && timers[i].due <= target) return frameAt(gridAtOrBefore(target));
+        }
+        return -1;
+    };
     // A frame's document is going away: its timers go with it, and its
     // workers are no longer asked. Loops over the tables, nothing called.
     __rk.dropTimers = function () {
@@ -1342,6 +1403,9 @@ pub(crate) const LAYER_PAINT: u8 = 1;
 /// computed style, the transformed rects, hit testing and the scroll
 /// extents see it; offset and client boxes do not.
 pub(crate) const LAYER_TRANSFORM: u8 = 2;
+/// An inline style write of `opacity` (TREE-REUSE step (2)): below 1 it makes a stacking
+/// context, which can reorder what paints above what, so a hit test sees it; no box moves.
+pub(crate) const LAYER_STACKING: u8 = 4;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
@@ -1404,6 +1468,27 @@ impl DirtyMark {
         }
     }
 
+    /// TREE-REUSE step (2): a script write of the inline `style` attribute that changed only paint
+    /// properties (`reads`: [`LAYER_PAINT`], with [`LAYER_STACKING`] for `opacity`). Like any
+    /// other script write it is beyond the animated-style layer and the engine lays it out when
+    /// script settles; but no box moved, so the published layout stays current for an offset,
+    /// client or rect read, and only the reads that see the values lay out (`needs_layout_for`).
+    /// It names its cause for the forced-layout log when it is the first write since the layout.
+    pub(crate) fn mark_paint_style(&self, bucket: DomDirty, kind: &'static str, reads: u8, logged: Logged) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.other_since_layout.set(true);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+            if self.cause.get().is_none() {
+                self.cause.set(Some(kind));
+            }
+        }
+    }
+
     /// Whether the read `read` (the forced-layout log's read kinds) must
     /// lay the page out first: after any write a layout can see, or after a
     /// paint-layer write whose values it reads.
@@ -1414,8 +1499,10 @@ impl DirtyMark {
         let layer = self.layer_since_layout.get();
         match read {
             "computed_style" => layer != 0,
-            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
-            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            "hit_test" => layer & (LAYER_TRANSFORM | LAYER_STACKING) != 0,
+            "rect" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll" | "scroll_to" => {
+                layer & LAYER_TRANSFORM != 0
+            }
             _ => false,
         }
     }
@@ -3009,6 +3096,14 @@ impl DomBindings {
         self.dom_host.borrow_mut().has_rules = probe;
     }
 
+    /// Whether some rule of the page's sheets reads the `style` attribute or uses `:has()`,
+    /// asked when an inline style write changes only paint properties: with one, the write can
+    /// change which rules match, and a geometry read after it lays the page out (TREE-REUSE
+    /// step (2)). Without a probe the answer is yes.
+    pub fn set_style_attr_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().style_attr_rules = probe;
+    }
+
     /// How many times a source from `set_geometry_source` was built.
     pub fn geometry_builds(&self) -> u64 {
         self.dom_host.borrow().geometry_builds
@@ -3971,6 +4066,38 @@ impl DomBindings {
             JsValue::Number(n) => n as u32,
             _ => 0,
         })
+    }
+
+    /// A frame tree's live turn opens (`true`) or closes (`false`): while it is open the
+    /// animation-frame callbacks run in one round, however many calls run the turn's parts
+    /// (RAF-ONE-ROUND).
+    /// One animation round a turn is on for this view's frame tree: a round a late turn runs is
+    /// the frame of the turn's time (CLOCK-AT-PRESENT).
+    pub fn set_one_round(&self, on: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setOneRound({on}); return 0;"))?;
+        Ok(())
+    }
+
+    /// The time of the frame a turn `delta_ms` on will run, on the tree's clock, when an
+    /// animation frame callback is due by then (ANIM-UPDATE-ORDER; `__rk.turnFrameAt`).
+    pub fn turn_frame_at(&self, delta_ms: u64) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("return __rk.turnFrameAt({delta_ms});"))
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() && n >= 0.0 => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn set_tree_turn(&self, open: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.treeTurn({open}); return 0;"))?;
+        Ok(())
     }
 
     /// The document timeline's time on the tree's clock (`__rk.animationNow`): the clock the
