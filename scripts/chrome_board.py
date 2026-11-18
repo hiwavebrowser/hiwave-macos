@@ -122,6 +122,14 @@ def probe_chrome_version(path: Path) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def home_relative(path: Path) -> str:
+    """A path for committed output: under $HOME it is written `~/...` (no user names in the repo)."""
+    try:
+        return "~/" + str(Path(path).resolve().relative_to(Path.home().resolve()))
+    except ValueError:
+        return str(path)
+
+
 def pinned_chrome_path(env: Optional[Dict[str, str]] = None,
                        version_of: Optional[Callable[[Path], Optional[str]]] = None) -> Path:
     """PARITY_CHROME_PATH, required, existing, and exactly PINNED_CHROME_VERSION
@@ -711,7 +719,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
             "sha": git_sha(REPO_ROOT),
             "base": git_develop_base(REPO_ROOT),
             "chromium": chromium_version,
-            "chromium_path": str(chrome_path),
+            "chromium_path": home_relative(chrome_path),
             "chromium_pinned": PINNED_CHROME_VERSION,
             "parity_capture": str(binary),
             "gate_pct": PIXEL_GATE_PCT,

@@ -295,7 +295,8 @@ class GateTests(unittest.TestCase):
             )
             self.assertEqual(rc, 0)
             run = json.loads((Path(tmp) / "out" / "board.json").read_text(encoding="utf-8"))["run"]
-            self.assertEqual(run["chromium_path"], sys.executable)
+            self.assertEqual(run["chromium_path"], chrome_board.home_relative(Path(sys.executable)))
+            self.assertNotIn(str(Path.home()), run["chromium_path"])
             self.assertEqual(run["chromium_pinned"], "148.0.7778.216")
             self.assertEqual(run["gate_pct"], 0.5)
             self.assertEqual(run["gate_geometry_pixel_pct"], 1.5)
