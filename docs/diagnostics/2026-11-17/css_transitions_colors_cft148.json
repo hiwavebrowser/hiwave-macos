@@ -1,0 +1,198 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": 50,
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "outline-color rgb",
+      "css": "#h{outline:2px solid rgb(0,0,255);transition:all 100ms linear;}#h.on{outline-color:rgb(255,0,0)}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "outline-color"
+      ],
+      "events": [
+        "run:outline-color",
+        "start:outline-color",
+        "end:outline-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "outline-color currentcolor->red",
+      "css": "#h{color:rgb(0,0,255);outline:2px solid;transition:all 100ms linear;}#h.on{outline-color:rgb(255,0,0)}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "outline-color"
+      ],
+      "events": [
+        "run:outline-color",
+        "start:outline-color",
+        "end:outline-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "outline-color red->currentcolor",
+      "css": "#h{color:rgb(0,0,255);outline:2px solid rgb(255,0,0);transition:all 100ms linear;}#h.on{outline-color:currentcolor}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "outline-color"
+      ],
+      "events": [
+        "run:outline-color",
+        "start:outline-color",
+        "end:outline-color"
+      ],
+      "end": "rgb(0, 0, 255)"
+    },
+    {
+      "label": "outline-color currentcolor, color jumps",
+      "css": "#h{color:rgb(0,0,255);outline:2px solid;transition:outline-color 100ms linear}#h.on{color:rgb(255,0,0)}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgb(255, 0, 0)",
+      "transitions": [],
+      "events": [],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "outline-color transparent->red",
+      "css": "#h{outline:2px solid transparent;transition:all 100ms linear;}#h.on{outline-color:rgb(255,0,0)}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgba(255, 0, 0, 0.5)",
+      "transitions": [
+        "outline-color"
+      ],
+      "events": [
+        "run:outline-color",
+        "start:outline-color",
+        "end:outline-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "outline shorthand named",
+      "css": "#h{outline:2px solid rgb(0,0,255);transition:outline 100ms linear}#h.on{outline-color:rgb(255,0,0)}",
+      "read": "outline-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "outline-color"
+      ],
+      "events": [
+        "run:outline-color",
+        "start:outline-color",
+        "end:outline-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "text-decoration-color rgb",
+      "css": "#h{text-decoration:underline;text-decoration-color:rgb(0,0,255);transition:all 100ms linear;}#h.on{text-decoration-color:rgb(255,0,0)}",
+      "read": "text-decoration-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "text-decoration-color"
+      ],
+      "events": [
+        "run:text-decoration-color",
+        "start:text-decoration-color",
+        "end:text-decoration-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "text-decoration-color transparent->red",
+      "css": "#h{text-decoration:underline;text-decoration-color:transparent;transition:all 100ms linear;}#h.on{text-decoration-color:rgb(255,0,0)}",
+      "read": "text-decoration-color",
+      "target": "h",
+      "mid": "rgba(255, 0, 0, 0.5)",
+      "transitions": [
+        "text-decoration-color"
+      ],
+      "events": [
+        "run:text-decoration-color",
+        "start:text-decoration-color",
+        "end:text-decoration-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "text-decoration shorthand named",
+      "css": "#h{text-decoration:underline;text-decoration-color:rgb(0,0,255);transition:text-decoration 100ms linear}#h.on{text-decoration-color:rgb(255,0,0)}",
+      "read": "text-decoration-color",
+      "target": "h",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "text-decoration-color"
+      ],
+      "events": [
+        "run:text-decoration-color",
+        "start:text-decoration-color",
+        "end:text-decoration-color"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "fill rgb",
+      "css": ".r{fill:rgb(0,0,255);transition:all 100ms linear;}.r.on{fill:rgb(255,0,0)}",
+      "read": "fill",
+      "target": "s",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "fill"
+      ],
+      "events": [
+        "run:fill",
+        "start:fill",
+        "end:fill"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "fill none->red",
+      "css": ".r{fill:none;transition:all 100ms linear;}.r.on{fill:rgb(255,0,0)}",
+      "read": "fill",
+      "target": "s",
+      "mid": "rgb(255, 0, 0)",
+      "transitions": [],
+      "events": [],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "stroke rgb",
+      "css": ".r{stroke:rgb(0,0,255);transition:all 100ms linear;}.r.on{stroke:rgb(255,0,0)}",
+      "read": "stroke",
+      "target": "s",
+      "mid": "rgb(128, 0, 128)",
+      "transitions": [
+        "stroke"
+      ],
+      "events": [
+        "run:stroke",
+        "start:stroke",
+        "end:stroke"
+      ],
+      "end": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "stroke none->red",
+      "css": ".r{stroke:none;transition:all 100ms linear;}.r.on{stroke:rgb(255,0,0)}",
+      "read": "stroke",
+      "target": "s",
+      "mid": "rgb(255, 0, 0)",
+      "transitions": [],
+      "events": [],
+      "end": "rgb(255, 0, 0)"
+    }
+  ]
+}
