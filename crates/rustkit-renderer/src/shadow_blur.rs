@@ -15,15 +15,26 @@
 //! The renderer draws the result as a mesh of cells whose corners carry the
 //! exact value and whose insides are interpolated by the GPU (`mesh_knots`).
 
+use hashbrown::HashMap;
 use rustkit_layout::{BorderRadius, CornerRadius, Rect};
+use std::sync::Arc;
 
-/// The Gaussian's standard deviation for a CSS blur radius.
+/// The largest standard deviation drawn. A blur past it (an infinite or
+/// absurd length) is drawn at it, so mesh positions stay finite.
+const MAX_SIGMA: f32 = 1000.0;
+
+/// The Gaussian's standard deviation for a CSS blur radius: half of it,
+/// clamped to `0..=MAX_SIGMA` (NaN is no blur).
 pub(crate) fn sigma_of(blur_radius: f32) -> f32 {
-    blur_radius.max(0.0) * 0.5
+    if blur_radius.is_nan() {
+        return 0.0;
+    }
+    (blur_radius.max(0.0) * 0.5).min(MAX_SIGMA)
 }
 
 /// How far past the shape the blur is drawn: three standard deviations,
-/// where a full-alpha shadow is a fifth of a level from nothing.
+/// where a full-alpha shadow is about a third of a level (1 - Phi(3) of 255,
+/// 0.34) from nothing.
 pub(crate) fn reach_of(sigma: f32) -> f32 {
     3.0 * sigma
 }
@@ -191,6 +202,7 @@ pub(crate) fn mesh_knots(
     breaks: [f32; 4],
     reach: f32,
     extra: &[f32],
+    detail: Detail,
 ) -> Vec<f32> {
     let mut knots = vec![lo, hi];
     if hi <= lo {
@@ -208,11 +220,16 @@ pub(crate) fn mesh_knots(
         .iter()
         .map(|(a, b)| (b.min(hi) - a.max(lo)).max(0.0))
         .sum();
-    // A third of a standard deviation (reach / 9) keeps linear interpolation
-    // within about a percent of the alpha, corners included (half a sigma
-    // leaves 4 levels at a corner); no finer than a pixel; no more than
-    // MAX_KNOTS.
-    let step = (reach / 9.0).max(1.0).max(total / MAX_KNOTS as f32);
+    // Fine: a third of a standard deviation (reach / 9) keeps linear
+    // interpolation within about a percent of the alpha, corners included
+    // (half a sigma leaves 4 levels at a corner); no finer than a pixel; no
+    // more than MAX_KNOTS. Coarse (`MeshCache`'s fallback): one sigma, at
+    // most a quarter of the knots.
+    let (per_reach, max_knots) = match detail {
+        Detail::Fine => (9.0, MAX_KNOTS),
+        Detail::Coarse => (3.0, MAX_KNOTS / 4),
+    };
+    let step = (reach / per_reach).max(1.0).max(total / max_knots as f32);
     for (a, b) in stretches {
         let (a, b) = (a.max(lo), b.min(hi));
         if b <= a {
@@ -296,16 +313,22 @@ pub(crate) fn mesh_key(
     MeshKey(k)
 }
 
-/// Build the mesh `mesh_key` describes, relative to `origin`.
-pub(crate) fn build_mesh(
+/// How finely a mesh is cut (`mesh_knots`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Detail {
+    Fine,
+    Coarse,
+}
+
+/// The mesh's cut positions, in page coordinates.
+fn knots_of(
     shape: &Shape,
     other: &Shape,
     sigma: f32,
     inset: bool,
-    origin: (f32, f32),
-) -> Mesh {
+    detail: Detail,
+) -> (Vec<f32>, Vec<f32>) {
     let reach = reach_of(sigma);
-    let (ox, oy) = origin;
     let (x0, x1, y0, y1) = if inset {
         (
             other.rect.x,
@@ -321,19 +344,209 @@ pub(crate) fn build_mesh(
             shape.rect.bottom() + reach,
         )
     };
-    let xs = mesh_knots(x0, x1, shape.breaks(false), reach, &other.breaks(false));
-    let ys = mesh_knots(y0, y1, shape.breaks(true), reach, &other.breaks(true));
-    let mut values = Vec::with_capacity(xs.len() * ys.len());
-    for &y in &ys {
-        for &x in &xs {
-            let v = blurred_coverage(shape, sigma, x, y);
-            values.push(if inset { 1.0 - v } else { v });
+    let xs = mesh_knots(
+        x0,
+        x1,
+        shape.breaks(false),
+        reach,
+        &other.breaks(false),
+        detail,
+    );
+    let ys = mesh_knots(
+        y0,
+        y1,
+        shape.breaks(true),
+        reach,
+        &other.breaks(true),
+        detail,
+    );
+    (xs, ys)
+}
+
+/// Most slices across one curved stretch of `build_mesh`'s integral.
+const MAX_SLICES: usize = 256;
+
+/// The horizontal slices `build_mesh` integrates over: the straight middle
+/// whole, each curved stretch in slices of at most half a sigma (at least
+/// `CURVED_SLICES`, at most `MAX_SLICES`).
+fn slices_of(shape: &Shape, sigma: f32) -> Vec<(f32, f32)> {
+    let [top, b1, b2, bottom] = shape.breaks(true);
+    let mut out = Vec::new();
+    let mut curved = |a: f32, b: f32, out: &mut Vec<(f32, f32)>| {
+        if b <= a {
+            return;
         }
+        let n =
+            (((b - a) / (0.5 * sigma).max(0.25)).ceil() as usize).clamp(CURVED_SLICES, MAX_SLICES);
+        let step = (b - a) / n as f32;
+        for i in 0..n {
+            out.push((a + step * i as f32, a + step * (i + 1) as f32));
+        }
+    };
+    if b1 < b2 {
+        curved(top, b1, &mut out);
+        out.push((b1, b2));
+        curved(b2, bottom, &mut out);
+    } else {
+        curved(top, bottom, &mut out);
     }
+    out
+}
+
+/// Build the mesh `mesh_key` describes, relative to `origin`.
+///
+/// The value at every knot crossing is `blurred_coverage`'s integral, taken
+/// over one set of slices for the whole mesh: each slice's horizontal blur
+/// is computed once per column and its Gaussian mass once per row, so a
+/// value costs a multiply-add per nearby slice, not two CDFs.
+pub(crate) fn build_mesh(
+    shape: &Shape,
+    other: &Shape,
+    sigma: f32,
+    inset: bool,
+    origin: (f32, f32),
+    detail: Detail,
+) -> Mesh {
+    let (xs, ys) = knots_of(shape, other, sigma, inset, detail);
+    let values = mesh_values(shape, sigma, inset, &xs, &ys);
+    let (ox, oy) = origin;
     Mesh {
         xs: xs.into_iter().map(|x| x - ox).collect(),
         ys: ys.into_iter().map(|y| y - oy).collect(),
         values,
+    }
+}
+
+fn mesh_values(shape: &Shape, sigma: f32, inset: bool, xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let nx = xs.len();
+    let mut values = vec![0.0f32; nx * ys.len()];
+    let r = shape.rect;
+    if r.width > 0.0 && r.height > 0.0 && sigma > 0.0 {
+        let slices = slices_of(shape, sigma);
+        // across[s * nx + i]: slice s's span blurred along x, at column i.
+        let mut across = vec![0.0f32; slices.len() * nx];
+        for (s, (a, b)) in slices.iter().enumerate() {
+            let (l, rt) = shape.span(0.5 * (a + b));
+            if rt <= l {
+                continue;
+            }
+            for (i, &x) in xs.iter().enumerate() {
+                across[s * nx + i] = phi((rt - x) / sigma) - phi((l - x) / sigma);
+            }
+        }
+        let window = 4.0 * sigma;
+        for (j, &y) in ys.iter().enumerate() {
+            let row = &mut values[j * nx..(j + 1) * nx];
+            for (s, &(a, b)) in slices.iter().enumerate() {
+                if b < y - window || a > y + window {
+                    continue;
+                }
+                let mass = phi((b - y) / sigma) - phi((a - y) / sigma);
+                if mass <= 0.0 {
+                    continue;
+                }
+                for (v, c) in row.iter_mut().zip(&across[s * nx..(s + 1) * nx]) {
+                    *v += mass * c;
+                }
+            }
+        }
+    }
+    for v in &mut values {
+        let c = v.clamp(0.0, 1.0);
+        *v = if inset { 1.0 - c } else { c };
+    }
+    values
+}
+
+/// Fine mesh vertices `MeshCache` builds in one frame before it falls back
+/// to coarse meshes: about 2 ms of building. The first build of a frame is always
+/// fine, so one animated shadow stays fine.
+pub(crate) const MESH_BUILD_BUDGET: usize = MESH_VERTICES_PER_MS * 2;
+
+/// Fine mesh vertices built per millisecond (release build, M-series Mac:
+/// 100k-160k for pill shapes at blur 8..64; the low end is taken).
+const MESH_VERTICES_PER_MS: usize = 100_000;
+
+/// Fine meshes kept; the least recently used goes first.
+pub(crate) const MESH_CACHE_CAPACITY: usize = 256;
+
+/// Shadow meshes by shape (`MeshKey`), least recently used evicted, with a
+/// per-frame build budget. Past the budget a mesh is built coarse (a
+/// sixteenth of the vertices) and not kept, so a later frame with budget
+/// left builds it fine.
+#[derive(Default)]
+pub(crate) struct MeshCache {
+    meshes: HashMap<MeshKey, (Arc<Mesh>, u64)>,
+    tick: u64,
+    spent: usize,
+    /// Fine meshes built this frame.
+    pub builds: usize,
+    /// Coarse meshes built this frame (the budget was spent).
+    pub coarse: usize,
+}
+
+impl MeshCache {
+    /// A new frame: its budget is unspent.
+    pub(crate) fn begin_frame(&mut self) {
+        self.spent = 0;
+        self.builds = 0;
+        self.coarse = 0;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// The mesh for this shadow: cached, built fine within the budget, or
+    /// built coarse past it.
+    pub(crate) fn get(
+        &mut self,
+        shape: &Shape,
+        other: &Shape,
+        sigma: f32,
+        inset: bool,
+        origin: (f32, f32),
+    ) -> Arc<Mesh> {
+        self.tick += 1;
+        let key = mesh_key(shape, other, sigma, inset, origin);
+        if let Some((mesh, used)) = self.meshes.get_mut(&key) {
+            *used = self.tick;
+            return mesh.clone();
+        }
+        let (xs, ys) = knots_of(shape, other, sigma, inset, Detail::Fine);
+        let cost = xs.len() * ys.len();
+        if self.spent > 0 && self.spent + cost > MESH_BUILD_BUDGET {
+            self.coarse += 1;
+            return Arc::new(build_mesh(
+                shape,
+                other,
+                sigma,
+                inset,
+                origin,
+                Detail::Coarse,
+            ));
+        }
+        self.spent += cost;
+        self.builds += 1;
+        let values = mesh_values(shape, sigma, inset, &xs, &ys);
+        let (ox, oy) = origin;
+        let mesh = Arc::new(Mesh {
+            xs: xs.into_iter().map(|x| x - ox).collect(),
+            ys: ys.into_iter().map(|y| y - oy).collect(),
+            values,
+        });
+        if self.meshes.len() >= MESH_CACHE_CAPACITY {
+            if let Some(oldest) = self
+                .meshes
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(k, _)| k.clone())
+            {
+                self.meshes.remove(&oldest);
+            }
+        }
+        self.meshes.insert(key, (mesh.clone(), self.tick));
+        mesh
     }
 }
 
@@ -404,7 +617,14 @@ mod tests {
 
     #[test]
     fn knots_cover_the_changing_stretches_and_skip_the_flat_middle() {
-        let k = mesh_knots(-30.0, 1030.0, [0.0, 0.0, 1000.0, 1000.0], 30.0, &[]);
+        let k = mesh_knots(
+            -30.0,
+            1030.0,
+            [0.0, 0.0, 1000.0, 1000.0],
+            30.0,
+            &[],
+            Detail::Fine,
+        );
         assert_eq!(*k.first().unwrap(), -30.0);
         assert_eq!(*k.last().unwrap(), 1030.0);
         assert!(k
@@ -430,8 +650,156 @@ mod tests {
             at(0.0, 0.0, 16.0),
             mesh_key(&shape, &moved_hole, 8.0, false, (0.0, 0.0))
         );
-        let mesh = build_mesh(&shape, &moved_hole, 8.0, false, (0.0, 0.0));
+        let mesh = build_mesh(&shape, &moved_hole, 8.0, false, (0.0, 0.0), Detail::Fine);
         assert_eq!(mesh.values.len(), mesh.xs.len() * mesh.ys.len());
         assert_eq!((mesh.xs[0], mesh.ys[0]), (-24.0, -24.0), "three sigma out");
+    }
+
+    fn pill(w: f32, h: f32) -> Shape {
+        let r = CornerRadius::circular(h / 2.0);
+        Shape::new(
+            Rect::new(0.0, 0.0, w, h),
+            BorderRadius {
+                top_left: r,
+                top_right: r,
+                bottom_right: r,
+                bottom_left: r,
+            },
+        )
+    }
+
+    /// The mesh's sliced integral is `blurred_coverage` at every knot.
+    #[test]
+    fn a_mesh_holds_the_blurred_coverage_at_its_knots() {
+        for (shape, sigma) in [
+            (pill(200.0, 56.0), 8.0),
+            (pill(120.0, 80.0), 16.0),
+            (square(0.0, 0.0, 90.0, 40.0), 2.0),
+        ] {
+            for inset in [false, true] {
+                let hole = square(0.0, 0.0, 1.0, 1.0);
+                let other = if inset {
+                    square(-10.0, -10.0, 220.0, 100.0)
+                } else {
+                    hole
+                };
+                let mesh = build_mesh(&shape, &other, sigma, inset, (0.0, 0.0), Detail::Fine);
+                for (j, y) in mesh.ys.iter().enumerate() {
+                    for (i, x) in mesh.xs.iter().enumerate() {
+                        let want = blurred_coverage(&shape, sigma, *x, *y);
+                        let want = if inset { 1.0 - want } else { want };
+                        let got = mesh.values[j * mesh.xs.len() + i];
+                        assert!(
+                            (got - want).abs() < 2e-3,
+                            "({x}, {y}) sigma {sigma}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// An infinite or NaN blur draws finite positions.
+    #[test]
+    fn an_infinite_blur_is_clamped() {
+        assert_eq!(sigma_of(f32::INFINITY), MAX_SIGMA);
+        assert_eq!(sigma_of(f32::NAN), 0.0);
+        assert_eq!(sigma_of(-4.0), 0.0);
+        let mut cache = MeshCache::default();
+        let mesh = cache.get(
+            &pill(100.0, 40.0),
+            &pill(100.0, 40.0),
+            sigma_of(f32::INFINITY),
+            false,
+            (0.0, 0.0),
+        );
+        assert!(mesh
+            .xs
+            .iter()
+            .chain(&mesh.ys)
+            .chain(&mesh.values)
+            .all(|v| v.is_finite()));
+    }
+
+    /// 300 distinct shapes, drawn every frame: no frame builds past the
+    /// budget (the first build excepted), the rest are coarse, and every
+    /// shape is drawn.
+    #[test]
+    fn three_hundred_shapes_stay_within_the_build_budget() {
+        let mut cache = MeshCache::default();
+        let shapes: Vec<Shape> = (0..300).map(|i| pill(100.0 + i as f32, 40.0)).collect();
+        let mut fine_vertices_max = 0;
+        for _frame in 0..10 {
+            cache.begin_frame();
+            for s in &shapes {
+                let m = cache.get(s, s, 8.0, false, (0.0, 0.0));
+                assert!(!m.values.is_empty());
+            }
+            assert_eq!(cache.builds + cache.coarse <= 300, true);
+            fine_vertices_max = fine_vertices_max.max(cache.spent);
+            let one = {
+                let (xs, ys) = knots_of(&shapes[0], &shapes[0], 8.0, false, Detail::Fine);
+                xs.len() * ys.len()
+            };
+            assert!(
+                cache.spent <= MESH_BUILD_BUDGET.max(one),
+                "spent {} of {}",
+                cache.spent,
+                MESH_BUILD_BUDGET
+            );
+            assert!(cache.builds >= 1, "every frame makes progress");
+            assert!(cache.len() <= MESH_CACHE_CAPACITY);
+        }
+        assert!(fine_vertices_max > 0);
+    }
+
+    /// A static page of a few shapes builds each once, then hits.
+    #[test]
+    fn a_static_page_builds_once() {
+        let mut cache = MeshCache::default();
+        let shapes: Vec<Shape> = (0..5).map(|i| pill(100.0 + i as f32, 40.0)).collect();
+        cache.begin_frame();
+        for s in &shapes {
+            cache.get(s, s, 8.0, false, (0.0, 0.0));
+        }
+        assert_eq!((cache.builds, cache.coarse), (5, 0));
+        for _ in 0..3 {
+            cache.begin_frame();
+            for s in &shapes {
+                cache.get(s, s, 8.0, false, (0.0, 0.0));
+            }
+            assert_eq!((cache.builds, cache.coarse), (0, 0));
+        }
+    }
+
+    /// An animating blur misses every frame: one fine build a frame, never
+    /// coarse, and the cache does not grow past its capacity.
+    #[test]
+    fn an_animating_blur_builds_one_mesh_a_frame() {
+        let mut cache = MeshCache::default();
+        let s = pill(200.0, 56.0);
+        for frame in 0..400 {
+            cache.begin_frame();
+            cache.get(&s, &s, 4.0 + frame as f32 * 0.05, false, (0.0, 0.0));
+            assert_eq!((cache.builds, cache.coarse), (1, 0), "frame {frame}");
+            assert!(cache.len() <= MESH_CACHE_CAPACITY);
+        }
+    }
+
+    /// Least recently used goes first: a shape drawn every frame survives
+    /// a stream of one-off shapes.
+    #[test]
+    fn the_cache_evicts_the_least_recently_used() {
+        let mut cache = MeshCache::default();
+        let kept = pill(77.0, 30.0);
+        for i in 0..(MESH_CACHE_CAPACITY * 2) {
+            cache.begin_frame();
+            cache.get(&kept, &kept, 8.0, false, (0.0, 0.0));
+            let other = pill(300.0 + i as f32, 40.0);
+            cache.get(&other, &other, 8.0, false, (0.0, 0.0));
+        }
+        cache.begin_frame();
+        cache.get(&kept, &kept, 8.0, false, (0.0, 0.0));
+        assert_eq!(cache.builds, 0, "the shape in use was evicted");
     }
 }

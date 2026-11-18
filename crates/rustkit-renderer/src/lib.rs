@@ -52,8 +52,6 @@ use wgpu::util::DeviceExt;
 /// a quarter of a level.
 const SHADOW_ALPHA_FLOOR: f32 = 0.25 / 255.0;
 
-/// Shadow meshes kept before the cache starts over.
-const SHADOW_MESH_CACHE: usize = 256;
 
 pub mod dither;
 mod cull;
@@ -488,7 +486,7 @@ pub struct Renderer {
     image_indices: Vec<u32>,
     image_runs: Vec<(String, u32)>,
     /// Blurred box shadow meshes by shape (`shadow_mesh`).
-    shadow_meshes: HashMap<shadow_blur::MeshKey, Arc<shadow_blur::Mesh>>,
+    shadow_meshes: shadow_blur::MeshCache,
 
     // GPU gradient queues for batched rendering
     gradient_queue: Vec<QueuedLinearGradient>,
@@ -858,7 +856,7 @@ impl Renderer {
             image_vertices: Vec::with_capacity(256),
             image_indices: Vec::with_capacity(512),
             image_runs: Vec::with_capacity(64),
-            shadow_meshes: HashMap::new(),
+            shadow_meshes: shadow_blur::MeshCache::default(),
             gradient_queue: Vec::with_capacity(64),
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
@@ -1425,6 +1423,8 @@ impl Renderer {
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
         self.last_list = (commands.as_ptr() as usize, commands.len());
+        // A frame: the shadow meshes' build budget starts over.
+        self.shadow_meshes.begin_frame();
         #[cfg(test)]
         {
             self.glyph_grid.scan_only = self.reference;
@@ -4469,6 +4469,14 @@ impl Renderer {
         if color.a == 0.0 {
             return;
         }
+        // Nothing sensible to draw from a non-finite length; an infinite blur
+        // is clamped by `sigma_of`.
+        if ![offset_x, offset_y, spread_radius, rect.x, rect.y, rect.width, rect.height]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return;
+        }
         let sigma = shadow_blur::sigma_of(blur_radius);
         if inset {
             self.draw_inset_shadow(rect, radius, offset_x, offset_y, sigma, spread_radius, color);
@@ -4526,8 +4534,9 @@ impl Renderer {
         }
     }
 
-    /// The mesh `shadow_blur::build_mesh` builds, from the cache when a box
-    /// of the same shape has drawn one (a grid of cards draws one mesh).
+    /// The shadow's mesh from `shadow_blur::MeshCache`: cached by shape
+    /// (a grid of cards draws one), built within the frame's budget, or
+    /// coarse past it.
     fn shadow_mesh(
         &mut self,
         shape: &shadow_blur::Shape,
@@ -4536,16 +4545,7 @@ impl Renderer {
         inset: bool,
         origin: (f32, f32),
     ) -> Arc<shadow_blur::Mesh> {
-        let key = shadow_blur::mesh_key(shape, other, sigma, inset, origin);
-        if let Some(mesh) = self.shadow_meshes.get(&key) {
-            return mesh.clone();
-        }
-        if self.shadow_meshes.len() >= SHADOW_MESH_CACHE {
-            self.shadow_meshes.clear();
-        }
-        let mesh = Arc::new(shadow_blur::build_mesh(shape, other, sigma, inset, origin));
-        self.shadow_meshes.insert(key, mesh.clone());
-        mesh
+        self.shadow_meshes.get(shape, other, sigma, inset, origin)
     }
 
     /// An inset shadow (CSS Backgrounds 3 §7.1): inside `clip` (the padding
