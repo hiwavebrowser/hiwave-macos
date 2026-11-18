@@ -128,7 +128,12 @@ fn check(css: &str, prop: &str, chrome_mid: &str, chrome_end: &str) {
 
 #[test]
 fn translate_from_none_interpolates_from_zero() {
-    check("#h.on{translate:100px 50px}", "translate", "50px 25px", "100px 50px");
+    check(
+        "#h.on{translate:100px 50px}",
+        "translate",
+        "50px 25px",
+        "100px 50px",
+    );
 }
 
 #[test]
@@ -139,13 +144,28 @@ fn translate_interpolates_each_length() {
         "20px 40px",
         "30px 60px",
     );
-    check("#h{translate:0px}#h.on{translate:100px}", "translate", "50px", "100px");
-    check("#h{translate:0%}#h.on{translate:100%}", "translate", "50%", "100%");
+    check(
+        "#h{translate:0px}#h.on{translate:100px}",
+        "translate",
+        "50px",
+        "100px",
+    );
+    check(
+        "#h{translate:0%}#h.on{translate:100%}",
+        "translate",
+        "50%",
+        "100%",
+    );
 }
 
 #[test]
 fn translate_to_none_interpolates_to_zero() {
-    check("#h{translate:100px}#h.on{translate:none}", "translate", "50px", "none");
+    check(
+        "#h{translate:100px}#h.on{translate:none}",
+        "translate",
+        "50px",
+        "none",
+    );
 }
 
 #[test]
@@ -156,14 +176,34 @@ fn rotate_from_none_interpolates_from_zero() {
 /// No turn is taken off: 45deg to 405deg passes 225deg.
 #[test]
 fn rotate_interpolates_the_angle_whole() {
-    check("#h{rotate:45deg}#h.on{rotate:405deg}", "rotate", "225deg", "405deg");
-    check("#h{rotate:0deg}#h.on{rotate:1turn}", "rotate", "180deg", "360deg");
+    check(
+        "#h{rotate:45deg}#h.on{rotate:405deg}",
+        "rotate",
+        "225deg",
+        "405deg",
+    );
+    check(
+        "#h{rotate:0deg}#h.on{rotate:1turn}",
+        "rotate",
+        "180deg",
+        "360deg",
+    );
 }
 
 #[test]
 fn rotate_about_z_and_to_none_interpolate() {
-    check("#h{rotate:z 0deg}#h.on{rotate:z 90deg}", "rotate", "45deg", "90deg");
-    check("#h{rotate:90deg}#h.on{rotate:none}", "rotate", "45deg", "none");
+    check(
+        "#h{rotate:z 0deg}#h.on{rotate:z 90deg}",
+        "rotate",
+        "45deg",
+        "90deg",
+    );
+    check(
+        "#h{rotate:90deg}#h.on{rotate:none}",
+        "rotate",
+        "45deg",
+        "none",
+    );
 }
 
 #[test]
@@ -200,26 +240,22 @@ fn the_painted_box_moves_with_a_translate_transition() {
 /// `scale` y is the x (Chrome 148: 20px 20px, 1.5 2 both ways).
 #[test]
 fn one_value_interpolates_against_two() {
-    check("#h{translate:10px}#h.on{translate:30px 40px}", "translate", "20px 20px", "30px 40px");
-    check("#h{translate:30px 40px}#h.on{translate:10px}", "translate", "20px 20px", "10px");
+    check(
+        "#h{translate:10px}#h.on{translate:30px 40px}",
+        "translate",
+        "20px 20px",
+        "30px 40px",
+    );
+    check(
+        "#h{translate:30px 40px}#h.on{translate:10px}",
+        "translate",
+        "20px 20px",
+        "10px",
+    );
     check("#h{scale:1}#h.on{scale:2 3}", "scale", "1.5 2", "2 3");
     check("#h{scale:2 3}#h.on{scale:1}", "scale", "1.5 2", "1");
 }
 
-/// TODAY'S BEHAVIOUR, NOT CHROME'S: a translate between two units (px or
-/// rem against %) is not interpolable here, so no transition starts, no
-/// event fires and the value jumps. Chrome 148 interpolates through
-/// calc() (`10px` to `50%` is `calc(25% + 5px)` at 50 ms, `1rem` to `50%`
-/// `calc(25% + 8px)`) and fires run/start/end. Group C's length-percentage
-/// interpolation flips this test; it is here so that the flip shows.
-#[test]
-fn a_mixed_unit_translate_jumps_today() {
-    for (css, end) in [
-        ("#h{translate:10px}#h.on{translate:50%}", "50%"),
-        ("#h{translate:1rem}#h.on{translate:50%}", "50%"),
-    ] {
-        let (mid, names, events, last) = run_case(css, "translate");
-        assert_eq!((mid.as_str(), names.as_str(), events.as_str()), (end, "", ""), "{css}");
-        assert_eq!(last, end, "{css}");
-    }
-}
+// `a_mixed_unit_translate_jumps_today` (group B) pinned px/rem against %
+// as a jump; group C interpolates it as a calc() mix:
+// `css_transitions_sizes_tests::a_translate_between_two_units_interpolates_as_calc`.

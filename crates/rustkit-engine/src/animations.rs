@@ -21,23 +21,25 @@
 //! `transitioncancel`) are queued here as the phases change and fired at
 //! the element after the build, in queue order, as Chrome orders them.
 //!
-//! What is interpolated: numbers (`opacity`), lengths of one unit (`px`
-//! with `px`, `%` with `%`; `auto` never transitions, as in Chrome),
+//! What is interpolated: numbers (`opacity`), lengths (one unit with
+//! itself, two units as a `calc()` mix of them; `auto` never transitions,
+//! as in Chrome),
 //! colours (premultiplied sRGB; `outline-color` and
 //! `text-decoration-color` keep `currentcolor` as a value of its own,
 //! `AnimValue::CurrentColor`), and transform lists (function by function
 //! when the lists match, `none` as the identity of the other list, else
 //! the two matrices component-wise, which is not the spec's decomposition
 //! and is a stated gap), and the individual `translate`/`rotate`/`scale`
-//! properties (`none` as the identity). Not here yet: `border-radius`,
-//! `box-shadow`, `background-position`, `line-height`, `visibility`'s discrete rule,
+//! properties (`none` as the identity), `line-height`, the four
+//! `border-*-radius` corners and `background-size`. Not here yet:
+//! `box-shadow`, `background-position`, `visibility`'s discrete rule,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
-    AnimationPlayState, Color, ComputedStyle, Display, Length, TimingFunction, TransformList,
-    TransformOp, TransitionItem,
+    AnimationPlayState, BackgroundSize, Color, ComputedStyle, CornerRadius, Display, Length,
+    LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem,
 };
 use std::collections::HashMap;
 
@@ -59,6 +61,14 @@ pub(crate) enum AnimValue {
     /// One of the individual transform properties (css-transforms-2 §5:
     /// `translate`, `rotate`, `scale`); `None` is `none`.
     Individual(Option<TransformOp>),
+    /// `line-height`: a number with a number, a length with a length;
+    /// `normal` and a number against a length are discrete (Chrome 148
+    /// starts no transition).
+    LineHeight(LineHeight),
+    /// A `border-*-radius` corner: both radii, each a length-percentage.
+    Radius(CornerRadius),
+    /// `background-size`, one per layer (bottom layer first, as stored).
+    BackgroundSizes(Vec<BackgroundSize>),
 }
 
 impl PartialEq for AnimValue {
@@ -71,6 +81,9 @@ impl PartialEq for AnimValue {
             (CurrentColor(_), CurrentColor(_)) => true,
             (Transform(a), Transform(b)) => a == b,
             (Individual(a), Individual(b)) => a == b,
+            (LineHeight(a), LineHeight(b)) => a == b,
+            (Radius(a), Radius(b)) => a == b,
+            (BackgroundSizes(a), BackgroundSizes(b)) => a == b,
             _ => false,
         }
     }
@@ -129,6 +142,19 @@ macro_rules! individual_prop {
             set: |s, v| {
                 if let AnimValue::Individual(op) = v {
                     s.$field = op.clone();
+                }
+            },
+        }
+    };
+}
+macro_rules! radius_prop {
+    ($name:literal, $field:ident) => {
+        Prop {
+            name: $name,
+            get: |s| AnimValue::Radius(s.$field.clone()),
+            set: |s, v| {
+                if let AnimValue::Radius(r) = v {
+                    s.$field = r.clone();
                 }
             },
         }
@@ -222,6 +248,37 @@ const PROPS: &[Prop] = &[
     inset_prop!("bottom", bottom),
     inset_prop!("left", left),
     len_prop!("font-size", font_size),
+    Prop {
+        name: "line-height",
+        get: |s| AnimValue::LineHeight(s.line_height),
+        set: |s, v| {
+            if let AnimValue::LineHeight(l) = v {
+                s.line_height = *l;
+            }
+        },
+    },
+    radius_prop!("border-top-left-radius", border_top_left_radius),
+    radius_prop!("border-top-right-radius", border_top_right_radius),
+    radius_prop!("border-bottom-right-radius", border_bottom_right_radius),
+    radius_prop!("border-bottom-left-radius", border_bottom_left_radius),
+    // The layer list is the background-image list's: a size written for
+    // a different number of layers (a transition overlapping a change of
+    // images) is left alone.
+    Prop {
+        name: "background-size",
+        get: |s| {
+            AnimValue::BackgroundSizes(s.background_layers.iter().map(|l| l.size.clone()).collect())
+        },
+        set: |s, v| {
+            if let AnimValue::BackgroundSizes(sizes) = v {
+                if sizes.len() == s.background_layers.len() {
+                    for (layer, size) in s.background_layers.iter_mut().zip(sizes) {
+                        layer.size = size.clone();
+                    }
+                }
+            }
+        },
+    },
     len_prop!("letter-spacing", letter_spacing),
     len_prop!("word-spacing", word_spacing),
     len_prop!("text-indent", text_indent),
@@ -263,8 +320,14 @@ fn expands_to(name: &str) -> &'static [&'static str] {
         "inset" => &["top", "right", "bottom", "left"],
         "outline" => &["outline-color"],
         "text-decoration" => &["text-decoration-color"],
-        "background" => &["background-color"],
-        "font" => &["font-size"],
+        "background" => &["background-color", "background-size"],
+        "font" => &["font-size", "line-height"],
+        "border-radius" => &[
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ],
         _ => &[],
     }
 }
@@ -324,7 +387,9 @@ fn interpolate_length(a: &Length, b: &Length, t: f32) -> Option<Length> {
         (Vmin(x), Vmin(y)) => Vmin(lerp(*x, *y, t)),
         (Vmax(x), Vmax(y)) => Vmax(lerp(*x, *y, t)),
         (Zero, Zero) => Zero,
-        _ => return None,
+        // Two units: a `calc()` mix of them (css-values-4 §3.2; Chrome 148
+        // reads `10px` to `50%` at the midpoint as `calc(25% + 5px)`).
+        _ => return Length::interpolate_as_calc(a, b, t),
     })
 }
 
@@ -462,6 +527,65 @@ fn interpolate_individual(
     interpolate_op(&a, &b, t).map(Some)
 }
 
+/// `line-height`: numbers and lengths each with their own kind.
+fn interpolate_line_height(a: &LineHeight, b: &LineHeight, t: f32) -> Option<LineHeight> {
+    match (a, b) {
+        (LineHeight::Number(x), LineHeight::Number(y)) => Some(LineHeight::Number(lerp(*x, *y, t))),
+        (LineHeight::Px(x), LineHeight::Px(y)) => Some(LineHeight::Px(lerp(*x, *y, t))),
+        _ => None,
+    }
+}
+
+/// One `background-size` dimension: `None` is `auto` (only with `auto`),
+/// a negative number a percentage (`parse_background_size_dimension`'s
+/// encoding, `-0.0` for `0%`), else px. A px against a percentage is a
+/// `calc()` Chrome interpolates and this encoding cannot hold: not
+/// interpolable here (a stated gap).
+fn interpolate_size_dimension(a: Option<f32>, b: Option<f32>, t: f32) -> Option<Option<f32>> {
+    match (a, b) {
+        (None, None) => Some(None),
+        (Some(x), Some(y)) if x.is_sign_negative() == y.is_sign_negative() => {
+            let v = lerp(x, y, t);
+            // Keep `0%` a percentage on the way.
+            Some(Some(if x.is_sign_negative() { -v.abs() } else { v }))
+        }
+        _ => None,
+    }
+}
+
+/// `background-size`, layer by layer: explicit sizes per dimension;
+/// `cover`, `contain` and `auto` are discrete (Chrome 148: `auto` or
+/// `cover` to `30px 40px` starts no transition).
+fn interpolate_background_sizes(
+    a: &[BackgroundSize],
+    b: &[BackgroundSize],
+    t: f32,
+) -> Option<Vec<BackgroundSize>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| match (x, y) {
+            (
+                BackgroundSize::Explicit {
+                    width: aw,
+                    height: ah,
+                },
+                BackgroundSize::Explicit {
+                    width: bw,
+                    height: bh,
+                },
+            ) => Some(BackgroundSize::Explicit {
+                width: interpolate_size_dimension(*aw, *bw, t)?,
+                height: interpolate_size_dimension(*ah, *bh, t)?,
+            }),
+            (x, y) if x == y => Some(x.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
     Some(match (a, b) {
         (AnimValue::Number(x), AnimValue::Number(y)) => AnimValue::Number(lerp(*x, *y, t)),
@@ -479,6 +603,16 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
         }
         (AnimValue::Individual(x), AnimValue::Individual(y)) => {
             AnimValue::Individual(interpolate_individual(x, y, t)?)
+        }
+        (AnimValue::LineHeight(x), AnimValue::LineHeight(y)) => {
+            AnimValue::LineHeight(interpolate_line_height(x, y, t)?)
+        }
+        (AnimValue::Radius(x), AnimValue::Radius(y)) => AnimValue::Radius(CornerRadius {
+            horizontal: interpolate_length(&x.horizontal, &y.horizontal, t)?,
+            vertical: interpolate_length(&x.vertical, &y.vertical, t)?,
+        }),
+        (AnimValue::BackgroundSizes(x), AnimValue::BackgroundSizes(y)) => {
+            AnimValue::BackgroundSizes(interpolate_background_sizes(x, y, t)?)
         }
         _ => return None,
     })
@@ -2007,7 +2141,7 @@ mod tests {
     }
 
     #[test]
-    fn lengths_interpolate_only_within_a_unit() {
+    fn lengths_interpolate_within_a_unit_and_mix_two_units_as_calc() {
         assert_eq!(
             interpolate_length(&Length::Px(100.0), &Length::Px(200.0), 0.5),
             Some(Length::Px(150.0))
@@ -2020,9 +2154,20 @@ mod tests {
             interpolate_length(&Length::Auto, &Length::Px(100.0), 0.5),
             None
         );
+        // Two units: a calc() mix (Chrome 148: `10px` to `50%` is
+        // `calc(25% + 5px)` at the midpoint).
         assert_eq!(
-            interpolate_length(&Length::Percent(50.0), &Length::Px(100.0), 0.5),
-            None
+            interpolate_length(&Length::Px(10.0), &Length::Percent(50.0), 0.5),
+            Some(Length::Calc(Box::new(rustkit_css::CalcSum {
+                px: 5.0,
+                percent: 25.0,
+                ..Default::default()
+            })))
+        );
+        assert_eq!(
+            interpolate_length(&Length::Px(10.0), &Length::Percent(50.0), 1.0),
+            Some(Length::Percent(50.0)),
+            "the end collapses to its one unit"
         );
     }
 

@@ -153,7 +153,13 @@ const CORNERS: [&str; 4] = [
 
 #[test]
 fn a_length_between_two_units_interpolates_as_calc() {
-    check("#h{width:100px}#h.on{width:50%}", "width", &["width"], "250px", "400px");
+    check(
+        "#h{width:100px}#h.on{width:50%}",
+        "width",
+        &["width"],
+        "250px",
+        "400px",
+    );
     check(
         "#h{padding-left:10px}#h.on{padding-left:10%}",
         "padding-left",
@@ -188,15 +194,41 @@ fn a_translate_between_two_units_interpolates_as_calc() {
 #[test]
 fn line_height_interpolates_lengths_and_numbers() {
     let lh = ["line-height"];
-    check("#h{line-height:20px}#h.on{line-height:40px}", "line-height", &lh, "30px", "40px");
-    check("#h{line-height:1}#h.on{line-height:2}", "line-height", &lh, "24px", "32px");
-    check("#h{line-height:100%}#h.on{line-height:200%}", "line-height", &lh, "24px", "32px");
+    check(
+        "#h{line-height:20px}#h.on{line-height:40px}",
+        "line-height",
+        &lh,
+        "30px",
+        "40px",
+    );
+    check(
+        "#h{line-height:1}#h.on{line-height:2}",
+        "line-height",
+        &lh,
+        "24px",
+        "32px",
+    );
+    check(
+        "#h{line-height:100%}#h.on{line-height:200%}",
+        "line-height",
+        &lh,
+        "24px",
+        "32px",
+    );
 }
 
 #[test]
 fn line_height_normal_and_a_number_against_a_length_are_discrete() {
-    check_discrete("#h{line-height:1}#h.on{line-height:40px}", "line-height", "40px");
-    check_discrete("#h{line-height:normal}#h.on{line-height:40px}", "line-height", "40px");
+    check_discrete(
+        "#h{line-height:1}#h.on{line-height:40px}",
+        "line-height",
+        "40px",
+    );
+    check_discrete(
+        "#h{line-height:normal}#h.on{line-height:40px}",
+        "line-height",
+        "40px",
+    );
 }
 
 // -------------------------------------------------------- border-radius
@@ -228,19 +260,24 @@ fn border_radius_interpolates_both_radii_and_percentages() {
         "20px 30px",
         "30px 40px",
     );
+    // Chrome 148 writes these as `25%` / `calc(25% + 5px)` / `50%`. This
+    // engine's getComputedStyle writes a corner's radii resolved against
+    // the 100x50 border box (`corner_radii_px`, a serialization gap of
+    // its own, also for a value that is not moving), so the same values
+    // read as px here.
     check(
         "#h{border-radius:0%}#h.on{border-radius:50%}",
         "border-top-left-radius",
         &CORNERS,
-        "25%",
-        "50%",
+        "25px 12.5px",
+        "50px 25px",
     );
     check(
         "#h{border-radius:10px}#h.on{border-radius:50%}",
         "border-top-left-radius",
         &CORNERS,
-        "calc(25% + 5px)",
-        "50%",
+        "30px 17.5px",
+        "50px 25px",
     );
 }
 
