@@ -227,7 +227,7 @@ class GateTests(unittest.TestCase):
             self.assertIn("0 geometry diffs and ≤ 1.5% pixel diff", md)
             self.assertIn("| gate |", md)
             body = [l for l in md.splitlines() if l.startswith("| shelf | default | 1280x800 |")]
-            gates = sorted(l.split("|")[6].strip() for l in body)
+            gates = sorted(l.split("|")[7].strip() for l in body)
             self.assertEqual(gates, ["geometry", "pixel", "red", "red"])
 
     def test_board_json_records_the_geometry_pixel_gate(self):
@@ -294,6 +294,81 @@ class RealSiteGateTests(unittest.TestCase):
         self.assertEqual(geometry["join_failures"], 0)
         self.assertEqual(geometry["compared"], 1)
         self.assertEqual(geometry["geometry_failures"], 0)
+
+    def test_compare_geometry_names_each_join_failure(self):
+        """T35: an unjoined element scores no geometry diff, so the board must
+        say which elements did not join, by kind and selector, not just a count."""
+        from scripts import chrome_board
+
+        box = {"x": 0, "y": 0, "width": 10, "height": 10}
+        chrome = {"elements": [
+            {"selector": "body > div.a", "tag": "div", "rect": box},
+            {"selector": "body > span.unit", "tag": "span", "rect": {"x": 5, "y": 0, "width": 0, "height": 14}},
+        ]}
+        rustkit = {"root": {"type": "block", "border_box": {"x": 0, "y": 0, "width": 800, "height": 600},
+                            "children": [
+                                {"type": "block", "selector": "body > div.a", "tag": "div", "border_box": box,
+                                 "children": []},
+                                {"type": "block", "selector": "body > div.extra", "tag": "div", "border_box": box,
+                                 "children": []},
+                            ]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            rects = Path(tmp) / "layout-rects.json"
+            layout = Path(tmp) / "rustkit-layout.json"
+            rects.write_text(json.dumps(chrome), encoding="utf-8")
+            layout.write_text(json.dumps(rustkit), encoding="utf-8")
+            geometry = chrome_board.compare_geometry("t", rects, layout)
+        self.assertEqual(geometry["join_failures"], 2)
+        self.assertEqual(geometry["join_detail"], [
+            {"kind": "missing_box", "selector": "body > span.unit"},
+            {"kind": "phantom_box", "selector": "body > div.extra"},
+        ])
+
+    def test_summarize_carries_the_join_detail(self):
+        from scripts import chrome_board
+
+        detail = [{"kind": "missing_box", "selector": "body > span.unit"}]
+        row = chrome_board.Row("inspector", "default", 1280, 800, Path("p"), Path("a"), Path("o"))
+        ok = {"status": "ok", "chromium": {"status": "ok"}, "rustkit": {"status": "ok"},
+              "pixels": {"diffPercent": 1.0, "top": []},
+              "geometry": {"geometry_failures": 0, "join_failures": 1, "join_detail": detail,
+                           "worst_selectors": []}}
+        entry = chrome_board.summarize(row, ok)
+        self.assertEqual(entry["join_failures"], 1)
+        self.assertEqual(entry["join_detail"], detail)
+
+    def test_board_has_a_join_failures_column_and_names_them(self):
+        """T35: join failures are a board column, and a section lists each
+        unjoined selector once per page and state with the sizes it failed at."""
+        from scripts import chrome_board
+
+        detail = [{"kind": "missing_box", "selector": "body > span.unit"}]
+        rows = []
+        for size, (w, h) in (("1280x800", (1280, 800)), ("1024x700", (1024, 700))):
+            r = _row(1.0, 0, join=1)
+            r.update(page="inspector", size=size, width=w, height=h, join_detail=detail)
+            rows.append(r)
+        rows.append(_row(0.2, 3, join=0))
+        rows.append(_row(None, None, join=None, status="rustkit_failed"))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            chrome_board.write_board(out, {
+                "run": {"at": "now", "sha": "feedface", "base": "0badf00d", "chromium": "148", "parity_capture": "pc",
+                        "gate_pct": 0.5, "gate_geometry_pixel_pct": 1.5},
+                "sizes": [], "states": {}, "rows": rows, "census": {},
+            })
+            md = (out / "BOARD.md").read_text(encoding="utf-8")
+        self.assertIn("| page | state | size | pixel diff % | geometry diffs | join failures | gate |", md)
+        cells = {tuple(c.strip() for c in l.split("|")[1:4]): [c.strip() for c in l.split("|")]
+                 for l in md.splitlines() if l.startswith("| inspector |") or l.startswith("| shelf |")}
+        self.assertEqual(cells[("inspector", "default", "1280x800")][6], "1")
+        self.assertEqual(cells[("inspector", "default", "1280x800")][7], "red")
+        self.assertEqual(cells[("shelf", "default", "1280x800")][6], "0")
+        self.assertIn("## Join failures", md)
+        self.assertEqual(md.count("`body > span.unit`"), 1, "one line per page/state, not per size")
+        line = next(l for l in md.splitlines() if "`body > span.unit`" in l)
+        self.assertIn("missing_box", line)
+        self.assertIn("1024x700, 1280x800", line)
 
     def test_looks_right_is_20_pct_for_now(self):
         from scripts import realsite_board
