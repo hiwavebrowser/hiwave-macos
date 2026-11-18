@@ -24,11 +24,24 @@ fn ev(b: &DomBindings, script: &str) -> String {
 /// Rows Chrome refuses for a reason other than the url rule, which this check does not make (separate rows):
 /// an unmatched `)` (in `url\(a b)` the escaped `(` is a name character), and a string where
 /// background-image takes an image.
-const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
+pub(crate) const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
 
 /// Rows Chrome keeps that stay refused here because the engine's url reader (`parse_css_url`, Rust whitespace
 /// and control characters) refuses them: an unquoted url holding NBSP or NUL (a row against the engine).
-const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)"];
+pub(crate) const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)", "url(a\u{85}b)", "url(a\u{2003}b)"];
+
+/// Regular-property values Chrome refuses by the property's grammar, which the bindings do not check (a
+/// separate row, VALUE-GRAMMAR): a value holding NBSP, U+FEFF or U+2003 at either end is one token
+/// that no color or length is. The bindings keep them, as they did before the CSS-whitespace trim
+/// (which then stored `red` for `red` + NBSP).
+const VALUE_GRAMMAR: &[(&str, &str)] = &[
+    ("color", "red\u{a0}"),
+    ("color", "\u{a0}red"),
+    ("color", "red\u{feff}"),
+    ("color", "\u{feff}red"),
+    ("color", "red\u{2003}"),
+    ("width", "10px\u{a0}"),
+];
 
 /// The exact value as a JS expression, from its UTF-16 code units (a lone surrogate does not survive JSON text).
 fn from_units(case: &serde_json::Value) -> String {
@@ -73,25 +86,32 @@ fn a_style_value_is_kept_or_refused_as_chrome_does() {
 }
 
 #[test]
-fn a_background_image_value_is_kept_or_refused_as_chrome_does() {
+fn a_value_on_a_regular_property_is_kept_or_refused_as_chrome_does() {
     let doc: serde_json::Value =
         serde_json::from_str(include_str!("../../../docs/diagnostics/2026-11-17/style_url_value_chrome148.json")).unwrap();
     let b = bound();
     let mut wrong = Vec::new();
     for case in doc["by_property"].as_array().unwrap() {
         let (prop, css) = (case["property"].as_str().unwrap(), case["css"].as_str().unwrap());
-        if NOT_THE_URL_RULE.contains(&css) {
+        if NOT_THE_URL_RULE.contains(&css) || VALUE_GRAMMAR.contains(&(prop, css)) {
             continue;
         }
+        // Through setProperty, and through the style attribute where the oracle wrote it that way too.
         let got = ev(
             &b,
             &format!(
-                "var el = document.getElementById('a'); el.removeAttribute('style');
-                 el.style.setProperty('{prop}', {}); String(el.style.getPropertyValue('{prop}') !== '')",
-                from_units(case)
+                "var el = document.getElementById('a'), v = {}; el.removeAttribute('style');
+                 el.style.setProperty('{prop}', v); var viaSet = el.style.getPropertyValue('{prop}') !== '';
+                 el.setAttribute('style', '{prop}: ' + v); var viaAttr = el.style.getPropertyValue('{prop}') !== '';
+                 viaSet + ({} ? '|' + viaAttr : '')",
+                from_units(case),
+                !case["kept_via_attribute"].is_null()
             ),
         );
-        let want = case["kept_via_setProperty"].as_bool().unwrap().to_string();
+        let mut want = case["kept_via_setProperty"].as_bool().unwrap().to_string();
+        if let Some(attr) = case["kept_via_attribute"].as_bool() {
+            want = format!("{want}|{attr}");
+        }
         if got != want {
             wrong.push(format!("{prop}: {css:?}: kept {got}, Chrome {want}"));
         }

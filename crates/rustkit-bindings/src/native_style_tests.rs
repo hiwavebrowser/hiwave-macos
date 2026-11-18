@@ -162,10 +162,10 @@ fn both_copies_keep_or_refuse_the_chrome_pinned_url_values() {
     let b = bound();
     let mut wrong = Vec::new();
     let cases = doc["cases"].as_array().unwrap();
-    // As style_value_url_tests reads the file (#1266): rows Chrome refuses for another rule are skipped, rows
-    // the engine's url reader refuses stay refused here, and each value is built from its UTF-16 units.
-    const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
-    const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)"];
+    // As style_value_url_tests reads the file (#1266), with its lists: rows Chrome refuses for another rule
+    // are skipped, rows the engine's url reader refuses stay refused here, and each value is built from its
+    // UTF-16 units.
+    use crate::style_value_url_tests::{ENGINE_REFUSES, NOT_THE_URL_RULE};
     for native in [true, false] {
         set_native(&b, native);
         for case in cases {
