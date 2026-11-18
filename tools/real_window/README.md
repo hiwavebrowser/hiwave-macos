@@ -60,6 +60,17 @@ least one failed, `3` none failed but some did not run, `2` the driver could
 not run. `--out` gets `result.json` (assertions and the full request log),
 one `<check>.app.log` per check and the captured frames.
 
+A `FAIL` from a known engine gap (driver.py `KNOWN_GAPS`) stays a `FAIL` and
+still sets exit code `1`, but it is labelled so it is not read as a regression:
+its detail starts `A8-blocked (...)`, its `result.json` row has
+`"blocked_by": "A8"` (every row has the field, `null` when unlabelled),
+`tally.blocked` counts them per gap, and the summary line reads
+`FAIL 3 (1 A8-blocked)`. Today the one entry is b11's "the sidebar shows a
+Settings item": `hwdrive find` is an Accessibility lookup and the RustKit
+chrome has no AX tree until A8 (T39). The label applies only on the RustKit
+chrome; with `HIWAVE_RUSTKIT_CHROME=0` a miss is a plain `FAIL`. When a
+labelled assertion passes, its detail says to drop the entry.
+
 ## Recording a pass (`--record`)
 
 ```

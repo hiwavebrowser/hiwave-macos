@@ -57,6 +57,24 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # The RustKit chrome is the app's default on macOS (CH3.A5a); a check that
 # covers the WebKit chrome (the escape hatch) launches with this.
 WEBKIT_CHROME = {"HIWAVE_RUSTKIT_CHROME": "0"}
+# Assertions that fail on the RustKit chrome for a known engine gap, not a
+# regression. They stay FAIL (the exit code does not move); the report labels
+# them so a batch reader can tell them apart. Drop an entry when its gap lands
+# (a pass of a labelled assertion says so in its detail).
+KNOWN_GAPS = {
+    # hwdrive find is an Accessibility lookup; the RustKit chrome has no AX
+    # tree until A8 (T39, Trace #243). a4_settings covers the flow meanwhile.
+    ("b11_settings_save", "the sidebar shows a Settings item"):
+        ("A8", "the RustKit chrome exposes no Accessibility tree"),
+}
+
+
+def tally_line(tally):
+    """The run's one-line summary; labelled fails are counted inside FAIL."""
+    blocked = tally.get("blocked") or {}
+    extra = ", ".join("%d %s-blocked" % (n, gap) for gap, n in sorted(blocked.items()))
+    return "PASS %d  FAIL %d%s  NOT RUN %d" % (
+        tally["PASS"], tally["FAIL"], " (%s)" % extra if extra else "", tally["NOT RUN"])
 
 # --record writes here by default: outside every checkout, so a recording is
 # never committed (the repo is public) and a fresh worktree does not lose it.
@@ -455,8 +473,22 @@ class Driver:
             return r.returncode, {"error": (r.stdout + r.stderr).strip()[-300:]}
 
     # assertions
+    def rustkit_chrome(self):
+        """Whether the app under test runs the RustKit chrome (the default)."""
+        env = dict(os.environ)
+        env.update(getattr(self.app, "env", None) or {})
+        return env.get("HIWAVE_RUSTKIT_CHROME") != "0"
+
     def note(self, check, name, status, detail=""):
-        self.results.append((check, name, status, detail))
+        gap = KNOWN_GAPS.get((check, name))
+        blocked = None
+        if gap and self.rustkit_chrome():
+            if status == "FAIL":
+                blocked = gap[0]
+                detail = "%s-blocked (%s)%s" % (gap[0], gap[1], ("; " + detail) if detail else "")
+            elif status == "PASS":
+                detail = "known %s gap passed: drop its KNOWN_GAPS entry%s" % (gap[0], ("; " + detail) if detail else "")
+        self.results.append((check, name, status, detail, blocked))
         print("  %-8s %s%s" % (status, name, (" — " + detail) if detail else ""), flush=True)
 
     def expect(self, check, name, ok, detail=""):
@@ -3514,7 +3546,7 @@ class Driver:
                 try:
                     check()
                 except HidUnsafe as e:
-                    self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                    self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e, None))
                     print("  STOP (HID safety): %s" % e, flush=True)
                     self.close_page()
                     break
@@ -3526,16 +3558,28 @@ class Driver:
             ignore_stop_signals()
             if rec is not None:
                 recording = self.stop_recording(rec)
+        tally, summary = self.summarise(sha, recording)
+        (self.out / "result.json").write_text(json.dumps(summary, indent=1))
+        print(tally_line(tally), "->", self.out / "result.json")
+        return 1 if tally["FAIL"] else (3 if tally["NOT RUN"] else 0)
+
+    def summarise(self, sha=None, recording=None):
+        """The tally and result.json body. A labelled fail stays in FAIL and
+        is also counted under tally["blocked"][gap]."""
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
+        blocked = {}
+        for r in self.results:
+            if len(r) > 4 and r[4]:
+                blocked[r[4]] = blocked.get(r[4], 0) + 1
+        tally["blocked"] = blocked
         summary = {
             "app": str(self.binary), "sha256": sha, "seat": self.pre, "tally": tally,
-            "assertions": [dict(check=r[0], name=r[1], status=r[2], detail=r[3]) for r in self.results],
-            "requests": self.fixture.requests,
+            "assertions": [dict(check=r[0], name=r[1], status=r[2], detail=r[3],
+                                blocked_by=r[4] if len(r) > 4 else None) for r in self.results],
+            "requests": getattr(self.fixture, "requests", []),
             "recording": recording,
         }
-        (self.out / "result.json").write_text(json.dumps(summary, indent=1))
-        print("PASS %(PASS)d  FAIL %(FAIL)d  NOT RUN %(NOT RUN)d" % tally, "->", self.out / "result.json")
-        return 1 if tally["FAIL"] else (3 if tally["NOT RUN"] else 0)
+        return tally, summary
 
 
 def main():
