@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+// Contains code contributed under MPL-2.0 by an outside contributor; see NOTICE.
 //! HiWave - Main Application Entry Point
 //!
 //! This is the primary entry point for the HiWave browser application.
