@@ -541,6 +541,45 @@ fn an_element_after_a_contents_wrapper_has_one_number_spliced_or_built() {
     );
 }
 
+/// BOXES-DIFF R1 (a): the element numbers a splice gives (and a full build now gives with the box tree
+/// kept) are read between builds by the intrinsic-size cache and the layout memo, and the tree-reuse
+/// memo (on by default) keeps the numbers of the build it snapshots. Whatever the numbering, what a page
+/// sees must not move: after each frame, the border boxes and what is hit at their centres, for
+/// elements after a `display: contents` wrapper, in a grid whose columns are sized by their content,
+/// are the same with the box tree kept as with a full build.
+#[test]
+fn elements_after_a_contents_wrapper_read_and_hit_alike_spliced_or_built() {
+    let page = page(
+        "#g{display:grid;grid-template-columns:auto auto;width:400px} .w{display:contents} \
+         #g div{height:12px;background-color:rgb(0,0,200)}",
+        "<div id=g><div class=w><div id=a>aa</div><div id=b>bbbbbb</div></div><div id=c>c</div><div id=d>dddd</div></div>\
+         <div id=after style=\"height:10px\"></div>",
+        "document.getElementById('c').textContent = 'c'.repeat(1 + n % 7); \
+         document.getElementById('after').style.width = (n % 50 + 10) + 'px';",
+    );
+    let read = "(function () { return ['a', 'b', 'c', 'd', 'after'].map(function (id) { \
+                var r = document.getElementById(id).getBoundingClientRect(); \
+                var e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); \
+                return id + ':' + [r.x, r.y, r.width, r.height].join(',') + '>' + (e ? e.id || e.tagName : 'none'); }).join(' '); })()";
+    let mut runs = Vec::new();
+    for mode in [RetainedStyles::Off, RetainedStyles::Boxes] {
+        set_retained_styles_for_test(Some(mode));
+        let (mut engine, view, _server) = load(&page);
+        let spliced = splices_for_test().0;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            frame(&mut engine, view);
+            seen.push(engine.execute_script(view, read).expect("read"));
+        }
+        runs.push((seen, splices_for_test().0 - spliced));
+        set_retained_styles_for_test(None);
+    }
+    assert!(runs[1].1 > 0, "the kept-boxes run spliced (last miss {:?})", splices_for_test().1);
+    for (i, (a, b)) in runs[0].0.iter().zip(&runs[1].0).enumerate() {
+        assert_eq!(a, b, "frame {i}: a full build vs kept boxes");
+    }
+}
+
 /// A written inline holding only a block is a culled inline: a full build makes it a block box
 /// (`rebox_culled_inline`) before its parent keeps it. The splice's box for it must be that box.
 #[test]
