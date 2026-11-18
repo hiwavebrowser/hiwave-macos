@@ -33,6 +33,10 @@ pub const CANVAS_SCRATCH_BUDGET: u64 = 128 << 20;
 /// recording's bytes) is not drawn: the canvas starts over from its CPU
 /// bitmap at its next batch.
 pub const CANVAS_VERTEX_CAP: usize = 2 << 20;
+/// Over-cap replays of one canvas in a row (its resets between them not
+/// counting as a break) after which it is denied: it shows its CPU bitmap
+/// for good rather than a stale texture every other frame.
+pub const CANVAS_OVER_CAP_LIMIT: u32 = 3;
 const SAMPLES: u32 = 4;
 const SCRATCH_BYTES_PER_PX: u64 = 4 * SAMPLES as u64 + SAMPLES as u64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -87,6 +91,8 @@ pub(crate) struct CanvasGpu {
     canvases: HashMap<String, u64>,
     /// Tests: a lower [`CANVAS_VERTEX_CAP`].
     vertex_cap: Option<usize>,
+    /// Over-cap replays in a row, by key.
+    over_cap: HashMap<String, u32>,
 }
 
 const SHADER: &str = r#"
@@ -145,7 +151,7 @@ impl CanvasGpu {
             bind_group_layouts: &[&copy_bgl],
             push_constant_ranges: &[],
         });
-        Self { shader, plain_layout, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None }
+        Self { shader, plain_layout, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None, over_cap: HashMap::new() }
     }
 
     fn pipe(&mut self, device: &wgpu::Device, p: Pipe) -> &wgpu::RenderPipeline {
@@ -324,6 +330,12 @@ impl Renderer {
         let mut draws: Vec<GpuDraw> = Vec::new();
         for b in batches {
             let Some((d, n)) = b.lower_within(left) else {
+                let count = cg.over_cap.entry(key.to_string()).or_insert(0);
+                *count += 1;
+                if *count >= CANVAS_OVER_CAP_LIMIT && false { // RED: stub, never denied
+                    cg.over_cap.remove(key);
+                    return CanvasReplay::Denied;
+                }
                 return CanvasReplay::NeedsReset;
             };
             left -= n;
@@ -421,6 +433,12 @@ impl Renderer {
                 cg.canvases.remove(key);
             }
             return CanvasReplay::NeedsReset;
+        }
+        if batches.iter().any(|b| b.op_count() > 0) {
+            // A frame of draws fit: the over-cap run is broken.
+            if let Some(cg) = self.canvas_gpu.as_mut() {
+                cg.over_cap.remove(key);
+            }
         }
         CanvasReplay::Drawn
     }

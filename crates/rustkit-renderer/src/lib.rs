@@ -50,7 +50,7 @@ use wgpu::util::DeviceExt;
 
 pub mod dither;
 mod canvas_gpu;
-pub use canvas_gpu::{CanvasReplay, CANVAS_SCRATCH_BUDGET, CANVAS_TEXTURE_BUDGET};
+pub use canvas_gpu::{CanvasReplay, CANVAS_OVER_CAP_LIMIT, CANVAS_SCRATCH_BUDGET, CANVAS_TEXTURE_BUDGET, CANVAS_VERTEX_CAP};
 mod cull;
 mod frame_stats;
 mod glyph_grid;

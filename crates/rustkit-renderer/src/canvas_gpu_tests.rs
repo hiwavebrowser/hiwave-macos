@@ -388,3 +388,56 @@ fn a_frame_past_the_vertex_cap_asks_for_a_reset_instead_of_drawing() {
     assert_eq!(r.read_canvas_texture(KEY).expect("texture"), c.premultiplied_pixels());
     r.remove_image(KEY);
 }
+
+/// A canvas over the vertex cap frame after frame does not alternate
+/// between a stale frame and a bitmap reset: after
+/// `CANVAS_OVER_CAP_LIMIT` over-cap replays in a row it is denied (its page
+/// shows its CPU bitmap from then on). The resets in between do not clear
+/// the count; a drawn frame of ops does (#1299 delta R1). Counts, no clock.
+#[test]
+fn a_canvas_over_the_cap_frame_after_frame_is_denied() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIPPED canvas_gpu: no GPU adapter");
+        return;
+    };
+    let mut r = renderer(&gpu);
+    r.set_canvas_vertex_cap(1_000);
+    let mut c = gpu_ctx(100, 80);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    let heavy = |c: &mut CanvasRenderingContext2D| {
+        c.clear_rect(0.0, 0.0, 100.0, 80.0);
+        c.set_line_width(2.0);
+        c.set_line_dash(vec![1.0, 1.0]);
+        for i in 0..30 {
+            c.begin_path();
+            c.arc(50.0, 40.0, 5.0 + i as f32, 0.0, std::f32::consts::TAU, false);
+            c.stroke();
+        }
+    };
+    let light = |c: &mut CanvasRenderingContext2D| {
+        c.clear_rect(0.0, 0.0, 100.0, 80.0);
+        c.set_line_dash(vec![]);
+        c.fill_rect(1.0, 1.0, 5.0, 5.0);
+    };
+    // Two over the cap, each followed by its reset; then a light frame:
+    // the count starts again.
+    for _ in 0..2 {
+        heavy(&mut c);
+        assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::NeedsReset);
+        assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(true)]), CanvasReplay::Drawn);
+    }
+    light(&mut c);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    let mut results = Vec::new();
+    for _ in 0..CANVAS_OVER_CAP_LIMIT {
+        heavy(&mut c);
+        results.push(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]));
+        if results.last() == Some(&CanvasReplay::NeedsReset) {
+            assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(true)]), CanvasReplay::Drawn);
+        }
+    }
+    let mut expected = vec![CanvasReplay::NeedsReset; CANVAS_OVER_CAP_LIMIT as usize - 1];
+    expected.push(CanvasReplay::Denied);
+    assert_eq!(results, expected);
+    r.remove_image(KEY);
+}
