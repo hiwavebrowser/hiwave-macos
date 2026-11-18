@@ -4,6 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+EXPECTATIONS = Path(__file__).with_name("wpt_expectations.json")
 
 def read(path):
     rows = {}
@@ -15,13 +16,22 @@ def read(path):
     return rows
 
 
-def scores(rows, reference):
+def scores(rows, reference, directories=None):
     totals = {}
     if rows.keys() != reference.keys():
         raise ValueError("page sets differ")
+    if directories is None:
+        directories = json.loads(EXPECTATIONS.read_text(encoding="utf-8"))
     for page, row in rows.items():
-        parts = page.split("/")
-        directory = "/".join(parts[:2]) if parts[0] in {"css", "html"} else parts[0]
+        parts = page.strip("/").split("/")[:-1]
+        # Prefer the most specific recorded suite. Give new suites a stable
+        # two-level group until their expectations have been recorded.
+        directory = "/".join(parts[:2])
+        for depth in range(len(parts), 0, -1):
+            prefix = "/".join(parts[:depth])
+            if prefix in directories:
+                directory = prefix
+                break
         counts = totals.setdefault(directory, Counter(passed=0, total=0, failed_pages=0))
         total = len(row["subtests"])
         if row["status"] != "OK":
@@ -51,8 +61,8 @@ def main():
     args = parser.parse_args()
     before, after = read(args.first), read(args.second)
     if args.mode == "check":
-        expected = json.loads(Path(__file__).with_name("wpt_expectations.json").read_text())
-        if scores(before, after) != expected:
+        expected = json.loads(EXPECTATIONS.read_text(encoding="utf-8"))
+        if scores(before, after, expected) != expected:
             raise SystemExit("Directory counts differ from committed expectations")
         return
     if args.mode == "summary":
