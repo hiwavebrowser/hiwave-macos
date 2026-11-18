@@ -591,6 +591,10 @@ pub(crate) struct ViewLayout {
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+    /// The document and author svg paint map this view's last build
+    /// styled its inline svgs with, for `getComputedStyle(fill / stroke)`
+    /// on svg content (`svg_computed`, A2.1).
+    pub(crate) svg_paint: RefCell<Option<Rc<crate::svg_computed::SvgPaintSnapshot>>>,
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
