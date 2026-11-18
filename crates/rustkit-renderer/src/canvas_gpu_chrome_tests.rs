@@ -3,14 +3,18 @@
 //! Chrome for Testing 148.0.7778.216, 40 x 40) against Chrome's pixels,
 //! the script run through the real bindings with the GPU switch on.
 //!
-//! Bounds: the CPU bitmap's own pin bounds against Chrome
-//! (rustkit-bindings web_canvas_raster_tests.rs: no premultiplied channel off
-//! by more than 80, mean difference at most 14 over Chrome's painted pixels).
-//! A3's own bounds (1.25x Chrome's GPU-vs-software distance per case) are
-//! not pinned yet; when they are, this test takes them.
+//! Bounds, both gated per case:
+//! - the CPU bitmap's own pin bounds against Chrome (rustkit-bindings
+//!   web_canvas_raster_tests.rs: no premultiplied channel off by more than
+//!   80, mean difference at most 14 over Chrome's painted pixels);
+//! - the GPU picture's own bound (A3, pinned in
+//!   tools/parity_oracle/canvas_raster_gpu_bounds.json): 1.25x the further
+//!   of Chrome's own GPU canvas (canvas_raster_gpu_log.mjs) and the CPU
+//!   bitmap from Chrome's software raster on that case, by the same metric,
+//!   at least max 2 / mean 0.5 (rounding).
 //!
 //! Gated: every gradient case is drawn by the GPU (not a reset from the
-//! CPU bitmap), and every case the GPU draws is within the bounds
+//! CPU bitmap), and every case the GPU draws is within both bounds
 //! (GPU-AA: under 4x MSAA thin curved strokes were past them).
 //! Cases that draw an image or a pattern are not run here: this harness has
 //! no image loader (the bitmap pins load them); a case the GPU does not
@@ -24,6 +28,15 @@ use rustkit_js::JsRuntime;
 const KEY: &str = "rustkit-canvas:9@gchrome";
 const WRONG: u8 = 80;
 const MEAN: f32 = 14.0;
+
+/// The case's A3 bound (max, mean) from the pinned distances.
+fn own_bound(bounds: &serde_json::Value, name: &str) -> Option<(u8, f32)> {
+    let c = &bounds["cases"][name];
+    let get = |k: &str, f: &str| c[k][f].as_f64();
+    let max = get("chrome_gpu", "max")?.max(get("cpu", "max")?);
+    let mean = get("chrome_gpu", "mean")?.max(get("cpu", "mean")?);
+    Some(((1.25 * max).max(2.0).min(WRONG as f64) as u8, (1.25 * mean).max(0.5).min(MEAN as f64) as f32))
+}
 
 fn gpu() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), ..Default::default() });
@@ -95,7 +108,7 @@ fn run(script: &str, w: u32, h: u32) -> (rustkit_bindings::canvas::GpuBatch, Vec
     (batch, cpu)
 }
 
-fn check_file(r: &mut Renderer, json: &str, failures: &mut Vec<String>, gradients_on_gpu: &mut usize) {
+fn check_file(r: &mut Renderer, json: &str, bounds: &serde_json::Value, failures: &mut Vec<String>, gradients_on_gpu: &mut usize) {
     let data: serde_json::Value = serde_json::from_str(json).unwrap();
     let w = data["size"][0].as_u64().unwrap() as u32;
     let h = data["size"][1].as_u64().unwrap() as u32;
@@ -131,6 +144,15 @@ fn check_file(r: &mut Renderer, json: &str, failures: &mut Vec<String>, gradient
         if gmax > WRONG || gmean > MEAN {
             failures.push(format!("{name}: GPU max {gmax} mean {gmean:.2}, past the bitmap's bounds ({WRONG} / {MEAN})"));
         }
+        match own_bound(bounds, name) {
+            Some((bmax, bmean)) => {
+                println!("gpu-chrome {name}: own bound max {bmax} mean {bmean:.2}");
+                if gmax > bmax || gmean > bmean {
+                    failures.push(format!("{name}: GPU max {gmax} mean {gmean:.2}, past its own bound ({bmax} / {bmean:.2})"));
+                }
+            }
+            None => failures.push(format!("{name}: no pinned bound (canvas_raster_gpu_bounds.json)")),
+        }
     }
 }
 
@@ -143,8 +165,10 @@ fn every_pin_the_gpu_draws_is_within_the_bitmap_bounds_of_chrome() {
     let mut r = Renderer::new(device, queue, wgpu::TextureFormat::Bgra8Unorm).expect("renderer");
     let mut failures = Vec::new();
     let mut gradients = 0;
-    check_file(&mut r, include_str!("../../../tools/parity_oracle/canvas_raster_cases.json"), &mut failures, &mut gradients);
-    check_file(&mut r, include_str!("../../../tools/parity_oracle/canvas_raster2_cases.json"), &mut failures, &mut gradients);
+    let bounds: serde_json::Value = serde_json::from_str(include_str!("../../../tools/parity_oracle/canvas_raster_gpu_bounds.json")).unwrap();
+    assert_eq!(bounds["chrome"], "148.0.7778.216", "the bounds' Chrome is the pinned one");
+    check_file(&mut r, include_str!("../../../tools/parity_oracle/canvas_raster_cases.json"), &bounds, &mut failures, &mut gradients);
+    check_file(&mut r, include_str!("../../../tools/parity_oracle/canvas_raster2_cases.json"), &bounds, &mut failures, &mut gradients);
     assert!(gradients >= 5, "the gradient cases ran on the GPU: {gradients}");
     assert!(failures.is_empty(), "{failures:#?}");
 }
