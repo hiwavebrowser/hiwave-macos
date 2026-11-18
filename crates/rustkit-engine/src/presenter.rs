@@ -772,6 +772,7 @@ impl Presenter {
             Vec::new();
         let mut urls_seen = HashSet::new();
         let mut canvas_uploads = Vec::new();
+        let mut gpu_canvases: Vec<String> = Vec::new();
 
         for cmd in commands {
             // Extract URL from BackgroundImage, Image and MaskedColor commands
@@ -784,6 +785,14 @@ impl Presenter {
 
             if !urls_seen.insert((url.clone(), mask)) {
                 continue; // Already processed
+            }
+
+            // GPU canvas A1: the canvas's own texture, brought up to date
+            // from the draws its page handed over, whether or not it is
+            // uploaded already.
+            if crate::canvas_paint::is_gpu_key(url) {
+                gpu_canvases.push(url.clone());
+                continue;
             }
 
             // Skip if already in renderer
@@ -834,6 +843,15 @@ impl Presenter {
         renderer.retain_images(|key| {
             !crate::canvas_paint::is_bitmap_key(key) || urls_seen.contains(&(key.to_string(), false))
         });
+
+        for key in gpu_canvases {
+            let batches = crate::canvas_paint::take_gpu_batches(&key);
+            if batches.is_empty() {
+                continue;
+            }
+            let result = renderer.replay_canvas(&key, &batches);
+            crate::canvas_paint::gpu_replayed(&key, result);
+        }
 
         // Now upload all collected images
         let mut uploaded_count = 0;

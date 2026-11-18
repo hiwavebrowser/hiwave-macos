@@ -5709,6 +5709,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "png",
  "pollster",
+ "rustkit-canvas",
  "rustkit-common",
  "rustkit-css",
  "rustkit-layout",

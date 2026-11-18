@@ -30,6 +30,8 @@ use thiserror::Error;
 
 mod raster;
 pub use raster::{raster_totals, set_raster_timing, CanvasBitmap, RasterTotals};
+pub mod gpu;
+pub use gpu::{compare_premultiplied, gpu_canvas_enabled, set_gpu_canvas, GpuBatch, GpuReset, PixelDiff};
 
 #[cfg(test)]
 mod recording_tests;
@@ -841,7 +843,11 @@ pub struct CanvasRenderingContext2D {
     raster: std::cell::RefCell<raster::Recorded>,
     /// See `is_origin_clean`.
     origin_clean: bool,
+    /// See [`Self::context_id`].
+    id: u64,
 }
+
+static CONTEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -862,8 +868,9 @@ impl CanvasRenderingContext2D {
             bounds: Vec::new(),
             bytes: 0,
             generation: next_generation(),
-            raster: Default::default(),
+            raster: std::cell::RefCell::new(raster::Recorded::new(gpu::gpu_canvas_enabled())),
             origin_clean: true,
+            id: CONTEXT_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -1312,11 +1319,16 @@ impl CanvasRenderingContext2D {
         }
         let t = self.state.transform;
         let clip = self.state.raster_clip.clone();
-        self.raster.get_mut().push(raster::Op::Clear { clip, rect: [x, y, w, h], t });
         let q = quad(&t, x, y, w, h);
         let canvas = self.canvas_rect();
         let clip_covers = self.state.clip_rect.is_none_or(|c| contains4(c, canvas));
         let corners = [(0.0, 0.0), (canvas[2], 0.0), (canvas[2], canvas[3]), (0.0, canvas[3])];
+        if clip.is_none() && corners.iter().all(|&p| in_convex_quad(&q, p)) {
+            // GPU canvas A1 (switch on only): neither picture replays what
+            // a clear of the whole bitmap hides.
+            self.raster.get_mut().full_clear((self.width, self.height));
+        }
+        self.raster.get_mut().push(raster::Op::Clear { clip, rect: [x, y, w, h], t });
         if clip_covers && corners.iter().all(|&p| in_convex_quad(&q, p)) {
             self.drop_all();
             return;
@@ -1403,6 +1415,7 @@ impl CanvasRenderingContext2D {
             self.path.commands(),
             even_odd,
             &self.state.transform,
+            self.raster.get_mut().gpu_on(),
         );
         self.state.clip_path = Some(self.path.clone());
         let t = self.state.transform;
@@ -1611,6 +1624,39 @@ impl CanvasRenderingContext2D {
     /// [`PENDING_BYTE_BUDGET`]).
     pub fn pending_bytes(&self) -> usize {
         self.raster.borrow().pending_bytes()
+    }
+
+    // ==================== The GPU picture (GPU canvas A1) ====================
+
+    /// Whether this context keeps a GPU picture (`HIWAVE_GPU_CANVAS=1` or
+    /// [`gpu::set_gpu_canvas`] when it was created, and not given up since).
+    pub fn gpu_canvas(&self) -> bool {
+        self.raster.borrow().gpu_on()
+    }
+
+    /// A number unique to this context in the process: the key its GPU
+    /// texture is kept under.
+    pub fn context_id(&self) -> u64 {
+        self.id
+    }
+
+    /// The draws recorded since the last batch, for the presenter's GPU
+    /// replay, or a reset from the CPU bitmap (`force_reset`, or when the
+    /// GPU picture must start over). Moves the GPU position to the end.
+    pub fn take_gpu_batch(&self, force_reset: bool) -> gpu::GpuBatch {
+        self.raster.borrow_mut().take_gpu((self.width, self.height), force_reset)
+    }
+
+    /// Draws the GPU has not taken yet (0 without a GPU picture).
+    pub fn gpu_pending_ops(&self) -> usize {
+        self.raster.borrow().gpu_pending()
+    }
+
+    /// Gives the GPU picture up for this context's life (the presenter has
+    /// no texture for it): it is shown from its CPU bitmap, as with the
+    /// switch off.
+    pub fn leave_gpu(&self) {
+        self.raster.borrow_mut().leave_gpu();
     }
 
     /// Tests: rasterize every draw at the call, as before the recording.

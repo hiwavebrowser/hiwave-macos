@@ -123,6 +123,28 @@ impl CanvasSource {
     pub fn retained_bytes(&self) -> usize {
         self.0.borrow().retained_bytes()
     }
+
+    /// GPU canvas A1: whether the canvas element `node`'s context keeps a
+    /// GPU picture, and its id (the key its texture is kept under).
+    /// `(id, width, height)`.
+    pub fn gpu_context(&self, node: usize) -> Option<(u64, u32, u32)> {
+        let store = self.0.borrow();
+        let ctx = store.contexts.get(&node)?;
+        ctx.gpu_canvas().then(|| (ctx.context_id(), ctx.width, ctx.height))
+    }
+
+    /// GPU canvas A1: the draws of `node`'s canvas the presenter has not
+    /// taken (`CanvasRenderingContext2D::take_gpu_batch`).
+    pub fn take_gpu_batch(&self, node: usize, force_reset: bool) -> Option<crate::canvas::GpuBatch> {
+        Some(self.0.borrow().contexts.get(&node)?.take_gpu_batch(force_reset))
+    }
+
+    /// GPU canvas A1: `node`'s canvas is shown from its CPU bitmap from now on.
+    pub fn leave_gpu(&self, node: usize) {
+        if let Some(ctx) = self.0.borrow().contexts.get(&node) {
+            ctx.leave_gpu();
+        }
+    }
 }
 
 impl CanvasStore {

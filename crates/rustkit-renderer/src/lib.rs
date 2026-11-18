@@ -49,6 +49,8 @@ use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 pub mod dither;
+mod canvas_gpu;
+pub use canvas_gpu::{CanvasReplay, CANVAS_SCRATCH_BUDGET, CANVAS_TEXTURE_BUDGET};
 mod cull;
 mod frame_stats;
 mod glyph_grid;
@@ -566,6 +568,9 @@ pub struct Renderer {
 
     // Caches
     texture_cache: TextureCache,
+    /// GPU canvas A1: pipelines and scratch for canvas replays, made on the
+    /// first one (`canvas_gpu.rs`).
+    canvas_gpu: Option<Box<canvas_gpu::CanvasGpu>>,
     glyph_cache: GlyphCache,
 
     // Texture bind group layout (for sharing)
@@ -882,6 +887,7 @@ impl Renderer {
             legacy_layers: false,
             per_pass: false,
             texture_cache,
+            canvas_gpu: None,
             glyph_cache,
             texture_bind_group_layout,
             intermediate_texture: None,
