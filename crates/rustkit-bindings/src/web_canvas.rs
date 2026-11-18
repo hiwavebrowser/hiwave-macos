@@ -567,7 +567,7 @@ pub(crate) fn install(
                             Some([nw, nh]) if nw > 0.0 && nh > 0.0 => (bitmap.width() as f32 / nw, bitmap.height() as f32 / nh),
                             _ => (1.0, 1.0),
                         };
-                        ctx.draw_bitmap(&bitmap, [sx * fx, sy * fy, sw * fx, sh * fy], [dx, dy, dw, dh]);
+                        ctx.draw_bitmap(bitmap, [sx * fx, sy * fy, sw * fx, sh * fy], [dx, dy, dw, dh]);
                     }
                 }
                 "putImageData" => {
