@@ -188,7 +188,6 @@ impl GpuBatch {
     /// rebuild of the clip in the stencil.
     pub fn lower_within(&self, max_vertices: usize) -> Option<(Vec<GpuDraw>, usize)> {
         const QUAD: usize = 6;
-        let max_vertices = usize::MAX; // RED: stub, no cap
         let left = std::cell::Cell::new(max_vertices);
         let take = |n: usize| -> Option<()> {
             let l = left.get().checked_sub(n)?;

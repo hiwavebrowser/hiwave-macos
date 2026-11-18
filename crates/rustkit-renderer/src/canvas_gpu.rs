@@ -336,6 +336,11 @@ impl Renderer {
                 return CanvasReplay::Denied;
             }
         }
+        // Everything below in error scopes: a validation or out-of-memory
+        // error drops the texture and asks for a reset, instead of reaching
+        // wgpu's default handler (which panics).
+        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("canvas_gpu") });
         if let Some(reset) = &reset {
             if have != Some((w, h)) {
@@ -407,6 +412,16 @@ impl Renderer {
             i = j;
         }
         queue.submit(std::iter::once(encoder.finish()));
+        let validation = ready(device.pop_error_scope()).flatten();
+        let memory = ready(device.pop_error_scope()).flatten();
+        if let Some(e) = validation.or(memory) {
+            tracing::warn!(error = %e, "canvas GPU replay failed; the canvas starts over from its bitmap");
+            self.texture_cache.textures.remove(key);
+            if let Some(cg) = self.canvas_gpu.as_mut() {
+                cg.canvases.remove(key);
+            }
+            return CanvasReplay::NeedsReset;
+        }
         CanvasReplay::Drawn
     }
 
@@ -414,7 +429,7 @@ impl Renderer {
     #[doc(hidden)]
     pub fn set_canvas_vertex_cap(&mut self, cap: usize) {
         let device = self.device.clone();
-        let _ = (device, cap); // RED: stub
+        self.canvas_gpu.get_or_insert_with(|| Box::new(CanvasGpu::new(&device))).vertex_cap = Some(cap);
     }
 
     /// Tests and tools: the canvas texture under `key` read back,
@@ -433,6 +448,17 @@ impl Renderer {
     pub fn canvas_texture_bytes(&self) -> u64 {
         let Some(cg) = &self.canvas_gpu else { return 0 };
         cg.canvases.iter().filter(|(k, _)| self.texture_cache.contains(k)).map(|(_, b)| *b).sum()
+    }
+}
+
+/// A future's output if it is ready at the first poll (wgpu's native
+/// error scopes are); `None` if not.
+fn ready<F: std::future::Future>(f: F) -> Option<F::Output> {
+    let mut f = std::pin::pin!(f);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(v) => Some(v),
+        std::task::Poll::Pending => None,
     }
 }
 
