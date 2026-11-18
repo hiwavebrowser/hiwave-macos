@@ -139,6 +139,13 @@ impl CanvasSource {
         Some(self.0.borrow().contexts.get(&node)?.take_gpu_batch(force_reset))
     }
 
+    /// The canvas elements with a 2D context, by NodeId.
+    pub fn nodes(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.0.borrow().contexts.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
     /// GPU canvas A1: `node`'s canvas is shown from its CPU bitmap from now on.
     pub fn leave_gpu(&self, node: usize) {
         if let Some(ctx) = self.0.borrow().contexts.get(&node) {
