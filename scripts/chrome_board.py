@@ -591,7 +591,13 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     census = board_json.get("census") or {}
     lines += ["", "## CSS census red list per page", ""]
     if census.get("source"):
-        lines.append(f"Census {census.get('date')} (`{census.get('report') or census['source']}`, oracle {census.get('oracle')}): "
+        census_oracle = census.get("oracle") or "?"
+        major = census_oracle.split(".")[0]
+        board_oracle = board_json["run"].get("chromium")
+        other = (f"; NOT this board's oracle ({board_oracle}): the census has not been retaken on it"
+                 if board_oracle and census_oracle != board_oracle else "")
+        lines.append(f"Census: the {census.get('date')} Chromium {major} census "
+                     f"(`{census.get('report') or census['source']}`, oracle {census_oracle}{other}): "
                      f"{census.get('red_total')} red properties. Per page, the red properties the page declares "
                      "(in its `<style>` blocks and `style=` attributes).")
         lines.append("")
@@ -702,8 +708,11 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     for i, row in enumerate(rows, 1):
         result = capture(row, binary)
         row_version = result.get("chromium", {}).get("browser")
-        if row_version and row_version != PINNED_CHROME_VERSION:
-            print(f"refused: {row.case_id} ran on Chrome {row_version}, not the pin {PINNED_CHROME_VERSION}",
+        if row_version != PINNED_CHROME_VERSION:
+            # No version at all (the arm failed before launch, or did not
+            # report) is a refusal too: an unverified oracle scores nothing.
+            print(f"refused: {row.case_id} ran on Chrome {row_version or '(no version reported)'}, "
+                  f"not the pin {PINNED_CHROME_VERSION}",
                   file=sys.stderr)
             return 2
         chromium_version = chromium_version or row_version

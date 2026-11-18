@@ -163,6 +163,40 @@ class TestChromeBoard(unittest.TestCase):
                 mock.patch.object(chrome_board, "capture", side_effect=AssertionError("captured")):
             self.assertEqual(chrome_board.main(["--parity-capture", "/bin/sh", "--only", "shelf"]), 2)
 
+    def test_a_row_that_reports_no_browser_version_is_refused(self):
+        import os
+        from unittest import mock
+        from scripts import chrome_board
+
+        for chromium in ({"status": "ok"}, {"status": "ok", "browser": "143.0.7499.4"}):
+            result = {"status": "ok", "chromium": chromium, "rustkit": {"status": "ok"},
+                      "pixels": {"diffPercent": 0.1, "top": []},
+                      "geometry": {"geometry_failures": 0, "join_failures": 0, "worst_selectors": []}}
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.dict(os.environ, {"PARITY_CHROME_PATH": sys.executable}):
+                rc = chrome_board.main(
+                    ["--parity-capture", sys.executable, "--only", "shelf",
+                     "--work", str(Path(tmp) / "work"), "--out", str(Path(tmp) / "out")],
+                    capture=lambda *a, **k: result, chrome_version=lambda p: "148.0.7778.216")
+                self.assertEqual(rc, 2, chromium)
+                self.assertFalse((Path(tmp) / "out" / "board.json").exists())
+
+    def test_census_section_names_the_census_oracle_when_it_is_not_the_boards(self):
+        from scripts import chrome_board
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            chrome_board.write_board(out, {
+                "run": {"at": "now", "sha": "f", "base": "b", "chromium": "148.0.7778.216",
+                        "chromium_path": "~/c", "chromium_pinned": "148.0.7778.216", "parity_capture": "pc", "gate_pct": 0.5},
+                "sizes": [], "states": {}, "rows": [],
+                "census": {"source": "docs/census/CSS_PROPERTY_CENSUS_2026-11-03.json", "date": "2026-11-03",
+                           "oracle": "143.0.7499.4", "red_total": 1, "pages": {}},
+            })
+            md = (out / "BOARD.md").read_text(encoding="utf-8")
+            self.assertIn("Census: the 2026-11-03 Chromium 143 census", md)
+            self.assertIn("NOT this board's oracle (148.0.7778.216)", md)
+
     def test_board_header_names_the_full_pinned_oracle_version(self):
         from scripts import chrome_board
 
@@ -280,7 +314,7 @@ class GateTests(unittest.TestCase):
         from scripts import chrome_board
 
         board = chrome_board.load_board(BOARD_PATH)
-        ok = {"status": "ok", "chromium": {"status": "ok"}, "rustkit": {"status": "ok"},
+        ok = {"status": "ok", "chromium": {"status": "ok", "browser": "148.0.7778.216"}, "rustkit": {"status": "ok"},
               "pixels": {"diffPercent": 1.0, "top": []},
               "geometry": {"geometry_failures": 0, "join_failures": 0, "worst_selectors": []}}
         import os
