@@ -42,3 +42,10 @@ class CssReportTests(unittest.TestCase):
         counts, clusters = summarize([row])
         self.assertEqual(counts["css/cssom"]["matched_fail"], 1)
         self.assertEqual(next(iter(clusters.values()))["count"], 1)
+
+    def test_origin_port_does_not_prevent_matching(self):
+        row = {"page": "/css/cssom/example.html",
+               "chrome": run("OK", ("expected http://127.0.0.1:51000/style.css", "PASS", None)),
+               "hiwave": run("OK", ("expected http://127.0.0.1:52000/style.css", "FAIL", "CSSStyleRule is not defined"))}
+        counts, _ = summarize([row])
+        self.assertEqual(counts["css/cssom"]["matched_fail"], 1)

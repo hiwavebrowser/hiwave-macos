@@ -1,5 +1,7 @@
 """Aggregate a complete paired run. Cluster only matched, named assertions."""
 import argparse
+
+from wpt_subtest_diff import normalize_subtest_name
 import collections
 import json
 import re
@@ -127,9 +129,9 @@ def summarize(rows):
             continue
         reference = collections.defaultdict(collections.deque)
         for test in b["subtests"]:
-            reference[test["name"]].append(test["status"])
+            reference[normalize_subtest_name(test["name"])].append(test["status"])
         for test in a["subtests"]:
-            matches = reference[test["name"]]
+            matches = reference[normalize_subtest_name(test["name"])]
             if not matches or matches.popleft() != "PASS" or test["status"] != "FAIL":
                 continue
             counts["matched_fail"] += 1
