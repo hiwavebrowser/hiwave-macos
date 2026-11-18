@@ -170,7 +170,11 @@ fn the_animation_round_a_stopped_frame_tree_turn_still_runs_is_script_time() {
 }
 
 /// SCRIPT-SPLIT: the host calls a canvas page makes are part of its script
-/// time and hold its canvas raster; each canvas operation has its row.
+/// time; each canvas operation has its row. Since GPU canvas A0 (#1282) a
+/// draw is recorded in the host call and rasterized at the first read, which
+/// for a page that never reads is the display list's copy of the bitmap: the
+/// raster is no longer inside the host calls (the name is kept for the batch
+/// filters that select it).
 #[test]
 fn host_calls_are_part_of_script_time_and_hold_the_canvas_raster() {
     let (mut engine, view, _server, rt) = load(PAGE);
@@ -184,7 +188,8 @@ fn host_calls_are_part_of_script_time_and_hold_the_canvas_raster() {
     set_frame_stage_timing(false);
     // Each frame: clearRect, fillStyle, fillRect, beginPath, arc, stroke.
     assert!(d.renders >= 3 && d.host_calls >= 6 * 3, "{d:?}");
-    assert!(d.canvas_raster_ms <= d.host_ms && d.host_ms <= d.script_ms, "{d:?}");
+    assert!(d.host_ms <= d.script_ms, "{d:?}");
+    assert!(d.canvas_draws >= 3 && d.canvas_raster_ms <= d.display_list_ms + d.host_ms, "the raster is in the display list build (or a read in a host call): {d:?}");
     for op in ["clearRect", "fillRect", "beginPath", "arc", "stroke"] {
         assert!(line.contains(&format!(",__rustkit_canvas/{op}:")) || line.contains(&format!("=__rustkit_canvas/{op}:")), "{op}: {line}");
     }
