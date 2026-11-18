@@ -195,3 +195,31 @@ fn the_painted_box_moves_with_a_translate_transition() {
     assert!(red_at(&mut engine, view, 110, 10), "after: at 100..120");
     assert!(!red_at(&mut engine, view, 60, 10));
 }
+
+/// One value against two: a missing `translate` y is `0px` and a missing
+/// `scale` y is the x (Chrome 148: 20px 20px, 1.5 2 both ways).
+#[test]
+fn one_value_interpolates_against_two() {
+    check("#h{translate:10px}#h.on{translate:30px 40px}", "translate", "20px 20px", "30px 40px");
+    check("#h{translate:30px 40px}#h.on{translate:10px}", "translate", "20px 20px", "10px");
+    check("#h{scale:1}#h.on{scale:2 3}", "scale", "1.5 2", "2 3");
+    check("#h{scale:2 3}#h.on{scale:1}", "scale", "1.5 2", "1");
+}
+
+/// TODAY'S BEHAVIOUR, NOT CHROME'S: a translate between two units (px or
+/// rem against %) is not interpolable here, so no transition starts, no
+/// event fires and the value jumps. Chrome 148 interpolates through
+/// calc() (`10px` to `50%` is `calc(25% + 5px)` at 50 ms, `1rem` to `50%`
+/// `calc(25% + 8px)`) and fires run/start/end. Group C's length-percentage
+/// interpolation flips this test; it is here so that the flip shows.
+#[test]
+fn a_mixed_unit_translate_jumps_today() {
+    for (css, end) in [
+        ("#h{translate:10px}#h.on{translate:50%}", "50%"),
+        ("#h{translate:1rem}#h.on{translate:50%}", "50%"),
+    ] {
+        let (mid, names, events, last) = run_case(css, "translate");
+        assert_eq!((mid.as_str(), names.as_str(), events.as_str()), (end, "", ""), "{css}");
+        assert_eq!(last, end, "{css}");
+    }
+}

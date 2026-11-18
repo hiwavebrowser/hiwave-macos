@@ -101,6 +101,86 @@
       "end": "50%"
     },
     {
+      "label": "translate one value->two",
+      "css": "#h{translate:10px}#h.on{translate:30px 40px}",
+      "read": "translate",
+      "mid": "20px 20px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "30px 40px"
+    },
+    {
+      "label": "translate two values->one",
+      "css": "#h{translate:30px 40px}#h.on{translate:10px}",
+      "read": "translate",
+      "mid": "20px 20px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "10px"
+    },
+    {
+      "label": "translate rem->percent",
+      "css": "#h{translate:1rem}#h.on{translate:50%}",
+      "read": "translate",
+      "mid": "calc(25% + 8px)",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "scale one value->two",
+      "css": "#h{scale:1}#h.on{scale:2 3}",
+      "read": "scale",
+      "mid": "1.5 2",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "2 3"
+    },
+    {
+      "label": "scale two values->one",
+      "css": "#h{scale:2 3}#h.on{scale:1}",
+      "read": "scale",
+      "mid": "1.5 2",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "1"
+    },
+    {
       "label": "translate 100px->none",
       "css": "#h{translate:100px}#h.on{translate:none}",
       "read": "translate",

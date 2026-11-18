@@ -54,6 +54,11 @@ await probe('translate 10px 20px->30px 60px', '#h{translate:10px 20px}#h.on{tran
 await probe('translate 0%->100%', '#h{translate:0%}#h.on{translate:100%}', 'translate');
 await probe('translate 0px->50%', '#h{translate:0px}#h.on{translate:50%}', 'translate');
 await probe('translate 10px->50%', '#h{translate:10px}#h.on{translate:50%}', 'translate');
+await probe('translate one value->two', '#h{translate:10px}#h.on{translate:30px 40px}', 'translate');
+await probe('translate two values->one', '#h{translate:30px 40px}#h.on{translate:10px}', 'translate');
+await probe('translate rem->percent', '#h{translate:1rem}#h.on{translate:50%}', 'translate');
+await probe('scale one value->two', '#h{scale:1}#h.on{scale:2 3}', 'scale');
+await probe('scale two values->one', '#h{scale:2 3}#h.on{scale:1}', 'scale');
 await probe('translate 100px->none', '#h{translate:100px}#h.on{translate:none}', 'translate');
 await probe('rotate none->90deg', '#h.on{rotate:90deg}', 'rotate');
 await probe('rotate 45deg->405deg', '#h{rotate:45deg}#h.on{rotate:405deg}', 'rotate');
