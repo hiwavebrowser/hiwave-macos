@@ -21,7 +21,7 @@ fn wpt_refuses_foreign_origin_before_replay() {
                 if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() { break; }
             }
             let body = if path == "/page" {
-                "<script src='http://example.invalid/foreign.js'></script><script>function add_completion_callback(){};globalThis.__hiwaveWptResult='ok'</script>"
+                "<script src='/local.js'></script><script src='http://example.invalid/foreign.js'></script><script>function add_completion_callback(){};globalThis.__hiwaveWptResult='ok'</script>"
             } else { "" };
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         }
@@ -31,5 +31,6 @@ fn wpt_refuses_foreign_origin_before_replay() {
     assert!(result.status.success(), "{:?}", result);
     let paths: Vec<_> = requests.try_iter().collect();
     assert!(paths.iter().any(|p| p == "/page"));
+    assert!(paths.iter().any(|p| p == "/local.js"));
     assert!(!paths.iter().any(|p| p == "/foreign.js"));
 }

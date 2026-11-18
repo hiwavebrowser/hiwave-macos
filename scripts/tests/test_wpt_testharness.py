@@ -31,3 +31,7 @@ class RunnerTests(unittest.TestCase):
         payload = 'WPT_ENCODED %7B%22status%22%3A%22OK%22%2C%22subtests%22%3A%5B%5D%7D'
         completed = run_page([sys.executable, "-c", f"print({payload!r})"], "/second", 10)
         self.assertEqual(completed, {"test": "/second", "status": "OK", "subtests": []})
+
+
+if __name__ == "__main__":
+    unittest.main()
