@@ -284,6 +284,18 @@ impl CanvasGpu {
         Self { shader, plain_layout, paint_bgl, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None, over_cap: HashMap::new() }
     }
 
+    /// A replay of `key` past a cap: a reset, or after
+    /// [`CANVAS_OVER_CAP_LIMIT`] in a row, denied.
+    fn over(&mut self, key: &str) -> CanvasReplay {
+        let count = self.over_cap.entry(key.to_string()).or_insert(0);
+        *count += 1;
+        if *count >= CANVAS_OVER_CAP_LIMIT {
+            self.over_cap.remove(key);
+            return CanvasReplay::Denied;
+        }
+        CanvasReplay::NeedsReset
+    }
+
     fn pipe(&mut self, device: &wgpu::Device, p: Pipe) -> &wgpu::RenderPipeline {
         if !self.pipes.contains_key(&p) {
             let built = self.build(device, p);
@@ -440,6 +452,10 @@ impl Renderer {
         if w == 0 || h == 0 || w > limit || h > limit || w as u64 * h as u64 * SCRATCH_BYTES_PER_PX > CANVAS_SCRATCH_BUDGET {
             return CanvasReplay::Denied;
         }
+        if device_has_no_storage_buffers(&self.device) {
+            // The paint pipelines read gradients from a storage buffer.
+            return CanvasReplay::Denied;
+        }
         if batches.iter().any(|b| (b.width, b.height) != (w, h)) {
             return CanvasReplay::NeedsReset;
         }
@@ -460,16 +476,17 @@ impl Renderer {
         let mut draws: Vec<GpuDraw> = Vec::new();
         for b in batches {
             let Some((d, n)) = b.lower_within(left) else {
-                let count = cg.over_cap.entry(key.to_string()).or_insert(0);
-                *count += 1;
-                if *count >= CANVAS_OVER_CAP_LIMIT {
-                    cg.over_cap.remove(key);
-                    return CanvasReplay::Denied;
-                }
-                return CanvasReplay::NeedsReset;
+                return cg.over(key);
             };
             left -= n;
             draws.extend(d);
+        }
+        // The gradient records a pass binds, counted (every gradient fill,
+        // an over-count of the distinct ones) against the device's binding
+        // limit, before any GPU work: past it, as past the vertex cap.
+        let grads = draws.iter().filter(|d| matches!(d, GpuDraw::Fill { paint: GpuPaint::Gradient(_), .. })).count() as u64;
+        if grads * std::mem::size_of::<GradRecord>() as u64 > device.limits().max_storage_buffer_binding_size as u64 {
+            return cg.over(key);
         }
         let bytes = w as u64 * h as u64 * 4;
         if reset.is_some() && have != Some((w, h)) {
@@ -602,6 +619,21 @@ impl Renderer {
     pub fn canvas_texture_bytes(&self) -> u64 {
         let Some(cg) = &self.canvas_gpu else { return 0 };
         cg.canvases.iter().filter(|(k, _)| self.texture_cache.contains(k)).map(|(_, b)| *b).sum()
+    }
+}
+
+fn device_has_no_storage_buffers(device: &wgpu::Device) -> bool {
+    device.limits().max_storage_buffers_per_shader_stage == 0
+}
+
+impl Renderer {
+    /// A canvas that went away (its image dropped): its over-cap count
+    /// goes with it.
+    pub(crate) fn forget_canvases(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        if let Some(cg) = self.canvas_gpu.as_mut() {
+            cg.over_cap.retain(|k, _| keep(k));
+            cg.canvases.retain(|k, _| keep(k));
+        }
     }
 }
 

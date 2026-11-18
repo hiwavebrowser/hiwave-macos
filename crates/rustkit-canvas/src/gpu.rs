@@ -360,14 +360,36 @@ fn premultiplied(c: [f32; 4]) -> [f32; 4] {
 /// What `style` covers a fill with under the transform `t`, as the CPU
 /// raster's `shader` decides it (globalAlpha is already in the colours):
 /// `None` when the GPU does not draw it (a pattern, a gradient with more
-/// than [`MAX_GRADIENT_STOPS`] stops, a transform with no inverse);
-/// `Some(None)` when it paints nothing (no stops, a degenerate gradient).
+/// than [`MAX_GRADIENT_STOPS`] stops, a transform with no finite inverse,
+/// a stop offset or a radial end radius that is not finite);
+/// `Some(None)` when it paints nothing (no stops, a degenerate gradient,
+/// and as tiny-skia refuses them: points whose distance is not finite as
+/// f32, a radial end radius that is not over 1/4096).
 fn paint_of(style: &CanvasStyle, t: &crate::Transform2D) -> Option<Option<GpuPaint>> {
     let gradient = |radial: bool, p0: [f32; 2], p1: [f32; 2], r1: f32, stops: Vec<(f32, [f32; 4])>| {
-        if stops.len() > MAX_GRADIENT_STOPS {
+        if stops.len() > MAX_GRADIENT_STOPS || stops.iter().any(|(o, _)| !o.is_finite()) {
             return None;
         }
+        // tiny-skia's gradient constructors (the CPU picture): a length
+        // that is not finite, or a two-point conical radius that is
+        // negative or nearly zero, make no shader, so nothing is painted.
+        // An end radius that is not finite does make one (it paints a
+        // degenerate colour): the CPU bitmap draws that.
+        if !r1.is_finite() {
+            return None;
+        }
+        let length = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
+        if !length.is_finite() || (radial && r1 <= 1.0 / 4096.0) {
+            return Some(None);
+        }
+        if !radial && length <= 1.0 / 32768.0 {
+            // tiny-skia's degenerate linear gradient (padded): its last colour.
+            return Some(Some(GpuPaint::Solid(premultiplied(stops.last()?.1))));
+        }
         let inv = t.inverse()?;
+        if ![inv.a, inv.b, inv.c, inv.d, inv.e, inv.f].iter().all(|v| v.is_finite()) {
+            return None;
+        }
         Some(Some(GpuPaint::Gradient(Arc::new(GpuGradient {
             radial,
             inv: [inv.a, inv.b, inv.c, inv.d, inv.e, inv.f],
@@ -791,6 +813,31 @@ mod gpu_recording_tests {
         c.set_fill_style(CanvasStyle::LinearGradient(many));
         c.fill_rect(0.0, 0.0, 2.0, 2.0);
         assert!(c.take_gpu_batch(false).reset.is_some());
+        // #1300 R1, as tiny-skia builds them: points too far apart for f32
+        // or an end radius of 0 paint nothing; an end radius that is not
+        // finite paints a degenerate colour there, so the CPU draws it.
+        let huge = 1e300_f64 as f32;
+        let stops = |g: &mut crate::RadialGradient| {
+            g.add_color_stop(0.0, rustkit_css::Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, rustkit_css::Color::new(0, 0, 255, 1.0));
+        };
+        let mut far = crate::LinearGradient::new(0.0, 0.0, huge, 0.0);
+        far.add_color_stop(0.0, rustkit_css::Color::new(255, 0, 0, 1.0));
+        far.add_color_stop(1.0, rustkit_css::Color::new(0, 0, 255, 1.0));
+        c.set_fill_style(CanvasStyle::LinearGradient(far));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        let mut zero = crate::RadialGradient::new(5.0, 5.0, 0.0, 20.0, 20.0, 0.0);
+        stops(&mut zero);
+        c.set_fill_style(CanvasStyle::RadialGradient(zero));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        let b = c.take_gpu_batch(false);
+        assert!(b.reset.is_none());
+        assert!(b.lower().is_empty(), "nothing painted");
+        let mut inf = crate::RadialGradient::new(5.0, 5.0, 0.0, 20.0, 20.0, huge);
+        stops(&mut inf);
+        c.set_fill_style(CanvasStyle::RadialGradient(inf));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        assert!(c.take_gpu_batch(false).reset.is_some(), "drawn from the CPU bitmap");
     }
 
     /// Off (the default), a context keeps no GPU position: nothing is

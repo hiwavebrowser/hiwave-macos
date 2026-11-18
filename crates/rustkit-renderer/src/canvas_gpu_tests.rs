@@ -227,7 +227,7 @@ fn cases() -> Vec<Case> {
             g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
             c.set_fill_style(CanvasStyle::LinearGradient(g));
             c.fill_rect(10.0, 10.0, 30.0, 30.0);
-            let mut g = rustkit_canvas::RadialGradient::new(50.0, 40.0, 0.0, 60.0, 40.0, huge);
+            let mut g = rustkit_canvas::RadialGradient::new(50.0, 40.0, 0.0, huge, 40.0, 30.0);
             g.add_color_stop(0.0, Color::new(255, 0, 0, 1.0));
             g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
             c.set_fill_style(CanvasStyle::RadialGradient(g));
