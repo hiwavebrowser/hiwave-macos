@@ -1,0 +1,19 @@
+<!doctype html><html><body><div id=w></div><script>
+// SCRIPT-SPLIT probe: what one Multiply-style DOM write costs per call (JS shims + host), by member.
+var N = 2000, w = document.getElementById('w'), els = [];
+for (var i = 0; i < 100; i++) { var e = document.createElement('div'); e.style.left = i + 'px'; e.style.top = '0px';
+  e.style.width = '20px'; e.style.height = '20px'; w.appendChild(e); els.push(e); }
+function per(f) { for (var k = 0; k < 200; k++) f(k); var t = performance.now(); for (var k = 0; k < N; k++) f(k);
+  return Math.round((performance.now() - t) * 1000000 / N) / 1000; }
+var plain = { style: {} };
+var res = {
+  plain_object_set: per(function (k) { plain.style.transform = 'rotate(' + k + 'deg)'; }),
+  style_transform_set: per(function (k) { els[k % 100].style.transform = 'rotate(' + k + 'deg)'; }),
+  style_bg_set: per(function (k) { els[k % 100].style.backgroundColor = 'hsl(' + (k % 360) + ',50%,50%)'; }),
+  style_get_object: per(function (k) { return els[k % 100].style; }),
+  setAttribute_data: per(function (k) { els[k % 100].setAttribute('data-x', 'v' + k); }),
+  getAttribute_style: per(function (k) { return els[k % 100].getAttribute('style'); }),
+  element_property_read: per(function (k) { return els[k % 100].nodeType; }),
+};
+console.log('DOM-PARTS ' + JSON.stringify(res));
+</script></body></html>

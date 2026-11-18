@@ -1437,8 +1437,26 @@ fn handle_get_sidebar_width(state: &Arc<Mutex<AppState>>) -> IpcResponse {
         // load at all" (Pete, live run 2026-08-05) was a sidebar that never
         // opened by default; settings.json said default_open=true the whole
         // time, and no message carried it across.
-        "default_open": settings.sidebar_default_open,
+        "default_open": sidebar_open_at_startup(
+            settings.sidebar_default_open,
+            std::env::var(TEST_SIDEBAR_ENV).ok().as_deref(),
+        ),
     }))
+}
+
+/// The test harnesses' sidebar switch: `closed` starts the sidebar closed,
+/// `open` starts it open, whatever settings.json says. Unset (or any other
+/// value), the saved `sidebar_default_open` decides, as it does for users.
+/// Measurements (tools/stress/run.py, tools/latency, scripts/pete-session.sh)
+/// set `closed` so the sidebar's width and its UI work stay out of them.
+pub(crate) const TEST_SIDEBAR_ENV: &str = "HIWAVE_TEST_SIDEBAR";
+
+fn sidebar_open_at_startup(saved_default_open: bool, test_switch: Option<&str>) -> bool {
+    match test_switch {
+        Some("closed") => false,
+        Some("open") => true,
+        _ => saved_default_open,
+    }
 }
 
 // Export/Import handlers
@@ -1978,5 +1996,28 @@ fn handle_reset_analytics_data(state: &Arc<Mutex<AppState>>) -> IpcResponse {
             }))
         }
         Err(e) => IpcResponse::error(format!("Failed to archive analytics data: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod sidebar_switch_tests {
+    use super::sidebar_open_at_startup;
+
+    #[test]
+    fn the_test_switch_closed_starts_the_sidebar_closed_over_a_saved_open() {
+        assert!(!sidebar_open_at_startup(true, Some("closed")));
+        assert!(!sidebar_open_at_startup(false, Some("closed")));
+    }
+
+    #[test]
+    fn the_test_switch_open_starts_the_sidebar_open_over_a_saved_closed() {
+        assert!(sidebar_open_at_startup(false, Some("open")));
+    }
+
+    #[test]
+    fn without_the_switch_the_saved_setting_decides() {
+        assert!(sidebar_open_at_startup(true, None));
+        assert!(!sidebar_open_at_startup(false, None));
+        assert!(sidebar_open_at_startup(true, Some("")));
     }
 }

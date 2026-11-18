@@ -1,0 +1,51 @@
+<!doctype html><title>clock at present probe</title>
+<style>
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#a { width: 10px; height: 10px; background: #08f; animation: fade 10s linear }
+</style>
+<div id=a></div><script>
+// CLOCK-AT-PRESENT: on frames that run late (each callback works 25 ms, longer than a frame),
+// what are document.timeline.currentTime, a CSS animation's currentTime and its painted
+// (computed) progress, against the rAF stamps? In the top document ("single") and in a frame
+// document inserted after load ("child", clock_at_present_child.html, same script).
+// Pinned on Chrome for Testing 148.0.7778.216, HEADLESS (clock_at_present_probe_chrome.mjs).
+// Rows (ms, 0.01), per document:
+//   frame  [t - previous t, timeline.currentTime - t, c.startTime + c.currentTime - t,
+//           c.currentTime - computed opacity * 10000]  read first thing in each late frame
+//   task   [timeline.currentTime - t, c.startTime + c.currentTime - timeline.currentTime,
+//           c.currentTime - computed opacity * 10000]  in a setTimeout(0) the frame set, which
+//           runs after the frame's 25 ms of work, before the next (late) frame
+// When done it sets rec.done.
+window.rec = { single: null, child: null, done: false };
+function lateLoop(win, doc, done) {
+  var a = doc.getElementById('a'), c = a.getAnimations()[0];
+  var out = { frame: [], task: [] }, prev = -1;
+  function r2(x) { return x === null || x === undefined ? x : Math.round(x * 100) / 100; }
+  function spin(ms) { var t0 = win.performance.now(); while (win.performance.now() - t0 < ms) {} }
+  function op() { return parseFloat(win.getComputedStyle(a).opacity) * 10000; }
+  function tl() { return doc.timeline.currentTime; }
+  (function f() {
+    win.requestAnimationFrame(function (t) {
+      out.frame.push([prev < 0 ? null : r2(t - prev), r2(tl() - t), r2(c.startTime + c.currentTime - t), r2(c.currentTime - op())]);
+      prev = t;
+      win.setTimeout(function () {
+        out.task.push([r2(tl() - t), r2(c.startTime + c.currentTime - tl()), r2(c.currentTime - op())]);
+      }, 0);
+      if (out.frame.length < 10) { f(); spin(25); } else win.setTimeout(function () { done(out); }, 50);
+    });
+  })();
+}
+setTimeout(function () {
+  lateLoop(window, document, function (single) {
+    rec.single = single;
+    var f = document.createElement('iframe');
+    f.onload = function () {
+      setTimeout(function () {
+        lateLoop(f.contentWindow, f.contentDocument, function (child) { rec.child = child; rec.done = true; console.log('REC ' + JSON.stringify(rec)); });
+      }, 200);
+    };
+    f.src = 'clock_at_present_child.html';
+    document.body.appendChild(f);
+  });
+}, 300);
+</script>
