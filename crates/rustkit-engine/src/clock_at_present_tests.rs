@@ -266,3 +266,54 @@ window.tasks = 0; function flood() { tasks++; setTimeout(flood, 0); } for (var i
     assert!(after[1] - before[1] >= 180.0, "the timeline moved: {before:?} -> {after:?}");
     assert_rows(&rows, "flood");
 }
+
+// #1272 R1 follow-ups.
+
+/// (1) The animation clock a turn leaves never steps back from the time its animations were
+/// already drawn at before the round: a stamp more than a millisecond below that time (a real
+/// clock read low against the grid) keeps the drawn time. Was: the stamp, so the painted time
+/// stepped back.
+#[test]
+fn the_turns_animation_clock_never_steps_back_from_the_presampled_frame() {
+    let f = crate::turn_animation_clock_for_tests;
+    assert_eq!(f(100.4, Some(100.0)), 100.0, "a stamp within a millisecond keeps the drawn time");
+    assert_eq!(f(120.0, Some(100.0)), 120.0, "a stamp past it is the clock");
+    assert_eq!(f(95.0, Some(100.0)), 100.0, "a stamp below it does not step the painted time back");
+    assert_eq!(f(95.0, None), 95.0, "without a presample the stamp");
+}
+
+/// (2) A CSS animation's events reach script before the rAF callbacks of the frame they happen
+/// in (HTML update the rendering: animations are updated and their events sent before the
+/// animation frame callbacks). Chrome 148 (`anim_event_order_probe_cft148.json`, 5 runs): each of
+/// 65 animationstart / animationiteration / animationend events came before its frame's rAF
+/// callback, whose stamp was the event's timeline time. Here: no rAF callback of a turn is logged
+/// before an animation event of the same turn. Was: the events fired in the settle after the round.
+#[test]
+fn a_css_animations_events_come_before_the_frames_callbacks() {
+    let page = "<!doctype html><style>@keyframes fade{from{opacity:0}to{opacity:1}}\
+        #a{width:10px;height:10px}#a.go{animation:fade 50ms linear 12}</style><div id=a></div><script>\
+        window.ready = true; window.turn = 0; window.log = [];\
+        ['animationstart','animationiteration','animationend'].forEach(function (type) {\
+          document.getElementById('a').addEventListener(type, function () { log.push(type + ':' + turn); }); });\
+        function tick() { log.push('raf:' + turn); requestAnimationFrame(tick); } requestAnimationFrame(tick);\
+        </script>"
+        .to_string();
+    let mut doc = Doc::load(page, String::new());
+    doc.turn(20);
+    doc.engine.execute_script(doc.view, "document.getElementById('a').classList.add('go')").unwrap();
+    for i in 1..60 {
+        doc.engine.execute_script(doc.view, &format!("window.turn = {i}")).unwrap();
+        doc.turn(20);
+    }
+    let log = doc.read("log.join(' ')");
+    let entries: Vec<(&str, &str)> = log.split(' ').filter_map(|e| e.split_once(':')).collect();
+    let events = entries.iter().filter(|(k, _)| *k != "raf").count();
+    assert!(events >= 12, "the animation's events fired: {log}");
+    for (i, (kind, turn)) in entries.iter().enumerate() {
+        if *kind == "raf" {
+            continue;
+        }
+        let raf_first = entries[..i].iter().any(|(k, t)| *k == "raf" && t == turn);
+        assert!(!raf_first, "turn {turn}: {kind} came after the turn's rAF callback: {log}");
+    }
+}

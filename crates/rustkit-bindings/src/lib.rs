@@ -86,6 +86,11 @@ mod class_list_cost_tests;
 #[cfg(test)]
 mod attr_write_cost_tests;
 #[cfg(test)]
+mod style_set_cost_tests;
+#[cfg(test)]
+mod native_style_tests;
+mod inline_style;
+#[cfg(test)]
 mod style_write_cost_tests;
 #[cfg(test)]
 mod style_value_url_tests;
@@ -516,7 +521,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
-    "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "userEdit",
+    "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
@@ -1256,6 +1261,18 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     __rk.setOneRound = function (on) {
         Q.oneRound = !!on;
     };
+    // ANIM-UPDATE-ORDER: the time of the frame a turn `delta` ms on will run (the frame of the
+    // turn's time, as `frameRound` makes it with one round a turn), or -1 when no animation frame
+    // callback is due by then. The engine updates the animations to it before the turn's timers
+    // and round run, so the callbacks read the frame's animated style (HTML update the rendering:
+    // animations are updated before the animation frame callbacks run). No clock is read.
+    __rk.turnFrameAt = function (delta) {
+        var target = Q.now + (toNumber(delta) || 0);
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame && timers[i].due <= target) return frameAt(gridAtOrBefore(target));
+        }
+        return -1;
+    };
     // A frame's document is going away: its timers go with it, and its
     // workers are no longer asked. Loops over the tables, nothing called.
     __rk.dropTimers = function () {
@@ -1386,6 +1403,9 @@ pub(crate) const LAYER_PAINT: u8 = 1;
 /// computed style, the transformed rects, hit testing and the scroll
 /// extents see it; offset and client boxes do not.
 pub(crate) const LAYER_TRANSFORM: u8 = 2;
+/// An inline style write of `opacity` (TREE-REUSE step (2)): below 1 it makes a stacking
+/// context, which can reorder what paints above what, so a hit test sees it; no box moves.
+pub(crate) const LAYER_STACKING: u8 = 4;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
@@ -1448,6 +1468,27 @@ impl DirtyMark {
         }
     }
 
+    /// TREE-REUSE step (2): a script write of the inline `style` attribute that changed only paint
+    /// properties (`reads`: [`LAYER_PAINT`], with [`LAYER_STACKING`] for `opacity`). Like any
+    /// other script write it is beyond the animated-style layer and the engine lays it out when
+    /// script settles; but no box moved, so the published layout stays current for an offset,
+    /// client or rect read, and only the reads that see the values lay out (`needs_layout_for`).
+    /// It names its cause for the forced-layout log when it is the first write since the layout.
+    pub(crate) fn mark_paint_style(&self, bucket: DomDirty, kind: &'static str, reads: u8, logged: Logged) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.other_since_layout.set(true);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+            if self.cause.get().is_none() {
+                self.cause.set(Some(kind));
+            }
+        }
+    }
+
     /// Whether the read `read` (the forced-layout log's read kinds) must
     /// lay the page out first: after any write a layout can see, or after a
     /// paint-layer write whose values it reads.
@@ -1458,8 +1499,10 @@ impl DirtyMark {
         let layer = self.layer_since_layout.get();
         match read {
             "computed_style" => layer != 0,
-            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
-            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            "hit_test" => layer & (LAYER_TRANSFORM | LAYER_STACKING) != 0,
+            "rect" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll" | "scroll_to" => {
+                layer & LAYER_TRANSFORM != 0
+            }
             _ => false,
         }
     }
@@ -3053,6 +3096,14 @@ impl DomBindings {
         self.dom_host.borrow_mut().has_rules = probe;
     }
 
+    /// Whether some rule of the page's sheets reads the `style` attribute or uses `:has()`,
+    /// asked when an inline style write changes only paint properties: with one, the write can
+    /// change which rules match, and a geometry read after it lays the page out (TREE-REUSE
+    /// step (2)). Without a probe the answer is yes.
+    pub fn set_style_attr_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().style_attr_rules = probe;
+    }
+
     /// How many times a source from `set_geometry_source` was built.
     pub fn geometry_builds(&self) -> u64 {
         self.dom_host.borrow().geometry_builds
@@ -4027,6 +4078,19 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_host_bookkeeping(&format!("__rk.setOneRound({on}); return 0;"))?;
         Ok(())
+    }
+
+    /// The time of the frame a turn `delta_ms` on will run, on the tree's clock, when an
+    /// animation frame callback is due by then (ANIM-UPDATE-ORDER; `__rk.turnFrameAt`).
+    pub fn turn_frame_at(&self, delta_ms: u64) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("return __rk.turnFrameAt({delta_ms});"))
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() && n >= 0.0 => Some(n),
+            _ => None,
+        }
     }
 
     pub fn set_tree_turn(&self, open: bool) -> Result<(), BindingError> {

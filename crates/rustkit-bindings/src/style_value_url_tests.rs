@@ -24,11 +24,11 @@ fn ev(b: &DomBindings, script: &str) -> String {
 /// Rows Chrome refuses for a reason other than the url rule, which this check does not make (separate rows):
 /// an unmatched `)` (in `url\(a b)` the escaped `(` is a name character), and a string where
 /// background-image takes an image.
-const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
+pub(crate) const NOT_THE_URL_RULE: &[&str] = &["url\\(a b)", "\"url(a b)\""];
 
 /// Rows Chrome keeps that stay refused here because the engine's url reader (`parse_css_url`, Rust whitespace
 /// and control characters) refuses them: an unquoted url holding NBSP or NUL (a row against the engine).
-const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)", "url(a\u{85}b)", "url(a\u{2003}b)"];
+pub(crate) const ENGINE_REFUSES: &[&str] = &["url(a\u{a0}b)", "url(a\0b)", "url(a\u{85}b)", "url(a\u{2003}b)"];
 
 /// Regular-property values Chrome refuses by the property's grammar, which the bindings do not check (a
 /// separate row, VALUE-GRAMMAR): a value holding NBSP, U+FEFF or U+2003 at either end is one token
