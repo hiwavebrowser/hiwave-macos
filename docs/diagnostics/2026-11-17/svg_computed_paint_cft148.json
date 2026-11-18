@@ -1,0 +1,178 @@
+{
+  "chrome": "148.0.7778.216",
+  "cases": [
+    {
+      "label": "initial",
+      "css": "",
+      "svg": "<rect id=p width=10 height=10 />",
+      "read": [
+        "s fill=rgb(0, 0, 0) stroke=none",
+        "p fill=rgb(0, 0, 0) stroke=none"
+      ]
+    },
+    {
+      "label": "attributes",
+      "css": "",
+      "svg": "<g id=g fill=blue stroke=red><rect id=p width=10 height=10 /></g>",
+      "read": [
+        "g fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)",
+        "p fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "css beats attribute",
+      "css": "#p{fill:lime}",
+      "svg": "<rect id=p width=10 height=10 fill=blue stroke=red />",
+      "read": [
+        "p fill=rgb(0, 255, 0) stroke=rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "inherited from svg css",
+      "css": "#s{fill:blue;stroke:red}",
+      "svg": "<g id=g><rect id=p width=10 height=10 /></g>",
+      "read": [
+        "s fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)",
+        "g fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)",
+        "p fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "style attribute beats css",
+      "css": "#p{fill:lime}",
+      "svg": "<rect id=p width=10 height=10 style=\"fill:blue\" />",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "css !important beats style attribute",
+      "css": "#p{fill:lime!important}",
+      "svg": "<rect id=p width=10 height=10 style=\"fill:blue\" />",
+      "read": [
+        "p fill=rgb(0, 255, 0) stroke=none"
+      ]
+    },
+    {
+      "label": "style !important beats css !important",
+      "css": "#p{fill:lime!important}",
+      "svg": "<rect id=p width=10 height=10 style=\"fill:blue!important\" />",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "specificity",
+      "css": "#p{fill:blue} rect{fill:lime}",
+      "svg": "<rect id=p width=10 height=10 />",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "url paint",
+      "css": "",
+      "svg": "<defs><linearGradient id=gr /></defs><rect id=p width=10 height=10 fill=\"url(#gr)\" stroke=\"url(#gr) red\" />",
+      "read": [
+        "p fill=url(\"#gr\") stroke=url(\"#gr\") rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "url paint css",
+      "css": "#p{fill:url(#gr);stroke:url(\"#gr\") none}",
+      "svg": "<defs><linearGradient id=gr /></defs><rect id=p width=10 height=10 />",
+      "read": [
+        "p fill=url(\"#gr\") stroke=url(\"#gr\") none"
+      ]
+    },
+    {
+      "label": "none",
+      "css": "#p{fill:none}",
+      "svg": "<rect id=p width=10 height=10 stroke=none />",
+      "read": [
+        "p fill=none stroke=none"
+      ]
+    },
+    {
+      "label": "currentcolor css",
+      "css": "#s{color:blue}#p{fill:currentcolor;stroke:currentColor}",
+      "svg": "<rect id=p width=10 height=10 />",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=rgb(0, 0, 255)"
+      ]
+    },
+    {
+      "label": "currentcolor attribute",
+      "css": "#s{color:rgb(0,128,0)}",
+      "svg": "<rect id=p width=10 height=10 fill=currentColor />",
+      "read": [
+        "p fill=rgb(0, 128, 0) stroke=none"
+      ]
+    },
+    {
+      "label": "alpha and hsl",
+      "css": "#p{fill:rgba(0,0,255,.5);stroke:hsl(120,100%,50%)}",
+      "svg": "<rect id=p width=10 height=10 />",
+      "read": [
+        "p fill=rgba(0, 0, 255, 0.5) stroke=rgb(0, 255, 0)"
+      ]
+    },
+    {
+      "label": "named colour attribute",
+      "css": "",
+      "svg": "<rect id=p width=10 height=10 fill=coral stroke=transparent />",
+      "read": [
+        "p fill=rgb(255, 127, 80) stroke=rgba(0, 0, 0, 0)"
+      ]
+    },
+    {
+      "label": "invalid attribute is ignored",
+      "css": "",
+      "svg": "<g fill=blue><rect id=p width=10 height=10 fill=bogus /></g>",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "inherit keyword over attribute",
+      "css": "#p{fill:inherit}",
+      "svg": "<g fill=blue><rect id=p width=10 height=10 fill=red /></g>",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "inherited from an html ancestor",
+      "css": "body{fill:blue;stroke:red}",
+      "svg": "<rect id=p width=10 height=10 />",
+      "read": [
+        "s fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)",
+        "p fill=rgb(0, 0, 255) stroke=rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "quoted url with a parenthesis",
+      "css": "",
+      "svg": "<rect id=p width=10 height=10 fill='url(\"a)b\")' stroke='url(\"a)b\") red' />",
+      "read": [
+        "p fill=url(\"a)b\") stroke=url(\"a)b\") rgb(255, 0, 0)"
+      ]
+    },
+    {
+      "label": "a long url() chain is invalid",
+      "css": "",
+      "svg": "<g fill=blue><rect id=p width=10 height=10 fill=\"url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)url(a)\" /></g>",
+      "read": [
+        "p fill=rgb(0, 0, 255) stroke=none"
+      ]
+    },
+    {
+      "label": "attribute writes in a display:none subtree",
+      "reads": [
+        "rgb(0, 0, 255)",
+        "rgb(255, 0, 0)",
+        "rgb(0, 255, 0)"
+      ]
+    }
+  ]
+}

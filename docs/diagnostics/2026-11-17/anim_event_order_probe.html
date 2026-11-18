@@ -1,0 +1,41 @@
+<!doctype html><title>anim event order probe</title>
+<style>
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#a { width: 10px; height: 10px; background: #08f }
+#a.go { animation: fade 50ms linear 12 }
+</style>
+<div id=a></div><script>
+// ANIM-UPDATE-ORDER R1 (2): in a frame where a CSS animation starts, iterates or ends, do its
+// events reach script before that frame's rAF callbacks (HTML update the rendering: "update
+// animations and send events" comes before "run the animation frame callbacks")? Pinned on Chrome
+// for Testing 148.0.7778.216, HEADLESS (anim_event_order_probe_chrome.mjs). rec.log: in order,
+// ['raf', t] for each rAF callback and [type, document.timeline.currentTime] for each
+// animationstart / animationiteration / animationend. rec.summary: per event, whether the next
+// rAF callback in the log has the event's timeline time as its stamp (same frame, event first),
+// and whether a rAF callback with that stamp came BEFORE the event (same frame, callback first).
+window.rec = { done: false };
+var a = document.getElementById('a'), log = [];
+['animationstart', 'animationiteration', 'animationend'].forEach(function (type) {
+  a.addEventListener(type, function () { log.push([type, Math.round(document.timeline.currentTime * 100) / 100]); });
+});
+var stop = false;
+function tick(t) { log.push(['raf', Math.round(t * 100) / 100]); if (!stop) requestAnimationFrame(tick); }
+setTimeout(function () {
+  requestAnimationFrame(tick);
+  setTimeout(function () { a.classList.add('go'); }, 40);
+  a.addEventListener('animationend', function () {
+    setTimeout(function () {
+      stop = true;
+      var summary = [];
+      for (var i = 0; i < log.length; i++) {
+        if (log[i][0] === 'raf') continue;
+        var at = log[i][1], after = null, before = false;
+        for (var j = i + 1; j < log.length; j++) if (log[j][0] === 'raf') { after = log[j][1]; break; }
+        for (var k = 0; k < i; k++) if (log[k][0] === 'raf' && Math.abs(log[k][1] - at) < 0.05) before = true;
+        summary.push([log[i][0], at, after === null ? null : Math.round((after - at) * 100) / 100, before]);
+      }
+      rec.log = log; rec.summary = summary; rec.done = true;
+    }, 100);
+  });
+}, 300);
+</script>
