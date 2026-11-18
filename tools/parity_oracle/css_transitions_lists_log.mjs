@@ -65,6 +65,9 @@ await probe('box-shadow revert', '#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}
 await probe('box-shadow revert-layer', '#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}', 'box-shadow');
 await probe('box-shadow inherit', 'body{box-shadow:10px 20px 30px 4px rgb(255,0,0),2px 2px 0px 0px rgb(0,0,255)}#h.on{box-shadow:inherit}', 'box-shadow');
 await probe('box-shadow inherit none', 'body{box-shadow:none}#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:inherit}', 'box-shadow');
+// revert-layer inside a layer rolls back to the earlier layer's shadow (R1 on #1290)
+await probe('box-shadow revert-layer in a layer', '@layer a{#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}}@layer b{#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:revert-layer}}', 'box-shadow');
+await probe('box-shadow revert-layer to no earlier layer', '@layer a{#h{color:red}}@layer b{#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}}', 'box-shadow');
 // filter
 await probe('filter blur', '#h{filter:blur(0px)}#h.on{filter:blur(10px)}', 'filter');
 await probe('filter none->blur', '#h{filter:none}#h.on{filter:blur(10px)}', 'filter');

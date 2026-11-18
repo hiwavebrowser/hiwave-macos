@@ -214,6 +214,28 @@ fn box_shadow_css_wide_keywords_replace_the_list() {
     );
 }
 
+/// `revert-layer` inside a layer rolls back to the earlier layer's shadow,
+/// or to none when no earlier layer sets one (R1 on #1290, Chrome 148).
+#[test]
+fn box_shadow_revert_layer_inside_a_layer() {
+    check(
+        "@layer a{#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}}\
+         @layer b{#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:revert-layer}}",
+        "box-shadow",
+        &BS,
+        "rgb(128, 0, 128) 5px 10px 15px 2px",
+        "rgb(255, 0, 0) 10px 20px 30px 4px",
+    );
+    check(
+        "@layer a{#h{color:red}}\
+         @layer b{#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}}",
+        "box-shadow",
+        &BS,
+        "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+        "none",
+    );
+}
+
 // --------------------------------------------- box-shadow, transitions
 
 #[test]
