@@ -21,7 +21,7 @@
 //! largest texture, is denied: it stays on the CPU bitmap.
 
 use super::*;
-use rustkit_canvas::gpu::{GpuBatch, GpuBlend, GpuDraw, GpuPath, GpuReset};
+use rustkit_canvas::gpu::{GpuBatch, GpuBlend, GpuDraw, GpuGradient, GpuPaint, GpuPath, GpuReset, MAX_GRADIENT_STOPS};
 
 /// Canvas textures one renderer keeps, in bytes.
 pub const CANVAS_TEXTURE_BUDGET: u64 = 128 << 20;
@@ -62,6 +62,41 @@ struct Vertex {
     color: [f32; 4],
 }
 
+/// A gradient as the shader reads it (GPU-GRADIENT), one per gradient fill
+/// of a pass, in a storage buffer. A cover vertex names it by a negative
+/// red: `-(index + 1)` (a real colour channel is never negative).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GradRecord {
+    /// Device to user space: (a, b, c, d).
+    inv0: [f32; 4],
+    /// (e, f, radial 0/1, stop count).
+    inv1: [f32; 4],
+    /// (x0, y0, x1, y1).
+    geo: [f32; 4],
+    /// (r1, 0, 0, 0).
+    extra: [f32; 4],
+    offs: [[f32; 4]; MAX_GRADIENT_STOPS / 4],
+    cols: [[f32; 4]; MAX_GRADIENT_STOPS],
+}
+
+impl GradRecord {
+    fn of(g: &GpuGradient) -> Self {
+        let mut r = Self::zeroed();
+        r.inv0 = [g.inv[0], g.inv[1], g.inv[2], g.inv[3]];
+        r.inv1 = [g.inv[4], g.inv[5], if g.radial { 1.0 } else { 0.0 }, g.stops.len().min(MAX_GRADIENT_STOPS) as f32];
+        r.geo = [g.p0[0], g.p0[1], g.p1[0], g.p1[1]];
+        r.extra = [g.r1, 0.0, 0.0, 0.0];
+        for (i, (o, c)) in g.stops.iter().take(MAX_GRADIENT_STOPS).enumerate() {
+            r.offs[i / 4][i % 4] = *o;
+            r.cols[i] = *c;
+        }
+        r
+    }
+}
+
+use bytemuck::Zeroable;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Pipe {
     Copy,
@@ -83,6 +118,7 @@ struct Scratch {
 pub(crate) struct CanvasGpu {
     shader: wgpu::ShaderModule,
     plain_layout: wgpu::PipelineLayout,
+    paint_bgl: wgpu::BindGroupLayout,
     copy_bgl: wgpu::BindGroupLayout,
     copy_layout: wgpu::PipelineLayout,
     pipes: HashMap<Pipe, wgpu::RenderPipeline>,
@@ -109,12 +145,93 @@ fn vs_main(@location(0) p: vec2<f32>, @location(1) c: vec4<f32>) -> VOut {
     return o;
 }
 
-@fragment
-fn fs_main(i: VOut) -> @location(0) vec4<f32> {
-    return i.color;
+struct Grad {
+    inv0: vec4<f32>,
+    inv1: vec4<f32>,
+    geo: vec4<f32>,
+    extra: vec4<f32>,
+    offs: array<vec4<f32>, 4>,
+    cols: array<vec4<f32>, 16>,
+};
+
+@group(0) @binding(0) var<storage, read> grads: array<Grad>;
+
+fn off(k: u32, i: u32) -> f32 {
+    return grads[k].offs[i / 4u][i % 4u];
 }
 
-@group(0) @binding(0) var src: texture_2d<f32>;
+// A gradient at the pixel centre `p` (device space), as tiny-skia
+// evaluates it: user space by the inverse transform, t padded to [0, 1],
+// the stops interpolated unpremultiplied, then premultiplied. A radial
+// gradient is two-point conical from (x0, y0), radius 0, to (x1, y1), r1:
+// the larger t whose circle passes through the point; none: transparent.
+fn gradient(k: u32, p: vec2<f32>) -> vec4<f32> {
+    let inv0 = grads[k].inv0;
+    let inv1 = grads[k].inv1;
+    let u = vec2<f32>(inv0.x * p.x + inv0.z * p.y + inv1.x, inv0.y * p.x + inv0.w * p.y + inv1.y);
+    let p0 = grads[k].geo.xy;
+    let d = grads[k].geo.zw - p0;
+    var t: f32;
+    if (inv1.z < 0.5) {
+        t = dot(u - p0, d) / dot(d, d);
+    } else {
+        let r1 = grads[k].extra.x;
+        let q = u - p0;
+        let a = dot(d, d) - r1 * r1;
+        let b = dot(q, d);
+        let c = dot(q, q);
+        if (abs(a) < 1e-6) {
+            if (b == 0.0) {
+                return vec4<f32>(0.0);
+            }
+            t = c / (2.0 * b);
+        } else {
+            let disc = b * b - a * c;
+            if (disc < 0.0) {
+                return vec4<f32>(0.0);
+            }
+            let s = sqrt(disc);
+            let t1 = (b + s) / a;
+            let t2 = (b - s) / a;
+            t = max(t1, t2);
+            if (t * r1 < 0.0) {
+                t = min(t1, t2);
+            }
+        }
+        if (t * r1 < 0.0) {
+            return vec4<f32>(0.0);
+        }
+    }
+    t = clamp(t, 0.0, 1.0);
+    let n = u32(inv1.w);
+    var col = grads[k].cols[0];
+    if (t > off(k, 0u)) {
+        col = grads[k].cols[n - 1u];
+        for (var i = 1u; i < n; i = i + 1u) {
+            if (t <= off(k, i)) {
+                let o0 = off(k, i - 1u);
+                let o1 = off(k, i);
+                var f = 1.0;
+                if (o1 > o0) {
+                    f = (t - o0) / (o1 - o0);
+                }
+                col = mix(grads[k].cols[i - 1u], grads[k].cols[i], f);
+                break;
+            }
+        }
+    }
+    return vec4<f32>(col.rgb * col.a, col.a);
+}
+
+@fragment
+fn fs_main(i: VOut) -> @location(0) vec4<f32> {
+    if (i.color.r >= 0.0) {
+        return i.color;
+    }
+    return gradient(u32(-i.color.r - 0.5), i.pos.xy);
+}
+
+@group(0) @binding(1) var src: texture_2d<f32>;
 
 @fragment
 fn fs_copy(i: VOut) -> @location(0) vec4<f32> {
@@ -128,15 +245,28 @@ impl CanvasGpu {
             label: Some("canvas_gpu"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
+        let paint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("canvas_gpu_paint"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
         let plain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("canvas_gpu_plain"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&paint_bgl],
             push_constant_ranges: &[],
         });
         let copy_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("canvas_gpu_copy"),
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+                binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     multisampled: false,
@@ -151,7 +281,7 @@ impl CanvasGpu {
             bind_group_layouts: &[&copy_bgl],
             push_constant_ranges: &[],
         });
-        Self { shader, plain_layout, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None, over_cap: HashMap::new() }
+        Self { shader, plain_layout, paint_bgl, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None, over_cap: HashMap::new() }
     }
 
     fn pipe(&mut self, device: &wgpu::Device, p: Pipe) -> &wgpu::RenderPipeline {
@@ -536,8 +666,20 @@ fn encode_fills(
         steps.push(Step { pipe: Pipe::Stencil { eo: p.even_odd }, reference: 0, range });
     };
     let mut current_clip: Option<usize> = None;
+    let mut grads: Vec<GradRecord> = Vec::new();
+    let mut grad_index: HashMap<usize, usize> = HashMap::new();
     for d in draws {
-        let GpuDraw::Fill { path, color, blend, clip } = d else { continue };
+        let GpuDraw::Fill { path, paint, blend, clip } = d else { continue };
+        let color = match paint {
+            GpuPaint::Solid(c) => *c,
+            GpuPaint::Gradient(g) => {
+                let k = *grad_index.entry(Arc::as_ptr(g) as usize).or_insert_with(|| {
+                    grads.push(GradRecord::of(g));
+                    grads.len() - 1
+                });
+                [-(k as f32 + 1.0), 0.0, 0.0, 0.0]
+            }
+        };
         if let Some(c) = clip {
             if current_clip != Some(c.id) {
                 steps.push(Step { pipe: Pipe::ClipSet, reference: 0xff, range: full.clone() });
@@ -553,7 +695,7 @@ fn encode_fills(
         }
         fan(&mut verts, &mut steps, path);
         let b = path.bounds;
-        let range = push(&mut verts, &mut quad([b[0] - 1.0, b[1] - 1.0, b[2] + 1.0, b[3] + 1.0]).into_iter(), *color);
+        let range = push(&mut verts, &mut quad([b[0] - 1.0, b[1] - 1.0, b[2] + 1.0, b[3] + 1.0]).into_iter(), color);
         let has_clip = clip.is_some();
         let reference = match (path.even_odd, has_clip) {
             (false, false) => 0,
@@ -574,8 +716,21 @@ fn encode_fills(
     });
     let copy_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         layout: &cg.copy_bgl,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&target.view) }],
+        entries: &[wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&target.view) }],
         label: Some("canvas_gpu_copy"),
+    });
+    if grads.is_empty() {
+        grads.push(GradRecord::zeroed());
+    }
+    let grad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("canvas_gpu_gradients"),
+        contents: bytemuck::cast_slice(&grads),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let paint_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &cg.paint_bgl,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: grad_buffer.as_entire_binding() }],
+        label: Some("canvas_gpu_paint"),
     });
     cg.scratch(device, size);
     let scratch = cg.scratch.as_ref().expect("scratch");
@@ -613,6 +768,7 @@ fn encode_fills(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
+    pass.set_bind_group(0, &paint_bind, &[]);
     pass.set_vertex_buffer(0, buffer.slice(..));
     for s in &steps {
         pass.set_pipeline(&cg.pipes[&s.pipe]);
@@ -624,3 +780,7 @@ fn encode_fills(
 #[cfg(test)]
 #[path = "canvas_gpu_tests.rs"]
 mod canvas_gpu_tests;
+
+#[cfg(test)]
+#[path = "canvas_gpu_chrome_tests.rs"]
+mod canvas_gpu_chrome_tests;

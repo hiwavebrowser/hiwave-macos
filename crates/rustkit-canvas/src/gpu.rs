@@ -7,13 +7,15 @@
 //! Behind `HIWAVE_GPU_CANVAS=1` (or [`set_gpu_canvas`] on a thread), read
 //! when a context is created; off (the default), nothing here runs.
 //!
-//! What the GPU replay draws at A1: fills and strokes with a solid colour,
-//! clears, `putImageData`, under the composite operations fixed-function
-//! blending can do (source-over, the Porter-Duff set, lighter, copy, xor)
-//! and under a clip chain of at most 32 `clip()`s. Anything else (a
-//! gradient or pattern style, `drawImage`, the blend modes that read the
-//! destination) makes the batch a reset: the CPU bitmap is brought up to
-//! date and uploaded, today's path, for that frame.
+//! What the GPU replay draws: fills and strokes with a solid colour or a
+//! linear or radial gradient (GPU-GRADIENT: at most [`MAX_GRADIENT_STOPS`]
+//! stops, evaluated per pixel in the shader as tiny-skia does), clears,
+//! `putImageData`, under the composite operations fixed-function blending
+//! can do (source-over, the Porter-Duff set, lighter, copy, xor) and under
+//! a clip chain of at most 32 `clip()`s. Anything else (a pattern style,
+//! `drawImage`, the blend modes that read the destination) makes the batch
+//! a reset: the CPU bitmap is brought up to date and uploaded, today's
+//! path, for that frame.
 
 use crate::raster::{build_path, skia_stroke, transform, ClipLink, Op};
 use crate::{CanvasStyle, CompositeOperation, PathCommand};
@@ -118,11 +120,43 @@ pub struct GpuClip {
     pub links: Vec<GpuPath>,
 }
 
+/// The most colour stops a gradient the GPU draws has (after the CPU's own
+/// remapping of a radial gradient's start radius, which adds one); a
+/// gradient with more is drawn from the CPU bitmap.
+pub const MAX_GRADIENT_STOPS: usize = 16;
+
+/// A gradient as the shader evaluates it, per pixel at the pixel's centre,
+/// as tiny-skia does for the CPU bitmap: the device point taken to the
+/// gradient's user space by `inv`, `t` from the geometry, padded to
+/// [0, 1], the stops interpolated unpremultiplied, then premultiplied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuGradient {
+    /// Two-point conical (tiny-skia's radial: from the point `p0`, radius
+    /// 0, to the circle at `p1` of radius `r1`) rather than linear.
+    pub radial: bool,
+    /// Device to user space: `[a, b, c, d, e, f]`, x' = a x + c y + e,
+    /// y' = b x + d y + f.
+    pub inv: [f32; 6],
+    pub p0: [f32; 2],
+    pub p1: [f32; 2],
+    pub r1: f32,
+    /// `(offset, [r, g, b, a])`, unpremultiplied, 0..1, offsets ascending.
+    pub stops: Vec<(f32, [f32; 4])>,
+}
+
+/// What a fill is covered with.
+#[derive(Debug, Clone)]
+pub enum GpuPaint {
+    /// A premultiplied colour.
+    Solid([f32; 4]),
+    Gradient(Arc<GpuGradient>),
+}
+
 /// One thing the GPU replay draws.
 #[derive(Debug, Clone)]
 pub enum GpuDraw {
-    /// `path` covered with the premultiplied `color` under `blend`.
-    Fill { path: GpuPath, color: [f32; 4], blend: GpuBlend, clip: Option<Arc<GpuClip>> },
+    /// `path` covered with `paint` under `blend`.
+    Fill { path: GpuPath, paint: GpuPaint, blend: GpuBlend, clip: Option<Arc<GpuClip>> },
     /// putImageData: premultiplied rows written as they are.
     Put { x: u32, y: u32, width: u32, height: u32, rgba: Vec<u8> },
 }
@@ -132,7 +166,7 @@ pub(crate) fn supported(op: &Op) -> bool {
     let clip_ok = |c: Option<&Arc<crate::raster::Clip>>| c.is_none_or(|c| c.chain.is_some());
     match op {
         Op::Fill { d, style, .. } | Op::Stroke { d, style, .. } => {
-            matches!(style, CanvasStyle::Color(_)) && GpuBlend::of(d.op).is_some() && clip_ok(d.clip.as_ref())
+            paint_of(style, &d.t).is_some() && GpuBlend::of(d.op).is_some() && clip_ok(d.clip.as_ref())
         }
         Op::Clear { clip, .. } => clip_ok(clip.as_ref()),
         Op::Put { .. } => true,
@@ -202,16 +236,16 @@ impl GpuBatch {
         for op in &self.ops {
             let (clip, draw) = match &**op {
                 Op::Fill { d, path, even_odd, style } => {
-                    let (Some(blend), Some(color)) = (GpuBlend::of(d.op), solid(style)) else { continue };
+                    let (Some(blend), Some(Some(paint))) = (GpuBlend::of(d.op), paint_of(style, &d.t)) else { continue };
                     let Some(p) = build_path(path).and_then(|p| p.transform(transform(&d.t))) else { continue };
                     let path = flatten(&p, *even_odd, &left)?;
                     if path.tris.is_empty() {
                         continue;
                     }
-                    (d.clip.as_ref(), GpuDraw::Fill { path, color, blend, clip: None })
+                    (d.clip.as_ref(), GpuDraw::Fill { path, paint, blend, clip: None })
                 }
                 Op::Stroke { d, path, line, style } => {
-                    let (Some(blend), Some(color)) = (GpuBlend::of(d.op), solid(style)) else { continue };
+                    let (Some(blend), Some(Some(paint))) = (GpuBlend::of(d.op), paint_of(style, &d.t)) else { continue };
                     let Some(p) = build_path(path) else { continue };
                     let ts = transform(&d.t);
                     let res_scale = tiny_skia::PathStroker::compute_resolution_scale(&ts);
@@ -222,7 +256,7 @@ impl GpuBatch {
                     if path.tris.is_empty() {
                         continue;
                     }
-                    (d.clip.as_ref(), GpuDraw::Fill { path, color, blend, clip: None })
+                    (d.clip.as_ref(), GpuDraw::Fill { path, paint, blend, clip: None })
                 }
                 Op::Clear { clip, rect, t } => {
                     let [x, y, w, h] = *rect;
@@ -245,7 +279,7 @@ impl GpuBatch {
                         };
                         flatten(&p, false, &left)?
                     };
-                    (clip.as_ref(), GpuDraw::Fill { path, color: [0.0; 4], blend: GpuBlend::Clear, clip: None })
+                    (clip.as_ref(), GpuDraw::Fill { path, paint: GpuPaint::Solid([0.0; 4]), blend: GpuBlend::Clear, clip: None })
                 }
                 Op::Put { rgba, width, dx, dy, .. } => {
                     if *width == 0 || *dx < 0 || *dy < 0 {
@@ -266,7 +300,7 @@ impl GpuBatch {
                 }
                 Op::Image { .. } => continue,
             };
-            let GpuDraw::Fill { path, color, blend, .. } = draw else { continue };
+            let GpuDraw::Fill { path, paint, blend, .. } = draw else { continue };
             take(QUAD)?; // the cover quad
             let clip = match clip.and_then(|c| c.chain.as_ref().map(|chain| (c, chain))) {
                 None => None,
@@ -298,7 +332,7 @@ impl GpuBatch {
                     Some(gc)
                 }
             };
-            out.push(GpuDraw::Fill { path, color, blend, clip });
+            out.push(GpuDraw::Fill { path, paint, blend, clip });
         }
         Some((out, max_vertices - left.get()))
     }
@@ -312,12 +346,69 @@ fn lower_link(l: &ClipLink, left: &std::cell::Cell<usize>) -> Option<GpuPath> {
     }
 }
 
-/// A solid style's premultiplied colour (globalAlpha is already in it).
-fn solid(style: &CanvasStyle) -> Option<[f32; 4]> {
-    let CanvasStyle::Color(c) = style else { return None };
+/// A colour as the CPU raster takes it (alpha to 8 bits, as
+/// `raster::color`), unpremultiplied, 0..1.
+fn rgba(c: rustkit_css::Color) -> [f32; 4] {
     let a = (c.a.clamp(0.0, 1.0) * 255.0).round() / 255.0;
-    let k = |v: u8| v as f32 / 255.0 * a;
-    Some([k(c.r), k(c.g), k(c.b), a])
+    [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, a]
+}
+
+fn premultiplied(c: [f32; 4]) -> [f32; 4] {
+    [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
+}
+
+/// What `style` covers a fill with under the transform `t`, as the CPU
+/// raster's `shader` decides it (globalAlpha is already in the colours):
+/// `None` when the GPU does not draw it (a pattern, a gradient with more
+/// than [`MAX_GRADIENT_STOPS`] stops, a transform with no inverse);
+/// `Some(None)` when it paints nothing (no stops, a degenerate gradient).
+fn paint_of(style: &CanvasStyle, t: &crate::Transform2D) -> Option<Option<GpuPaint>> {
+    let gradient = |radial: bool, p0: [f32; 2], p1: [f32; 2], r1: f32, stops: Vec<(f32, [f32; 4])>| {
+        if stops.len() > MAX_GRADIENT_STOPS {
+            return None;
+        }
+        let inv = t.inverse()?;
+        Some(Some(GpuPaint::Gradient(Arc::new(GpuGradient {
+            radial,
+            inv: [inv.a, inv.b, inv.c, inv.d, inv.e, inv.f],
+            p0,
+            p1,
+            r1,
+            stops,
+        }))))
+    };
+    match style {
+        CanvasStyle::Color(c) => Some(Some(GpuPaint::Solid(premultiplied(rgba(*c))))),
+        CanvasStyle::LinearGradient(g) => {
+            if g.stops.is_empty() || (g.x0 == g.x1 && g.y0 == g.y1) {
+                return Some(None);
+            }
+            if g.stops.len() == 1 {
+                return Some(Some(GpuPaint::Solid(premultiplied(rgba(g.stops[0].color)))));
+            }
+            let stops = g.stops.iter().map(|s| (s.offset, rgba(s.color))).collect();
+            gradient(false, [g.x0, g.y0], [g.x1, g.y1], 0.0, stops)
+        }
+        CanvasStyle::RadialGradient(g) => {
+            if g.stops.is_empty() || (g.x0 == g.x1 && g.y0 == g.y1 && g.r0 == g.r1) {
+                return Some(None);
+            }
+            if g.stops.len() == 1 {
+                return Some(Some(GpuPaint::Solid(premultiplied(rgba(g.stops[0].color)))));
+            }
+            // The CPU raster's remapping of a start radius (raster.rs
+            // `shader`): offset t at (r0 + t (r1 - r0)) / r1 of the end
+            // circle, and the first colour inside the start circle.
+            let mut stops: Vec<(f32, [f32; 4])> = g.stops.iter().map(|s| (s.offset, rgba(s.color))).collect();
+            if g.r0 > 0.0 && g.r1 > 0.0 {
+                let k = g.r0 / g.r1;
+                stops = g.stops.iter().map(|s| (k + s.offset * (1.0 - k), rgba(s.color))).collect();
+                stops.insert(0, (0.0, rgba(g.stops[0].color)));
+            }
+            gradient(true, [g.x0, g.y0], [g.x1, g.y1], g.r1, stops)
+        }
+        CanvasStyle::Pattern(_) => None,
+    }
 }
 
 fn rect_path(r: [f32; 4]) -> GpuPath {
@@ -645,8 +736,59 @@ mod gpu_recording_tests {
         c.fill_rect(0.0, 0.0, 2.0, 2.0);
         let b = c.take_gpu_batch(true);
         assert!(b.reset.is_some() && b.op_count() == 0);
-        // A gradient too.
+        // A pattern too.
+        let bitmap = crate::CanvasBitmap::from_rgba(2, 2, &[255; 16]).unwrap();
+        c.set_fill_style(CanvasStyle::Pattern(crate::CanvasPattern {
+            bitmap: Arc::new(bitmap),
+            repetition: crate::PatternRepetition::Repeat,
+        }));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        assert!(c.take_gpu_batch(false).reset.is_some());
+    }
+
+    /// GPU-GRADIENT: linear and radial gradients are drawn by the GPU
+    /// (no reset), lowered as the CPU raster resolves them: a radial
+    /// gradient's start radius remapped into its stops, globalAlpha in the
+    /// colours, the device-to-user inverse of the transform; one stop is a
+    /// solid colour, no stops paint nothing; past MAX_GRADIENT_STOPS, a
+    /// reset.
+    #[test]
+    fn gradients_lower_as_the_cpu_resolves_them() {
+        let mut c = gpu_ctx(40, 40);
+        c.take_gpu_batch(false);
+        c.translate(10.0, 0.0);
+        c.set_global_alpha(0.5);
+        let mut g = crate::RadialGradient::new(20.0, 20.0, 6.0, 20.0, 20.0, 18.0);
+        g.add_color_stop(0.0, rustkit_css::Color::new(255, 0, 0, 1.0));
+        g.add_color_stop(1.0, rustkit_css::Color::new(0, 0, 255, 1.0));
+        c.set_fill_style(CanvasStyle::RadialGradient(g));
+        c.fill_rect(0.0, 0.0, 40.0, 40.0);
+        let b = c.take_gpu_batch(false);
+        assert!(b.reset.is_none(), "drawn by the GPU");
+        let draws = b.lower();
+        let GpuDraw::Fill { paint: GpuPaint::Gradient(g), .. } = &draws[0] else { panic!("a gradient: {draws:?}") };
+        assert!(g.radial);
+        assert_eq!(g.inv, [1.0, 0.0, 0.0, 1.0, -10.0, 0.0]);
+        let k = 6.0 / 18.0;
+        assert_eq!(g.stops.len(), 3);
+        assert_eq!(g.stops[0].0, 0.0);
+        assert!((g.stops[1].0 - k).abs() < 1e-6 && (g.stops[2].0 - 1.0).abs() < 1e-6);
+        assert!((g.stops[1].1[3] - 128.0 / 255.0).abs() < 1e-6, "globalAlpha in the stops, to 8 bits");
+        // One stop: solid. None: nothing.
+        let mut one = crate::LinearGradient::new(0.0, 0.0, 8.0, 0.0);
+        one.add_color_stop(0.5, rustkit_css::Color::new(0, 255, 0, 1.0));
+        c.set_fill_style(CanvasStyle::LinearGradient(one));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
         c.set_fill_style(CanvasStyle::LinearGradient(crate::LinearGradient::new(0.0, 0.0, 8.0, 0.0)));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        let draws = c.take_gpu_batch(false).lower();
+        assert_eq!(draws.len(), 1);
+        assert!(matches!(&draws[0], GpuDraw::Fill { paint: GpuPaint::Solid(_), .. }));
+        let mut many = crate::LinearGradient::new(0.0, 0.0, 8.0, 0.0);
+        for i in 0..=MAX_GRADIENT_STOPS {
+            many.add_color_stop(i as f32 / MAX_GRADIENT_STOPS as f32, rustkit_css::Color::new(0, 0, 0, 1.0));
+        }
+        c.set_fill_style(CanvasStyle::LinearGradient(many));
         c.fill_rect(0.0, 0.0, 2.0, 2.0);
         assert!(c.take_gpu_batch(false).reset.is_some());
     }
