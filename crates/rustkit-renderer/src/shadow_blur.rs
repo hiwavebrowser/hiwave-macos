@@ -188,10 +188,10 @@ pub(crate) fn mesh_knots(
         stretches = vec![(stretches[0].0, stretches[1].1)];
     }
     let total: f32 = stretches.iter().map(|(a, b)| (b.min(hi) - a.max(lo)).max(0.0)).sum();
-    // A third of a standard deviation (reach / 9) keeps linear interpolation
-    // within about a percent of the alpha, corners included; no finer than a
-    // pixel; no more than MAX_KNOTS.
-    let step = (reach / 9.0).max(1.0).max(total / MAX_KNOTS as f32);
+    // Half a standard deviation (reach / 6) keeps linear interpolation
+    // within about a percent of the alpha; no finer than a pixel; no more
+    // than MAX_KNOTS.
+    let step = (reach / 6.0).max(1.0).max(total / MAX_KNOTS as f32);
     for (a, b) in stretches {
         let (a, b) = (a.max(lo), b.min(hi));
         if b <= a {
@@ -206,6 +206,95 @@ pub(crate) fn mesh_knots(
     knots.sort_by(f32::total_cmp);
     knots.dedup_by(|a, b| (*a - *b).abs() < 0.01);
     knots
+}
+
+/// A shadow's mesh: cut positions along each axis and the value at every
+/// knot crossing, row-major. Positions are relative to the mesh's origin, so
+/// one mesh serves every box of the same shape (`MeshKey`).
+#[derive(Debug)]
+pub(crate) struct Mesh {
+    pub xs: Vec<f32>,
+    pub ys: Vec<f32>,
+    pub values: Vec<f32>,
+}
+
+impl Mesh {
+    /// The four corner values of cell `(i, j)`: top-left, top-right,
+    /// bottom-right, bottom-left.
+    pub(crate) fn cell(&self, i: usize, j: usize) -> [f32; 4] {
+        let n = self.xs.len();
+        [
+            self.values[j * n + i],
+            self.values[j * n + i + 1],
+            self.values[(j + 1) * n + i + 1],
+            self.values[(j + 1) * n + i],
+        ]
+    }
+}
+
+/// What a mesh depends on, each length to 1/64 px: the shadow shape and
+/// the box it is cut against (the hole of an outer shadow, the clip of an
+/// inset one), both relative to the mesh origin, sigma, and which kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct MeshKey([i32; 26]);
+
+fn quantize(v: f32) -> i32 {
+    (v * 64.0).round() as i32
+}
+
+fn radii(r: &BorderRadius) -> [f32; 8] {
+    let c = [r.top_left, r.top_right, r.bottom_right, r.bottom_left];
+    [c[0].h, c[0].v, c[1].h, c[1].v, c[2].h, c[2].v, c[3].h, c[3].v]
+}
+
+/// The mesh of an outer shadow (`inset` false: `shape` blurred, over the
+/// shape grown by the reach) or an inset one (`inset` true: one minus
+/// `shape` blurred, over `other`, the clip). `other` adds its own edges to
+/// the cuts. Positions are relative to `origin`.
+pub(crate) fn mesh_key(shape: &Shape, other: &Shape, sigma: f32, inset: bool, origin: (f32, f32)) -> MeshKey {
+    let mut k = [0i32; 26];
+    let (ox, oy) = origin;
+    let rel = |r: Rect| [r.x - ox, r.y - oy, r.width, r.height];
+    let fields = rel(shape.rect)
+        .into_iter()
+        .chain(radii(&shape.radius))
+        .chain(rel(other.rect))
+        .chain(radii(&other.radius))
+        .chain([sigma, if inset { 1.0 } else { 0.0 }]);
+    for (slot, v) in k.iter_mut().zip(fields) {
+        *slot = quantize(v);
+    }
+    MeshKey(k)
+}
+
+/// Build the mesh `mesh_key` describes, relative to `origin`.
+pub(crate) fn build_mesh(shape: &Shape, other: &Shape, sigma: f32, inset: bool, origin: (f32, f32)) -> Mesh {
+    let reach = reach_of(sigma);
+    let (ox, oy) = origin;
+    let (x0, x1, y0, y1) = if inset {
+        (other.rect.x, other.rect.right(), other.rect.y, other.rect.bottom())
+    } else {
+        (
+            shape.rect.x - reach,
+            shape.rect.right() + reach,
+            shape.rect.y - reach,
+            shape.rect.bottom() + reach,
+        )
+    };
+    let xs = mesh_knots(x0, x1, shape.breaks(false), reach, &other.breaks(false));
+    let ys = mesh_knots(y0, y1, shape.breaks(true), reach, &other.breaks(true));
+    let mut values = Vec::with_capacity(xs.len() * ys.len());
+    for &y in &ys {
+        for &x in &xs {
+            let v = blurred_coverage(shape, sigma, x, y);
+            values.push(if inset { 1.0 - v } else { v });
+        }
+    }
+    Mesh {
+        xs: xs.into_iter().map(|x| x - ox).collect(),
+        ys: ys.into_iter().map(|y| y - oy).collect(),
+        values,
+    }
 }
 
 /// The value at `(u, v)` (0..=1 across the cell) of the cell whose corners
@@ -263,7 +352,26 @@ mod tests {
         let k = mesh_knots(-30.0, 1030.0, [0.0, 0.0, 1000.0, 1000.0], 30.0, &[]);
         assert_eq!(*k.first().unwrap(), -30.0);
         assert_eq!(*k.last().unwrap(), 1030.0);
-        assert!(k.windows(2).all(|w| w[1] - w[0] <= 3.34 || (w[0] >= 30.0 && w[1] <= 970.0)));
-        assert!(k.len() < 60, "{} knots", k.len());
+        assert!(k.windows(2).all(|w| w[1] - w[0] <= 5.0 + 1e-3 || (w[0] >= 30.0 && w[1] <= 970.0)));
+        assert!(k.len() < 40, "{} knots", k.len());
+    }
+
+    /// Two boxes of one shape anywhere share a mesh; a different blur or a
+    /// different hole does not.
+    #[test]
+    fn a_mesh_is_keyed_by_shape_not_place() {
+        let at = |x: f32, y: f32, blur: f32| {
+            let shape = square(x, y, 100.0, 40.0);
+            let hole = square(x + 4.0, y + 4.0, 92.0, 32.0);
+            mesh_key(&shape, &hole, sigma_of(blur), false, (x, y))
+        };
+        assert_eq!(at(10.0, 20.0, 16.0), at(310.5, 900.25, 16.0));
+        assert_ne!(at(10.0, 20.0, 16.0), at(10.0, 20.0, 32.0));
+        let shape = square(0.0, 0.0, 100.0, 40.0);
+        let moved_hole = square(6.0, 4.0, 92.0, 32.0);
+        assert_ne!(at(0.0, 0.0, 16.0), mesh_key(&shape, &moved_hole, 8.0, false, (0.0, 0.0)));
+        let mesh = build_mesh(&shape, &moved_hole, 8.0, false, (0.0, 0.0));
+        assert_eq!(mesh.values.len(), mesh.xs.len() * mesh.ys.len());
+        assert_eq!((mesh.xs[0], mesh.ys[0]), (-24.0, -24.0), "three sigma out");
     }
 }

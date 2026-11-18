@@ -52,6 +52,9 @@ use wgpu::util::DeviceExt;
 /// a quarter of a level.
 const SHADOW_ALPHA_FLOOR: f32 = 0.25 / 255.0;
 
+/// Shadow meshes kept before the cache starts over.
+const SHADOW_MESH_CACHE: usize = 256;
+
 pub mod dither;
 mod cull;
 mod shadow_blur;
@@ -484,6 +487,8 @@ pub struct Renderer {
     image_vertices: Vec<TextureVertex>,
     image_indices: Vec<u32>,
     image_runs: Vec<(String, u32)>,
+    /// Blurred box shadow meshes by shape (`shadow_mesh`).
+    shadow_meshes: HashMap<shadow_blur::MeshKey, Arc<shadow_blur::Mesh>>,
 
     // GPU gradient queues for batched rendering
     gradient_queue: Vec<QueuedLinearGradient>,
@@ -853,6 +858,7 @@ impl Renderer {
             image_vertices: Vec::with_capacity(256),
             image_indices: Vec::with_capacity(512),
             image_runs: Vec::with_capacity(64),
+            shadow_meshes: HashMap::new(),
             gradient_queue: Vec::with_capacity(64),
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
@@ -4495,39 +4501,20 @@ impl Renderer {
         // outside the border box (CSS Backgrounds 3 §7.1).
         let shape = shadow_blur::Shape::new(shadow_rect, shadow_radius);
         let hole = shadow_blur::Shape::new(rect, radius);
-        let reach = shadow_blur::reach_of(sigma);
-        let xs = shadow_blur::mesh_knots(
-            shadow_rect.x - reach,
-            shadow_rect.right() + reach,
-            shape.breaks(false),
-            reach,
-            &hole.breaks(false),
-        );
-        let ys = shadow_blur::mesh_knots(
-            shadow_rect.y - reach,
-            shadow_rect.bottom() + reach,
-            shape.breaks(true),
-            reach,
-            &hole.breaks(true),
-        );
-        let values: Vec<f32> = ys
-            .iter()
-            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
-            .map(|(x, y)| shadow_blur::blurred_coverage(&shape, sigma, x, y))
-            .collect();
-        let n = xs.len();
-        for j in 0..ys.len() - 1 {
-            for i in 0..n - 1 {
-                let c = [
-                    values[j * n + i],
-                    values[j * n + i + 1],
-                    values[(j + 1) * n + i + 1],
-                    values[(j + 1) * n + i],
-                ];
+        let origin = (shadow_rect.x, shadow_rect.y);
+        let mesh = self.shadow_mesh(&shape, &hole, sigma, false, origin);
+        for j in 0..mesh.ys.len() - 1 {
+            for i in 0..mesh.xs.len() - 1 {
+                let c = mesh.cell(i, j);
                 if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
                     continue;
                 }
-                let cell = Rect::new(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
+                let cell = Rect::new(
+                    origin.0 + mesh.xs[i],
+                    origin.1 + mesh.ys[j],
+                    mesh.xs[i + 1] - mesh.xs[i],
+                    mesh.ys[j + 1] - mesh.ys[j],
+                );
                 if cell.intersect(&rect).is_none() {
                     self.draw_shadow_cell(cell, cell, c, color, 1.0);
                     continue;
@@ -4537,6 +4524,28 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// The mesh `shadow_blur::build_mesh` builds, from the cache when a box
+    /// of the same shape has drawn one (a grid of cards draws one mesh).
+    fn shadow_mesh(
+        &mut self,
+        shape: &shadow_blur::Shape,
+        other: &shadow_blur::Shape,
+        sigma: f32,
+        inset: bool,
+        origin: (f32, f32),
+    ) -> Arc<shadow_blur::Mesh> {
+        let key = shadow_blur::mesh_key(shape, other, sigma, inset, origin);
+        if let Some(mesh) = self.shadow_meshes.get(&key) {
+            return mesh.clone();
+        }
+        if self.shadow_meshes.len() >= SHADOW_MESH_CACHE {
+            self.shadow_meshes.clear();
+        }
+        let mesh = Arc::new(shadow_blur::build_mesh(shape, other, sigma, inset, origin));
+        self.shadow_meshes.insert(key, mesh.clone());
+        mesh
     }
 
     /// An inset shadow (CSS Backgrounds 3 §7.1): inside `clip` (the padding
@@ -4576,28 +4585,21 @@ impl Renderer {
         }
         let inner = shadow_blur::Shape::new(inner_rect, inner_radius);
         let outer = shadow_blur::Shape::new(clip, radius);
-        let reach = shadow_blur::reach_of(sigma);
-        let xs = shadow_blur::mesh_knots(clip.x, clip.right(), inner.breaks(false), reach, &outer.breaks(false));
-        let ys = shadow_blur::mesh_knots(clip.y, clip.bottom(), inner.breaks(true), reach, &outer.breaks(true));
-        let values: Vec<f32> = ys
-            .iter()
-            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
-            .map(|(x, y)| 1.0 - shadow_blur::blurred_coverage(&inner, sigma, x, y))
-            .collect();
-        let n = xs.len();
+        let origin = (clip.x, clip.y);
+        let mesh = self.shadow_mesh(&inner, &outer, sigma, true, origin);
         self.push_clip_rounded(clip, radius);
-        for j in 0..ys.len() - 1 {
-            for i in 0..n - 1 {
-                let c = [
-                    values[j * n + i],
-                    values[j * n + i + 1],
-                    values[(j + 1) * n + i + 1],
-                    values[(j + 1) * n + i],
-                ];
+        for j in 0..mesh.ys.len() - 1 {
+            for i in 0..mesh.xs.len() - 1 {
+                let c = mesh.cell(i, j);
                 if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
                     continue;
                 }
-                let cell = Rect::new(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
+                let cell = Rect::new(
+                    origin.0 + mesh.xs[i],
+                    origin.1 + mesh.ys[j],
+                    mesh.xs[i + 1] - mesh.xs[i],
+                    mesh.ys[j + 1] - mesh.ys[j],
+                );
                 self.draw_shadow_cell(cell, cell, c, color, 1.0);
             }
         }
