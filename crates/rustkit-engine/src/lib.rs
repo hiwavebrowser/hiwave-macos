@@ -301,6 +301,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod svg_computed;
 mod console_log;
 pub mod console_file;
 mod relayout_cause;
@@ -20883,6 +20884,7 @@ impl layout_ctx::LayoutCtx {
         };
         let kept = self.svg_prepass.borrow_mut().paint_for(document.root(), &key);
         if let Some(map) = kept {
+            Self::note_svg_paint(lay, document, &map);
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
@@ -20905,7 +20907,23 @@ impl layout_ctx::LayoutCtx {
             _ => Rc::new(map),
         };
         self.svg_prepass.borrow_mut().keep_paint(document.root(), key, map.clone());
+        Self::note_svg_paint(lay, document, &map);
         *self.svg_paint_styles.borrow_mut() = map;
+    }
+
+    /// Keep `map` and `document` on the view for svg content's computed
+    /// paint (`svg_computed`), read after the build.
+    fn note_svg_paint(
+        lay: Option<&layout_ctx::ViewLayout>,
+        document: &Document,
+        map: &Rc<HashMap<usize, SvgPaintStyle>>,
+    ) {
+        if let Some(lay) = lay {
+            *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot {
+                root: Rc::downgrade(document.root()),
+                paint: map.clone(),
+            }));
+        }
     }
 
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
@@ -31497,6 +31515,9 @@ fn computed_lines_source(
     lay: Rc<layout_ctx::ViewLayout>,
 ) -> rustkit_bindings::ComputedLines {
     let index: std::cell::OnceCell<HashMap<usize, (Vec<u32>, bool)>> = std::cell::OnceCell::new();
+    // A2.1: svg content's computed fill / stroke, resolved on the first
+    // read that needs them.
+    let svg_paint: std::cell::OnceCell<HashMap<usize, (String, String)>> = std::cell::OnceCell::new();
     Rc::new(move |node| {
         let layout = layout()?;
         let _snapshot_time = time_stage(Stage::Snapshot);
@@ -31507,6 +31528,23 @@ fn computed_lines_source(
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
         let index = index.get_or_init(|| style_box_index(&layout));
+        let box_at = |node: usize| -> Option<&LayoutBox> {
+            let (path, _) = index.get(&node)?;
+            let mut b: &LayoutBox = &layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b)
+        };
+        let svg_rows = || -> Option<String> {
+            let snapshot = lay.svg_paint.borrow().clone()?;
+            let paint = svg_paint.get_or_init(|| match snapshot.root.upgrade() {
+                Some(root) => svg_computed::resolve_all(&root, &snapshot.paint, &|svg| box_at(svg).map(|b| b.style.color)),
+                None => HashMap::new(),
+            });
+            let (fill, stroke) = paint.get(&node)?;
+            Some(format!("\nfill\t{fill}\nstroke\t{stroke}"))
+        };
         let mut lines = match index.get(&node) {
             Some((path, own_vars)) => {
                 let mut b: &LayoutBox = &layout;
@@ -31519,15 +31557,21 @@ fn computed_lines_source(
                 }
                 lines
             }
-            None => {
-                let style = boxless.get(&node)?;
-                let mut lines = computed_style_lines(&style.box_);
-                if style.own_vars {
-                    lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            None => match boxless.get(&node) {
+                Some(style) => {
+                    let mut lines = computed_style_lines(&style.box_);
+                    if style.own_vars {
+                        lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+                    }
+                    lines
                 }
-                lines
-            }
+                // svg content has no box and no style: its paint rows alone.
+                None => return svg_rows(),
+            },
         };
+        if let Some(rows) = svg_rows() {
+            lines.push_str(&rows);
+        }
         for ((at, pseudo), style) in lay.pseudo_styles.borrow().iter() {
             if *at != node {
                 continue;
