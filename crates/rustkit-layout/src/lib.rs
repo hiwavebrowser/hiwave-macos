@@ -12639,8 +12639,19 @@ impl DisplayList {
         if layout_box.style.box_shadows.is_empty() {
             return;
         }
-        let box_rect = layout_box.dimensions.border_box();
-        let border_radius = self.border_radius_px(layout_box);
+        // An inset shadow is drawn inside the padding box, whose corners are
+        // the border box's inset by the border widths (CSS Backgrounds 3
+        // §7.1, §5.2).
+        let d = &layout_box.dimensions;
+        let box_rect = d.padding_box();
+        let outer = self.border_radius_px(layout_box);
+        let b = &d.border;
+        let border_radius = BorderRadius {
+            top_left: outer.top_left.inset(b.left, b.top),
+            top_right: outer.top_right.inset(b.right, b.top),
+            bottom_right: outer.bottom_right.inset(b.right, b.bottom),
+            bottom_left: outer.bottom_left.inset(b.left, b.bottom),
+        };
 
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && shadow.inset {

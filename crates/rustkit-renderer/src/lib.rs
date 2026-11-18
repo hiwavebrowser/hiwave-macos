@@ -48,8 +48,13 @@ use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
+/// A shadow mesh cell whose alpha nowhere reaches this is not drawn: under
+/// a quarter of a level.
+const SHADOW_ALPHA_FLOOR: f32 = 0.25 / 255.0;
+
 pub mod dither;
 mod cull;
+mod shadow_blur;
 mod frame_stats;
 mod glyph_grid;
 #[cfg(test)]
@@ -3905,6 +3910,16 @@ impl Renderer {
         ]);
     }
 
+    /// `push_screen_corners` with a colour per corner, interpolated across
+    /// the quad.
+    fn push_screen_corners_shaded(&mut self, p: [[f32; 2]; 4], c: [[f32; 4]; 4]) {
+        let base = self.color_vertices.len() as u32;
+        for (position, color) in p.into_iter().zip(c) {
+            self.color_vertices.push(ColorVertex { position, color });
+        }
+        self.color_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
     /// Draw a rounded rectangle using SDF-based rendering.
     ///
     /// Each corner is a quarter ellipse `(h, v)`; the interior is painted as
@@ -4448,71 +4463,169 @@ impl Renderer {
         if color.a == 0.0 {
             return;
         }
-        
-        // Calculate shadow rectangle
-        let shadow_rect = if inset {
-            // Inset shadow is inside the box
-            Rect::new(
-                rect.x + offset_x.max(0.0),
-                rect.y + offset_y.max(0.0),
-                rect.width - spread_radius * 2.0 - offset_x.abs(),
-                rect.height - spread_radius * 2.0 - offset_y.abs(),
-            )
-        } else {
-            // Outer shadow is outside the box
-            Rect::new(
-                rect.x + offset_x - spread_radius,
-                rect.y + offset_y - spread_radius,
-                rect.width + spread_radius * 2.0,
-                rect.height + spread_radius * 2.0,
-            )
-        };
-        
-        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+        let sigma = shadow_blur::sigma_of(blur_radius);
+        if inset {
+            self.draw_inset_shadow(rect, radius, offset_x, offset_y, sigma, spread_radius, color);
             return;
         }
 
-        if !inset {
-            let shadow_radius = radius.spread(spread_radius);
-            for (r, alpha) in Self::outer_shadow_paint_rects(
-                rect,
-                radius,
-                shadow_rect,
-                shadow_radius,
-                blur_radius,
-                color.a,
-            ) {
+        // The shadow shape: the border box moved by the offset and grown by
+        // the spread.
+        let shadow_rect = Rect::new(
+            rect.x + offset_x - spread_radius,
+            rect.y + offset_y - spread_radius,
+            rect.width + spread_radius * 2.0,
+            rect.height + spread_radius * 2.0,
+        );
+        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+            return;
+        }
+        let shadow_radius = radius.spread(spread_radius);
+        if sigma <= 0.0 {
+            for (r, alpha) in
+                Self::outer_shadow_paint_rects(rect, radius, shadow_rect, shadow_radius, 0.0, color.a)
+            {
                 self.draw_solid_rect(r, Color::new(color.r, color.g, color.b, alpha));
             }
             return;
         }
 
-        // Inset: for blur, draw multiple layers with decreasing opacity, shrinking
-        // inward. This is a simplified approximation - real blur would use GPU shaders
-        if blur_radius > 0.0 {
-            let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
-            let step_size = blur_radius / steps as f32;
-
-            for i in 0..steps {
-                let layer = steps - i; // Draw outer layers first
-                let expansion = step_size * layer as f32;
-                let layer_alpha = color.a / (steps as f32 * 1.5); // Fade out
-
-                let layer_rect = Rect::new(
-                    shadow_rect.x + expansion,
-                    shadow_rect.y + expansion,
-                    shadow_rect.width - expansion * 2.0,
-                    shadow_rect.height - expansion * 2.0,
-                );
-
-                if layer_rect.width > 0.0 && layer_rect.height > 0.0 {
-                    let layer_color = Color::new(color.r, color.g, color.b, layer_alpha);
-                    self.draw_solid_rect(layer_rect, layer_color);
+        // Blurred: a mesh over the shape grown by the blur's reach, each
+        // cell's corners carrying the exact blurred value, clipped to
+        // outside the border box (CSS Backgrounds 3 §7.1).
+        let shape = shadow_blur::Shape::new(shadow_rect, shadow_radius);
+        let hole = shadow_blur::Shape::new(rect, radius);
+        let reach = shadow_blur::reach_of(sigma);
+        let xs = shadow_blur::mesh_knots(
+            shadow_rect.x - reach,
+            shadow_rect.right() + reach,
+            shape.breaks(false),
+            reach,
+            &hole.breaks(false),
+        );
+        let ys = shadow_blur::mesh_knots(
+            shadow_rect.y - reach,
+            shadow_rect.bottom() + reach,
+            shape.breaks(true),
+            reach,
+            &hole.breaks(true),
+        );
+        let values: Vec<f32> = ys
+            .iter()
+            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
+            .map(|(x, y)| shadow_blur::blurred_coverage(&shape, sigma, x, y))
+            .collect();
+        let n = xs.len();
+        for j in 0..ys.len() - 1 {
+            for i in 0..n - 1 {
+                let c = [
+                    values[j * n + i],
+                    values[j * n + i + 1],
+                    values[(j + 1) * n + i + 1],
+                    values[(j + 1) * n + i],
+                ];
+                if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
+                    continue;
+                }
+                let cell = Rect::new(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
+                if cell.intersect(&rect).is_none() {
+                    self.draw_shadow_cell(cell, cell, c, color, 1.0);
+                    continue;
+                }
+                for (piece, coverage) in rounded_difference_pieces(cell, Default::default(), rect, radius) {
+                    self.draw_shadow_cell(piece, cell, c, color, coverage);
                 }
             }
-        } else {
-            // No blur - just draw solid shadow
-            self.draw_solid_rect(shadow_rect, color);
+        }
+    }
+
+    /// An inset shadow (CSS Backgrounds 3 §7.1): inside `clip` (the padding
+    /// box, `radius` its corners), everything outside the shadow shape —
+    /// `clip` moved by the offset and shrunk by the spread — blurred.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_inset_shadow(
+        &mut self,
+        clip: Rect,
+        radius: rustkit_layout::BorderRadius,
+        offset_x: f32,
+        offset_y: f32,
+        sigma: f32,
+        spread: f32,
+        color: Color,
+    ) {
+        if clip.width <= 0.0 || clip.height <= 0.0 {
+            return;
+        }
+        let inner_rect = Rect::new(
+            clip.x + offset_x + spread,
+            clip.y + offset_y + spread,
+            clip.width - spread * 2.0,
+            clip.height - spread * 2.0,
+        );
+        let inner_radius = radius.spread(-spread);
+        if inner_rect.width <= 0.0 || inner_rect.height <= 0.0 {
+            // Nothing is left of the shape: the whole box is shadow.
+            self.draw_rounded_rect(clip, color, radius);
+            return;
+        }
+        if sigma <= 0.0 {
+            for (piece, coverage) in rounded_difference_pieces(clip, radius, inner_rect, inner_radius) {
+                self.draw_solid_rect(piece, Color::new(color.r, color.g, color.b, color.a * coverage));
+            }
+            return;
+        }
+        let inner = shadow_blur::Shape::new(inner_rect, inner_radius);
+        let outer = shadow_blur::Shape::new(clip, radius);
+        let reach = shadow_blur::reach_of(sigma);
+        let xs = shadow_blur::mesh_knots(clip.x, clip.right(), inner.breaks(false), reach, &outer.breaks(false));
+        let ys = shadow_blur::mesh_knots(clip.y, clip.bottom(), inner.breaks(true), reach, &outer.breaks(true));
+        let values: Vec<f32> = ys
+            .iter()
+            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
+            .map(|(x, y)| 1.0 - shadow_blur::blurred_coverage(&inner, sigma, x, y))
+            .collect();
+        let n = xs.len();
+        self.push_clip_rounded(clip, radius);
+        for j in 0..ys.len() - 1 {
+            for i in 0..n - 1 {
+                let c = [
+                    values[j * n + i],
+                    values[j * n + i + 1],
+                    values[(j + 1) * n + i + 1],
+                    values[(j + 1) * n + i],
+                ];
+                if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
+                    continue;
+                }
+                let cell = Rect::new(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
+                self.draw_shadow_cell(cell, cell, c, color, 1.0);
+            }
+        }
+        self.pop_clip();
+    }
+
+    /// `piece` of the shadow mesh cell `cell`, whose corners carry the
+    /// blurred values `c` (top-left, top-right, bottom-right, bottom-left):
+    /// clipped like any quad, its colour's alpha scaled by the value
+    /// interpolated at each corner and by `coverage`.
+    fn draw_shadow_cell(&mut self, piece: Rect, cell: Rect, c: [f32; 4], color: Color, coverage: f32) {
+        if piece.width <= 0.0 || piece.height <= 0.0 || cell.width <= 0.0 || cell.height <= 0.0 {
+            return;
+        }
+        let tex = [
+            (piece.x - cell.x) / cell.width,
+            (piece.y - cell.y) / cell.height,
+            (piece.right() - cell.x) / cell.width,
+            (piece.bottom() - cell.y) / cell.height,
+        ];
+        let rgb = [color.r as f32 / 255.0, color.g as f32 / 255.0, color.b as f32 / 255.0];
+        for (corners, t, clip_coverage) in self.textured_pieces(piece, tex) {
+            let at = |u: f32, v: f32| {
+                let a = color.a * shadow_blur::bilinear(c, u, v) * coverage * clip_coverage;
+                [rgb[0], rgb[1], rgb[2], a]
+            };
+            let colors = [at(t[0], t[1]), at(t[2], t[1]), at(t[2], t[3]), at(t[0], t[3])];
+            self.push_screen_corners_shaded(corners, colors);
         }
     }
 
