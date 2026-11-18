@@ -66,6 +66,25 @@ python3 tools/stress/run.py --suite speedometer --engine hiwave-headless --binar
     --timeout 60 --until-exit --keep
 ```
 
+Per-frame stage split (FRAME-STAGES; docs/diagnostics/2026-11-17/motionmark_stage_split.md):
+
+```bash
+# one MotionMark subtest held at a fixed complexity (the suite's own fixed controller)
+python3 tools/stress/run.py --suite motionmark --only "Canvas Arcs" --complexity 100 --test-interval 10 \
+    --engine hiwave-headless --binary target/parity/parity-capture --frame-stages
+python3 tools/stress/run.py --suite motionmark --only "Canvas Arcs" --complexity 100 --test-interval 10 \
+    --engine chrome --binary "$CFT" --frame-stages
+```
+
+`--frame-stages`: the headless engine prints one `Frame stages ...` line per
+live turn (parity-capture `--frame-stages`: script, canvas raster, build,
+layout, display list, render and its acquire/execute/present, the wait before
+the turn); Chrome writes its own startup trace (JSON). The record's
+`stage_split` has the per-frame medians (`frame_stages.py`, which also reads
+a kept log or trace by hand); the log and the trace are kept in `<run>.work/`.
+Not for `--engine hiwave`: the app prints no per-turn line yet, and a headless
+run has no present to time.
+
 ## Load
 
 The Mac's rule (2026-11-11): a run starts only below a 1-minute load of 6,

@@ -2234,9 +2234,10 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_info",
         3,
+        2,
         Box::new(move |args| {
             // innerText reads computed display/visibility (CH2.E13).
             // `geom:<read>` names the geometry read for the forced-layout log.
@@ -2684,9 +2685,10 @@ pub(crate) fn install(
     let d = dirty.clone();
     let m = mutations.clone();
     let l = log.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_write",
         5,
+        1,
         Box::new(move |args| {
             let record = write_record(&h.borrow(), args);
             let (reach, cause) = write_reach(&h.borrow(), args, &d);
@@ -4923,36 +4925,138 @@ const WRAPPERS_JS: &str = r#"
         return out;
     }
     // A value holding a bad url (CSS Syntax 3 §4.3.6: an unquoted url with a
-    // quote, `(`, inner whitespace or a control character in it) is invalid
-    // for every property, so the declaration is not in the block (CH2.E29:
-    // Chromium's `el.style.length` leaves it out and the earlier value
-    // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    // quote, `(`, inner whitespace, a control character or a broken escape in
+    // it) is invalid for every property, so the declaration is not in the
+    // block (CH2.E29: Chromium's `el.style.length` leaves it out and the
+    // earlier value stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    //
+    // The value is read as the CSS tokenizer reads it (SEC-STYLE-URL): a
+    // function name is an identifier with its escapes decoded (`\75rl(` is
+    // `url(`), strings and comments are skipped, an identifier after `#` or
+    // `@`, or one that starts with a digit, is not a function name, and
+    // whitespace is CSS whitespace. Pinned against Chrome 148 in
+    // style_value_url_tests.rs. Every built-in it uses is taken now, so page
+    // script cannot change the answer.
+    //
+    // Only a `url(` or an escape can make a value bad, so a value with
+    // neither (almost every value a page writes) is answered by one search.
+    var urlLower = uncurry(String.prototype.toLowerCase), urlIndexOf = uncurry(String.prototype.indexOf);
+    var urlCode = uncurry(String.prototype.charCodeAt);
+    // A property name or priority as the declaration methods compare it, with the same taken built-ins.
+    var cssTrim = uncurry(String.prototype.trim), toDOMString = String;
+    function propertyName(name) { return urlLower(cssTrim(toDOMString(name))); }
+    function cssNewline(c) { return c === 10 || c === 13 || c === 12; }
+    function cssSpace(c) { return c === 32 || c === 9 || cssNewline(c); }
+    // A value without its leading and trailing CSS whitespace (space, tab, newlines; not NBSP or the other
+    // characters JavaScript's trim takes, which CSS reads as name characters).
+    var cssSlice = uncurry(String.prototype.slice);
+    function cssTrimValue(v) {
+        var a = 0, b = v.length;
+        while (a < b && cssSpace(urlCode(v, a))) a++;
+        while (b > a && cssSpace(urlCode(v, b - 1))) b--;
+        return a === 0 && b === v.length ? v : cssSlice(v, a, b);
+    }
+    function hexValue(c) {
+        if (c >= 48 && c <= 57) return c - 48;
+        if (c >= 65 && c <= 70) return c - 55;
+        if (c >= 97 && c <= 102) return c - 87;
+        return -1;
+    }
+    function identCode(c) {
+        return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 45 || c >= 128;
+    }
+    // A backslash at `i` starts an escape unless a newline follows it.
+    function validEscape(value, i) {
+        return urlCode(value, i) === 92 && !(i + 1 < value.length && cssNewline(urlCode(value, i + 1)));
+    }
+    // The index just past the escape whose backslash is at `i` (§4.3.7: up to six hex digits and one
+    // whitespace, or one other character).
+    function escapeEnd(value, i) {
+        var n = value.length, j = i + 1, k;
+        if (j >= n) return j;
+        if (hexValue(urlCode(value, j)) < 0) return j + 1;
+        for (k = 0; k < 6 && j < n && hexValue(urlCode(value, j)) >= 0; k++) j++;
+        if (j + 1 < n && urlCode(value, j) === 13 && urlCode(value, j + 1) === 10) return j + 2;
+        if (j < n && cssSpace(urlCode(value, j))) return j + 1;
+        return j;
+    }
+    // Characters the engine's url reader (`rustkit_css::mask::parse_css_url`: Rust's `char::is_whitespace` and
+    // `is_control`) refuses in an unquoted url although CSS does not (NUL reads as U+FFFD, NBSP is a url
+    // character): refused here too while the engine does, so a value kept here is one the engine reads alike.
+    function engineRefusesInUrl(c) {
+        return c === 0 || (c >= 0x7f && c <= 0x9f) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+            c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+    }
     function hasBadUrl(value) {
-        var quote = null, i, j, k, c;
-        for (i = 0; i < value.length; i++) {
-            c = value.charAt(i);
-            if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
-            if (c === '"' || c === "'") { quote = c; continue; }
-            if (c === '\\') { i++; continue; }
-            // `url(` as its own function name, not the tail of `foourl(`.
-            if (value.substr(i, 4).toLowerCase() !== 'url(' ||
-                (i > 0 && /[\w\-\\\u0080-￿]/.test(value.charAt(i - 1)))) continue;
-            for (j = i + 4; j < value.length && /\s/.test(value.charAt(j)); j++) {}
-            // A quoted url is a function with a string: the strings rule above reads it.
-            if (value.charAt(j) === '"' || value.charAt(j) === "'") { i = j - 1; continue; }
-            for (; j < value.length; j++) {
-                c = value.charAt(j);
-                if (c === '\\') { j++; continue; }
-                if (c === ')') break;
-                if (c === '"' || c === "'" || c === '(' || /[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(c)) return true;
-                if (/\s/.test(c)) {
-                    for (k = j; k < value.length && /\s/.test(value.charAt(k)); k++) {}
-                    // Whitespace is allowed only before the closing `)`.
-                    if (k < value.length && value.charAt(k) !== ')') return true;
-                    j = k - 1;
+        if (urlIndexOf(urlLower(value), 'url(') < 0 && urlIndexOf(value, '\\') < 0) return false;
+        var n = value.length, i = 0, c, q, h, k, cp, prev = -1;
+        while (i < n) {
+            c = urlCode(value, i);
+            if (c === 34 || c === 39) {
+                // A string: to its closing quote; a backslash takes the next character.
+                for (i++; i < n; i++) {
+                    q = urlCode(value, i);
+                    if (q === 92) { i++; continue; }
+                    if (q === c || cssNewline(q)) break;
+                }
+                prev = c; i++;
+                continue;
+            }
+            if (c === 47 && i + 1 < n && urlCode(value, i + 1) === 42) {
+                k = urlIndexOf(value, '*/', i + 2);
+                i = k < 0 ? n : k + 2;
+                prev = 32;
+                continue;
+            }
+            if (!identCode(c) && !validEscape(value, i)) { prev = c; i++; continue; }
+            // An identifier run, decoded: its length and its first three code points (plain variables, not an
+            // array page script could reach through Array.prototype).
+            var count = 0, c0 = -1, c1 = -1, c2 = -1;
+            while (i < n) {
+                c = urlCode(value, i);
+                if (identCode(c)) { cp = c; i++; }
+                else if (validEscape(value, i)) {
+                    i++;
+                    if (i >= n) { cp = 0xfffd; }
+                    else if (hexValue(urlCode(value, i)) >= 0) {
+                        cp = 0;
+                        for (k = 0; k < 6 && i < n && (h = hexValue(urlCode(value, i))) >= 0; k++, i++) cp = cp * 16 + h;
+                        if (i < n && urlCode(value, i) === 13 && i + 1 < n && urlCode(value, i + 1) === 10) i += 2;
+                        else if (i < n && cssSpace(urlCode(value, i))) i++;
+                        if (cp === 0 || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) cp = 0xfffd;
+                    } else { cp = urlCode(value, i); i++; }
+                } else break;
+                if (count === 0) c0 = cp; else if (count === 1) c1 = cp; else if (count === 2) c2 = cp;
+                count++;
+            }
+            var isUrl = count === 3 && prev !== 35 && prev !== 64 &&
+                (c0 === 117 || c0 === 85) && (c1 === 114 || c1 === 82) && (c2 === 108 || c2 === 76) &&
+                i < n && urlCode(value, i) === 40;
+            prev = 97;
+            if (!isUrl) continue;
+            // The url's contents (§4.3.6), after `(` and any whitespace.
+            for (i++; i < n && cssSpace(urlCode(value, i)); i++) {}
+            // A quoted url is a function with a string: the string rule above reads it.
+            if (i < n && (urlCode(value, i) === 34 || urlCode(value, i) === 39)) continue;
+            for (; i < n; i++) {
+                c = urlCode(value, i);
+                if (c === 41) break;
+                if (cssSpace(c)) {
+                    for (k = i; k < n && cssSpace(urlCode(value, k)); k++) {}
+                    // Whitespace is allowed only before the closing `)` (or the end).
+                    if (k < n && urlCode(value, k) !== 41) return true;
+                    i = k - 1;
+                    continue;
+                }
+                if (c === 34 || c === 39 || c === 40 || c <= 8 || c === 11 || (c >= 14 && c <= 31) || c === 127) return true;
+                if (engineRefusesInUrl(c)) return true;
+                if (c === 92) {
+                    if (!validEscape(value, i)) return true;
+                    i = escapeEnd(value, i) - 1;
                 }
             }
-            i = j;
+            i++;
+            prev = 41;
         }
         return false;
     }
@@ -5072,7 +5176,7 @@ const WRAPPERS_JS: &str = r#"
         splitDecls(text).forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
-            var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
+            var name = d.slice(0, i).trim().toLowerCase(), value = cssTrimValue(d.slice(i + 1));
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
@@ -5170,23 +5274,23 @@ const WRAPPERS_JS: &str = r#"
     }
     var styleMethods = {
         getPropertyValue: function (name) {
-            var d = declNamed(this, String(name).trim().toLowerCase());
+            var d = declNamed(this, propertyName(name));
             return d ? d.value : '';
         },
         getPropertyPriority: function (name) {
-            var d = declNamed(this, String(name).trim().toLowerCase());
+            var d = declNamed(this, propertyName(name));
             return d && d.important ? 'important' : '';
         },
         setProperty: function (name, value, priority) {
-            name = String(name).trim().toLowerCase();
-            value = value == null ? '' : String(value).trim();
+            name = propertyName(name);
+            value = value == null ? '' : cssTrimValue(toDOMString(value));
             // Plain strings from here on: what is serialised is what is kept and checked.
             if (typeof name !== 'string') name = '' + name;
             if (typeof value !== 'string') value = '' + value;
             if (value === '') { this.removeProperty(name); return; }
             // An invalid value changes nothing (the attribute is not rewritten).
             if (hasBadUrl(value)) return;
-            var important = String(priority || '').toLowerCase() === 'important';
+            var important = urlLower(toDOMString(priority || '')) === 'important';
             // The same declaration again changes nothing: the attribute is
             // not rewritten (Blink's set-property returns "did not change"),
             // so a geometry read after it lays nothing out (LAT7).
@@ -5199,7 +5303,7 @@ const WRAPPERS_JS: &str = r#"
             storeDecls(this, ds);
         },
         removeProperty: function (name) {
-            name = String(name).trim().toLowerCase();
+            name = propertyName(name);
             if (typeof name !== 'string') name = '' + name;
             var ds = decls(this), old = this.getPropertyValue(name), kept = newList();
             for (var i = 0; i < ds.n; i++) if (ds[i].name !== name) listAdd(kept, ds[i]);

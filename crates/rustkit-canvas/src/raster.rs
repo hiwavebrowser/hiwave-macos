@@ -210,6 +210,71 @@ fn band_clip(size: (u32, u32), clip: Option<&Mask>, band: Rect, t: Transform) ->
     Some(m)
 }
 
+/// What this thread has rasterized so far (FRAME-STAGES): the draws that
+/// painted into a bitmap and the milliseconds the raster calls took (a
+/// draw that returned early, or a clip, adds its time but is not a draw),
+/// never reset. Kept only while [`set_raster_timing`] is on for the
+/// thread; off (the default) a draw reads one thread-local flag and no
+/// clock. The per-frame stage line reads the difference across a turn;
+/// draws run inside the page's script, so this is a breakdown of its
+/// script time.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RasterTotals {
+    pub draws: u64,
+    pub ms: f64,
+}
+
+thread_local! {
+    static TOTALS: std::cell::Cell<RasterTotals> = const { std::cell::Cell::new(RasterTotals { draws: 0, ms: 0.0 }) };
+    static TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// This thread's [`RasterTotals`].
+pub fn raster_totals() -> RasterTotals {
+    TOTALS.with(|t| t.get())
+}
+
+/// Keeps this thread's [`RasterTotals`] from now on (`on`), or stops.
+/// Per thread, as the totals are: the thread that reads them asks.
+pub fn set_raster_timing(on: bool) {
+    TIMING.with(|t| t.set(on));
+}
+
+fn timing() -> bool {
+    TIMING.with(|t| t.get())
+}
+
+/// One raster call, timed until dropped when timing is on: two `Instant`
+/// reads and a thread-local add.
+struct Timed(Option<std::time::Instant>);
+
+fn timed() -> Timed {
+    Timed(timing().then(std::time::Instant::now))
+}
+
+/// One draw painted into a bitmap (counted only while timing is on).
+fn painted() {
+    if timing() {
+        TOTALS.with(|t| {
+            let mut v = t.get();
+            v.draws += 1;
+            t.set(v);
+        });
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let Some(start) = self.0 else { return };
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        TOTALS.with(|t| {
+            let mut v = t.get();
+            v.ms += ms;
+            t.set(v);
+        });
+    }
+}
+
 impl Raster {
     /// Drops the pixels (a resize, a context reset).
     pub(crate) fn reset(&mut self) {
@@ -252,11 +317,13 @@ impl Raster {
         let paint = Paint { shader, blend_mode: blend(ctx.op), anti_alias: true, ..Paint::default() };
         if let Some(pm) = self.pixmap(ctx.size.0, ctx.size.1) {
             pm.fill_path(path, &paint, rule, ts, clip);
+            painted();
         }
     }
 
     /// Fills `path` (canvas path commands, in user space under `t`).
     pub(crate) fn fill(&mut self, ctx: &Ctx, path: &[PathCommand], even_odd: bool, style: &CanvasStyle, t: &Transform2D) {
+        let _timed = timed();
         let Some(path) = build_path(path) else {
             return;
         };
@@ -266,6 +333,7 @@ impl Raster {
 
     /// Strokes `path` with `line`.
     pub(crate) fn stroke(&mut self, ctx: &Ctx, path: &[PathCommand], line: &StrokeStyle, style: &CanvasStyle, t: &Transform2D) {
+        let _timed = timed();
         let Some(path) = build_path(path) else {
             return;
         };
@@ -300,6 +368,7 @@ impl Raster {
 
     /// Clears the rect `x, y, w, h` under `t` to transparent black.
     pub(crate) fn clear(&mut self, clip: Option<&Mask>, x: f32, y: f32, w: f32, h: f32, t: &Transform2D) {
+        let _timed = timed();
         let Some(pm) = self.pixmap.as_mut() else {
             return; // nothing drawn yet: already clear
         };
@@ -310,12 +379,14 @@ impl Raster {
         // clearRect: canvas_raster_cases.json "clear-rect".
         let paint = Paint { blend_mode: BlendMode::Clear, anti_alias: false, ..Paint::default() };
         pm.fill_path(&path, &paint, FillRule::Winding, transform(t), clip);
+        painted();
     }
 
     /// drawImage: the source rect `src` of `image` drawn into the
     /// destination rect `dst` (user space under `t`), smoothed (bilinear,
     /// Chrome's default "low" quality).
     pub(crate) fn draw_image(&mut self, ctx: &Ctx, image: &CanvasBitmap, src: [f32; 4], dst: [f32; 4], t: &Transform2D) {
+        let _timed = timed();
         let [sx, sy, sw, sh] = src;
         let [dx, dy, dw, dh] = dst;
         if sw == 0.0 || sh == 0.0 || dw == 0.0 || dh == 0.0 {
@@ -365,6 +436,7 @@ impl Raster {
         let paint = Paint { shader, blend_mode: blend(ctx.op), anti_alias: true, ..Paint::default() };
         if let Some(pm) = self.pixmap(ctx.size.0, ctx.size.1) {
             pm.fill_path(&PathBuilder::from_rect(area), &paint, FillRule::Winding, transform(t), ctx.clip);
+            painted();
         }
     }
 
@@ -372,6 +444,7 @@ impl Raster {
     /// are (no transform, clip, alpha or compositing) at `dx, dy`, the
     /// part inside `dirty` (`x, y, w, h` in the image, already cut to it).
     pub(crate) fn put(&mut self, size: (u32, u32), rgba: &[u8], width: u32, dx: i32, dy: i32, dirty: [i32; 4]) {
+        let _timed = timed();
         let Some(pm) = self.pixmap(size.0, size.1) else {
             return;
         };
@@ -382,6 +455,7 @@ impl Raster {
         let Some((rows, cols)) = put_span((width, height), (pm.width(), pm.height()), dx, dy, dirty) else {
             return;
         };
+        painted();
         let pixels = pm.pixels_mut();
         for row in rows {
             let ty = dy as i64 + row;
@@ -446,6 +520,7 @@ impl Raster {
 /// The clip mask after clipping to `path` (HTML §4.12.5.1.10: the new
 /// clip is the old one intersected with the path), on a `size` bitmap.
 pub(crate) fn clip_to(size: (u32, u32), old: Option<&Mask>, path: &[PathCommand], even_odd: bool, t: &Transform2D) -> ClipMask {
+    let _timed = timed();
     let rule = if even_odd { FillRule::EvenOdd } else { FillRule::Winding };
     let ts = transform(t);
     let path = build_path(path);
@@ -672,6 +747,71 @@ pub(crate) fn put_span(
     let cols = x.max(0).max(-dx)..(x + w).min(i64::from(image.0)).min(i64::from(bitmap.0) - dx);
     let rows = y.max(0).max(-dy)..(y + h).min(i64::from(image.1)).min(i64::from(bitmap.1) - dy);
     (cols.start < cols.end && rows.start < rows.end).then_some((rows, cols))
+}
+
+#[cfg(test)]
+mod raster_totals_tests {
+    use crate::{raster_totals, set_raster_timing, CanvasRenderingContext2D};
+
+    /// Every draw that paints into the bitmap is one more on this thread's
+    /// totals (the per-frame stage line reads the difference across a
+    /// turn); a draw that returns before painting, and a clip, are not.
+    /// Counts, not milliseconds: no wall-clock bound.
+    #[test]
+    fn each_draw_painted_into_the_bitmap_counts_once_on_the_thread_totals() {
+        set_raster_timing(true);
+        let before = raster_totals();
+        // Nothing drawn yet: the clear returns before painting.
+        let mut fresh = CanvasRenderingContext2D::new(20, 20);
+        fresh.clear_rect(0.0, 0.0, 3.0, 3.0);
+        assert_eq!(raster_totals().draws, before.draws, "a clear of a bitmap never drawn paints nothing");
+        let mut ctx = CanvasRenderingContext2D::new(20, 20);
+        ctx.fill_rect(1.0, 1.0, 5.0, 5.0);
+        ctx.stroke_rect(2.0, 2.0, 6.0, 6.0);
+        ctx.clear_rect(0.0, 0.0, 3.0, 3.0);
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 10.0, 10.0);
+        ctx.clip();
+        let after = raster_totals();
+        assert_eq!(after.draws - before.draws, 3, "fill, stroke and clear: one each; the clip is none");
+        assert!(after.ms >= before.ms, "the time only grows");
+        // Another thread's draws are not this thread's.
+        let other = std::thread::spawn(|| {
+            set_raster_timing(true);
+            let mut ctx = CanvasRenderingContext2D::new(4, 4);
+            ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            raster_totals().draws
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other, 1);
+        assert_eq!(raster_totals().draws, after.draws);
+        set_raster_timing(false);
+    }
+
+    /// Off (the default for every thread), a draw keeps no totals: no
+    /// count and no clock read reaches them.
+    #[test]
+    fn with_raster_timing_off_draws_keep_no_totals() {
+        let draws = std::thread::spawn(|| {
+            let mut ctx = CanvasRenderingContext2D::new(8, 8);
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+            ctx.stroke_rect(1.0, 1.0, 4.0, 4.0);
+            ctx.clear_rect(0.0, 0.0, 2.0, 2.0);
+            raster_totals()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(draws, crate::RasterTotals::default());
+        // Turned off again after being on: the totals stand still.
+        set_raster_timing(true);
+        let mut ctx = CanvasRenderingContext2D::new(8, 8);
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        set_raster_timing(false);
+        let held = raster_totals();
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        assert_eq!(raster_totals(), held);
+    }
 }
 
 #[cfg(test)]
