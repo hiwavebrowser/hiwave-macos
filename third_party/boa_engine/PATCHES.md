@@ -1199,7 +1199,10 @@ of the function shares, and grows only the calling environment for them (`extend
   apart.
 - **Older environments:** an environment created before another call's eval grew the shared scope
   is shorter than the indices code compiled after the growth uses. `get` answers such a slot as
-  uninitialized, and `set` adds it, marked eval-added (`FunctionEnvironment::get` / `set`).
+  uninitialized, and `set` adds it, marked eval-added (`FunctionEnvironment::get` / `set`). The
+  lexical, global and module environments' `get` / `set` take the same guard (a function with
+  parameter expressions keeps its vars in a separate lexical environment). No test here reaches
+  those three past their end; the guard is so that no order of calls can.
 
 **Pin.** `crates/rustkit-js/tests/eval_var_per_call.rs`: 10 cases (reads, writes, `typeof`, `delete`,
 calls before and after the declaring call), each against Chrome for Testing 148.0.7778.216
