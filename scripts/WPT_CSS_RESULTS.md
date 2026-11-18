@@ -1,5 +1,7 @@
 # Pinned CSS testharness results
 
+HiWave was measured on develop at `1901c6c8` with the runner from #1281. The Chrome column reuses the pinned 148.0.7778.216 results for the identical 3,889-URL inventory.
+
 Windows, Chrome for Testing 148.0.7778.216, WPT a24eb4e7a77917cfa5a6f64e8b02288ca1df1877.
 The shared denominator sums the larger reported subtest count per page.
 
@@ -7,7 +9,7 @@ The shared denominator sums the larger reported subtest count per page.
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 65 | 3,429 | 3,429 | 835 | 24.4% | 0 |
+| HiWave | 65 | 3,429 | 3,429 | 830 | 24.2% | 0 |
 | Chrome | 65 | 3,429 | 3,429 | 3,088 | 90.1% | 0 |
 
 ## `css/css-box/`
@@ -28,7 +30,7 @@ The shared denominator sums the larger reported subtest count per page.
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 72 | 12,766 | 12,766 | 1,373 | 10.8% | 0 |
+| HiWave | 72 | 12,766 | 12,766 | 1,372 | 10.7% | 0 |
 | Chrome | 72 | 12,766 | 12,766 | 11,009 | 86.2% | 0 |
 
 ## `css/css-display/`
@@ -49,7 +51,7 @@ The shared denominator sums the larger reported subtest count per page.
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 178 | 8,631 | 8,653 | 2,609 | 30.2% | 0 |
+| HiWave | 178 | 8,631 | 8,653 | 2,621 | 30.3% | 0 |
 | Chrome | 178 | 8,644 | 8,653 | 8,269 | 95.6% | 0 |
 
 ## `css/css-grid/`
@@ -91,21 +93,21 @@ The shared denominator sums the larger reported subtest count per page.
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 110 | 5,528 | 5,531 | 857 | 15.5% | 0 |
+| HiWave | 110 | 5,528 | 5,531 | 858 | 15.5% | 0 |
 | Chrome | 110 | 5,531 | 5,531 | 5,515 | 99.7% | 0 |
 
 ## `css/css-values/`
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 291 | 10,452 | 10,483 | 1,993 | 19.0% | 0 |
+| HiWave | 291 | 10,452 | 10,483 | 1,998 | 19.1% | 0 |
 | Chrome | 291 | 10,271 | 10,483 | 9,104 | 86.8% | 3 |
 
 ## `css/css-variables/`
 
 | Browser | Pages | Reported subtests | Shared denominator | Passes | Pass rate | Crashes |
 |---|---:|---:|---:|---:|---:|---:|
-| HiWave | 65 | 591 | 594 | 299 | 50.3% | 0 |
+| HiWave | 65 | 591 | 594 | 300 | 50.5% | 0 |
 | Chrome | 65 | 594 | 594 | 512 | 86.2% | 0 |
 
 ## `css/cssom/`

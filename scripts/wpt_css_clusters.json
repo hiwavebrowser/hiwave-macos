@@ -829,21 +829,21 @@
     ]
   },
   {
+    "failure": "Animation or transition samples differ for box-shadow",
+    "likely_location": "animation sampling / property interpolation",
+    "subtests": 425,
+    "files": [
+      "/css/css-backgrounds/animations/box-shadow-composition.html",
+      "/css/css-backgrounds/animations/box-shadow-interpolation.html"
+    ]
+  },
+  {
     "failure": "CSS.supports rejects font-variation-settings values",
     "likely_location": "crates/rustkit-bindings/src/web_cssom.js supports() / crates/rustkit-css/src/lib.rs",
     "subtests": 418,
     "files": [
       "/css/css-fonts/animations/font-variation-settings-composition.html",
       "/css/css-fonts/animations/font-variation-settings-interpolation.html"
-    ]
-  },
-  {
-    "failure": "Animation or transition samples differ for box-shadow",
-    "likely_location": "animation sampling / property interpolation",
-    "subtests": 417,
-    "files": [
-      "/css/css-backgrounds/animations/box-shadow-composition.html",
-      "/css/css-backgrounds/animations/box-shadow-interpolation.html"
     ]
   },
   {
@@ -952,14 +952,6 @@
     ]
   },
   {
-    "failure": "Animation or transition samples differ for font",
-    "likely_location": "animation sampling / property interpolation",
-    "subtests": 356,
-    "files": [
-      "/css/css-fonts/animations/system-fonts.html"
-    ]
-  },
-  {
     "failure": "Specified color serialization differs",
     "likely_location": "crates/rustkit-bindings/src/web_cssom.js declaration readback / crates/rustkit-css/src/lib.rs",
     "subtests": 354,
@@ -968,6 +960,14 @@
       "/css/css-color/parsing/color-valid-lab.html",
       "/css/css-color/parsing/color-valid-system-color.html",
       "/css/css-color/parsing/color-valid.html"
+    ]
+  },
+  {
+    "failure": "Animation or transition samples differ for font",
+    "likely_location": "animation sampling / property interpolation",
+    "subtests": 344,
+    "files": [
+      "/css/css-fonts/animations/system-fonts.html"
     ]
   },
   {
@@ -1505,7 +1505,7 @@
   {
     "failure": "Animation or transition samples differ for background-color",
     "likely_location": "animation sampling / property interpolation",
-    "subtests": 139,
+    "subtests": 136,
     "files": [
       "/css/css-backgrounds/animations/background-color-interpolation.html"
     ]
