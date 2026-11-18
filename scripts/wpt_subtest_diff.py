@@ -1,6 +1,7 @@
 """Compare local WPT JSONL runs and produce aggregate directory counts."""
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -32,14 +33,19 @@ def scores(rows, reference):
     return totals
 
 
+def normalize_subtest_name(name):
+    return re.sub(r"(https?://127[.]0[.]0[.]1:)\d+", r"\g<1>PORT", name)
+
+
 def subtests(rows):
     results = {}
     for page, row in rows.items():
         seen = Counter()
         for t in row["subtests"]:
-            key = (page, t["name"], seen[t["name"]])
+            name = normalize_subtest_name(t["name"])
+            key = (page, name, seen[name])
             results[key] = t["status"]
-            seen[t["name"]] += 1
+            seen[name] += 1
     return results
 
 
