@@ -62,7 +62,13 @@ else
 fi
 echo "   RUST_LOG=$RUST_LOG_SPEC" >> "$OUT/meta.txt"
 
-RUST_LOG="$RUST_LOG_SPEC" \
+# A session starts with the sidebar closed, whatever settings.json says, so
+# what it measures is not the sidebar's width or UI work. Open it from the
+# toolbar when the session needs it, or start with HIWAVE_TEST_SIDEBAR=open.
+SIDEBAR_SWITCH="${HIWAVE_TEST_SIDEBAR:-closed}"
+echo "   HIWAVE_TEST_SIDEBAR=$SIDEBAR_SWITCH" >> "$OUT/meta.txt"
+
+HIWAVE_TEST_SIDEBAR="$SIDEBAR_SWITCH" RUST_LOG="$RUST_LOG_SPEC" \
   cargo run -p hiwave-app --features rustkit $PROFILE_FLAG 2>&1 | tee "$OUT/run.log"
 APP_EXIT=${PIPESTATUS[0]}
 
