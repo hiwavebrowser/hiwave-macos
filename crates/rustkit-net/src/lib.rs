@@ -771,6 +771,12 @@ impl ResourceLoader {
             });
         }
 
+        if let Some(interceptor) = &self.interceptor {
+            if !interceptor.read().await.permits_origin(&request.url) {
+                return Err(NetError::Blocked(None));
+            }
+        }
+
         // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
         if let Some(ref proxy) = self.config.replay_proxy {
             if !request.is_replay_proxied {
