@@ -1,0 +1,48 @@
+<!doctype html><html><body><canvas id=c width=100 height=100></canvas><script>
+// SCRIPT-SPLIT probe: what one canvas shim call costs in Boa, part by part (no host: C is a JS no-op).
+var N = 20000;
+function C() {}
+var WM = WeakMap, wmGet = WeakMap.prototype.get;
+var DATA = new WM(); Object.defineProperty(DATA, 'get', { value: wmGet });
+var obj = {}; var rec = { gen: 1, id: 2, st: { lineWidth: 1 } }; DATA.set(obj, rec);
+function data(o) { var d = o != null ? DATA.get(o) : undefined; if (!d) throw new TypeError('Illegal invocation'); return d; }
+function need(n, args, iface, member) { if (args.length < n) throw new TypeError('x'); }
+function call(d, op, a, b, c, e, f, h, i, j) { return C(d.gen, d.id, op, a, b, c, e, f, h, i, j); }
+var variants = {
+  empty_method: function (x, y, r, a0, a1, ccw) {},
+  args_length: function (x, y, r, a0, a1, ccw) { if (arguments.length < 5) throw 1; },
+  need_arguments: function (x, y, r, a0, a1, ccw) { need(5, arguments, 'CanvasRenderingContext2D', 'arc'); },
+  strict_args_length: function (x, y, r, a0, a1, ccw) { 'use strict'; if (arguments.length < 5) throw 1; },
+  rest_length: function (...a) { if (a.length < 5) throw 1; },
+  undefined_guard_only: function (x, y, r, a0, a1, ccw) { if (a1 === undefined) throw 1; },
+  data_this: function (x, y, r, a0, a1, ccw) { data(obj); },
+  call_12: function (x, y, r, a0, a1, ccw) { call(rec, 'arc', +x, +y, +r, +a0, +a1, !!ccw); },
+  C_direct_9: function (x, y, r, a0, a1, ccw) { C(rec.gen, rec.id, 'arc', +x, +y, +r, +a0, +a1, !!ccw); },
+  lean_arc: function (x, y, r, a0, a1, ccw) {
+    'use strict'; if (arguments.length < 5) throw 1;
+    var d = DATA.get(obj); if (!d) throw 1;
+    if (C(d.gen, d.id, 'arc', +x, +y, +r, +a0, +a1, !!ccw) === 'IndexSizeError') throw 1; },
+  full_arc_shim: function (x, y, r, a0, a1, ccw) {
+    need(5, arguments, 'CanvasRenderingContext2D', 'arc');
+    var out = call(data(obj), 'arc', +x, +y, +r, +a0, +a1, !!ccw); if (out === 'IndexSizeError') throw 1; },
+};
+var res = {};
+for (var k in variants) {
+  var f = variants[k];
+  for (var w = 0; w < 2000; w++) f(1, 2, 3, 4, 5, false);
+  var best = 1e9;
+  for (var rep = 0; rep < 5; rep++) {
+    var t = performance.now();
+    for (var i = 0; i < N; i++) f(1, 2, 3, 4, 5, false);
+    best = Math.min(best, (performance.now() - t) * 1000 / N);
+  }
+  res[k] = Math.round(best * 1000) / 1000;
+}
+// The real shim through the prototype (host call included), and a setter.
+var ctx = document.getElementById('c').getContext('2d');
+var t = performance.now(); for (var i = 0; i < N; i++) ctx.arc(1, 2, 3, 4, 5, false); res.real_arc_with_host = Math.round((performance.now() - t) * 1000000 / N) / 1000;
+t = performance.now(); for (var i = 0; i < N; i++) ctx.beginPath(); res.real_beginPath_with_host = Math.round((performance.now() - t) * 1000000 / N) / 1000;
+t = performance.now(); for (var i = 0; i < N; i++) ctx.lineWidth = 3; res.real_lineWidth_set_with_host = Math.round((performance.now() - t) * 1000000 / N) / 1000;
+t = performance.now(); for (var i = 0; i < N; i++) ctx.strokeStyle = '#e01040'; res.real_strokeStyle_set_with_host = Math.round((performance.now() - t) * 1000000 / N) / 1000;
+console.log('SHIM-PARTS ' + JSON.stringify(res));
+</script></body></html>
