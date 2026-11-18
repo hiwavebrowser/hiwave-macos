@@ -31,16 +31,16 @@
 //! the two matrices component-wise, which is not the spec's decomposition
 //! and is a stated gap), and the individual `translate`/`rotate`/`scale`
 //! properties (`none` as the identity), `line-height`, the four
-//! `border-*-radius` corners, `background-size` and `visibility` (its
-//! discrete rule: `visible` in between when either end is). Not here yet:
-//! `box-shadow`, `background-position`,
+//! `border-*-radius` corners, `background-size`, `visibility` (its
+//! discrete rule: `visible` in between when either end is), `box-shadow`
+//! and `filter`/`backdrop-filter` lists. Not here yet: `background-position`,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
-    AnimationPlayState, BackgroundSize, Color, ComputedStyle, CornerRadius, Display, Length,
-    LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem, Visibility,
+    AnimationPlayState, BackgroundSize, BoxShadow, Color, ComputedStyle, CornerRadius, Display,
+    Length, LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem, Visibility,
 };
 use std::collections::HashMap;
 
@@ -73,6 +73,30 @@ pub(crate) enum AnimValue {
     /// `visibility`: discrete, but `visible` between the end points when
     /// either end is `visible` (`interpolate_visibility`).
     Visibility(Visibility),
+    /// `box-shadow`, in the declaration's order (the first is on top).
+    Shadows(Vec<BoxShadow>),
+    /// `filter` / `backdrop-filter`: the declared text (what the style
+    /// keeps; empty is `none`) and its functions as read for
+    /// interpolation (`None` where a function is not one of the
+    /// interpolable ones, a `url()` say: such a list does not transition).
+    Filter(String, Option<Vec<FilterFn>>),
+}
+
+/// One `filter` function as a transition reads it (filter-effects-1 §8):
+/// lengths in px, angles in degrees, amounts as numbers (`50%` is 0.5).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FilterFn {
+    Blur(f32),
+    /// `brightness`, `contrast`, `grayscale`, `invert`, `opacity`,
+    /// `saturate` or `sepia`.
+    Amount(&'static str, f32),
+    HueRotate(f32),
+    DropShadow {
+        x: f32,
+        y: f32,
+        blur: f32,
+        color: Color,
+    },
 }
 
 impl PartialEq for AnimValue {
@@ -89,11 +113,14 @@ impl PartialEq for AnimValue {
             (Radius(a), Radius(b)) => a == b,
             (BackgroundSizes(a), BackgroundSizes(b)) => a == b,
             (Visibility(a), Visibility(b)) => a == b,
+            (Shadows(a), Shadows(b)) => a == b,
+            (Filter(a, _), Filter(b, _)) => a == b,
             // Every variant by name: a new one is a compile error here
             // until its equality is decided.
             (
                 Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_) | Individual(_)
-                | LineHeight(_) | Radius(_) | BackgroundSizes(_) | Visibility(_),
+                | LineHeight(_) | Radius(_) | BackgroundSizes(_) | Visibility(_) | Shadows(_)
+                | Filter(..),
                 _,
             ) => false,
         }
@@ -265,6 +292,41 @@ const PROPS: &[Prop] = &[
         set: |s, v| {
             if let AnimValue::LineHeight(l) = v {
                 s.line_height = *l;
+            }
+        },
+    },
+    Prop {
+        name: "box-shadow",
+        get: |s| AnimValue::Shadows(s.box_shadows.clone()),
+        set: |s, v| {
+            if let AnimValue::Shadows(list) = v {
+                s.box_shadows = list.clone();
+            }
+        },
+    },
+    Prop {
+        name: "filter",
+        get: |s| AnimValue::Filter(s.filter.clone(), parse_filter_list(&s.filter, s.color)),
+        set: |s, v| {
+            if let AnimValue::Filter(text, _) = v {
+                s.filter = text.clone();
+            }
+        },
+    },
+    // A `backdrop-filter` stacks only while it is not `none`; a value on
+    // the way between two lists is never `none`.
+    Prop {
+        name: "backdrop-filter",
+        get: |s| {
+            AnimValue::Filter(
+                s.backdrop_filter.clone(),
+                parse_filter_list(&s.backdrop_filter, s.color),
+            )
+        },
+        set: |s, v| {
+            if let AnimValue::Filter(text, _) = v {
+                s.backdrop_filter = text.clone();
+                crate::set_stacks(s, rustkit_css::STACKS_BACKDROP, !text.is_empty());
             }
         },
     },
@@ -547,6 +609,206 @@ fn interpolate_individual(
     interpolate_op(&a, &b, t).map(Some)
 }
 
+/// `box-shadow` (css-backgrounds-3 §7.2): shadow by shadow, the shorter
+/// list padded with transparent zero shadows of the other's kind; a pair
+/// whose `inset` differs is not interpolable. The end points are the
+/// lists themselves (a transition to `none` ends on no shadow).
+fn interpolate_shadows(a: &[BoxShadow], b: &[BoxShadow], t: f32) -> Option<Vec<BoxShadow>> {
+    if t == 0.0 {
+        return Some(a.to_vec());
+    }
+    if t == 1.0 {
+        return Some(b.to_vec());
+    }
+    let none = |other: &BoxShadow| BoxShadow {
+        color: Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.0,
+        },
+        inset: other.inset,
+        ..BoxShadow::default()
+    };
+    (0..a.len().max(b.len()))
+        .map(|i| {
+            let (x, y) = match (a.get(i), b.get(i)) {
+                (Some(x), Some(y)) => (*x, *y),
+                (Some(x), None) => (*x, none(x)),
+                (None, Some(y)) => (none(y), *y),
+                (None, None) => unreachable!("i is below the longer length"),
+            };
+            (x.inset == y.inset).then(|| BoxShadow {
+                offset_x: lerp(x.offset_x, y.offset_x, t),
+                offset_y: lerp(x.offset_y, y.offset_y, t),
+                blur_radius: lerp(x.blur_radius, y.blur_radius, t).max(0.0),
+                spread_radius: lerp(x.spread_radius, y.spread_radius, t),
+                color: interpolate_color(&x.color, &y.color, t),
+                inset: x.inset,
+            })
+        })
+        .collect()
+}
+
+/// A `filter` list's functions (`None` where one is not interpolable, or
+/// the text does not read). Empty text is `none`, no functions.
+/// `currentcolor` is the colour of a `drop-shadow()` that names none.
+pub(crate) fn parse_filter_list(text: &str, current: Color) -> Option<Vec<FilterFn>> {
+    let amount = |args: &str| -> Option<f32> {
+        let args = args.trim();
+        if args.is_empty() {
+            return Some(1.0);
+        }
+        match args.strip_suffix('%') {
+            Some(p) => p.trim().parse::<f32>().ok().map(|p| p / 100.0),
+            None => args.parse::<f32>().ok(),
+        }
+    };
+    let px = |token: &str| -> Option<f32> {
+        match crate::parse_length(token)? {
+            Length::Percent(_) | Length::Auto | Length::FitContent => None,
+            l => Some(l.to_px(16.0, 16.0, 0.0)),
+        }
+    };
+    crate::computed_read::functions(text)?
+        .into_iter()
+        .map(|(name, args)| {
+            Some(match name.as_str() {
+                "blur" if args.trim().is_empty() => FilterFn::Blur(0.0),
+                "blur" => FilterFn::Blur(px(&args)?),
+                "hue-rotate" if args.trim().is_empty() => FilterFn::HueRotate(0.0),
+                "hue-rotate" => FilterFn::HueRotate(crate::parse_angle(args.trim())?),
+                "brightness" => FilterFn::Amount("brightness", amount(&args)?),
+                "contrast" => FilterFn::Amount("contrast", amount(&args)?),
+                "grayscale" => FilterFn::Amount("grayscale", amount(&args)?),
+                "invert" => FilterFn::Amount("invert", amount(&args)?),
+                "opacity" => FilterFn::Amount("opacity", amount(&args)?),
+                "saturate" => FilterFn::Amount("saturate", amount(&args)?),
+                "sepia" => FilterFn::Amount("sepia", amount(&args)?),
+                "drop-shadow" => {
+                    let mut lengths = Vec::new();
+                    let mut color = None;
+                    for token in split_top_level(&args, ' ') {
+                        match crate::parse_color(token) {
+                            Some(c) => color = Some(c),
+                            None => lengths.push(px(token)?),
+                        }
+                    }
+                    if !(2..=3).contains(&lengths.len()) {
+                        return None;
+                    }
+                    FilterFn::DropShadow {
+                        x: lengths[0],
+                        y: lengths[1],
+                        blur: lengths.get(2).copied().unwrap_or(0.0),
+                        color: color.unwrap_or(current),
+                    }
+                }
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// The value a missing function takes in a filter interpolation (its
+/// initial value, filter-effects-1 §8).
+fn filter_initial(f: &FilterFn) -> FilterFn {
+    match f {
+        FilterFn::Blur(_) => FilterFn::Blur(0.0),
+        FilterFn::HueRotate(_) => FilterFn::HueRotate(0.0),
+        FilterFn::Amount(name, _) => FilterFn::Amount(
+            name,
+            match *name {
+                "grayscale" | "invert" | "sepia" => 0.0,
+                _ => 1.0,
+            },
+        ),
+        FilterFn::DropShadow { .. } => FilterFn::DropShadow {
+            x: 0.0,
+            y: 0.0,
+            blur: 0.0,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0.0,
+            },
+        },
+    }
+}
+
+/// filter-effects-1 §8: function by function when one list's functions
+/// are the other's first ones (a missing function at its initial value;
+/// `none` is the empty list), else not interpolable.
+fn interpolate_filter_fns(a: &[FilterFn], b: &[FilterFn], t: f32) -> Option<Vec<FilterFn>> {
+    (0..a.len().max(b.len()))
+        .map(|i| {
+            let (x, y) = match (a.get(i), b.get(i)) {
+                (Some(x), Some(y)) => (x.clone(), y.clone()),
+                (Some(x), None) => (x.clone(), filter_initial(x)),
+                (None, Some(y)) => (filter_initial(y), y.clone()),
+                (None, None) => unreachable!("i is below the longer length"),
+            };
+            Some(match (x, y) {
+                (FilterFn::Blur(p), FilterFn::Blur(q)) => FilterFn::Blur(lerp(p, q, t).max(0.0)),
+                (FilterFn::HueRotate(p), FilterFn::HueRotate(q)) => {
+                    FilterFn::HueRotate(lerp(p, q, t))
+                }
+                (FilterFn::Amount(n, p), FilterFn::Amount(m, q)) if n == m => {
+                    FilterFn::Amount(n, lerp(p, q, t).max(0.0))
+                }
+                (
+                    FilterFn::DropShadow {
+                        x: x0,
+                        y: y0,
+                        blur: b0,
+                        color: c0,
+                    },
+                    FilterFn::DropShadow {
+                        x: x1,
+                        y: y1,
+                        blur: b1,
+                        color: c1,
+                    },
+                ) => FilterFn::DropShadow {
+                    x: lerp(x0, x1, t),
+                    y: lerp(y0, y1, t),
+                    blur: lerp(b0, b1, t).max(0.0),
+                    color: interpolate_color(&c0, &c1, t),
+                },
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// A filter list as the style keeps it (the text paint and
+/// `getComputedStyle` read).
+fn filter_text(fns: &[FilterFn]) -> String {
+    let n = |v: f32| {
+        let r = (v * 1000.0).round() / 1000.0;
+        format!("{r}")
+    };
+    fns.iter()
+        .map(|f| match f {
+            FilterFn::Blur(px) => format!("blur({}px)", n(*px)),
+            FilterFn::HueRotate(deg) => format!("hue-rotate({}deg)", n(*deg)),
+            FilterFn::Amount(name, v) => format!("{name}({})", n(*v)),
+            FilterFn::DropShadow { x, y, blur, color } => format!(
+                "drop-shadow({}px {}px {}px rgba({}, {}, {}, {}))",
+                n(*x),
+                n(*y),
+                n(*blur),
+                color.r,
+                color.g,
+                color.b,
+                n(color.a)
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `visibility` (web-animations-1 §5.3, css-transitions-1): discrete,
 /// except that with `visible` at either end the value is `visible` for
 /// every progress strictly between 0 and 1. With neither end `visible`
@@ -654,6 +916,18 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
         }
         (AnimValue::Visibility(x), AnimValue::Visibility(y)) => {
             AnimValue::Visibility(interpolate_visibility(*x, *y, t)?)
+        }
+        (AnimValue::Shadows(x), AnimValue::Shadows(y)) => {
+            AnimValue::Shadows(interpolate_shadows(x, y, t)?)
+        }
+        // The end points keep the declared text.
+        (AnimValue::Filter(xt, x), AnimValue::Filter(yt, y)) => {
+            let fns = interpolate_filter_fns(x.as_ref()?, y.as_ref()?, t)?;
+            match t {
+                t if t == 0.0 => AnimValue::Filter(xt.clone(), Some(fns)),
+                t if t == 1.0 => AnimValue::Filter(yt.clone(), Some(fns)),
+                _ => AnimValue::Filter(filter_text(&fns), Some(fns)),
+            }
         }
         _ => return None,
     })
@@ -1396,6 +1670,8 @@ pub(crate) fn is_paint_prop(index: usize) -> bool {
             | "border-bottom-color"
             | "border-left-color"
             | "outline-color"
+            // Ink only: a shadow adds to no box and no overflow layout reads.
+            | "box-shadow"
     )
 }
 
