@@ -624,6 +624,8 @@ fn an_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
         frame(&mut engine, view);
     }
     let (mismatches, spliced) = (splice_mismatches_for_test(), splices_for_test().0);
+    // Not vacuous: the frames before the image did splice, so the kept tree was there to go stale.
+    assert!(spliced > 0, "the frames before the image spliced (last miss {:?})", splices_for_test().1);
     // The image arrives; no relayout of its own runs before the next script write.
     let url = Url::parse(&format!("http://127.0.0.1:{}/late.png", server.port)).unwrap();
     engine.lctx.image_manager.insert_fetched(&url, Some("image/png"), PNG).expect("the PNG decodes");
