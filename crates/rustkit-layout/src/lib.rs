@@ -12617,8 +12617,9 @@ impl DisplayList {
         let box_rect = layout_box.dimensions.border_box();
         let border_radius = self.border_radius_px(layout_box);
 
-        // Render outer shadows first (in order, first shadow is top-most)
-        for shadow in &layout_box.style.box_shadows {
+        // The first shadow is top-most (css-backgrounds-3 §7.1): painted
+        // last.
+        for shadow in layout_box.style.box_shadows.iter().rev() {
             if shadow.is_visible() && !shadow.inset {
                 self.commands.push(DisplayCommand::BoxShadow {
                     offset_x: shadow.offset_x,
@@ -12653,7 +12654,7 @@ impl DisplayList {
             bottom_left: outer.bottom_left.inset(b.left, b.bottom),
         };
 
-        for shadow in &layout_box.style.box_shadows {
+        for shadow in layout_box.style.box_shadows.iter().rev() {
             if shadow.is_visible() && shadow.inset {
                 self.commands.push(DisplayCommand::BoxShadow {
                     offset_x: shadow.offset_x,
