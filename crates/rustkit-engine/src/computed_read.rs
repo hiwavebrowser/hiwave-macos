@@ -776,11 +776,8 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     }
     let colored = s.text_decoration_color.filter(|c| *c != s.color);
     if !line.is_empty() || styled || colored.is_some() {
-        let mut parts = vec![if line.is_empty() {
-            "none".to_string()
-        } else {
-            line.clone()
-        }];
+        // Chrome 148 leaves `none` out when a style or colour follows.
+        let mut parts = if line.is_empty() { vec![] } else { vec![line.clone()] };
         if styled {
             parts.push(keyword(s.text_decoration_style));
         }
