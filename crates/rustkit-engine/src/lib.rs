@@ -48191,7 +48191,9 @@ fn check_animation_frame(
                 return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
             }
             match animations::prop_name(*index) {
-                "transform" => {
+                // The individual transforms compose into the same matrix
+                // (`effective_transform`), so they come and go the same way.
+                "transform" | "translate" | "rotate" | "scale" => {
                     let identity = |v: &animations::AnimValue| {
                         let mut s = rustkit_css::ComputedStyle::default();
                         animations::set_prop_value(&mut s, *index, v);
