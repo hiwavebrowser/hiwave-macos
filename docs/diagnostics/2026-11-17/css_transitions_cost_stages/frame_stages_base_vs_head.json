@@ -1,0 +1,1209 @@
+{
+ "tool": "parity-capture --profile parity --html-file <page> --width 1280 --height 800 --live-ms 3000 --animations --frame-stages, then tools/stress/frame_stages.py --hiwave",
+ "base": "origin/develop 83b46110 (batch 102)",
+ "head": "atlas/transitions-visibility dabca3cc (stack through #1289, group C included)",
+ "pages": "docs/diagnostics/2026-11-17/css_transitions_cost_stages/<case>.html: 200 cells, transition all 1500ms linear, toggled at 50 ms and every 1600 ms",
+ "note": "base renders once per toggle (the values jump), so its median is of one frame",
+ "runs": {
+  "base/background-color/1": {
+   "engine": "hiwave-headless",
+   "turns": 144,
+   "frames": 86,
+   "stages": {
+    "script_ms": 0.172,
+    "host_ms": 0.001,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 0.0,
+    "layout_ms": 0.0,
+    "display_list_ms": 0.9,
+    "snapshot_ms": 0.0,
+    "svg_ms": 0.0,
+    "render_ms": 1.105,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.9725,
+    "present_ms": 0.0,
+    "other_ms": 3.8315,
+    "busy_ms": 6.0495,
+    "wait_ms": 14.18
+   },
+   "frame_interval_ms": 20.255,
+   "script_less_raster_ms": 0.172,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.171,
+   "host_less_raster_ms": 0.001,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.0269,
+     "us_per_call": 3.81
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.0049,
+     "us_per_call": 0.232
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0042,
+     "us_per_call": 0.148
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0041,
+     "us_per_call": 0.194
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.0014,
+     "us_per_call": 0.126
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 1.0
+    }
+   ]
+  },
+  "base/background-color/2": {
+   "engine": "hiwave-headless",
+   "turns": 147,
+   "frames": 87,
+   "stages": {
+    "script_ms": 0.166,
+    "host_ms": 0.001,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 0.0,
+    "layout_ms": 0.0,
+    "display_list_ms": 0.892,
+    "snapshot_ms": 0.0,
+    "svg_ms": 0.0,
+    "render_ms": 1.119,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.996,
+    "present_ms": 0.0,
+    "other_ms": 3.82,
+    "busy_ms": 6.04,
+    "wait_ms": 13.911
+   },
+   "frame_interval_ms": 20.0485,
+   "script_less_raster_ms": 0.166,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.165,
+   "host_less_raster_ms": 0.001,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 6.67,
+     "ms": 0.0275,
+     "us_per_call": 4.128
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 20.01,
+     "ms": 0.0049,
+     "us_per_call": 0.244
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 20.0,
+     "ms": 0.0044,
+     "us_per_call": 0.221
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 26.67,
+     "ms": 0.0042,
+     "us_per_call": 0.157
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 10.7,
+     "ms": 0.0014,
+     "us_per_call": 0.129
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 6.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 1.0
+    }
+   ]
+  },
+  "head/background-color/1": {
+   "engine": "hiwave-headless",
+   "turns": 142,
+   "frames": 84,
+   "stages": {
+    "script_ms": 0.069,
+    "host_ms": 0.001,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 0.0,
+    "layout_ms": 0.0,
+    "display_list_ms": 0.5625,
+    "snapshot_ms": 0.0,
+    "svg_ms": 0.0,
+    "render_ms": 0.7485,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.693,
+    "present_ms": 0.0,
+    "other_ms": 4.243,
+    "busy_ms": 5.605,
+    "wait_ms": 14.6
+   },
+   "frame_interval_ms": 20.389,
+   "script_less_raster_ms": 0.069,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.068,
+   "host_less_raster_ms": 0.001,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.034,
+     "us_per_call": 4.823
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.0055,
+     "us_per_call": 0.26
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0048,
+     "us_per_call": 0.169
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0048,
+     "us_per_call": 0.226
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.0013,
+     "us_per_call": 0.118
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 8.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "head/background-color/2": {
+   "engine": "hiwave-headless",
+   "turns": 142,
+   "frames": 84,
+   "stages": {
+    "script_ms": 0.072,
+    "host_ms": 0.001,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 0.0,
+    "layout_ms": 0.0,
+    "display_list_ms": 0.554,
+    "snapshot_ms": 0.0,
+    "svg_ms": 0.0,
+    "render_ms": 0.738,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.682,
+    "present_ms": 0.0,
+    "other_ms": 3.933,
+    "busy_ms": 5.3705,
+    "wait_ms": 14.704
+   },
+   "frame_interval_ms": 20.146,
+   "script_less_raster_ms": 0.072,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.071,
+   "host_less_raster_ms": 0.001,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.0327,
+     "us_per_call": 4.635
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.0059,
+     "us_per_call": 0.277
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0046,
+     "us_per_call": 0.161
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0046,
+     "us_per_call": 0.217
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.0011,
+     "us_per_call": 0.103
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 8.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "base/border-radius/1": {
+   "engine": "hiwave-headless",
+   "turns": 55,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.167,
+    "host_ms": 0.013,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.294,
+    "layout_ms": 0.465,
+    "display_list_ms": 0.339,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.015,
+    "render_ms": 7.421,
+    "acquire_ms": 0.0,
+    "execute_ms": 7.342,
+    "present_ms": 0.0,
+    "other_ms": 0.383,
+    "busy_ms": 10.087,
+    "wait_ms": 59.794
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.167,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.154,
+   "host_less_raster_ms": 0.013,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "base/border-radius/2": {
+   "engine": "hiwave-headless",
+   "turns": 54,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.167,
+    "host_ms": 0.012,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.308,
+    "layout_ms": 0.457,
+    "display_list_ms": 0.343,
+    "snapshot_ms": 0.002,
+    "svg_ms": 0.013,
+    "render_ms": 7.612,
+    "acquire_ms": 0.0,
+    "execute_ms": 7.517,
+    "present_ms": 0.0,
+    "other_ms": 0.367,
+    "busy_ms": 10.27,
+    "wait_ms": 59.787
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.167,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.155,
+   "host_less_raster_ms": 0.012,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "head/border-radius/1": {
+   "engine": "hiwave-headless",
+   "turns": 140,
+   "frames": 84,
+   "stages": {
+    "script_ms": 0.045,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 5.567,
+    "layout_ms": 0.4475,
+    "display_list_ms": 0.293,
+    "snapshot_ms": 0.0785,
+    "svg_ms": 0.0,
+    "render_ms": 3.695,
+    "acquire_ms": 0.0,
+    "execute_ms": 3.643,
+    "present_ms": 0.0,
+    "other_ms": 0.2995,
+    "busy_ms": 10.4505,
+    "wait_ms": 7.4825
+   },
+   "frame_interval_ms": 17.981,
+   "script_less_raster_ms": 0.045,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.0445,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 26.67,
+     "ms": 0.1005,
+     "us_per_call": 3.768
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 80.01,
+     "ms": 0.0167,
+     "us_per_call": 0.209
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 80.0,
+     "ms": 0.0143,
+     "us_per_call": 0.179
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 106.67,
+     "ms": 0.0142,
+     "us_per_call": 0.133
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 30.7,
+     "ms": 0.0021,
+     "us_per_call": 0.07
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 6.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "head/border-radius/2": {
+   "engine": "hiwave-headless",
+   "turns": 141,
+   "frames": 84,
+   "stages": {
+    "script_ms": 0.045,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 5.5825,
+    "layout_ms": 0.4445,
+    "display_list_ms": 0.29,
+    "snapshot_ms": 0.079,
+    "svg_ms": 0.0,
+    "render_ms": 3.7355,
+    "acquire_ms": 0.0,
+    "execute_ms": 3.707,
+    "present_ms": 0.0,
+    "other_ms": 0.295,
+    "busy_ms": 10.489,
+    "wait_ms": 7.4635
+   },
+   "frame_interval_ms": 17.989,
+   "script_less_raster_ms": 0.045,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.0435,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 28.24,
+     "ms": 0.1096,
+     "us_per_call": 3.88
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 84.72,
+     "ms": 0.0176,
+     "us_per_call": 0.207
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 112.94,
+     "ms": 0.0154,
+     "us_per_call": 0.136
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 84.71,
+     "ms": 0.015,
+     "us_per_call": 0.177
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 32.27,
+     "ms": 0.0023,
+     "us_per_call": 0.07
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 6.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "base/line-height/1": {
+   "engine": "hiwave-headless",
+   "turns": 56,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.167,
+    "host_ms": 0.013,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.29,
+    "layout_ms": 0.466,
+    "display_list_ms": 0.362,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.016,
+    "render_ms": 0.625,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.544,
+    "present_ms": 0.0,
+    "other_ms": 0.352,
+    "busy_ms": 3.28,
+    "wait_ms": 59.794
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.167,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.154,
+   "host_less_raster_ms": 0.013,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "base/line-height/2": {
+   "engine": "hiwave-headless",
+   "turns": 55,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.165,
+    "host_ms": 0.012,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.289,
+    "layout_ms": 0.463,
+    "display_list_ms": 0.349,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.014,
+    "render_ms": 0.68,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.596,
+    "present_ms": 0.0,
+    "other_ms": 0.346,
+    "busy_ms": 3.308,
+    "wait_ms": 59.794
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.165,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.153,
+   "host_less_raster_ms": 0.012,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "head/line-height/1": {
+   "engine": "hiwave-headless",
+   "turns": 145,
+   "frames": 87,
+   "stages": {
+    "script_ms": 0.068,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 4.046,
+    "layout_ms": 0.708,
+    "display_list_ms": 0.461,
+    "snapshot_ms": 0.041,
+    "svg_ms": 0.0,
+    "render_ms": 0.617,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.567,
+    "present_ms": 0.0,
+    "other_ms": 0.384,
+    "busy_ms": 6.348,
+    "wait_ms": 13.665
+   },
+   "frame_interval_ms": 20.0235,
+   "script_less_raster_ms": 0.068,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.067,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 6.67,
+     "ms": 0.0285,
+     "us_per_call": 4.28
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 20.01,
+     "ms": 0.0047,
+     "us_per_call": 0.235
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 26.67,
+     "ms": 0.0041,
+     "us_per_call": 0.155
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 20.0,
+     "ms": 0.0041,
+     "us_per_call": 0.206
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 10.7,
+     "ms": 0.001,
+     "us_per_call": 0.091
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 9.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "head/line-height/2": {
+   "engine": "hiwave-headless",
+   "turns": 144,
+   "frames": 86,
+   "stages": {
+    "script_ms": 0.058,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 3.602,
+    "layout_ms": 0.633,
+    "display_list_ms": 0.4155,
+    "snapshot_ms": 0.0365,
+    "svg_ms": 0.0,
+    "render_ms": 0.554,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.5045,
+    "present_ms": 0.0,
+    "other_ms": 0.3565,
+    "busy_ms": 5.7475,
+    "wait_ms": 14.4745
+   },
+   "frame_interval_ms": 20.286,
+   "script_less_raster_ms": 0.058,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.057,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.0284,
+     "us_per_call": 4.028
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.005,
+     "us_per_call": 0.235
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0044,
+     "us_per_call": 0.155
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0043,
+     "us_per_call": 0.201
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.001,
+     "us_per_call": 0.089
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "base/background-size/1": {
+   "engine": "hiwave-headless",
+   "turns": 56,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.162,
+    "host_ms": 0.015,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.333,
+    "layout_ms": 0.462,
+    "display_list_ms": 0.415,
+    "snapshot_ms": 0.002,
+    "svg_ms": 0.013,
+    "render_ms": 0.828,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.742,
+    "present_ms": 0.0,
+    "other_ms": 0.358,
+    "busy_ms": 3.574,
+    "wait_ms": 59.795
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.162,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.147,
+   "host_less_raster_ms": 0.015,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "base/background-size/2": {
+   "engine": "hiwave-headless",
+   "turns": 56,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.196,
+    "host_ms": 0.013,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.403,
+    "layout_ms": 0.478,
+    "display_list_ms": 0.378,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.018,
+    "render_ms": 0.895,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.794,
+    "present_ms": 0.0,
+    "other_ms": 0.401,
+    "busy_ms": 3.771,
+    "wait_ms": 59.802
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.196,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.183,
+   "host_less_raster_ms": 0.013,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "head/background-size/1": {
+   "engine": "hiwave-headless",
+   "turns": 144,
+   "frames": 86,
+   "stages": {
+    "script_ms": 0.063,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 3.992,
+    "layout_ms": 0.6895,
+    "display_list_ms": 0.441,
+    "snapshot_ms": 0.039,
+    "svg_ms": 0.0,
+    "render_ms": 0.713,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.667,
+    "present_ms": 0.0,
+    "other_ms": 0.379,
+    "busy_ms": 6.349,
+    "wait_ms": 13.6295
+   },
+   "frame_interval_ms": 20.02,
+   "script_less_raster_ms": 0.063,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.063,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.0318,
+     "us_per_call": 4.51
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.0053,
+     "us_per_call": 0.252
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0046,
+     "us_per_call": 0.163
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0044,
+     "us_per_call": 0.208
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.0011,
+     "us_per_call": 0.098
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "head/background-size/2": {
+   "engine": "hiwave-headless",
+   "turns": 145,
+   "frames": 87,
+   "stages": {
+    "script_ms": 0.063,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 3.982,
+    "layout_ms": 0.707,
+    "display_list_ms": 0.454,
+    "snapshot_ms": 0.04,
+    "svg_ms": 0.0,
+    "render_ms": 0.734,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.683,
+    "present_ms": 0.0,
+    "other_ms": 0.372,
+    "busy_ms": 6.429,
+    "wait_ms": 13.605
+   },
+   "frame_interval_ms": 20.009,
+   "script_less_raster_ms": 0.063,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.063,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 6.67,
+     "ms": 0.0278,
+     "us_per_call": 4.165
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 20.01,
+     "ms": 0.0051,
+     "us_per_call": 0.255
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 26.67,
+     "ms": 0.0045,
+     "us_per_call": 0.17
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 20.0,
+     "ms": 0.0042,
+     "us_per_call": 0.212
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 10.7,
+     "ms": 0.001,
+     "us_per_call": 0.093
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "base/width-two-units/1": {
+   "engine": "hiwave-headless",
+   "turns": 55,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.248,
+    "host_ms": 0.015,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.362,
+    "layout_ms": 0.478,
+    "display_list_ms": 0.369,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.016,
+    "render_ms": 1.225,
+    "acquire_ms": 0.0,
+    "execute_ms": 1.106,
+    "present_ms": 0.0,
+    "other_ms": 0.399,
+    "busy_ms": 4.101,
+    "wait_ms": 54.078
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.248,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.233,
+   "host_less_raster_ms": 0.015,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "base/width-two-units/2": {
+   "engine": "hiwave-headless",
+   "turns": 55,
+   "frames": 1,
+   "stages": {
+    "script_ms": 0.173,
+    "host_ms": 0.012,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 1.342,
+    "layout_ms": 0.478,
+    "display_list_ms": 0.345,
+    "snapshot_ms": 0.003,
+    "svg_ms": 0.018,
+    "render_ms": 1.108,
+    "acquire_ms": 0.0,
+    "execute_ms": 1.022,
+    "present_ms": 0.0,
+    "other_ms": 0.355,
+    "busy_ms": 3.823,
+    "wait_ms": 59.798
+   },
+   "frame_interval_ms": null,
+   "script_less_raster_ms": 0.173,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.161,
+   "host_less_raster_ms": 0.012,
+   "host_calls_per_frame": 9.0,
+   "host_rows_per_frame": []
+  },
+  "head/width-two-units/1": {
+   "engine": "hiwave-headless",
+   "turns": 144,
+   "frames": 86,
+   "stages": {
+    "script_ms": 0.0665,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 4.033,
+    "layout_ms": 0.7155,
+    "display_list_ms": 0.459,
+    "snapshot_ms": 0.042,
+    "svg_ms": 0.0,
+    "render_ms": 0.6255,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.5735,
+    "present_ms": 0.0,
+    "other_ms": 0.3875,
+    "busy_ms": 6.3635,
+    "wait_ms": 13.6285
+   },
+   "frame_interval_ms": 20.067,
+   "script_less_raster_ms": 0.0665,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.0645,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 7.06,
+     "ms": 0.0301,
+     "us_per_call": 4.26
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 21.19,
+     "ms": 0.0055,
+     "us_per_call": 0.258
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 28.24,
+     "ms": 0.0048,
+     "us_per_call": 0.171
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 21.18,
+     "ms": 0.0045,
+     "us_per_call": 0.214
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 11.09,
+     "ms": 0.001,
+     "us_per_call": 0.093
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  },
+  "head/width-two-units/2": {
+   "engine": "hiwave-headless",
+   "turns": 145,
+   "frames": 87,
+   "stages": {
+    "script_ms": 0.065,
+    "host_ms": 0.0,
+    "canvas_raster_ms": 0.0,
+    "build_ms": 4.006,
+    "layout_ms": 0.713,
+    "display_list_ms": 0.435,
+    "snapshot_ms": 0.038,
+    "svg_ms": 0.0,
+    "render_ms": 0.592,
+    "acquire_ms": 0.0,
+    "execute_ms": 0.543,
+    "present_ms": 0.0,
+    "other_ms": 0.378,
+    "busy_ms": 6.309,
+    "wait_ms": 13.667
+   },
+   "frame_interval_ms": 20.009,
+   "script_less_raster_ms": 0.065,
+   "renders_per_frame": 1.0,
+   "canvas_draws_per_frame": 0.0,
+   "js_ms": 0.064,
+   "host_less_raster_ms": 0.0,
+   "host_calls_per_frame": 4.0,
+   "host_rows_per_frame": [
+    {
+     "name": "__rustkit_dom_collect",
+     "op": "",
+     "calls": 6.67,
+     "ms": 0.0281,
+     "us_per_call": 4.217
+    },
+    {
+     "name": "__rustkit_dom_attr",
+     "op": "",
+     "calls": 20.01,
+     "ms": 0.005,
+     "us_per_call": 0.252
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "type",
+     "calls": 26.67,
+     "ms": 0.0042,
+     "us_per_call": 0.159
+    },
+    {
+     "name": "__rustkit_dom_info",
+     "op": "parent",
+     "calls": 20.0,
+     "ms": 0.0042,
+     "us_per_call": 0.211
+    },
+    {
+     "name": "__rustkit_now_ms",
+     "op": "",
+     "calls": 10.7,
+     "ms": 0.001,
+     "us_per_call": 0.09
+    },
+    {
+     "name": "__rustkit_dom_write",
+     "op": "setAttr",
+     "calls": 0.01,
+     "ms": 0.0001,
+     "us_per_call": 7.0
+    },
+    {
+     "name": "__rustkit_dom_root",
+     "op": "",
+     "calls": 0.01,
+     "ms": 0.0,
+     "us_per_call": 0.0
+    }
+   ]
+  }
+ }
+}

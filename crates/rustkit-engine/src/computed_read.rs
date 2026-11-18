@@ -72,6 +72,23 @@ pub(crate) fn length(l: &Length, font_px: f32) -> Option<String> {
         Length::Zero => "0px".into(),
         Length::Auto => "auto".into(),
         Length::FitContent => "fit-content".into(),
+        // A `calc()` mix (a transition between two units): `em`/`rem` are
+        // px by now; Chrome writes the percentage first (`calc(25% + 5px)`).
+        // A viewport unit has no viewport here.
+        Length::Calc(c) => {
+            if c.vw != 0.0 || c.vh != 0.0 || c.vmin != 0.0 || c.vmax != 0.0 {
+                return None;
+            }
+            let px = c.px + c.em * font_px + c.rem * root_font();
+            match (c.percent != 0.0, px != 0.0) {
+                (true, true) => {
+                    let sign = if px < 0.0 { '-' } else { '+' };
+                    format!("calc({}% {sign} {})", numf(c.percent), css_px(px.abs()))
+                }
+                (true, false) => format!("{}%", numf(c.percent)),
+                _ => css_px(px),
+            }
+        }
         _ => return None,
     })
 }
