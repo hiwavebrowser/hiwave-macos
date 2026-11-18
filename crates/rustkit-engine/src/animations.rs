@@ -67,7 +67,9 @@ impl PartialEq for AnimValue {
             (Color(a), Color(b)) => a == b,
             (CurrentColor(_), CurrentColor(_)) => true,
             (Transform(a), Transform(b)) => a == b,
-            _ => false,
+            // Every variant by name: a new one is a compile error here
+            // until its equality is decided.
+            (Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_), _) => false,
         }
     }
 }
