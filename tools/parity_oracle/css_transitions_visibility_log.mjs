@@ -54,6 +54,33 @@ async function probe(label, css, read) {
   cases.push({ label, css, read, ...out });
 }
 
+// A child with no visibility of its own inherits the parent's animated
+// value (R1 on #1289): the child's visibility at 0, 1, 50 and 99 ms.
+async function probeChild(label, css) {
+  await page.setContent('<!doctype html><style>body{margin:0}#h{width:100px;height:50px;font:16px sans-serif;' +
+    'transition:all 100ms linear}' + css + '</style><div id=h><span id=c>text</span></div>');
+  await page.evaluate(() => document.body.offsetWidth);
+  const out = await page.evaluate(async () => {
+    const el = document.getElementById('h');
+    const c = document.getElementById('c');
+    el.classList.add('on');
+    getComputedStyle(el).visibility;
+    getComputedStyle(c).visibility;
+    const anims = document.getAnimations();
+    const at = {};
+    for (const t of [0, 1, 50, 99]) {
+      anims.forEach((a) => { a.pause(); a.currentTime = t; });
+      at[t] = getComputedStyle(c).visibility;
+    }
+    const names = anims.map((a) => a.effect.target.id + ':' + a.transitionProperty);
+    anims.forEach((a) => a.finish());
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return { at, transitions: names, end: getComputedStyle(c).visibility };
+  });
+  console.log(`${label}: child ${JSON.stringify(out.at)} | anims [${out.transitions}] | end ${out.end}`);
+  cases.push({ label, css, read: 'visibility of the child #c', ...out });
+}
+
 // visibility: discrete, but visible wins whenever one end is visible
 await probe('visible->hidden', '#h{visibility:visible}#h.on{visibility:hidden}', 'visibility');
 await probe('hidden->visible', '#h{visibility:hidden}#h.on{visibility:visible}', 'visibility');
@@ -62,6 +89,8 @@ await probe('hidden->collapse', '#h{visibility:hidden}#h.on{visibility:collapse}
 await probe('named visibility only', '#h{visibility:visible;transition:visibility 100ms linear}#h.on{visibility:hidden}', 'visibility');
 await probe('visible->hidden with opacity', '#h{visibility:visible;opacity:1}#h.on{visibility:hidden;opacity:0}', 'visibility');
 
+await probeChild('child follows parent visible->hidden', '#h{visibility:visible}#h.on{visibility:hidden}');
+await probeChild('child follows parent hidden->visible', '#h{visibility:hidden}#h.on{visibility:visible}');
 await browser.close();
 writeFileSync(RECEIPT, JSON.stringify({ chrome: PIN, sampled_at_ms: 50, duration_ms: 100, timing: 'linear', cases }, null, 2) + '\n');
 console.log('receipt ' + RECEIPT);

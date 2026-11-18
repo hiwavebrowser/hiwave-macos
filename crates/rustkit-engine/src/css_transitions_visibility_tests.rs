@@ -193,3 +193,74 @@ fn visibility_named_alone_transitions() {
     assert_eq!(names, ["visibility"]);
     assert_eq!(end, "hidden");
 }
+
+/// A child with no `visibility` of its own and no transition inherits the
+/// parent's animated value (R1 on #1289). Chrome 148: the child reads the
+/// parent's value at every sample (visible through a fade-out, visible
+/// from the first moment of a fade-in), runs no transition of its own,
+/// and its painted box follows.
+#[test]
+fn a_child_follows_its_parents_animated_visibility() {
+    let page = |css: &str| {
+        format!(
+            "<!doctype html><style>body{{margin:0}}\
+#h{{width:100px;height:50px;font:16px sans-serif;transition:all 100ms linear}}\
+#c{{display:block;width:20px;height:20px;background:rgb(0,255,0)}}{css}</style>\
+<div id=h><span id=c></span></div>\
+<script>var h=document.getElementById('h');var c=document.getElementById('c');</script>"
+        )
+    };
+    let green = |engine: &mut Engine, view: EngineViewId| {
+        let (w, _, rgba) = engine.frame_rgba(view).expect("frame");
+        let i = ((10 * w + 10) * 4) as usize;
+        rgba[i] <= 5 && rgba[i + 1] >= 250 && rgba[i + 2] <= 5
+    };
+    for (css, want_at, want_end) in [
+        (
+            "#h{visibility:visible}#h.on{visibility:hidden}",
+            ["visible", "visible", "visible", "visible"],
+            "hidden",
+        ),
+        (
+            "#h{visibility:hidden}#h.on{visibility:visible}",
+            ["hidden", "visible", "visible", "visible"],
+            "visible",
+        ),
+    ] {
+        let (mut engine, view, _server) = load(&page(css));
+        engine
+            .execute_script(
+                view,
+                "h.classList.add('on');getComputedStyle(h).visibility;getComputedStyle(c).visibility",
+            )
+            .unwrap();
+        let mut at = vec![read(&mut engine, view, "getComputedStyle(c).visibility")];
+        let mut painted = vec![];
+        for step in [10, 40, 40] {
+            pump(&mut engine, view, step, 10);
+            at.push(read(&mut engine, view, "getComputedStyle(c).visibility"));
+            painted.push(green(&mut engine, view));
+        }
+        assert_eq!(at, want_at, "{css}: the child at 0, 10, 50, 90 ms");
+        assert_eq!(
+            painted, [true; 3],
+            "{css}: the child painted at 10, 50, 90 ms"
+        );
+        assert_eq!(
+            read(&mut engine, view, "c.getAnimations().length"),
+            "0",
+            "{css}"
+        );
+        pump(&mut engine, view, 50, 10);
+        assert_eq!(
+            read(&mut engine, view, "getComputedStyle(c).visibility"),
+            want_end,
+            "{css}: the child at the end"
+        );
+        assert_eq!(
+            green(&mut engine, view),
+            want_end == "visible",
+            "{css}: painted at the end"
+        );
+    }
+}

@@ -127,6 +127,36 @@
         "end:visibility"
       ],
       "end": "hidden"
+    },
+    {
+      "label": "child follows parent visible->hidden",
+      "css": "#h{visibility:visible}#h.on{visibility:hidden}",
+      "read": "visibility of the child #c",
+      "at": {
+        "0": "visible",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "h:visibility"
+      ],
+      "end": "hidden"
+    },
+    {
+      "label": "child follows parent hidden->visible",
+      "css": "#h{visibility:hidden}#h.on{visibility:visible}",
+      "read": "visibility of the child #c",
+      "at": {
+        "0": "hidden",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "h:visibility"
+      ],
+      "end": "visible"
     }
   ]
 }
