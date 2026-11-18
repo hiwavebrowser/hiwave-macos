@@ -85,6 +85,21 @@
    "name": "eval_in_eval_made_before_another_call_declared",
    "js": "var f = function (c) { if (c) return eval(c); return function (d) { return eval(\"eval(d)\"); }; }; var old = f(''); f(\"eval('var x = 2;')\"); var r; try { r = old(\"'use strict'; typeof x\"); } catch (e) { r = e.constructor.name; } String(r)",
    "chrome": "undefined"
+  },
+  {
+   "name": "default_parameters_closure_made_before_another_call_declared",
+   "js": "var f = function (a = 0, c) { if (c) return eval(c); return function (d) { return eval(d); }; }; var old = f(0, ''); f(0, \"eval('var x = 2;')\"); var r = []; try { r.push(old(\"'use strict'; typeof x\")); } catch (e) { r.push(e.constructor.name); } try { r.push(old('typeof x')); } catch (e) { r.push(e.constructor.name); } String(r)",
+   "chrome": "undefined,undefined"
+  },
+  {
+   "name": "default_parameters_eval_var_per_call",
+   "js": "var f = function (a = 0, c) { eval(c); return function () { return typeof x; }; }; var g1 = f(0, ''); var g2 = f(0, 'var x = 2'); String([g1(), g2()])",
+   "chrome": "undefined,number"
+  },
+  {
+   "name": "old_activation_sloppy_eval_writes_the_outer_name",
+   "js": "var x = 1; var f = function (c) { if (c) return eval(c); return function (d) { return eval(d); }; }; var old = f(''); f(\"eval('var x = 2;')\"); old('x = 5'); String([x, old('x')])",
+   "chrome": "5,5"
   }
  ],
  "chrome_version": "148.0.7778.216"
