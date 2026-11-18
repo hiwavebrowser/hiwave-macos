@@ -21,6 +21,15 @@ starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
 `HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
 is logged as its `cmd` and size only, always.
 
+`m1_cmd_w_after_clicks` clicks tabs where the chrome says they are (T38):
+it runs `M1_TABS_JS` in the chrome, which posts the tab strip's box and each
+tab's id, box, active flag and block/close button boxes (no titles, no URLs)
+whenever they change. The check clicks a background tab's title left of its
+buttons and the active tab's close button. Until T38 it swept the strip's
+row from x=232, and every tab's block button (left of its close button,
+clickable while transparent) came first, so the step was `NOT RUN`
+(Trace #243). Without the report (the WebKit chrome) the check is `NOT RUN`.
+
 ## Which chrome
 
 The RustKit chrome (chrome.html, the shelf, the Inspector and the settings

@@ -167,6 +167,27 @@ def test_a_clipped_tab_is_clicked_on_its_visible_title_or_skipped():
     assert Strip.X <= x < Strip.X + Strip.W
 
 
+def test_a_tab_showing_mostly_buttons_is_clicked_left_of_them():
+    # Tab 7 shows 60 px at the strip's left edge, 18 of them title: the
+    # middle of what shows is its block button.
+    report = {"strip": [220, 12, 500, 32],
+              "tabs": [{"id": "7", "box": [180, 12, 100, 32], "active": False,
+                        "block": [238, 20, 16, 16], "close": [256, 20, 16, 16]},
+                       {"id": "8", "box": [282, 12, 180, 32], "active": True,
+                        "block": [420, 20, 16, 16], "close": [438, 20, 16, 16]}]}
+    tab, (x, y) = rw.m1_background_tab_point(report)
+    assert tab == "7" and 220 <= x < 238, (tab, x)
+
+
+def test_a_tab_wholly_outside_the_strip_is_never_picked():
+    report = {"strip": [220, 12, 500, 32],
+              "tabs": [{"id": "6", "box": [20, 12, 180, 32], "active": False,
+                        "block": [158, 20, 16, 16], "close": [176, 20, 16, 16]},
+                       {"id": "8", "box": [282, 12, 180, 32], "active": True,
+                        "block": [420, 20, 16, 16], "close": [438, 20, 16, 16]}]}
+    assert rw.m1_background_tab_point(report) is None
+
+
 def test_no_background_tab_on_the_strip_is_none():
     report = rw.m1_strip_report(Strip([1], 1).report_line())
     assert rw.m1_background_tab_point(report) is None
