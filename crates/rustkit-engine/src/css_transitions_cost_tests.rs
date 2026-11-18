@@ -104,3 +104,15 @@ fn css_transitions_cost_background_size() {
 fn css_transitions_cost_width_two_units() {
     measure("width px->%", "", "width:8%");
 }
+
+/// Group G: each cell a two-column grid whose columns move (relayout path,
+/// as group C's).
+#[test]
+#[ignore]
+fn css_transitions_cost_grid_template_columns() {
+    measure(
+        "grid-template-columns",
+        "display:inline-grid;grid-template-columns:30px 70px",
+        "grid-template-columns:60px 40px",
+    );
+}

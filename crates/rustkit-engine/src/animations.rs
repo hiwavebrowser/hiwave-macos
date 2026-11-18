@@ -40,7 +40,8 @@ use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
     AnimationPlayState, BackgroundSize, BoxShadow, Color, ComputedStyle, CornerRadius, Display,
-    Length, LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem, Visibility,
+    GridTemplate, Length, LineHeight, TimingFunction, TrackDefinition, TrackRepeat, TrackSize,
+    TransformList, TransformOp, TransitionItem, Visibility,
 };
 use std::collections::HashMap;
 
@@ -80,6 +81,9 @@ pub(crate) enum AnimValue {
     /// interpolation (`None` where a function is not one of the
     /// interpolable ones, a `url()` say: such a list does not transition).
     Filter(String, Option<Vec<FilterFn>>),
+    /// `grid-template-columns` / `grid-template-rows`: the track list as
+    /// declared (`repeat()` kept, which is what decides the shape).
+    Grid(GridTemplate),
 }
 
 /// One `filter` function as a transition reads it (filter-effects-1 §8):
@@ -115,12 +119,13 @@ impl PartialEq for AnimValue {
             (Visibility(a), Visibility(b)) => a == b,
             (Shadows(a), Shadows(b)) => a == b,
             (Filter(a, _), Filter(b, _)) => a == b,
+            (Grid(a), Grid(b)) => a == b,
             // Every variant by name: a new one is a compile error here
             // until its equality is decided.
             (
                 Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_) | Individual(_)
                 | LineHeight(_) | Radius(_) | BackgroundSizes(_) | Visibility(_) | Shadows(_)
-                | Filter(..),
+                | Filter(..) | Grid(_),
                 _,
             ) => false,
         }
@@ -364,6 +369,24 @@ const PROPS: &[Prop] = &[
     len_prop!("letter-spacing", letter_spacing),
     len_prop!("word-spacing", word_spacing),
     len_prop!("text-indent", text_indent),
+    Prop {
+        name: "grid-template-columns",
+        get: |s| AnimValue::Grid(s.grid_template_columns.clone()),
+        set: |s, v| {
+            if let AnimValue::Grid(g) = v {
+                s.grid_template_columns = g.clone();
+            }
+        },
+    },
+    Prop {
+        name: "grid-template-rows",
+        get: |s| AnimValue::Grid(s.grid_template_rows.clone()),
+        set: |s, v| {
+            if let AnimValue::Grid(g) = v {
+                s.grid_template_rows = g.clone();
+            }
+        },
+    },
 ];
 
 /// The shorthands a `transition-property` name expands to.
@@ -404,6 +427,7 @@ fn expands_to(name: &str) -> &'static [&'static str] {
         "text-decoration" => &["text-decoration-color"],
         "background" => &["background-color", "background-size"],
         "font" => &["font-size", "line-height"],
+        "grid-template" | "grid" => &["grid-template-columns", "grid-template-rows"],
         "border-radius" => &[
             "border-top-left-radius",
             "border-top-right-radius",
@@ -886,6 +910,103 @@ fn interpolate_background_sizes(
         .collect()
 }
 
+/// A discrete pair: the first value before the midpoint, the second from
+/// it on (web-animations-1 §5.3, the 50% flip).
+fn flip<T: Clone>(a: &T, b: &T, t: f32) -> T {
+    if t < 0.5 {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// One grid track size (css-grid-2 §7.2.5): two of one kind interpolate
+/// (px, %, fr, the `fit-content()` limit, a `minmax()` end by end), equal
+/// keywords stay; `None` is a pair of different kinds, which flips at the
+/// midpoint while the rest of the list moves (Chrome 148: `1fr` against
+/// `100px`, `100px` against `auto`).
+fn interpolate_track_size(a: &TrackSize, b: &TrackSize, t: f32) -> Option<TrackSize> {
+    use TrackSize::*;
+    Some(match (a, b) {
+        (Px(x), Px(y)) => Px(lerp(*x, *y, t).max(0.0)),
+        (Percent(x), Percent(y)) => Percent(lerp(*x, *y, t).max(0.0)),
+        (Fr(x), Fr(y)) => Fr(lerp(*x, *y, t).max(0.0)),
+        (FitContent(x), FitContent(y)) => FitContent(lerp(*x, *y, t).max(0.0)),
+        (MinMax(a0, a1), MinMax(b0, b1)) => MinMax(
+            Box::new(interpolate_track_size(a0, b0, t)?),
+            Box::new(interpolate_track_size(a1, b1, t)?),
+        ),
+        (x, y) if x == y => x.clone(),
+        _ => return None,
+    })
+}
+
+/// Two track runs of one length, track by track; line names flip.
+fn interpolate_tracks(
+    a: &[TrackDefinition],
+    b: &[TrackDefinition],
+    t: f32,
+) -> Option<Vec<TrackDefinition>> {
+    (a.len() == b.len()).then(|| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| TrackDefinition {
+                size: interpolate_track_size(&x.size, &y.size, t)
+                    .unwrap_or_else(|| flip(&x.size, &y.size, t)),
+                line_names: flip(&x.line_names, &y.line_names, t),
+            })
+            .collect()
+    })
+}
+
+/// `grid-template-columns` / `-rows` (css-grid-2 §7.2.5): two lists of
+/// the same shape (as many tracks, the same `repeat()`s at the same
+/// places with the same counts and lengths) interpolate track by track;
+/// anything else (`none` against a list, a `repeat()` against the plain
+/// list it expands to, different lengths) is not interpolable, so no
+/// transition starts (Chrome 148).
+fn interpolate_grid_template(a: &GridTemplate, b: &GridTemplate, t: f32) -> Option<GridTemplate> {
+    let tracks = interpolate_tracks(&a.tracks, &b.tracks, t)?;
+    if a.repeats.len() != b.repeats.len() {
+        return None;
+    }
+    let repeats = a
+        .repeats
+        .iter()
+        .zip(&b.repeats)
+        .map(|((at, x), (bt, y))| {
+            if at != bt {
+                return None;
+            }
+            let repeat = match (x, y) {
+                (TrackRepeat::Count(n, x), TrackRepeat::Count(m, y)) if n == m => {
+                    TrackRepeat::Count(*n, interpolate_tracks(x, y, t)?)
+                }
+                (TrackRepeat::AutoFill(x), TrackRepeat::AutoFill(y)) => {
+                    TrackRepeat::AutoFill(interpolate_tracks(x, y, t)?)
+                }
+                (TrackRepeat::AutoFit(x), TrackRepeat::AutoFit(y)) => {
+                    TrackRepeat::AutoFit(interpolate_tracks(x, y, t)?)
+                }
+                _ => return None,
+            };
+            Some((*at, repeat))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // The end points are the lists themselves.
+    if t == 0.0 {
+        return Some(a.clone());
+    }
+    if t == 1.0 {
+        return Some(b.clone());
+    }
+    Some(GridTemplate {
+        tracks,
+        repeats,
+        final_line_names: flip(&a.final_line_names, &b.final_line_names, t),
+    })
+}
+
 fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
     Some(match (a, b) {
         (AnimValue::Number(x), AnimValue::Number(y)) => AnimValue::Number(lerp(*x, *y, t)),
@@ -928,6 +1049,9 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
                 t if t == 1.0 => AnimValue::Filter(yt.clone(), Some(fns)),
                 _ => AnimValue::Filter(filter_text(&fns), Some(fns)),
             }
+        }
+        (AnimValue::Grid(x), AnimValue::Grid(y)) => {
+            AnimValue::Grid(interpolate_grid_template(x, y, t)?)
         }
         _ => return None,
     })
