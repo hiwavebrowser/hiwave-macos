@@ -209,6 +209,36 @@
       "end": "none"
     },
     {
+      "label": "box-shadow revert-layer in a layer",
+      "css": "@layer a{#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}}@layer b{#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:revert-layer}}",
+      "read": "box-shadow",
+      "mid": "rgb(128, 0, 128) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px"
+    },
+    {
+      "label": "box-shadow revert-layer to no earlier layer",
+      "css": "@layer a{#h{color:red}}@layer b{#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
       "label": "filter blur",
       "css": "#h{filter:blur(0px)}#h.on{filter:blur(10px)}",
       "read": "filter",
