@@ -57,6 +57,25 @@ await probe('invalid attribute is ignored', '', '<g fill=blue>' + R + ' fill=bog
 await probe('inherit keyword over attribute', '#p{fill:inherit}', '<g fill=blue>' + R + ' fill=red /></g>', ['p']);
 await probe('inherited from an html ancestor', 'body{fill:blue;stroke:red}', R + ' />', ['s', 'p']);
 
+await probe('quoted url with a parenthesis', '', R + ` fill='url("a)b")' stroke='url("a)b") red' />`, ['p']);
+await probe('a long url() chain is invalid', '', '<g fill=blue>' + R + ' fill="' + 'url(a)'.repeat(1000) + '" /></g>', ['p']);
+
+// A presentation attribute written by script inside a display:none
+// subtree, read before and after the write (R1 on #1294).
+{
+  await page.setContent('<!doctype html><div style="display:none"><svg id=s><g id=g fill=blue><rect id=p width=10 height=10 /></g></svg></div>');
+  const out = await page.evaluate(() => {
+    const read = () => getComputedStyle(document.getElementById('p')).fill;
+    const before = read();
+    document.getElementById('g').setAttribute('fill', 'red');
+    const after = read();
+    document.getElementById('p').setAttribute('fill', 'lime');
+    return [before, after, read()];
+  });
+  console.log(`attribute writes in a display:none subtree: ${out.join(' | ')}`);
+  cases.push({ label: 'attribute writes in a display:none subtree', reads: out });
+}
+
 await browser.close();
 writeFileSync(RECEIPT, JSON.stringify({ chrome: PIN, cases }, null, 2) + '\n');
 console.log('receipt ' + RECEIPT);

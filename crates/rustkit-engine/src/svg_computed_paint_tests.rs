@@ -236,3 +236,102 @@ fn inherited_from_an_html_ancestor() {
         ]
     );
 }
+
+// ------------------------------------------------------- R1 on #1294
+
+/// A quoted url may hold `)`; the paint is not cut there.
+#[test]
+fn a_quoted_url_keeps_its_parenthesis() {
+    assert_eq!(
+        read(
+            "",
+            &format!("{R} fill='url(\"a)b\")' stroke='url(\"a)b\") red' />"),
+            &["p"]
+        ),
+        ["p fill=url(\"a)b\") stroke=url(\"a)b\") rgb(255, 0, 0)"]
+    );
+}
+
+/// A page's long `url()` chain is one invalid value (the parent's fill),
+/// read without recursing once per `url()`: 100k of them used to overflow
+/// the stack on the first read.
+#[test]
+fn a_long_url_chain_is_invalid() {
+    let chain = "url(a)".repeat(100_000);
+    assert_eq!(
+        read(
+            "",
+            &format!("<g fill=blue>{R} fill=\"{chain}\" /></g>"),
+            &["p"]
+        ),
+        ["p fill=rgb(0, 0, 255) stroke=none"]
+    );
+}
+
+/// Script writes a presentation attribute inside a `display: none`
+/// subtree (no relayout follows); the next read sees it (Chrome 148:
+/// blue, then red, then lime).
+#[test]
+fn attribute_writes_in_a_hidden_subtree_are_read() {
+    let server = serve_routes(vec![(
+        "/",
+        "text/html",
+        "<!doctype html><div style=\"display:none\"><svg id=s><g id=g fill=blue>\
+         <rect id=p width=10 height=10 /></g></svg></div>"
+            .to_string(),
+    )]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt().block_on(engine.load_url(view, url)).expect("load_url");
+    let value = engine
+        .execute_script(
+            view,
+            "var read=function(){return getComputedStyle(document.getElementById('p')).fill};\
+             var out=[read()];document.getElementById('g').setAttribute('fill','red');out.push(read());\
+             document.getElementById('p').setAttribute('fill','lime');out.push(read());String(out.join(' | '))",
+        )
+        .unwrap();
+    assert_eq!(
+        value,
+        "String(\"rgb(0, 0, 255) | rgb(255, 0, 0) | rgb(0, 255, 0)\")"
+    );
+}
+
+/// A page with no inline svg resolves no svg paint, however often script
+/// writes and reads styles.
+#[test]
+fn a_page_without_svg_resolves_no_svg_paint() {
+    let server = serve_routes(vec![(
+        "/",
+        "text/html",
+        "<!doctype html><div id=d style=\"width:10px\">x</div>".to_string(),
+    )]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt().block_on(engine.load_url(view, url)).expect("load_url");
+    let before = crate::svg_computed::resolves();
+    engine
+        .execute_script(
+            view,
+            "var d=document.getElementById('d');for(var i=0;i<20;i++){\
+             d.style.width=(10+i)+'px';getComputedStyle(d).width;getComputedStyle(d).fill}",
+        )
+        .unwrap();
+    assert_eq!(crate::svg_computed::resolves() - before, 0);
+}

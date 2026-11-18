@@ -69,6 +69,15 @@ impl Paint {
     }
 }
 
+thread_local! {
+    static RESOLVES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread resolved svg paint (`resolve_all` walks).
+pub(crate) fn resolves() -> u64 {
+    RESOLVES.with(|c| c.get())
+}
+
 const BLACK: Color = Color {
     r: 0,
     g: 0,
@@ -222,6 +231,7 @@ pub(crate) fn resolve_all(
             );
         }
     }
+    RESOLVES.with(|c| c.set(c.get() + 1));
     let mut out = HashMap::new();
     walk(root, None, paint, color_of, &mut out);
     out
@@ -251,5 +261,13 @@ mod tests {
         assert_eq!(text("url(#a) url(#b)"), None);
         assert_eq!(text("coral").as_deref(), Some("rgb(255, 127, 80)"));
         assert_eq!(text("bogus"), None);
+    }
+
+    /// R1 on #1294: page input must not drive recursion. 100k `url()`s
+    /// overflowed the stack, one frame per `url()`.
+    #[test]
+    fn a_long_url_chain_is_rejected() {
+        let chain = "url(a)".repeat(100_000);
+        assert_eq!(parse_paint(&chain, BLACK), None);
     }
 }
