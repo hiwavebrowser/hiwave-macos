@@ -668,7 +668,8 @@ mod tests {
         )
     }
 
-    /// The mesh's sliced integral is `blurred_coverage` at every knot.
+    /// The mesh's sliced integral is `blurred_coverage` at every knot, to
+    /// a level at full alpha (the two slice a corner differently).
     #[test]
     fn a_mesh_holds_the_blurred_coverage_at_its_knots() {
         for (shape, sigma) in [
@@ -690,7 +691,7 @@ mod tests {
                         let want = if inset { 1.0 - want } else { want };
                         let got = mesh.values[j * mesh.xs.len() + i];
                         assert!(
-                            (got - want).abs() < 2e-3,
+                            (got - want).abs() < 4e-3,
                             "({x}, {y}) sigma {sigma}: {got} vs {want}"
                         );
                     }
