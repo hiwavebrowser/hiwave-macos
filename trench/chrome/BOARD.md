@@ -1,6 +1,6 @@
 # Chrome board — HiWave's own UI pages, RustKit vs Chromium (CH3.A1)
 
-Run: 2026-11-18 01:39 UTC · head `514afe2e` on develop `83b46110` · oracle Chrome for Testing 148.0.7778.216 (PARITY_CHROME_PATH) · parity-capture `target/release/parity-capture`
+Run: 2026-11-18 01:44 UTC · head `06ff14f3` on develop `83b46110` · oracle Chrome for Testing 148.0.7778.216 (PARITY_CHROME_PATH) · parity-capture `target/release/parity-capture`
 
 Oracle history: metrics start on 148 from 2026-11-17; earlier rows were measured against Chromium 143 (Playwright-bundled 143.0.7499.4, PARITY_CHROME_PATH unset), so a row's change across that date may be the oracle, not RustKit.
 
@@ -67,7 +67,7 @@ Pixel diff % is pixelmatch over the whole viewport (compare_baseline.mjs). Geome
 
 ## CSS census red list per page
 
-Census 2026-11-03 (`CSS_PROPERTY_CENSUS_2026-11-03.json`, oracle 143.0.7499.4): 212 red properties. Per page, the red properties the page declares (in its `<style>` blocks and `style=` attributes).
+Census: the 2026-11-03 Chromium 143 census (`CSS_PROPERTY_CENSUS_2026-11-03.json`, oracle 143.0.7499.4; NOT this board's oracle (148.0.7778.216): the census has not been retaken on it): 212 red properties. Per page, the red properties the page declares (in its `<style>` blocks and `style=` attributes).
 
 | page | declared properties | red | red properties |
 |---|---:|---:|---|
