@@ -7243,11 +7243,13 @@ impl Renderer {
     /// Remove an image from the cache.
     pub fn remove_image(&mut self, url: &str) {
         self.texture_cache.remove(url);
+        self.forget_canvases(|k| k != url);
     }
 
     /// Drop the uploaded images whose key `keep` rejects.
-    pub fn retain_images(&mut self, keep: impl FnMut(&str) -> bool) {
-        self.texture_cache.retain(keep);
+    pub fn retain_images(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.texture_cache.retain(&mut keep);
+        self.forget_canvases(keep);
     }
 
 
