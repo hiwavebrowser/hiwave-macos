@@ -1,0 +1,36 @@
+<!doctype html><title>clock at present flood</title>
+<style>
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#a { width: 10px; height: 10px; background: #08f; animation: fade 10s linear }
+</style>
+<div id=a></div><script>
+// CLOCK-AT-PRESENT R1 (1): a pending animation frame while zero-delay timers flood the event loop
+// (2000 timers, each re-arming itself: always one due). Does the frame run, and does the
+// timeline move? Pinned on Chrome for Testing 148.0.7778.216, HEADLESS
+// (clock_at_present_probe_chrome.mjs). For 1000 ms of flood: rec.frames = rAF callbacks,
+// rec.tasks = timer callbacks, rec.span = last stamp - first stamp, rec.tl = timeline.currentTime
+// at the end - at the start, rec.lag = timeline - last stamp in the last task.
+window.rec = { done: false };
+setTimeout(function () {
+  var a = document.getElementById('a'), c = a.getAnimations()[0];
+  var stop = false, frames = 0, tasks = 0, first = -1, last = -1, tl0 = document.timeline.currentTime, lag = null, painted = [];
+  function tick(t) {
+    frames++; if (first < 0) first = t; last = t;
+    painted.push(Math.round((c.currentTime - parseFloat(getComputedStyle(a).opacity) * 10000) * 100) / 100);
+    if (!stop) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  function flood() { tasks++; lag = document.timeline.currentTime - last; if (!stop) setTimeout(flood, 0); }
+  for (var i = 0; i < 2000; i++) setTimeout(flood, 0);
+  var started = performance.now();
+  (function check() {
+    if (performance.now() - started >= 1000) {
+      stop = true;
+      rec.frames = frames; rec.tasks = tasks; rec.span = Math.round(last - first);
+      rec.tl = Math.round(document.timeline.currentTime - tl0); rec.lag = Math.round(lag * 100) / 100;
+      rec.paintedMax = Math.max.apply(null, painted.map(Math.abs));
+      rec.done = true;
+    } else setTimeout(check, 0);
+  })();
+}, 300);
+</script>

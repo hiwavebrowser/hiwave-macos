@@ -190,6 +190,17 @@ fn render(s: &Stats) -> String {
     out
 }
 
+/// HIWAVE PATCH (vm-stats): how many times the opcode named `name` ran on this thread; `None`
+/// when the counters are off or no opcode has that name, so a misspelt name never reads as 0. The
+/// report lists only the 40 most run; this answers for any opcode (a test's count).
+pub fn opcode_count(name: &str) -> Option<u64> {
+    if !enabled() {
+        return None;
+    }
+    let byte = (0..=255u8).find(|b| crate::vm::opcode::Opcode::decode(*b).as_str() == name)?;
+    Some(STATS.with(|s| s.borrow().ops[byte as usize]))
+}
+
 /// The counters so far, as text; empty when `RUSTKIT_VM_STATS` is not set.
 pub fn report() -> String {
     if !enabled() {
