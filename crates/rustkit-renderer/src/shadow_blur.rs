@@ -95,6 +95,7 @@ impl Shape {
     }
 
     /// Whether neither side is curved anywhere in `[a, b]`.
+    #[cfg(test)]
     fn straight_between(&self, a: f32, b: f32) -> bool {
         let r = self.rect;
         let [tl, tr, br, bl] = self.corners();
@@ -133,6 +134,7 @@ const CURVED_SLICES: usize = 12;
 
 /// The shape's coverage at `(x, y)` after a Gaussian blur of `sigma`, in
 /// 0..=1. With `sigma` 0, whether the point is inside.
+#[cfg(test)]
 pub(crate) fn blurred_coverage(shape: &Shape, sigma: f32, x: f32, y: f32) -> f32 {
     let r = shape.rect;
     if r.width <= 0.0 || r.height <= 0.0 {
@@ -376,7 +378,7 @@ fn slices_of(shape: &Shape, sigma: f32) -> Vec<(f32, f32, f32)> {
     let mut out = Vec::new();
     // A stretch of height `v` whose tip is at `tip`, running `dir` (+1 down
     // from a top tip, -1 up from a bottom tip).
-    let mut curved = |tip: f32, v: f32, dir: f32, out: &mut Vec<(f32, f32, f32)>| {
+    let curved = |tip: f32, v: f32, dir: f32, out: &mut Vec<(f32, f32, f32)>| {
         if v <= 0.0 {
             return;
         }
@@ -516,6 +518,7 @@ impl MeshCache {
         self.coarse = 0;
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.meshes.len()
     }
