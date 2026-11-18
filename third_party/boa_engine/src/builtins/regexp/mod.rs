@@ -40,6 +40,64 @@ mod tests;
 /// it has evaluated, keyed by the literal's pattern and flags constant indexes.
 pub(crate) type LiteralCache = RefCell<Vec<(u32, u32, RegExp)>>;
 
+// HIWAVE PATCH (regex-input-copy): `regress` matches UCS-2 or UTF-16, not Latin-1, so a Latin-1
+// input is copied to UCS-2 for the matcher. Copying it for every match made a global match over a long
+// string quadratic (each step copied the whole input). The last copy is kept, with the string it came
+// from (so its storage cannot be reused while the copy is kept), and reused while the same string is
+// matched; a different string replaces it, so at most one copy is alive per thread. Short inputs are
+// copied each time: that costs nothing. The kept pair would pin a page's string after the page drops
+// it, so the host releases it when a script turn ends (`release_kept_input`), and an input longer than
+// `KEEP_UP_TO` is never kept (copied for each match, as before; the turn budget stops a long loop of
+// them): what a thread can hold is bounded on paths that arm no turn too.
+thread_local! {
+    static LATIN1_INPUT: RefCell<Option<(JsString, Rc<[u16]>)>> =
+        const { RefCell::new(None) };
+}
+
+/// How many UCS-2 code units this thread keeps for a Latin-1 regexp input (see `LATIN1_INPUT`); 0 when
+/// none is kept. For tests.
+#[doc(hidden)]
+#[must_use]
+pub fn kept_input_units() -> usize {
+    LATIN1_INPUT.with(|cell| cell.borrow().as_ref().map_or(0, |(_, units)| units.len()))
+}
+
+/// Drop the UCS-2 copy of a Latin-1 regexp input this thread keeps, and the string it holds (see
+/// `LATIN1_INPUT`). The host calls it when a script turn ends.
+pub fn release_kept_input() {
+    let kept = LATIN1_INPUT.with(|cell| cell.borrow_mut().take());
+    drop(kept);
+}
+
+/// The UCS-2 code units of `input`, a Latin-1 string (see `LATIN1_INPUT`).
+fn latin1_as_ucs2(input: &JsString) -> Rc<[u16]> {
+    const KEEP_FROM: usize = 256;
+    const KEEP_UP_TO: usize = 1 << 24;
+    let same_storage = |a: &JsString, b: &JsString| match (a.as_str().variant(), b.as_str().variant()) {
+        (JsStrVariant::Latin1(x), JsStrVariant::Latin1(y)) => x.as_ptr() == y.as_ptr() && x.len() == y.len(),
+        _ => false,
+    };
+    if input.len() < KEEP_FROM {
+        return input.to_vec().into();
+    }
+    if input.len() > KEEP_UP_TO {
+        // A different string: what was kept goes, as it would if this one were kept.
+        release_kept_input();
+        return input.to_vec().into();
+    }
+    LATIN1_INPUT.with(|cell| {
+        let mut kept = cell.borrow_mut();
+        if let Some((string, units)) = kept.as_ref()
+            && same_storage(string, input)
+        {
+            return units.clone();
+        }
+        let units: Rc<[u16]> = input.to_vec().into();
+        *kept = Some((input.clone(), units.clone()));
+        units
+    })
+}
+
 /// The internal representation of a `RegExp` object.
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
 // Safety: `RegExp` does not contain any objects which needs to be traced, so this is safe.
@@ -1202,7 +1260,10 @@ impl RegExp {
         let r: Option<regress::Match> = match (full_unicode, input.as_str().variant()) {
             (true | false, JsStrVariant::Latin1(_)) => {
                 // TODO: Currently regress does not support latin1 encoding.
-                let input = input.to_vec();
+                // HIWAVE PATCH (regex-input-copy): the UCS-2 copy of the input is made once and
+                // reused while the same string is matched again (each step of a global match, or a
+                // page's own `exec` loop), not once per match.
+                let input = latin1_as_ucs2(&input);
 
                 // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
                 matcher.find_from_ucs2(&input, last_index as usize).next()

@@ -86,6 +86,10 @@ mod class_list_cost_tests;
 #[cfg(test)]
 mod attr_write_cost_tests;
 #[cfg(test)]
+mod style_write_cost_tests;
+#[cfg(test)]
+mod style_value_url_tests;
+#[cfg(test)]
 mod attr_write_tests;
 #[cfg(test)]
 mod node_apis_tests;

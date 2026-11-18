@@ -600,8 +600,9 @@ impl Animations {
     /// style (css-transitions-1 §3: a transition on an element that no
     /// longer has one is cancelled). A build that took the kept box tree
     /// (`reused_tree`) visited no element at all, and a pointer restyle's
-    /// partial build (`partial_build`) visited only what is under the
-    /// changed elements; the rest are all still there with their styles:
+    /// or a kept-tree splice's partial build (`partial_build`) visited only
+    /// what is under the changed elements; the rest are all still there
+    /// with their styles:
     /// nothing is cancelled and the before-change values stay for the
     /// next change. (The restyle itself misses to a full build when a
     /// changed element left the document.)
@@ -639,6 +640,26 @@ impl Animations {
         }
         self.captured.retain(|node, _| seen(*node, &self.seen));
         self.seen.retain(|_, s| *s == serial);
+    }
+
+    /// The elements whose before-change values `end_build` would drop if the build so far ended
+    /// now as `partial_build` says (none for a partial build): those the build has not visited.
+    /// `boxes-verify` reads it after a splice, before its comparison build visits the rest.
+    pub(crate) fn would_sweep(&self, partial_build: bool) -> Vec<usize> {
+        if partial_build {
+            return Vec::new();
+        }
+        let serial = self.build_serial;
+        self.base
+            .keys()
+            .copied()
+            .filter(|node| self.seen.get(node) != Some(&serial))
+            .collect()
+    }
+
+    /// Whether the build in progress has handed `node` to `on_style`.
+    pub(crate) fn visited_this_build(&self, node: usize) -> bool {
+        self.seen.get(&node) == Some(&self.build_serial)
     }
 
     /// Whether a build of this document has handed `node` to `on_style`:
