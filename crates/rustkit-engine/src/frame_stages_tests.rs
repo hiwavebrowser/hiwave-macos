@@ -19,6 +19,9 @@ const PAGE: &str = "<html><body style='margin:0'>\
     </script></body></html>";
 
 fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server, tokio::runtime::Runtime) {
+    // These tests count the CPU canvas raster's stages, so the GPU canvas stays
+    // off on this thread whatever HIWAVE_GPU_CANVAS says.
+    rustkit_bindings::canvas::set_gpu_canvas(Some(false));
     let server = serve_routes(vec![("/", "text/html", page.to_string())]);
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
