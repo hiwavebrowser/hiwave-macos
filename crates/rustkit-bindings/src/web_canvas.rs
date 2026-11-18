@@ -284,9 +284,10 @@ pub(crate) fn install(
     let (s, h) = (store.clone(), host.clone());
     // Pixels cross in the runtime's slot, not as arguments.
     let pixels = runtime.pixel_slot();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_canvas",
         12,
+        2,
         Box::new(move |args| {
             let Some(op) = text(args, 2) else {
                 return JsValue::Undefined;
