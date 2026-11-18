@@ -187,10 +187,7 @@ impl LayoutCtx {
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         let built = build();
-        // A kept-tree splice (TREE-REUSE) starts its restyle build inside `build`, so it is not
-        // seen above: its last build says so. A splice that missed after its partial build, and
-        // `boxes-verify`, build in full afterwards, which says otherwise.
-        let partial_build = partial_build || crate::relayout_cause::last_build_partial();
+        let partial_build = build_was_partial(partial_build);
         // What the build did not visit has no computed style: its
         // transitions end here. Not after a build that took the kept box
         // tree (it visited nothing) or a partial restyle build (it skipped
@@ -946,4 +943,26 @@ pub(crate) struct FrameChange {
     pub(crate) props: Vec<(usize, crate::animations::AnimValue, crate::animations::AnimValue)>,
     /// `animation_settled_opacity`, painted last and now.
     pub(crate) settled: Option<(Option<f32>, Option<f32>)>,
+}
+
+/// Whether the build `with_building` just ran visited only part of the document, so the animation
+/// state keeps what it did not visit (`Animations::end_build`): `started_partial` (a pointer
+/// restyle set its restyle build before the build), or the last build ran under a restyle build. A
+/// kept-tree splice (TREE-REUSE) starts its restyle build inside the build, so only the second
+/// sees it; a splice that missed after its partial build, and `boxes-verify`, build in full
+/// afterwards, which says otherwise. `boxes-verify` asks it too, for what a splice's sweep would
+/// drop (`Animations::would_sweep`).
+pub(crate) fn build_was_partial(started_partial: bool) -> bool {
+    #[cfg(test)]
+    if IGNORE_LAST_BUILD_PARTIAL.with(|c| c.get()) {
+        return started_partial;
+    }
+    started_partial || crate::relayout_cause::last_build_partial()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: `build_was_partial` as before #1257's fix (a splice swept like a full build), so a
+    /// test can show that `boxes-verify` sees that class of bug.
+    pub(crate) static IGNORE_LAST_BUILD_PARTIAL: Cell<bool> = const { Cell::new(false) };
 }

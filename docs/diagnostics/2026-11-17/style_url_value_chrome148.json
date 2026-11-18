@@ -1479,6 +1479,40 @@
    "value_via_setProperty": "url( a.png )",
    "kept_via_attribute": true,
    "value_via_attribute": "url( a.png )"
+  },
+  {
+   "css": "url(ab)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    133,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(ab)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(ab)"
+  },
+  {
+   "css": "url(a b)",
+   "css_units": [
+    117,
+    114,
+    108,
+    40,
+    97,
+    8195,
+    98,
+    41
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "url(a b)",
+   "kept_via_attribute": true,
+   "value_via_attribute": "url(a b)"
   }
  ],
  "by_property": [
@@ -1728,6 +1762,106 @@
    ],
    "kept_via_setProperty": false,
    "value_via_setProperty": ""
+  },
+  {
+   "property": "color",
+   "css": "red ",
+   "css_units": [
+    114,
+    101,
+    100,
+    160
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
+  },
+  {
+   "property": "color",
+   "css": " red",
+   "css_units": [
+    160,
+    114,
+    101,
+    100
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
+  },
+  {
+   "property": "color",
+   "css": "red﻿",
+   "css_units": [
+    114,
+    101,
+    100,
+    65279
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
+  },
+  {
+   "property": "color",
+   "css": "﻿red",
+   "css_units": [
+    65279,
+    114,
+    101,
+    100
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
+  },
+  {
+   "property": "color",
+   "css": "red ",
+   "css_units": [
+    114,
+    101,
+    100,
+    8195
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
+  },
+  {
+   "property": "color",
+   "css": " red\t",
+   "css_units": [
+    32,
+    114,
+    101,
+    100,
+    9
+   ],
+   "kept_via_setProperty": true,
+   "value_via_setProperty": "red",
+   "kept_via_attribute": true,
+   "value_via_attribute": "red"
+  },
+  {
+   "property": "width",
+   "css": "10px ",
+   "css_units": [
+    49,
+    48,
+    112,
+    120,
+    160
+   ],
+   "kept_via_setProperty": false,
+   "value_via_setProperty": "",
+   "kept_via_attribute": false,
+   "value_via_attribute": ""
   }
  ],
  "replaced_builtins": "before"

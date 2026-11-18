@@ -152,6 +152,18 @@ const CHILD: &str = "<!doctype html><style>@keyframes fade{from{opacity:0}to{opa
 /// machine is (R1: the wall-clock bounds failed on a fast or a slow machine).
 #[test]
 fn in_a_frame_document_a_css_animation_is_on_the_frames_own_timeline() {
+    frame_document_case(false);
+}
+
+/// The same with one animation round per turn (RAF-ONE-ROUND on; CLOCK-AT-PRESENT): the frame
+/// document's painted time is the presented frame's.
+#[test]
+fn in_a_frame_document_a_css_animation_is_on_the_frames_own_timeline_with_one_round_a_turn() {
+    frame_document_case(true);
+}
+
+fn frame_document_case(one_round: bool) {
+    crate::set_one_animation_round(one_round);
     let parent = "<!doctype html><body><script>window.ready = false;\
         setTimeout(function () { var f = document.createElement('iframe'); f.id = 'f';\
           f.onload = function () { window.ready = true; }; f.src = '/child.html'; document.body.appendChild(f); }, 300);</script></body>";

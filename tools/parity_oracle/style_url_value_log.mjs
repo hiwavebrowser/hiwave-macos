@@ -6,7 +6,7 @@
 // Output: docs/diagnostics/2026-11-17/style_url_value_chrome148.json. Fails unless PARITY_CHROME_PATH is set.
 import { chromium } from 'playwright';
 import { getPinnedExecutablePath } from './deterministic.mjs';
-const browser = await chromium.launch({ executablePath: getPinnedExecutablePath(), headless: true });
+const browser = await chromium.launch({ executablePath: getPinnedExecutablePath({ required: true }), headless: true });
 const values = [
   'url(a b)', 'url(ok.png)', 'URL(a b)', 'none, url(a(b)',
   '\\75rl(a b)', '\\75 rl(a b)', 'u\\72l(a b)', 'ur\\6c(a b)', '\\55 RL(a b)', '\\55\\52\\4c(a b)',
@@ -27,7 +27,13 @@ const values = [
   'url(', 'url( ', 'url("a b")', 'url("a b" )', '\\75rl("a b")',
   // The rest of the native setter's list (ATHENA) on the custom property.
   'U\\52L(a b)', 'ur\\l(a b)', 'url\\(a b)', 'u\\72l(a.png)', 'image-set(url(a b) 1x)', 'url( a.png )',
+  // A C1 control and a Unicode space inside an unquoted url (delta R1 follow-up).
+  'url(a\u0085b)', 'url(a\u2003b)',
 ];
+// [property, value] pairs on regular properties: a non-CSS-whitespace character around a value is kept
+// in it, not trimmed (delta R1 follow-up).
+const regular = [['color', 'red\u00a0'], ['color', '\u00a0red'], ['color', 'red\ufeff'], ['color', '\ufeffred'],
+  ['color', 'red\u2003'], ['color', ' red\t'], ['width', '10px\u00a0']];
 const athena = ['url(a b)', 'u\\72l(a b)', '\\75rl(a b)', '\\55 RL(a b)', '\\75 rl(a b)', 'U\\52L(a b)', 'ur\\l(a b)',
   'url\\(a b)', 'u\\72l(a.png)', 'url(a\\\nb)', 'image-set(url(a b) 1x)', 'url( a.png )', '"url(a b)"'];
 const units = (v) => Array.from({ length: v.length }, (_, i) => v.charCodeAt(i));
@@ -60,6 +66,18 @@ for (const v of athena) {
     return { kept_via_setProperty: viaSet !== '', value_via_setProperty: viaSet };
   }, units(v));
   out.by_property.push({ property: 'background-image', ...text(v), css_units: units(v), ...wf(r) });
+}
+for (const [prop, v] of regular) {
+  const r = await page.evaluate(([prop, u]) => {
+    const v = String.fromCharCode.apply(null, u), el = document.getElementById('a');
+    el.removeAttribute('style');
+    el.style.setProperty(prop, v);
+    const viaSet = el.style.getPropertyValue(prop);
+    el.setAttribute('style', prop + ': ' + v);
+    const viaAttr = el.style.getPropertyValue(prop);
+    return { kept_via_setProperty: viaSet !== '', value_via_setProperty: viaSet, kept_via_attribute: viaAttr !== '', value_via_attribute: viaAttr };
+  }, [prop, units(v)]);
+  out.by_property.push({ property: prop, ...text(v), css_units: units(v), ...wf(r) });
 }
 // Built-ins replaced by page script do not change the answer.
 out.replaced_builtins = await page.evaluate(() => {

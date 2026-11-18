@@ -161,7 +161,8 @@ def main():
     # As Pete runs the app: no content-thread override, default log level.
     for k in ("HIWAVE_CONTENT_THREAD", "RUST_LOG", "HIWAVE_DEBUG"):
         os.environ.pop(k, None)
-    ENV = {"HIWAVE_TEST_HOOKS": "0"}
+    # Sidebar closed whatever the profile saved: its width and UI work stay out of the timing.
+    ENV = {"HIWAVE_TEST_HOOKS": "0", "HIWAVE_TEST_SIDEBAR": "closed"}
 
     idle = idle_seconds()
     if idle < args.min_idle:
