@@ -695,6 +695,26 @@ impl Animations {
         self.seen.retain(|_, s| *s == serial);
     }
 
+    /// The elements whose before-change values `end_build` would drop if the build so far ended
+    /// now as `partial_build` says (none for a partial build): those the build has not visited.
+    /// `boxes-verify` reads it after a splice, before its comparison build visits the rest.
+    pub(crate) fn would_sweep(&self, partial_build: bool) -> Vec<usize> {
+        if partial_build {
+            return Vec::new();
+        }
+        let serial = self.build_serial;
+        self.base
+            .keys()
+            .copied()
+            .filter(|node| self.seen.get(node) != Some(&serial))
+            .collect()
+    }
+
+    /// Whether the build in progress has handed `node` to `on_style`.
+    pub(crate) fn visited_this_build(&self, node: usize) -> bool {
+        self.seen.get(&node) == Some(&self.build_serial)
+    }
+
     /// Whether a build of this document has handed `node` to `on_style`:
     /// it has a computed style and may have a box. A node no build visited
     /// (detached, or under a `display: none` ancestor) paints nothing, so
