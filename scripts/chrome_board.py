@@ -322,9 +322,14 @@ def compare_geometry(case_id: str, rects_json: Path, rustkit_layout: Path) -> Di
     for f in deltas:
         sel = f.get("selector") or f.get("path")
         worst[sel] = max(worst.get(sel, 0.0), abs(f["delta"]))
+    # An unjoined element scores no geometry diff (T35), so a count alone hides
+    # what the geometry column did not see: name each one, by kind and selector.
+    join_detail = [{"kind": f["kind"], "selector": f.get("selector") or f.get("path")}
+                   for f in record["failures"] if f.get("kind") != "delta"]
     return {
         "geometry_failures": record["geometry_failures"],
         "join_failures": record["join_failures"],
+        "join_detail": join_detail,
         "compared": record["compared"],
         "chrome_boxes": record["chrome_boxes"],
         "worst_selectors": [{"selector": s, "max_delta_px": round(d, 2)} for s, d in
@@ -425,6 +430,7 @@ def summarize(row: Row, result: Dict[str, Any]) -> Dict[str, Any]:
     geometry = result.get("geometry", {})
     entry["geometry_diffs"] = geometry.get("geometry_failures")
     entry["join_failures"] = geometry.get("join_failures")
+    entry["join_detail"] = geometry.get("join_detail", [])
     top = [{"selector": c["selector"], "pct": round(c.get("contribution_percent", 0.0), 1)}
            for c in pixels.get("top", [])[:TOP_N]]
     if len(top) < TOP_N:
@@ -469,6 +475,22 @@ def sort_key(entry: Dict[str, Any]):
     return (0 if entry["status"] != "ok" else 1, -(pct if pct is not None else 0.0))
 
 
+def join_failure_lines(rows: List[Dict[str, Any]]) -> List[str]:
+    """One line per (page, state, kind, selector) with the sizes it failed at.
+    The same element usually fails at every size; listing it per row would
+    repeat it three times and hide a size-only failure in the noise."""
+    seen: Dict[tuple, List[str]] = {}
+    for r in rows:
+        for j in r.get("join_detail") or []:
+            seen.setdefault((r["page"], r["state"], j["kind"], j["selector"]), []).append(r["size"])
+    if not seen:
+        return ["None: every element Chromium captured joined one RustKit box."]
+    out = ["| page | state | kind | selector | sizes |", "|---|---|---|---|---|"]
+    for (page, state, kind, selector), sizes in sorted(seen.items()):
+        out.append(f"| {page} | {state} | {kind} | `{selector}` | {', '.join(sorted(sizes))} |")
+    return out
+
+
 def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "board.json").write_text(json.dumps(board_json, indent=2) + "\n", encoding="utf-8")
@@ -493,20 +515,26 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         "the count of (box, axis) pairs more than 0.5 px from Chrome's rect on the join selector "
         "(layout_oracle_gate.compare_case). Top 3 is the attribution of the diff pixels to elements "
         "by selector; where fewer than three elements carry pixels, the worst geometry deltas fill in. "
+        "Join failures is the count of elements the geometry compare could not pair (missing, ambiguous or "
+        "phantom boxes); an unjoined element scores no geometry diff, so they are listed by selector under "
+        "Join failures below. "
         "Gate is the rule that made the row green (`pixel` or `geometry`), or `red`.",
         "",
         "## Rows, worst first",
         "",
-        "| page | state | size | pixel diff % | geometry diffs | gate | top 3 differing elements | notes |",
-        "|---|---|---|---:|---:|---|---|---|",
+        "| page | state | size | pixel diff % | geometry diffs | join failures | gate | top 3 differing elements | notes |",
+        "|---|---|---|---:|---:|---:|---|---|---|",
     ]
     for r in sorted(rows, key=sort_key):
         geo = "—" if r["geometry_diffs"] is None else str(r["geometry_diffs"])
+        join = "—" if r.get("join_failures") is None else str(r["join_failures"])
         status = "" if r["status"] == "ok" else f"**{r['status']}** "
         notes = status + "; ".join(r["notes"])
         gate = "—" if r["status"] != "ok" else (green_rule(r) or "red")
-        lines.append(f"| {r['page']} | {r['state']} | {r['size']} | {_fmt_pct(r['pixel_diff_pct'])} | {geo} | {gate} | "
-                     f"{_fmt_top(r['top'])} | {notes} |")
+        lines.append(f"| {r['page']} | {r['state']} | {r['size']} | {_fmt_pct(r['pixel_diff_pct'])} | {geo} | {join} | "
+                     f"{gate} | {_fmt_top(r['top'])} | {notes} |")
+    lines += ["", "## Join failures", ""]
+    lines += join_failure_lines(rows)
     lines += ["", "## Pages", "", "| page | rows | green | worst state | worst pixel diff % |", "|---|---:|---:|---|---:|"]
     pages = sorted({r["page"] for r in rows})
     for page in pages:
