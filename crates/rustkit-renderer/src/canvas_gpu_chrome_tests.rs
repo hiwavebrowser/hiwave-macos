@@ -9,11 +9,9 @@
 //! A3's own bounds (1.25x Chrome's GPU-vs-software distance per case) are
 //! not pinned yet; when they are, this test takes them.
 //!
-//! Gated (GPU-GRADIENT): every gradient case is drawn by the GPU (not a
-//! reset from the CPU bitmap) and within the bounds. Every other case drawn
-//! by the GPU is printed with its numbers and listed when past the bounds,
-//! not gated: under 4x MSAA thin curved strokes are past them (row
-//! GPU-AA; A3 decides the GPU's own bounds before the switch defaults on).
+//! Gated: every gradient case is drawn by the GPU (not a reset from the
+//! CPU bitmap), and every case the GPU draws is within the bounds
+//! (GPU-AA: under 4x MSAA thin curved strokes were past them).
 //! Cases that draw an image or a pattern are not run here: this harness has
 //! no image loader (the bitmap pins load them); a case the GPU does not
 //! draw yet is reported as "cpu".
@@ -131,17 +129,13 @@ fn check_file(r: &mut Renderer, json: &str, failures: &mut Vec<String>, gradient
             100.0 * coff as f32 / (w * h) as f32
         );
         if gmax > WRONG || gmean > MEAN {
-            if gradient {
-                failures.push(format!("{name}: GPU max {gmax} mean {gmean:.2}"));
-            } else {
-                println!("gpu-chrome {name}: PAST THE BITMAP BOUNDS (GPU-AA, not gated)");
-            }
+            failures.push(format!("{name}: GPU max {gmax} mean {gmean:.2}, past the bitmap's bounds ({WRONG} / {MEAN})"));
         }
     }
 }
 
 #[test]
-fn gradients_on_the_gpu_are_within_the_bitmap_bounds_of_chrome_and_every_pin_is_reported() {
+fn every_pin_the_gpu_draws_is_within_the_bitmap_bounds_of_chrome() {
     let Some((device, queue)) = gpu() else {
         eprintln!("SKIPPED canvas_gpu_chrome: no GPU adapter");
         return;
