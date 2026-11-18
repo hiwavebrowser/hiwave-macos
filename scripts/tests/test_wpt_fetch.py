@@ -12,3 +12,7 @@ class CachedSuiteTests(unittest.TestCase):
             path = Path(base) / "test"
             path.write_bytes(b"changed")
             self.assertFalse(verified_file(path, "0" * 64))
+
+
+if __name__ == "__main__":
+    unittest.main()
