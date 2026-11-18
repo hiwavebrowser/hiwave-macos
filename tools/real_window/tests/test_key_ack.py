@@ -91,6 +91,16 @@ def test_the_answer_is_the_first_matching_line_stamped_after_the_request():
                             r"New tab - navigating to start page", REQ) is None
 
 
+def test_the_app_s_coloured_lines_are_read_after_log_text_strips_them():
+    # The shape of a real app log line (tracing's colours on, as the app
+    # writes them to the driver's file); App.log_text() strips the codes.
+    raw = ("\x1b[2m2026-10-14T01:37:11.028457Z\x1b[0m \x1b[32m INFO\x1b[0m "
+           "\x1b[2mhiwave::ipc::commands\x1b[0m\x1b[2m:\x1b[0m Closed tab: TabId(0)\n")
+    t0 = 1_791_941_831.0  # 2026-10-14T01:37:11Z
+    assert rw.log_answer_ms(rw.ANSI.sub("", raw), r"Closed tab", t0) == 28.5
+    assert rw.log_answer_ms(raw, r"Closed tab", t0) is None
+
+
 # ── the assertion ──────────────────────────────────────────────────────────
 
 def test_keys_are_judged_from_hwdrive_s_request_to_the_app_s_line_not_the_subprocess_wall(tmp_path, monkeypatch):
