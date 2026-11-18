@@ -332,7 +332,7 @@ impl Renderer {
             let Some((d, n)) = b.lower_within(left) else {
                 let count = cg.over_cap.entry(key.to_string()).or_insert(0);
                 *count += 1;
-                if *count >= CANVAS_OVER_CAP_LIMIT && false { // RED: stub, never denied
+                if *count >= CANVAS_OVER_CAP_LIMIT {
                     cg.over_cap.remove(key);
                     return CanvasReplay::Denied;
                 }
