@@ -379,7 +379,11 @@ This means:
 - ⚠️ If you distribute HiWave, or a modified version, you must make the complete corresponding source available under AGPL-3.0-or-later
 - ⚠️ If you run a modified version for users over a network, you must offer them its source (AGPL section 13)
 
-**Earlier versions:** versions of HiWave published before the move to AGPL-3.0-or-later were released under the Mozilla Public License 2.0 and remain available under it.
+This covers the RustKit engine (`crates/rustkit-*`) as well as the app.
+
+**Earlier versions:** versions of HiWave published before the move to AGPL-3.0-or-later were released under the Mozilla Public License 2.0 and remain available under it; in those versions the RustKit engine crates declared the MIT licence and remain available under MIT.
+
+**Kept on their upstream licence:** the Unicode CLDR data in `crates/rustkit-bindings/src/likely_subtags.txt` and the CLDR tables in `crates/rustkit-bindings/src/web_intl.js` (Unicode License v3), and the Ahem test font in `crates/rustkit-text/tests/fixtures/` (web-platform-tests, tests only). See NOTICE and THIRD_PARTY_NOTICES.md.
 
 **Files under MPL-2.0:** these files contain code contributed under MPL-2.0 by an outside contributor and stay under MPL-2.0 (text in [LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)); each is marked `SPDX-License-Identifier: MPL-2.0`. MPL-2.0 files may form part of this AGPL-3.0-or-later larger work (MPL-2.0 section 3.3).
 - `crates/hiwave-app/src/main.rs`
