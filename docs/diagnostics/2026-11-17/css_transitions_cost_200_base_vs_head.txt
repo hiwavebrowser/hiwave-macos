@@ -1,0 +1,25 @@
+# css_transitions_cost_tests (ignored), 200 elements, 30 live turns of 16 ms, debug test profile (unoptimized),
+# -j 2 under the batch-102 machine rules, one case per process. base = #1286 head e6023f8a+merges (atlas/transitions-individual-transforms),
+# head = #1288 (atlas/transitions-sizes). median/max: wall ms of one pump_live turn. Two runs each.
+## base
+COST background-color: elements=200 frames=30 median_ms=23.00 max_ms=113.68 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST border-radius: elements=200 frames=30 median_ms=0.21 max_ms=0.51 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST line-height: elements=200 frames=30 median_ms=0.21 max_ms=0.44 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST background-size: elements=200 frames=30 median_ms=0.21 max_ms=0.45 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST width px->%: elements=200 frames=30 median_ms=0.20 max_ms=0.46 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST background-color: elements=200 frames=30 median_ms=23.02 max_ms=114.02 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST border-radius: elements=200 frames=30 median_ms=0.20 max_ms=0.50 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST line-height: elements=200 frames=30 median_ms=0.21 max_ms=0.50 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST background-size: elements=200 frames=30 median_ms=0.21 max_ms=0.47 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+COST width px->%: elements=200 frames=30 median_ms=0.21 max_ms=0.50 full_relayouts=0 kept_layout_frames=0 animations=String("0")
+## head
+COST background-color: elements=200 frames=30 median_ms=24.47 max_ms=112.28 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST border-radius: elements=200 frames=30 median_ms=79.35 max_ms=423.70 full_relayouts=30 kept_layout_frames=0 animations=String("800")
+COST line-height: elements=200 frames=30 median_ms=33.66 max_ms=119.31 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST background-size: elements=200 frames=30 median_ms=34.32 max_ms=122.48 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST width px->%: elements=200 frames=30 median_ms=34.01 max_ms=121.06 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST background-color: elements=200 frames=30 median_ms=24.72 max_ms=111.38 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST border-radius: elements=200 frames=30 median_ms=83.39 max_ms=423.98 full_relayouts=30 kept_layout_frames=0 animations=String("800")
+COST line-height: elements=200 frames=30 median_ms=35.45 max_ms=126.59 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST background-size: elements=200 frames=30 median_ms=35.93 max_ms=125.28 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST width px->%: elements=200 frames=30 median_ms=35.48 max_ms=125.81 full_relayouts=30 kept_layout_frames=0 animations=String("200")
