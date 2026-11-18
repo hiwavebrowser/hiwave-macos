@@ -480,24 +480,37 @@ const MESH_VERTICES_PER_MS: usize = 100_000;
 /// Fine meshes kept; the least recently used goes first.
 pub(crate) const MESH_CACHE_CAPACITY: usize = 256;
 
-/// Shadow meshes by shape (`MeshKey`), least recently used evicted, with a
-/// per-frame build budget. Past the budget a mesh is built coarse (a
-/// sixteenth of the vertices) and not kept, so a later frame with budget
-/// left builds it fine.
+/// Coarse meshes kept (`MeshCache`).
+pub(crate) const COARSE_CACHE_CAPACITY: usize = 256;
+
+/// Shadow meshes by shape (`MeshKey`), with a per-frame build budget.
+///
+/// A fine mesh is built while the frame's budget lasts and there is a slot
+/// for it: a free one, or the least recently used mesh if that was not drawn
+/// this frame or the last. Otherwise the shadow gets a coarse mesh (a
+/// sixteenth of the vertices), kept in a side cache until a later frame
+/// with budget and a slot replaces it with the fine one. So a page drawing
+/// more shapes every frame than the fine cache holds settles: those that fit
+/// stay fine, the rest stay coarse, and nothing is rebuilt or alternates.
 #[derive(Default)]
 pub(crate) struct MeshCache {
-    meshes: HashMap<MeshKey, (Arc<Mesh>, u64)>,
+    /// Fine meshes: (mesh, last use, frame of last use).
+    meshes: HashMap<MeshKey, (Arc<Mesh>, u64, u64)>,
+    /// Coarse meshes: (mesh, last use).
+    coarse_meshes: HashMap<MeshKey, (Arc<Mesh>, u64)>,
     tick: u64,
+    frame: u64,
     spent: usize,
     /// Fine meshes built this frame.
     pub builds: usize,
-    /// Coarse meshes built this frame (the budget was spent).
+    /// Coarse meshes built this frame (the budget was spent, or no slot).
     pub coarse: usize,
 }
 
 impl MeshCache {
     /// A new frame: its budget is unspent.
     pub(crate) fn begin_frame(&mut self) {
+        self.frame += 1;
         self.spent = 0;
         self.builds = 0;
         self.coarse = 0;
@@ -507,8 +520,41 @@ impl MeshCache {
         self.meshes.len()
     }
 
-    /// The mesh for this shadow: cached, built fine within the budget, or
-    /// built coarse past it.
+    #[cfg(test)]
+    pub(crate) fn coarse_len(&self) -> usize {
+        self.coarse_meshes.len()
+    }
+
+    /// Whether a fine mesh of `cost` vertices fits this frame's budget (the
+    /// first build of a frame always does).
+    fn affordable(&self, cost: usize) -> bool {
+        self.spent == 0 || self.spent + cost <= MESH_BUILD_BUDGET
+    }
+
+    /// Room for one more fine mesh: true when there is a free slot or the
+    /// least recently used mesh was not drawn this frame or the last (it is
+    /// then evicted).
+    fn make_room(&mut self) -> bool {
+        if self.meshes.len() < MESH_CACHE_CAPACITY {
+            return true;
+        }
+        let Some((oldest, frame)) = self
+            .meshes
+            .iter()
+            .min_by_key(|(_, (_, used, _))| *used)
+            .map(|(k, (_, _, frame))| (k.clone(), *frame))
+        else {
+            return true;
+        };
+        if frame + 1 >= self.frame {
+            return false;
+        }
+        self.meshes.remove(&oldest);
+        true
+    }
+
+    /// The mesh for this shadow: cached fine, built fine, cached coarse, or
+    /// built coarse, in that order of preference.
     pub(crate) fn get(
         &mut self,
         shape: &Shape,
@@ -518,44 +564,53 @@ impl MeshCache {
         origin: (f32, f32),
     ) -> Arc<Mesh> {
         self.tick += 1;
+        let (tick, frame) = (self.tick, self.frame);
         let key = mesh_key(shape, other, sigma, inset, origin);
-        if let Some((mesh, used)) = self.meshes.get_mut(&key) {
-            *used = self.tick;
+        if let Some((mesh, used, used_frame)) = self.meshes.get_mut(&key) {
+            *used = tick;
+            *used_frame = frame;
             return mesh.clone();
         }
         let (xs, ys) = knots_of(shape, other, sigma, inset, Detail::Fine);
         let cost = xs.len() * ys.len();
-        if self.spent > 0 && self.spent + cost > MESH_BUILD_BUDGET {
-            self.coarse += 1;
-            return Arc::new(build_mesh(
-                shape,
-                other,
-                sigma,
-                inset,
-                origin,
-                Detail::Coarse,
-            ));
+        if self.affordable(cost) && self.make_room() {
+            self.spent += cost;
+            self.builds += 1;
+            let values = mesh_values(shape, sigma, inset, &xs, &ys);
+            let (ox, oy) = origin;
+            let mesh = Arc::new(Mesh {
+                xs: xs.into_iter().map(|x| x - ox).collect(),
+                ys: ys.into_iter().map(|y| y - oy).collect(),
+                values,
+            });
+            self.coarse_meshes.remove(&key);
+            self.meshes.insert(key, (mesh.clone(), tick, frame));
+            return mesh;
         }
-        self.spent += cost;
-        self.builds += 1;
-        let values = mesh_values(shape, sigma, inset, &xs, &ys);
-        let (ox, oy) = origin;
-        let mesh = Arc::new(Mesh {
-            xs: xs.into_iter().map(|x| x - ox).collect(),
-            ys: ys.into_iter().map(|y| y - oy).collect(),
-            values,
-        });
-        if self.meshes.len() >= MESH_CACHE_CAPACITY {
+        if let Some((mesh, used)) = self.coarse_meshes.get_mut(&key) {
+            *used = tick;
+            return mesh.clone();
+        }
+        self.coarse += 1;
+        let mesh = Arc::new(build_mesh(
+            shape,
+            other,
+            sigma,
+            inset,
+            origin,
+            Detail::Coarse,
+        ));
+        if self.coarse_meshes.len() >= COARSE_CACHE_CAPACITY {
             if let Some(oldest) = self
-                .meshes
+                .coarse_meshes
                 .iter()
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(k, _)| k.clone())
             {
-                self.meshes.remove(&oldest);
+                self.coarse_meshes.remove(&oldest);
             }
         }
-        self.meshes.insert(key, (mesh.clone(), self.tick));
+        self.coarse_meshes.insert(key, (mesh.clone(), tick));
         mesh
     }
 }
@@ -747,36 +802,69 @@ mod tests {
             .all(|v| v.is_finite()));
     }
 
-    /// 300 distinct shapes, drawn every frame: no frame builds past the
-    /// budget (the first build excepted), the rest are coarse, and every
-    /// shape is drawn.
+    /// 300 distinct shapes, drawn every frame (more than the fine cache
+    /// holds): no frame builds past the budget, every shape is drawn, and the
+    /// page settles: 256 fine, 44 coarse, nothing rebuilt, and each shape
+    /// keeps the same mesh from frame to frame (no fine/coarse alternation).
     #[test]
-    fn three_hundred_shapes_stay_within_the_build_budget() {
+    fn three_hundred_shapes_settle_within_the_build_budget() {
         let mut cache = MeshCache::default();
         let shapes: Vec<Shape> = (0..300).map(|i| pill(100.0 + i as f32, 40.0)).collect();
-        let mut fine_vertices_max = 0;
-        for _frame in 0..10 {
+        let one = {
+            let (xs, ys) = knots_of(&shapes[0], &shapes[0], 8.0, false, Detail::Fine);
+            xs.len() * ys.len()
+        };
+        let mut last: Vec<*const Mesh> = Vec::new();
+        let mut settled_at = None;
+        for frame in 0..20 {
             cache.begin_frame();
-            for s in &shapes {
-                let m = cache.get(s, s, 8.0, false, (0.0, 0.0));
-                assert!(!m.values.is_empty());
-            }
-            assert_eq!(cache.builds + cache.coarse <= 300, true);
-            fine_vertices_max = fine_vertices_max.max(cache.spent);
-            let one = {
-                let (xs, ys) = knots_of(&shapes[0], &shapes[0], 8.0, false, Detail::Fine);
-                xs.len() * ys.len()
-            };
+            let drawn: Vec<*const Mesh> = shapes
+                .iter()
+                .map(|s| Arc::as_ptr(&cache.get(s, s, 8.0, false, (0.0, 0.0))))
+                .collect();
             assert!(
                 cache.spent <= MESH_BUILD_BUDGET.max(one),
-                "spent {} of {}",
+                "frame {frame}: spent {} of {}",
                 cache.spent,
                 MESH_BUILD_BUDGET
             );
-            assert!(cache.builds >= 1, "every frame makes progress");
             assert!(cache.len() <= MESH_CACHE_CAPACITY);
+            assert!(cache.coarse_len() <= COARSE_CACHE_CAPACITY);
+            if cache.builds == 0 && cache.coarse == 0 && drawn == last {
+                settled_at.get_or_insert(frame);
+            } else {
+                assert!(
+                    settled_at.is_none(),
+                    "frame {frame}: unsettled after settling"
+                );
+            }
+            last = drawn;
         }
-        assert!(fine_vertices_max > 0);
+        assert!(
+            settled_at.is_some_and(|f| f < 10),
+            "settled at {settled_at:?}"
+        );
+        assert_eq!((cache.len(), cache.coarse_len()), (256, 44));
+    }
+
+    /// A coarse mesh is replaced by the fine one when a later frame has
+    /// budget and room.
+    #[test]
+    fn a_coarse_mesh_is_upgraded_when_there_is_budget() {
+        let mut cache = MeshCache::default();
+        let shapes: Vec<Shape> = (0..200).map(|i| pill(100.0 + i as f32, 40.0)).collect();
+        cache.begin_frame();
+        for s in &shapes {
+            cache.get(s, s, 8.0, false, (0.0, 0.0));
+        }
+        assert!(cache.coarse > 0, "the first frame ran out of budget");
+        for _ in 0..10 {
+            cache.begin_frame();
+            for s in &shapes {
+                cache.get(s, s, 8.0, false, (0.0, 0.0));
+            }
+        }
+        assert_eq!((cache.len(), cache.coarse_len()), (200, 0));
     }
 
     /// A static page of a few shapes builds each once, then hits.
