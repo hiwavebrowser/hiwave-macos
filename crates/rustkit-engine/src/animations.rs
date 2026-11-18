@@ -31,15 +31,16 @@
 //! the two matrices component-wise, which is not the spec's decomposition
 //! and is a stated gap), and the individual `translate`/`rotate`/`scale`
 //! properties (`none` as the identity), `line-height`, the four
-//! `border-*-radius` corners and `background-size`. Not here yet:
-//! `box-shadow`, `background-position`, `visibility`'s discrete rule,
+//! `border-*-radius` corners, `background-size` and `visibility` (its
+//! discrete rule: `visible` in between when either end is). Not here yet:
+//! `box-shadow`, `background-position`,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
     AnimationPlayState, BackgroundSize, Color, ComputedStyle, CornerRadius, Display, Length,
-    LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem,
+    LineHeight, TimingFunction, TransformList, TransformOp, TransitionItem, Visibility,
 };
 use std::collections::HashMap;
 
@@ -69,6 +70,9 @@ pub(crate) enum AnimValue {
     Radius(CornerRadius),
     /// `background-size`, one per layer (bottom layer first, as stored).
     BackgroundSizes(Vec<BackgroundSize>),
+    /// `visibility`: discrete, but `visible` between the end points when
+    /// either end is `visible` (`interpolate_visibility`).
+    Visibility(Visibility),
 }
 
 impl PartialEq for AnimValue {
@@ -84,11 +88,12 @@ impl PartialEq for AnimValue {
             (LineHeight(a), LineHeight(b)) => a == b,
             (Radius(a), Radius(b)) => a == b,
             (BackgroundSizes(a), BackgroundSizes(b)) => a == b,
+            (Visibility(a), Visibility(b)) => a == b,
             // Every variant by name: a new one is a compile error here
             // until its equality is decided.
             (
                 Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_) | Individual(_)
-                | LineHeight(_) | Radius(_) | BackgroundSizes(_),
+                | LineHeight(_) | Radius(_) | BackgroundSizes(_) | Visibility(_),
                 _,
             ) => false,
         }
@@ -260,6 +265,15 @@ const PROPS: &[Prop] = &[
         set: |s, v| {
             if let AnimValue::LineHeight(l) = v {
                 s.line_height = *l;
+            }
+        },
+    },
+    Prop {
+        name: "visibility",
+        get: |s| AnimValue::Visibility(s.visibility),
+        set: |s, v| {
+            if let AnimValue::Visibility(x) = v {
+                s.visibility = *x;
             }
         },
     },
@@ -533,6 +547,24 @@ fn interpolate_individual(
     interpolate_op(&a, &b, t).map(Some)
 }
 
+/// `visibility` (web-animations-1 §5.3, css-transitions-1): discrete,
+/// except that with `visible` at either end the value is `visible` for
+/// every progress strictly between 0 and 1. With neither end `visible`
+/// it is not interpolable, so no transition starts (Chrome 148: `hidden`
+/// to `collapse`).
+fn interpolate_visibility(a: Visibility, b: Visibility, t: f32) -> Option<Visibility> {
+    if a != Visibility::Visible && b != Visibility::Visible {
+        return (a == b).then_some(a);
+    }
+    Some(if t <= 0.0 {
+        a
+    } else if t >= 1.0 {
+        b
+    } else {
+        Visibility::Visible
+    })
+}
+
 /// `line-height`: numbers and lengths each with their own kind.
 fn interpolate_line_height(a: &LineHeight, b: &LineHeight, t: f32) -> Option<LineHeight> {
     match (a, b) {
@@ -619,6 +651,9 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
         }),
         (AnimValue::BackgroundSizes(x), AnimValue::BackgroundSizes(y)) => {
             AnimValue::BackgroundSizes(interpolate_background_sizes(x, y, t)?)
+        }
+        (AnimValue::Visibility(x), AnimValue::Visibility(y)) => {
+            AnimValue::Visibility(interpolate_visibility(*x, *y, t)?)
         }
         _ => return None,
     })
