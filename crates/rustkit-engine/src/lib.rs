@@ -301,6 +301,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod svg_computed;
 mod console_log;
 pub mod console_file;
 mod relayout_cause;
@@ -713,6 +714,8 @@ mod css_transitions_visibility_tests;
 mod css_transitions_lists_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_grid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_computed_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -20866,6 +20869,12 @@ impl Engine {
         let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
             .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
+        // The view's own document (a test may style a detached one).
+        if let Some(view) = view {
+            if let Some(own) = view.document.as_ref().filter(|d| std::ptr::eq(Rc::as_ptr(d), document)) {
+                self.lctx.note_svg_paint(&view.lay, own);
+            }
+        }
     }
 }
 
@@ -20977,6 +20986,13 @@ impl layout_ctx::LayoutCtx {
         };
         self.svg_prepass.borrow_mut().keep_paint(document.root(), key, map.clone());
         *self.svg_paint_styles.borrow_mut() = map;
+    }
+
+    /// Keep `document` and the paint map just cached on `lay`'s view for
+    /// svg content's computed paint (`svg_computed`), read after the build.
+    fn note_svg_paint(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let paint = self.svg_paint_styles.borrow().clone();
+        *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot::new(document, paint)));
     }
 
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
@@ -26774,6 +26790,7 @@ impl Engine {
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
+            lctx.note_svg_paint(&lay, &document);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
@@ -31595,6 +31612,20 @@ fn computed_lines_source(
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
         let index = index.get_or_init(|| style_box_index(&layout));
+        let box_at = |node: usize| -> Option<&LayoutBox> {
+            let (path, _) = index.get(&node)?;
+            let mut b: &LayoutBox = &layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b)
+        };
+        // A2.1: svg content's computed fill / stroke (`svg_computed`).
+        let svg_rows = || -> Option<String> {
+            let snapshot = lay.svg_paint.borrow().clone()?;
+            let (fill, stroke) = snapshot.fill_stroke(node, &|svg| box_at(svg).map(|b| b.style.color))?;
+            Some(format!("\nfill\t{fill}\nstroke\t{stroke}"))
+        };
         let mut lines = match index.get(&node) {
             Some((path, own_vars)) => {
                 let mut b: &LayoutBox = &layout;
@@ -31607,15 +31638,21 @@ fn computed_lines_source(
                 }
                 lines
             }
-            None => {
-                let style = boxless.get(&node)?;
-                let mut lines = computed_style_lines(&style.box_);
-                if style.own_vars {
-                    lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            None => match boxless.get(&node) {
+                Some(style) => {
+                    let mut lines = computed_style_lines(&style.box_);
+                    if style.own_vars {
+                        lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+                    }
+                    lines
                 }
-                lines
-            }
+                // svg content has no box and no style: its paint rows alone.
+                None => return svg_rows(),
+            },
         };
+        if let Some(rows) = svg_rows() {
+            lines.push_str(&rows);
+        }
         for ((at, pseudo), style) in lay.pseudo_styles.borrow().iter() {
             if *at != node {
                 continue;
