@@ -1,0 +1,125 @@
+{
+  "chrome": "148.0.7778.216",
+  "cases": [
+    {
+      "label": "line and colour",
+      "css": "#t{text-decoration:underline red}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "underline rgb(255, 0, 0)"
+    },
+    {
+      "label": "colour first",
+      "css": "#t{text-decoration:red underline}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "underline rgb(255, 0, 0)"
+    },
+    {
+      "label": "line style colour",
+      "css": "#t{text-decoration:underline wavy rgb(0,128,0)}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "wavy",
+      "text-decoration-color": "rgb(0, 128, 0)",
+      "text-decoration": "underline wavy rgb(0, 128, 0)"
+    },
+    {
+      "label": "two lines and a colour",
+      "css": "#t{text-decoration:underline overline red}",
+      "text-decoration-line": "underline overline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "underline overline rgb(255, 0, 0)"
+    },
+    {
+      "label": "colour alone",
+      "css": "#t{text-decoration:red}",
+      "text-decoration-line": "none",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "colour alone after a line",
+      "css": "#t{text-decoration:underline}#t{text-decoration:red}",
+      "text-decoration-line": "none",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "style alone",
+      "css": "#t{text-decoration:dotted}",
+      "text-decoration-line": "none",
+      "text-decoration-style": "dotted",
+      "text-decoration-color": "rgb(0, 0, 255)",
+      "text-decoration": "dotted"
+    },
+    {
+      "label": "with thickness",
+      "css": "#t{text-decoration:underline red 2px}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "underline 2px rgb(255, 0, 0)"
+    },
+    {
+      "label": "shorthand resets an earlier colour",
+      "css": "#t{text-decoration-color:red;text-decoration:underline}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(0, 0, 255)",
+      "text-decoration": "underline"
+    },
+    {
+      "label": "shorthand resets an earlier style",
+      "css": "#t{text-decoration-style:wavy;text-decoration:underline red}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "underline rgb(255, 0, 0)"
+    },
+    {
+      "label": "none with a colour",
+      "css": "#t{text-decoration:none red}",
+      "text-decoration-line": "none",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(255, 0, 0)",
+      "text-decoration": "rgb(255, 0, 0)"
+    },
+    {
+      "label": "currentcolor",
+      "css": "#t{text-decoration:underline currentcolor}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(0, 0, 255)",
+      "text-decoration": "underline"
+    },
+    {
+      "label": "invalid token drops the declaration",
+      "css": "#t{text-decoration:underline}#t{text-decoration:overline bogus red}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(0, 0, 255)",
+      "text-decoration": "underline"
+    },
+    {
+      "label": "two colours is invalid",
+      "css": "#t{text-decoration:underline}#t{text-decoration:overline red blue}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(0, 0, 255)",
+      "text-decoration": "underline"
+    },
+    {
+      "label": "longhand after shorthand",
+      "css": "#t{text-decoration:underline red;text-decoration-color:rgb(0,128,0)}",
+      "text-decoration-line": "underline",
+      "text-decoration-style": "solid",
+      "text-decoration-color": "rgb(0, 128, 0)",
+      "text-decoration": "underline rgb(0, 128, 0)"
+    }
+  ]
+}
