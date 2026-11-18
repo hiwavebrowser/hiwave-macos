@@ -7,7 +7,7 @@ use crate::entities;
 use crate::{ParseError, ParseResult};
 
 /// A start tag's attributes, in source order. A name written twice keeps
-/// its first value and the later ones are dropped (HTML §13.2.5.33).
+/// its first value and the later ones are dropped (HTML Â§13.2.5.33).
 ///
 /// A list searched in order, which is fastest for the handful a tag has;
 /// past `NAME_SET_FROM` attributes the names are also kept in a set, so a
@@ -157,7 +157,7 @@ pub struct Tokenizer {
     return_state: Option<State>,
     /// The name of the last emitted start tag (for RAWTEXT/RCDATA/ScriptData end tag matching)
     last_start_tag_name: String,
-    /// The scripting flag (HTML §13.2.3.5): with it on, `<noscript>` holds
+    /// The scripting flag (HTML Â§13.2.3.5): with it on, `<noscript>` holds
     /// raw text, as `<style>` does.
     scripting: bool,
     current_tag_name: String,
@@ -165,7 +165,6 @@ pub struct Tokenizer {
     current_attr_name: String,
     current_attr_value: String,
     self_closing: bool,
-    entity_buffer: String,
     current_comment: String,
     doctype_name: String,
     doctype_public_id: String,
@@ -187,7 +186,6 @@ impl Tokenizer {
             current_attr_name: String::new(),
             current_attr_value: String::new(),
             self_closing: false,
-            entity_buffer: String::new(),
             current_comment: String::new(),
             doctype_name: String::new(),
             doctype_public_id: String::new(),
@@ -621,32 +619,19 @@ impl Tokenizer {
         }
     }
 
-    // The opening ampersand has been consumed. Keep one scratch string for
-    // the whole document, including the literal fallback for unknown names.
     fn consume_entity(&mut self) {
-        self.entity_buffer.clear();
-        self.entity_buffer.push('&');
+        let in_attribute = !matches!(self.state, State::Data | State::RcData);
         let mut numeric = [0; 4];
-        let mut decoded = None;
-        while self.entity_buffer.len() <= 32 {
-            let Some(ch) = self.current_char() else { break };
-            if ch == ';' {
-                self.consume();
-                decoded = entities::decode_reference(&self.entity_buffer[1..], &mut numeric);
-                self.entity_buffer.push(';');
-                break;
-            }
-            if !ch.is_alphanumeric() && ch != '#' {
-                break;
-            }
-            self.consume();
-            self.entity_buffer.push(ch);
-        }
-
-        let value = decoded.unwrap_or(&self.entity_buffer);
-        match self.state {
-            State::Data | State::RcData => self.tokens.extend(value.chars().map(Token::Character)),
-            _ => self.current_attr_value.push_str(value),
+        let (consumed, value) = entities::reference(
+            self.input[self.pos..].iter().copied(),
+            in_attribute,
+            &mut numeric,
+        );
+        self.pos += consumed;
+        if in_attribute {
+            self.current_attr_value.push_str(value);
+        } else {
+            self.tokens.extend(value.chars().map(Token::Character));
         }
     }
 
@@ -1234,7 +1219,7 @@ pub fn tokenize(input: &str) -> ParseResult<Vec<Token>> {
 }
 
 /// `tokenize` with the scripting flag: when it is on, the contents of
-/// `<noscript>` are raw text (HTML §13.2.6.4.4, §13.2.6.4.7).
+/// `<noscript>` are raw text (HTML Â§13.2.6.4.4, Â§13.2.6.4.7).
 pub fn tokenize_scripted(input: &str, scripting: bool) -> ParseResult<Vec<Token>> {
     let mut tokenizer = Tokenizer::new(input);
     tokenizer.scripting = scripting;
@@ -1308,8 +1293,8 @@ mod tests {
     }
 
     /// `<?` is a bogus comment. The `?` is part of the data (HTML tokenizer:
-    /// reconsume in the bogus comment state). Lit writes `<?lit$…$>` and
-    /// matches the comment data `?lit$…$`.
+    /// reconsume in the bogus comment state). Lit writes `<?lit$â€¦$>` and
+    /// matches the comment data `?lit$â€¦$`.
     #[test]
     fn test_question_mark_bogus_comment_keeps_the_question_mark() {
         let tokens = tokenize("<?lit$1$><slot name=\"title\"></slot>").unwrap();
