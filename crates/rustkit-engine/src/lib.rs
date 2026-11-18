@@ -3487,12 +3487,37 @@ pub struct Engine {
 /// inherited one): the declaration is left out and the same-named
 /// presentation attribute dropped, so rustkit-svg's parse-time inheritance
 /// gives the parent's value.
+///
+/// A2.2: `transitions` holds the author `transition*` declarations that
+/// match the element, as (property, value) in the cascade's order, for the
+/// svg paint lane (`LayoutCtx::svg_paint_transitions`); never written into
+/// the markup. `animated` is the lane's running values (`fill:rgb(...);`),
+/// written after everything else, since a transition beats every origin.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SvgPaintStyle {
     normal: String,
     important: String,
     inherit: Vec<String>,
+    transitions: Vec<(String, String)>,
+    animated: String,
 }
+
+impl SvgPaintStyle {
+    /// Whether this changes the element's markup: a style that only names
+    /// transitions serializes as no entry, so its cache key stays.
+    fn paints(&self) -> bool {
+        !self.normal.is_empty() || !self.important.is_empty() || !self.inherit.is_empty() || !self.animated.is_empty()
+    }
+}
+
+/// The `transition*` properties the svg paint side cascade collects (A2.2).
+const SVG_TRANSITION_PROPERTIES: &[&str] = &[
+    "transition",
+    "transition-property",
+    "transition-duration",
+    "transition-timing-function",
+    "transition-delay",
+];
 
 /// Of `SVG_PAINT_PROPERTIES`, the ones that are not inherited (`unset` is
 /// `initial` for them).
@@ -13028,6 +13053,11 @@ impl Engine {
         if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
             return miss("a relayout is pending");
         }
+        // A2.2: an svg paint transition re-rasterises its svg, which only a
+        // build does (no frame change carries an svg's raster yet).
+        if view.lay.animations.borrow().svg_moving() {
+            return miss("an svg paint transition runs");
+        }
         let size = match view.headless_bounds {
             Some(b) => (b.width, b.height),
             None => match self.presenter.as_mut().map(|p| p.host_bounds(view.viewhost_id)) {
@@ -13293,7 +13323,7 @@ impl layout_ctx::LayoutCtx {
         };
         // A running transition or animation moves boxes no write reached: their kept boxes hold
         // last frame's values (#1246 R1 item 1, carried into the splice).
-        if lay.animations.borrow().running() {
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
             return miss("animations running");
         }
         // One that moved while the kept tree was built may have moved on or ended since, in frames
@@ -13506,7 +13536,8 @@ impl layout_ctx::LayoutCtx {
             let keep = lay.want_script_unlaid.get() && (lay.retain_script_unlaid_now.get() || forced);
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
             lay.script_unlaid_unpublished.set(keep && forced);
-            lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
+            lay.script_unlaid_animated
+                .set(keep && (lay.animations.borrow().running() || lay.animations.borrow().svg_moving()));
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
         }
 
@@ -13752,7 +13783,9 @@ impl layout_ctx::LayoutCtx {
     /// INC5 stage 2: the last layout again, without a build, when the view
     /// keeps it under the same key and nothing animates.
     fn skipped_build(&self, lay: &Rc<layout_ctx::ViewLayout>, bounds: (u32, u32)) -> Option<LayoutBox> {
-        if lay.animations.borrow().running() {
+        // A2.2: a moving svg paint is in the svg's raster key, which the
+        // kept layout holds as of its build.
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
             return None;
         }
         let mut slot = lay.incremental_layout.borrow_mut();
@@ -14340,7 +14373,12 @@ impl layout_ctx::LayoutCtx {
     /// value is one frame's: a tree kept now would replay that frame, and
     /// a kept tree taken now would skip the frame due.
     fn building_view_animates(&self) -> bool {
-        self.with_building_lay(|lay| lay.animations.borrow().running()).unwrap_or(false)
+        // A2.2: so is an svg paint transition (the svg's raster key moves).
+        self.with_building_lay(|lay| {
+            let anims = lay.animations.borrow();
+            anims.running() || anims.svg_moving()
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -20809,7 +20847,7 @@ impl Engine {
                     out.push('<');
                     out.push_str(tag_name);
                     let styled;
-                    let attributes = match paint.get(&node.id.raw()) {
+                    let attributes = match paint.get(&node.id.raw()).filter(|p| p.paints()) {
                         Some(p) => {
                             let mut a = attributes.clone();
                             for property in &p.inherit {
@@ -20829,7 +20867,7 @@ impl Engine {
                                         .is_none_or(|(prop, _)| !own_important.contains(&prop.trim().to_ascii_lowercase()))
                                 })
                                 .collect();
-                            let style = format!("{}{};{}", p.normal, own, important);
+                            let style = format!("{}{};{}{}", p.normal, own, important, p.animated);
                             a.insert("style".to_string(), style);
                             styled = a;
                             &styled
@@ -20876,6 +20914,7 @@ impl Engine {
         // The view's own document (a test may style a detached one).
         if let Some(view) = view {
             if let Some(own) = view.document.as_ref().filter(|d| std::ptr::eq(Rc::as_ptr(d), document)) {
+                self.lctx.svg_paint_transitions(&view.lay, own);
                 self.lctx.note_svg_paint(&view.lay, own);
             }
         }
@@ -20992,6 +21031,74 @@ impl layout_ctx::LayoutCtx {
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
+    /// A2.2: one pass of `lay`'s svg paint lane over `document` at its
+    /// animation clock (`Animations::svg_update`), then the running values
+    /// written into the paint map just cached (`SvgPaintStyle::animated`),
+    /// so the svg markup, its cache key and raster, and the computed read
+    /// (`svg_computed`) all take them. The lane's own `transition*` lists
+    /// are the side cascade's (`SvgPaintStyle::transitions`).
+    ///
+    /// Cost: nothing when no svg element names a transition and the lane
+    /// is empty. Otherwise the svgs are resolved only when the paint map or
+    /// the DOM changed since the last pass, or a transition runs; a
+    /// running one re-rasterises its svg every frame, as a moving
+    /// `currentcolor` does.
+    fn svg_paint_transitions(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let base = self.svg_paint_styles.borrow().clone();
+        let mut anims = lay.animations.borrow_mut();
+        let named = base.values().any(|s| !s.transitions.is_empty());
+        if !named && anims.svg_lane_empty() {
+            anims.svg_last = None;
+            return;
+        }
+        let gen = rustkit_dom::mutation_generation();
+        let unchanged = anims
+            .svg_last
+            .as_ref()
+            .is_some_and(|(map, at)| *at == gen && std::ptr::eq(map.as_ptr(), Rc::as_ptr(&base)));
+        if anims.svg_moving() || !unchanged {
+            // One parse per distinct declaration list.
+            let mut lists: HashMap<&[(String, String)], Rc<Vec<rustkit_css::TransitionItem>>> = HashMap::new();
+            let mut paints = Vec::new();
+            for svg in svg_computed::outermost_svgs(document) {
+                for (node, (fill, stroke)) in svg_computed::resolve_paints(&svg, &base, svg_computed::BLACK) {
+                    let declared = base.get(&node).map(|s| s.transitions.as_slice()).unwrap_or(&[]);
+                    let items = (!declared.is_empty()).then(|| {
+                        lists
+                            .entry(declared)
+                            .or_insert_with(|| {
+                                let mut scratch = ComputedStyle::default();
+                                for (property, value) in declared {
+                                    self.apply_style_property(&mut scratch, property, value);
+                                }
+                                Rc::new(scratch.transitions)
+                            })
+                            .clone()
+                    });
+                    for (prop, paint) in [("fill", fill), ("stroke", stroke)] {
+                        let spec = items.as_ref().and_then(|i| animations::svg_spec_for(i, prop).cloned());
+                        if spec.is_some() || anims.svg_holds(node, prop) {
+                            paints.push((node, prop, paint, spec));
+                        }
+                    }
+                }
+            }
+            anims.svg_update(&paints);
+            anims.svg_last = Some((Rc::downgrade(&base), gen));
+        }
+        let moving = anims.svg_overlay();
+        drop(anims);
+        if moving.is_empty() {
+            return;
+        }
+        let mut map = (*base).clone();
+        for (node, prop, colour) in moving {
+            let style = map.entry(node).or_default();
+            style.animated.push_str(&format!("{prop}:{};", css_color(colour)));
+        }
+        *self.svg_paint_styles.borrow_mut() = Rc::new(map);
+    }
+
     /// Keep `document` and the paint map just cached on `lay`'s view for
     /// svg content's computed paint (`svg_computed`), read after the build.
     fn note_svg_paint(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
@@ -21066,6 +21173,8 @@ impl layout_ctx::LayoutCtx {
             let keyed = KeyedElement::of(tag_name, attributes);
             // (important, specificity, order, property, value)
             let mut won: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
+            // A2.2: the `transition*` declarations, ranked the same way.
+            let mut transitions: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
             for (order, rule, keys) in &paint_rules {
                 let (order, rule) = (*order, *rule);
                 if !Engine::keys_may_match_keyed(keys, &keyed) {
@@ -21079,6 +21188,11 @@ impl layout_ctx::LayoutCtx {
                 let Some(specificity) = specificity else { continue };
                 for decl in &rule.declarations {
                     let rustkit_css::PropertyValue::Specified(value) = &decl.value else { continue };
+                    if SVG_TRANSITION_PROPERTIES.contains(&decl.property.as_str()) {
+                        let value = self.resolve_css_variables(value, root_vars);
+                        transitions.push((decl.important, specificity, order, decl.property.as_str(), value));
+                        continue;
+                    }
                     if !SVG_PAINT_PROPERTIES.contains(&decl.property.as_str()) {
                         continue;
                     }
@@ -21090,11 +21204,18 @@ impl layout_ctx::LayoutCtx {
                     won.push((decl.important, specificity, order, decl.property.as_str(), value));
                 }
             }
-            if won.is_empty() {
+            if won.is_empty() && transitions.is_empty() {
                 return None;
             }
             won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-            let mut style = SvgPaintStyle::default();
+            transitions.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+            let mut style = SvgPaintStyle {
+                transitions: transitions
+                    .into_iter()
+                    .map(|(_, _, _, property, value)| (property.to_string(), value))
+                    .collect(),
+                ..SvgPaintStyle::default()
+            };
             // The winner per property is its last entry; a CSS-wide
             // keyword there is applied here rather than written out.
             let mut keyword: HashMap<&str, String> = HashMap::new();
@@ -21111,7 +21232,7 @@ impl layout_ctx::LayoutCtx {
             }
             style.inherit.sort();
             won.retain(|(_, _, _, property, _)| !keyword.get(property).is_some_and(|v| wide(v)));
-            if won.is_empty() && style.inherit.is_empty() {
+            if won.is_empty() && style.inherit.is_empty() && style.transitions.is_empty() {
                 return None;
             }
             for (important, _, _, property, value) in won {
@@ -21191,7 +21312,10 @@ impl layout_ctx::LayoutCtx {
                 if !(rule.media.is_empty() || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))) {
                     continue;
                 }
-                if rule.declarations.iter().any(|d| SVG_PAINT_PROPERTIES.contains(&d.property.as_str())) {
+                if rule.declarations.iter().any(|d| {
+                    SVG_PAINT_PROPERTIES.contains(&d.property.as_str())
+                        || SVG_TRANSITION_PROPERTIES.contains(&d.property.as_str())
+                }) {
                     paint.push((order, source, index, self.subject_keys(&rule.selector)));
                 }
                 if selects_the_root(&rule.selector) {
@@ -26794,6 +26918,7 @@ impl Engine {
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
+            lctx.svg_paint_transitions(&lay, &document);
             lctx.note_svg_paint(&lay, &document);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script

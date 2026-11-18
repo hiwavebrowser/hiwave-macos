@@ -17,7 +17,8 @@
 use super::*;
 use crate::script_net_tests::serve_routes;
 
-const RECEIPT: &str = include_str!("../../../docs/diagnostics/2026-11-17/css_transitions_svg_paint_cft148.json");
+const RECEIPT: &str =
+    include_str!("../../../docs/diagnostics/2026-11-17/css_transitions_svg_paint_cft148.json");
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -43,7 +44,9 @@ fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
 }
 
 fn read(engine: &mut Engine, view: EngineViewId, expr: &str) -> String {
-    let value = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    let value = engine
+        .execute_script(view, &format!("String({expr})"))
+        .unwrap();
     value
         .strip_prefix("String(\"")
         .and_then(|v| v.strip_suffix("\")"))
@@ -64,7 +67,11 @@ fn pump(engine: &mut Engine, view: EngineViewId, total: u64) {
 /// transition event at `#s` and `#p` logged as `id:type:property`.
 fn page(css: &str, attrs: &str) -> String {
     let attrs = attrs.replace('=', "=\"").replace(' ', "\" ");
-    let attrs = if attrs.is_empty() { attrs } else { format!("{attrs}\"") };
+    let attrs = if attrs.is_empty() {
+        attrs
+    } else {
+        format!("{attrs}\"")
+    };
     format!(
         "<!doctype html><style>body{{margin:0}}{css}</style>\
 <svg id=s width=100 height=100><defs><linearGradient id=g><stop offset=0 stop-color=lime /></linearGradient></defs>\
@@ -94,14 +101,18 @@ fn channels(colour: &str) -> Option<Vec<f64>> {
 /// anything else exactly.
 fn same_value(got: &str, want: &str) -> bool {
     match (channels(got), channels(want)) {
-        (Some(g), Some(w)) => g.len() == w.len() && g.iter().zip(&w).all(|(g, w)| (g - w).abs() <= 1.0),
+        (Some(g), Some(w)) => {
+            g.len() == w.len() && g.iter().zip(&w).all(|(g, w)| (g - w).abs() <= 1.0)
+        }
         _ => got == want,
     }
 }
 
 fn same_pixel(got: [u8; 4], want: &str) -> bool {
     let want: Vec<i32> = want.split(',').map(|c| c.parse().unwrap()).collect();
-    got.iter().zip(&want).all(|(g, w)| (*g as i32 - w).abs() <= 1)
+    got.iter()
+        .zip(&want)
+        .all(|(g, w)| (*g as i32 - w).abs() <= 1)
 }
 
 /// Run the receipt's case `label` and compare everything it pinned.
@@ -117,31 +128,35 @@ fn check(label: &str) {
     let s = |key: &str| case[key].as_str().unwrap().to_string();
     let (toggle, read_at) = (s("toggle"), s("read"));
     let (target, prop) = read_at.split_once(' ').unwrap();
-    let (mut engine, view, _server) = load(&page(&s("css"), &s("attrs")));
-    let value = format!("getComputedStyle(document.getElementById('{target}')).getPropertyValue('{prop}')");
-    read(
-        &mut engine,
-        view,
-        &format!("(document.getElementById('{toggle}').classList.add('on'), {value})"),
-    );
+    let value =
+        format!("getComputedStyle(document.getElementById('{target}')).getPropertyValue('{prop}')");
+    let start = |engine: &mut Engine, view| {
+        read(
+            engine,
+            view,
+            &format!("(document.getElementById('{toggle}').classList.add('on'), {value})"),
+        );
+    };
     let mut failures = Vec::new();
-    for at in ["25", "50", "75"] {
-        pump(&mut engine, view, 25);
-        let got = read(&mut engine, view, &value);
-        let want = case["at"][at].as_str().unwrap();
-        if !same_value(&got, want) {
-            failures.push(format!("{prop} at {at} ms: {got:?}, Chrome {want:?}"));
-        }
-        if at != "50" {
-            continue;
-        }
+    // The painted frame and `getAnimations()`, at 50 ms, from a page of
+    // their own: the samples at 25, 50 and 75 ms come from a page that
+    // only reads the value.
+    {
+        let (mut engine, view, _server) = load(&page(&s("css"), &s("attrs")));
+        start(&mut engine, view);
+        pump(&mut engine, view, 50);
         let names = read(
             &mut engine,
             view,
             "['s','p'].map(function(id){return document.getElementById(id).getAnimations()\
              .map(function(a){return id+':'+a.transitionProperty}).join()}).filter(String).join()",
         );
-        let want: Vec<&str> = case["transitions"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let want: Vec<&str> = case["transitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
         if names != want.join(",") {
             failures.push(format!("transitions at 50 ms: {names:?}, Chrome {want:?}"));
         }
@@ -153,13 +168,28 @@ fn check(label: &str) {
             }
         }
     }
+    let (mut engine, view, _server) = load(&page(&s("css"), &s("attrs")));
+    start(&mut engine, view);
+    for at in ["25", "50", "75"] {
+        pump(&mut engine, view, 25);
+        let got = read(&mut engine, view, &value);
+        let want = case["at"][at].as_str().unwrap();
+        if !same_value(&got, want) {
+            failures.push(format!("{prop} at {at} ms: {got:?}, Chrome {want:?}"));
+        }
+    }
     pump(&mut engine, view, 100);
     let end = read(&mut engine, view, &value);
     if !same_value(&end, case["end"].as_str().unwrap()) {
         failures.push(format!("end value {end:?}, Chrome {}", case["end"]));
     }
     let events = read(&mut engine, view, "log.join()");
-    let want: Vec<&str> = case["events"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    let want: Vec<&str> = case["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     if events != want.join(",") {
         failures.push(format!("events {events:?}, Chrome {want:?}"));
     }
@@ -227,4 +257,25 @@ fn a_currentcolor_fill_follows_a_moving_color() {
 #[test]
 fn a_class_on_the_svg_transitions_the_rect() {
     check("hover-like: class on svg, rule on rect");
+}
+
+/// A page whose svg names no transition runs no svg transition: the lane
+/// stays empty while an HTML transition runs, so it asks for no frames of
+/// its own.
+#[test]
+fn an_html_transition_leaves_the_svg_lane_empty() {
+    let (mut engine, view, _server) = load(
+        "<!doctype html><style>#h{color:blue;transition:color 100ms linear}#h.on{color:red}#p{fill:blue}</style>\
+         <div id=h>x</div><svg width=10 height=10><rect id=p width=10 height=10 /></svg>",
+    );
+    read(
+        &mut engine,
+        view,
+        "(h.classList.add('on'), getComputedStyle(h).color)",
+    );
+    for _ in 0..30 {
+        pump(&mut engine, view, 5);
+        let lay = engine.views[&view].lay.clone();
+        assert!(!lay.animations.borrow().svg_moving(), "the svg lane moved");
+    }
 }
