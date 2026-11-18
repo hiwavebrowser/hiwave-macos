@@ -379,7 +379,6 @@ fn paint_of(style: &CanvasStyle, t: &crate::Transform2D) -> Option<Option<GpuPai
     };
     match style {
         CanvasStyle::Color(c) => Some(Some(GpuPaint::Solid(premultiplied(rgba(*c))))),
-        CanvasStyle::LinearGradient(_) | CanvasStyle::RadialGradient(_) if true => None, // RED: stub, no gradients on the GPU
         CanvasStyle::LinearGradient(g) => {
             if g.stops.is_empty() || (g.x0 == g.x1 && g.y0 == g.y1) {
                 return Some(None);
