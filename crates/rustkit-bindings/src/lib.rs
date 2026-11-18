@@ -1391,6 +1391,9 @@ pub(crate) const LAYER_PAINT: u8 = 1;
 /// computed style, the transformed rects, hit testing and the scroll
 /// extents see it; offset and client boxes do not.
 pub(crate) const LAYER_TRANSFORM: u8 = 2;
+/// An inline style write of `opacity` (TREE-REUSE step (2)): below 1 it makes a stacking
+/// context, which can reorder what paints above what, so a hit test sees it; no box moves.
+pub(crate) const LAYER_STACKING: u8 = 4;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
@@ -1453,6 +1456,27 @@ impl DirtyMark {
         }
     }
 
+    /// TREE-REUSE step (2): a script write of the inline `style` attribute that changed only paint
+    /// properties (`reads`: [`LAYER_PAINT`], with [`LAYER_STACKING`] for `opacity`). Like any
+    /// other script write it is beyond the animated-style layer and the engine lays it out when
+    /// script settles; but no box moved, so the published layout stays current for an offset,
+    /// client or rect read, and only the reads that see the values lay out (`needs_layout_for`).
+    /// It names its cause for the forced-layout log when it is the first write since the layout.
+    pub(crate) fn mark_paint_style(&self, bucket: DomDirty, kind: &'static str, reads: u8, logged: Logged) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.other_since_layout.set(true);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+            if self.cause.get().is_none() {
+                self.cause.set(Some(kind));
+            }
+        }
+    }
+
     /// Whether the read `read` (the forced-layout log's read kinds) must
     /// lay the page out first: after any write a layout can see, or after a
     /// paint-layer write whose values it reads.
@@ -1463,8 +1487,10 @@ impl DirtyMark {
         let layer = self.layer_since_layout.get();
         match read {
             "computed_style" => layer != 0,
-            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
-            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            "hit_test" => layer & (LAYER_TRANSFORM | LAYER_STACKING) != 0,
+            "rect" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll" | "scroll_to" => {
+                layer & LAYER_TRANSFORM != 0
+            }
             _ => false,
         }
     }
@@ -3056,6 +3082,14 @@ impl DomBindings {
     /// the answer is yes.
     pub fn set_has_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
         self.dom_host.borrow_mut().has_rules = probe;
+    }
+
+    /// Whether some rule of the page's sheets reads the `style` attribute or uses `:has()`,
+    /// asked when an inline style write changes only paint properties: with one, the write can
+    /// change which rules match, and a geometry read after it lays the page out (TREE-REUSE
+    /// step (2)). Without a probe the answer is yes.
+    pub fn set_style_attr_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().style_attr_rules = probe;
     }
 
     /// How many times a source from `set_geometry_source` was built.

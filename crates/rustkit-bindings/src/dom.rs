@@ -341,6 +341,10 @@ pub(crate) struct DomHost {
     /// rule index), so a write deep in a subtree can restyle an ancestor.
     /// `None` until the engine installs it: assumed yes.
     pub(crate) has_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// Whether some rule of the page's sheets reads the `style` attribute (`[style*=..]`) or
+    /// uses `:has()` (the engine's rule index), so an inline style write can change which rules
+    /// match. `None` until the engine installs it: assumed yes (TREE-REUSE step (2)).
+    pub(crate) style_attr_rules: Option<Rc<dyn Fn() -> bool>>,
     /// NATIVE-SETPROPERTY: each element's inline declarations as last parsed, with the attribute text
     /// they were parsed from (`style_decls`). A pure function of the text, so an entry is right for any
     /// element whose attribute holds that text; at most `STYLE_DECLS_KEPT` are kept.
@@ -594,10 +598,11 @@ impl DomHost {
         if !dirty.needs_layout_for(read) {
             return;
         }
-        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        // Only a paint write is pending: an inline style's (TREE-REUSE step (2)), which names
+        // itself, or Web Animations' layer (LAT7c), which does not.
         let cause = match dirty.written_since_layout() {
             true => dirty.cause().unwrap_or("other"),
-            false => "animation",
+            false => dirty.cause().unwrap_or("animation"),
         };
         let forced = {
             let mut h = host.borrow_mut();
@@ -1513,6 +1518,10 @@ enum Reach {
     /// script settles (the bucket and the mutation log are kept), so what
     /// it builds next is the same; only the read in between is spared.
     Unseen,
+    /// TREE-REUSE step (2): an inline `style` write that changed only paint properties
+    /// (`paint_style_reads`, the read bits it carries). No box moves: only a read that sees
+    /// the values (`getComputedStyle`, and a hit test after `opacity`) lays the page out.
+    Paint(u8),
 }
 
 impl Reach {
@@ -1520,8 +1529,70 @@ impl Reach {
         match self {
             Reach::Seen => dirty.mark(bucket, cause, logged),
             Reach::Unseen => dirty.mark_unseen(bucket, logged),
+            Reach::Paint(reads) => dirty.mark_paint_style(bucket, cause, reads, logged),
         }
     }
+}
+
+/// Inline style properties a change of which moves no box (TREE-REUSE step (2)), with the reads
+/// that see the change beyond `getComputedStyle`. Longhands and the one colour shorthand only:
+/// `background` and `border` also set what lays out.
+const PAINT_STYLE_PROPERTIES: &[(&str, u8)] = &[
+    ("color", crate::LAYER_PAINT),
+    ("background-color", crate::LAYER_PAINT),
+    ("border-color", crate::LAYER_PAINT),
+    ("border-top-color", crate::LAYER_PAINT),
+    ("border-right-color", crate::LAYER_PAINT),
+    ("border-bottom-color", crate::LAYER_PAINT),
+    ("border-left-color", crate::LAYER_PAINT),
+    ("outline-color", crate::LAYER_PAINT),
+    ("text-decoration-color", crate::LAYER_PAINT),
+    ("caret-color", crate::LAYER_PAINT),
+    ("opacity", crate::LAYER_PAINT | crate::LAYER_STACKING),
+];
+
+/// An inline style's declarations as `name -> value` (names ASCII-lowercased, the last of a name
+/// wins), or `None` when the text holds anything a split on `;` and `:` could misread: a quote, an
+/// escape, a comment, a brace, or brackets left open across a `;`.
+fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
+    if text.contains(['"', '\'', '\\', '{', '}']) || text.contains("/*") {
+        return None;
+    }
+    let mut declarations = HashMap::new();
+    for declaration in text.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        if declaration.matches('(').count() != declaration.matches(')').count() {
+            return None;
+        }
+        let (name, value) = declaration.split_once(':')?;
+        declarations.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    Some(declarations)
+}
+
+/// The read bits of a write of `node`'s `style` attribute from `old` to `new` (`None`: removed)
+/// when every declaration it adds, removes or changes is a paint property
+/// (`PAINT_STYLE_PROPERTIES`); `None` when one may move a box, or when the page has a rule that
+/// reads the attribute or a `:has()` (`DomHost::style_attr_rules`), through which the write can
+/// change which rules match.
+fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Option<u8> {
+    if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
+        return None;
+    }
+    let old = plain_declarations(old.unwrap_or(""))?;
+    let new = plain_declarations(new.unwrap_or(""))?;
+    let mut reads = 0;
+    for name in old.keys().chain(new.keys()) {
+        if old.get(name) == new.get(name) {
+            continue;
+        }
+        let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| property == name)?;
+        reads |= bits;
+    }
+    (reads != 0).then_some(reads)
 }
 
 /// Elements a write under or to which may change something outside its
@@ -1619,6 +1690,14 @@ fn write_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (R
     let container = if node.is_element() { Some(node.clone()) } else { node.parent() };
     match container {
         Some(c) if under_hidden(host, &c, dirty) => (Reach::Unseen, cause),
+        _ if cause == "style" && is_html_element(&node) => {
+            let new = (op == "setAttr").then(|| string_arg(args, 4).unwrap_or(""));
+            let old = node.get_attribute("style");
+            match paint_style_reads(host, old.as_deref(), new) {
+                Some(reads) => (Reach::Paint(reads), cause),
+                None => (Reach::Seen, cause),
+            }
+        }
         _ => (Reach::Seen, cause),
     }
 }
