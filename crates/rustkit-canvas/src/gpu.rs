@@ -175,8 +175,10 @@ pub(crate) fn supported(op: &Op) -> bool {
 }
 
 /// Curves are cut into lines no further than this from the curve, in
-/// device pixels.
-const TOLERANCE: f32 = 0.2;
+/// device pixels. (GPU-AA: at 0.2 the chords alone put thin curved
+/// strokes past the CPU's pin bounds against Chrome, whatever the
+/// anti-aliasing; 0.1 brings them within, measured on every raster pin.)
+const TOLERANCE: f32 = 0.1;
 
 impl GpuBatch {
     pub(crate) fn reset(size: (u32, u32), pixels: Option<Vec<u8>>) -> Self {
@@ -217,9 +219,10 @@ impl GpuBatch {
     /// than `max_vertices` vertices (the renderer's per-replay cap: a few
     /// MB of curves can flatten to far more): `None` then, and lowering
     /// stops as soon as it knows, so no more than about the cap is ever
-    /// built. With the draws, the vertices their replay takes: every fan
-    /// and cover quad, the full-target quads of each pass, and each
-    /// rebuild of the clip in the stencil.
+    /// built. With the draws, the vertices their replay takes: every fan,
+    /// each fill's coverage and paint quads, and for a clipped fill the
+    /// clip's rebuild in its coverage region (each clip's fans are kept
+    /// once and counted once).
     pub fn lower_within(&self, max_vertices: usize) -> Option<(Vec<GpuDraw>, usize)> {
         const QUAD: usize = 6;
         let left = std::cell::Cell::new(max_vertices);
@@ -230,9 +233,6 @@ impl GpuBatch {
         };
         let mut clips: std::collections::HashMap<usize, Arc<GpuClip>> = Default::default();
         let mut out = Vec::with_capacity(self.ops.len());
-        // The clip the stencil holds as the replay reaches each draw.
-        let mut in_stencil: Option<usize> = None;
-        take(QUAD)?; // the first pass's load quad
         for op in &self.ops {
             let (clip, draw) = match &**op {
                 Op::Fill { d, path, even_odd, style } => {
@@ -291,17 +291,13 @@ impl GpuBatch {
                         let c = tiny_skia::ColorU8::from_rgba(p[0], p[1], p[2], p[3]).premultiply();
                         px.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
                     }
-                    // The next draw starts a new pass: its load quad, and the
-                    // stencil starts empty.
-                    take(QUAD)?;
-                    in_stencil = None;
                     out.push(GpuDraw::Put { x: *dx as u32, y: *dy as u32, width: *width, height, rgba: px });
                     continue;
                 }
                 Op::Image { .. } => continue,
             };
             let GpuDraw::Fill { path, paint, blend, .. } = draw else { continue };
-            take(QUAD)?; // the cover quad
+            take(2 * QUAD)?; // the coverage and paint quads
             let clip = match clip.and_then(|c| c.chain.as_ref().map(|chain| (c, chain))) {
                 None => None,
                 Some((c, chain)) => {
@@ -318,16 +314,12 @@ impl GpuBatch {
                             gc
                         }
                     };
-                    if in_stencil != Some(id) {
-                        // A rebuild: the set quad, and per link its fan, a
-                        // cut quad and a zero quad (a link's fan is also
-                        // charged when lowered: an over-count, on the safe
-                        // side).
-                        take(QUAD)?;
-                        for l in &gc.links {
-                            take(2 * QUAD + l.tris.len())?;
-                        }
-                        in_stencil = Some(id);
+                    // The rebuild in this fill's region: the set quad,
+                    // and per link its fan (drawn again; kept once), a cut
+                    // quad and a zero quad.
+                    take(QUAD)?;
+                    for l in &gc.links {
+                        take(2 * QUAD + l.tris.len())?;
                     }
                     Some(gc)
                 }
@@ -899,8 +891,8 @@ mod gpu_recording_tests {
         let b = c.take_gpu_batch(false);
         let (draws, used) = b.lower_within(usize::MAX).expect("no cap");
         assert_eq!(draws.len(), 40);
-        let fans: usize = draws.iter().map(|d| if let GpuDraw::Fill { path, .. } = d { path.tris.len() + 6 } else { 0 }).sum();
-        assert_eq!(used, fans + 6, "fans and cover quads, plus the pass's load quad");
+        let fans: usize = draws.iter().map(|d| if let GpuDraw::Fill { path, .. } = d { path.tris.len() + 12 } else { 0 }).sum();
+        assert_eq!(used, fans, "fans, and each fill's coverage and paint quads");
         assert!(used > 5_000, "40 dashed arcs: {used} vertices");
         assert!(b.lower_within(used - 1).is_none(), "one short of what it takes: refused");
         assert!(b.lower_within(used / 2).is_none());
