@@ -260,24 +260,22 @@ fn border_radius_interpolates_both_radii_and_percentages() {
         "20px 30px",
         "30px 40px",
     );
-    // Chrome 148 writes these as `25%` / `calc(25% + 5px)` / `50%`. This
-    // engine's getComputedStyle writes a corner's radii resolved against
-    // the 100x50 border box (`corner_radii_px`, a serialization gap of
-    // its own, also for a value that is not moving), so the same values
-    // read as px here.
+    // Chrome 148 writes these as `25%` / `calc(25% + 5px)` / `50%`: a
+    // percentage radius stays a percentage in getComputedStyle
+    // (`radius_computed`, border-radius computed values).
     check(
         "#h{border-radius:0%}#h.on{border-radius:50%}",
         "border-top-left-radius",
         &CORNERS,
-        "25px 12.5px",
-        "50px 25px",
+        "25%",
+        "50%",
     );
     check(
         "#h{border-radius:10px}#h.on{border-radius:50%}",
         "border-top-left-radius",
         &CORNERS,
-        "30px 17.5px",
-        "50px 25px",
+        "calc(25% + 5px)",
+        "50%",
     );
 }
 
