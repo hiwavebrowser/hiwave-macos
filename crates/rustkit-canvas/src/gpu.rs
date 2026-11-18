@@ -175,8 +175,10 @@ pub(crate) fn supported(op: &Op) -> bool {
 }
 
 /// Curves are cut into lines no further than this from the curve, in
-/// device pixels.
-const TOLERANCE: f32 = 0.2;
+/// device pixels. (GPU-AA: at 0.2 the chords alone put thin curved
+/// strokes past the CPU's pin bounds against Chrome, whatever the
+/// anti-aliasing; 0.1 brings them within, measured on every raster pin.)
+const TOLERANCE: f32 = 0.1;
 
 impl GpuBatch {
     pub(crate) fn reset(size: (u32, u32), pixels: Option<Vec<u8>>) -> Self {
@@ -217,9 +219,10 @@ impl GpuBatch {
     /// than `max_vertices` vertices (the renderer's per-replay cap: a few
     /// MB of curves can flatten to far more): `None` then, and lowering
     /// stops as soon as it knows, so no more than about the cap is ever
-    /// built. With the draws, the vertices their replay takes: every fan
-    /// and cover quad, the full-target quads of each pass, and each
-    /// rebuild of the clip in the stencil.
+    /// built. With the draws, the vertices their replay takes: every fan,
+    /// each fill's coverage and paint quads, and for a clipped fill the
+    /// clip's rebuild in its coverage region (each clip's fans are kept
+    /// once and counted once).
     pub fn lower_within(&self, max_vertices: usize) -> Option<(Vec<GpuDraw>, usize)> {
         const QUAD: usize = 6;
         let left = std::cell::Cell::new(max_vertices);
@@ -230,9 +233,6 @@ impl GpuBatch {
         };
         let mut clips: std::collections::HashMap<usize, Arc<GpuClip>> = Default::default();
         let mut out = Vec::with_capacity(self.ops.len());
-        // The clip the stencil holds as the replay reaches each draw.
-        let mut in_stencil: Option<usize> = None;
-        take(QUAD)?; // the first pass's load quad
         for op in &self.ops {
             let (clip, draw) = match &**op {
                 Op::Fill { d, path, even_odd, style } => {
@@ -291,17 +291,13 @@ impl GpuBatch {
                         let c = tiny_skia::ColorU8::from_rgba(p[0], p[1], p[2], p[3]).premultiply();
                         px.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
                     }
-                    // The next draw starts a new pass: its load quad, and the
-                    // stencil starts empty.
-                    take(QUAD)?;
-                    in_stencil = None;
                     out.push(GpuDraw::Put { x: *dx as u32, y: *dy as u32, width: *width, height, rgba: px });
                     continue;
                 }
                 Op::Image { .. } => continue,
             };
             let GpuDraw::Fill { path, paint, blend, .. } = draw else { continue };
-            take(QUAD)?; // the cover quad
+            take(2 * QUAD)?; // the coverage and paint quads
             let clip = match clip.and_then(|c| c.chain.as_ref().map(|chain| (c, chain))) {
                 None => None,
                 Some((c, chain)) => {
@@ -318,16 +314,12 @@ impl GpuBatch {
                             gc
                         }
                     };
-                    if in_stencil != Some(id) {
-                        // A rebuild: the set quad, and per link its fan, a
-                        // cut quad and a zero quad (a link's fan is also
-                        // charged when lowered: an over-count, on the safe
-                        // side).
-                        take(QUAD)?;
-                        for l in &gc.links {
-                            take(2 * QUAD + l.tris.len())?;
-                        }
-                        in_stencil = Some(id);
+                    // The rebuild in this fill's region: the set quad,
+                    // and per link its fan (drawn again; kept once), a cut
+                    // quad and a zero quad.
+                    take(QUAD)?;
+                    for l in &gc.links {
+                        take(2 * QUAD + l.tris.len())?;
                     }
                     Some(gc)
                 }
@@ -360,14 +352,36 @@ fn premultiplied(c: [f32; 4]) -> [f32; 4] {
 /// What `style` covers a fill with under the transform `t`, as the CPU
 /// raster's `shader` decides it (globalAlpha is already in the colours):
 /// `None` when the GPU does not draw it (a pattern, a gradient with more
-/// than [`MAX_GRADIENT_STOPS`] stops, a transform with no inverse);
-/// `Some(None)` when it paints nothing (no stops, a degenerate gradient).
+/// than [`MAX_GRADIENT_STOPS`] stops, a transform with no finite inverse,
+/// a stop offset or a radial end radius that is not finite);
+/// `Some(None)` when it paints nothing (no stops, a degenerate gradient,
+/// and as tiny-skia refuses them: points whose distance is not finite as
+/// f32, a radial end radius that is not over 1/4096).
 fn paint_of(style: &CanvasStyle, t: &crate::Transform2D) -> Option<Option<GpuPaint>> {
     let gradient = |radial: bool, p0: [f32; 2], p1: [f32; 2], r1: f32, stops: Vec<(f32, [f32; 4])>| {
-        if stops.len() > MAX_GRADIENT_STOPS {
+        if stops.len() > MAX_GRADIENT_STOPS || stops.iter().any(|(o, _)| !o.is_finite()) {
             return None;
         }
+        // tiny-skia's gradient constructors (the CPU picture): a length
+        // that is not finite, or a two-point conical radius that is
+        // negative or nearly zero, make no shader, so nothing is painted.
+        // An end radius that is not finite does make one (it paints a
+        // degenerate colour): the CPU bitmap draws that.
+        if !r1.is_finite() {
+            return None;
+        }
+        let length = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
+        if !length.is_finite() || (radial && r1 <= 1.0 / 4096.0) {
+            return Some(None);
+        }
+        if !radial && length <= 1.0 / 32768.0 {
+            // tiny-skia's degenerate linear gradient (padded): its last colour.
+            return Some(Some(GpuPaint::Solid(premultiplied(stops.last()?.1))));
+        }
         let inv = t.inverse()?;
+        if ![inv.a, inv.b, inv.c, inv.d, inv.e, inv.f].iter().all(|v| v.is_finite()) {
+            return None;
+        }
         Some(Some(GpuPaint::Gradient(Arc::new(GpuGradient {
             radial,
             inv: [inv.a, inv.b, inv.c, inv.d, inv.e, inv.f],
@@ -791,6 +805,31 @@ mod gpu_recording_tests {
         c.set_fill_style(CanvasStyle::LinearGradient(many));
         c.fill_rect(0.0, 0.0, 2.0, 2.0);
         assert!(c.take_gpu_batch(false).reset.is_some());
+        // #1300 R1, as tiny-skia builds them: points too far apart for f32
+        // or an end radius of 0 paint nothing; an end radius that is not
+        // finite paints a degenerate colour there, so the CPU draws it.
+        let huge = 1e300_f64 as f32;
+        let stops = |g: &mut crate::RadialGradient| {
+            g.add_color_stop(0.0, rustkit_css::Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, rustkit_css::Color::new(0, 0, 255, 1.0));
+        };
+        let mut far = crate::LinearGradient::new(0.0, 0.0, huge, 0.0);
+        far.add_color_stop(0.0, rustkit_css::Color::new(255, 0, 0, 1.0));
+        far.add_color_stop(1.0, rustkit_css::Color::new(0, 0, 255, 1.0));
+        c.set_fill_style(CanvasStyle::LinearGradient(far));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        let mut zero = crate::RadialGradient::new(5.0, 5.0, 0.0, 20.0, 20.0, 0.0);
+        stops(&mut zero);
+        c.set_fill_style(CanvasStyle::RadialGradient(zero));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        let b = c.take_gpu_batch(false);
+        assert!(b.reset.is_none());
+        assert!(b.lower().is_empty(), "nothing painted");
+        let mut inf = crate::RadialGradient::new(5.0, 5.0, 0.0, 20.0, 20.0, huge);
+        stops(&mut inf);
+        c.set_fill_style(CanvasStyle::RadialGradient(inf));
+        c.fill_rect(0.0, 0.0, 2.0, 2.0);
+        assert!(c.take_gpu_batch(false).reset.is_some(), "drawn from the CPU bitmap");
     }
 
     /// Off (the default), a context keeps no GPU position: nothing is
@@ -852,8 +891,8 @@ mod gpu_recording_tests {
         let b = c.take_gpu_batch(false);
         let (draws, used) = b.lower_within(usize::MAX).expect("no cap");
         assert_eq!(draws.len(), 40);
-        let fans: usize = draws.iter().map(|d| if let GpuDraw::Fill { path, .. } = d { path.tris.len() + 6 } else { 0 }).sum();
-        assert_eq!(used, fans + 6, "fans and cover quads, plus the pass's load quad");
+        let fans: usize = draws.iter().map(|d| if let GpuDraw::Fill { path, .. } = d { path.tris.len() + 12 } else { 0 }).sum();
+        assert_eq!(used, fans, "fans, and each fill's coverage and paint quads");
         assert!(used > 5_000, "40 dashed arcs: {used} vertices");
         assert!(b.lower_within(used - 1).is_none(), "one short of what it takes: refused");
         assert!(b.lower_within(used / 2).is_none());
