@@ -22,6 +22,8 @@ const ROWS: &[&str] = &[
     "suspended_generator_resumed_after_another_call_declared",
     "arrow_made_before_another_call_declared",
     "eval_in_eval_made_before_another_call_declared",
+    "default_parameters_closure_made_before_another_call_declared",
+    "old_activation_sloppy_eval_writes_the_outer_name",
 ];
 
 const CASES: &str = include_str!("../../../docs/diagnostics/2026-11-17/eval_var_per_call_cases.json");

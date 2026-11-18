@@ -100,6 +100,21 @@
    "name": "old_activation_sloppy_eval_writes_the_outer_name",
    "js": "var x = 1; var f = function (c) { if (c) return eval(c); return function (d) { return eval(d); }; }; var old = f(''); f(\"eval('var x = 2;')\"); old('x = 5'); String([x, old('x')])",
    "chrome": "5,5"
+  },
+  {
+   "name": "default_parameters_eval_var_read_in_the_same_call",
+   "js": "var f = function (a = 0) { eval('var x = 2'); return x; }; String([f(), f()])",
+   "chrome": "2,2"
+  },
+  {
+   "name": "default_parameters_eval_var_typeof_and_write",
+   "js": "var f = function (a = 0) { eval('var y = 3'); y = y + 1; return [typeof y, y]; }; String(f())",
+   "chrome": "number,4"
+  },
+  {
+   "name": "default_parameters_eval_function_declaration",
+   "js": "var f = function (a = 0) { eval('function g() { return 4; }'); return g(); }; String(f())",
+   "chrome": "4"
   }
  ],
  "chrome_version": "148.0.7778.216"
