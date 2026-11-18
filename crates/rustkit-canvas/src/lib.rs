@@ -29,7 +29,7 @@ use std::f32::consts::PI;
 use thiserror::Error;
 
 mod raster;
-pub use raster::CanvasBitmap;
+pub use raster::{raster_totals, set_raster_timing, CanvasBitmap, RasterTotals};
 
 #[cfg(test)]
 mod recording_tests;
