@@ -111,6 +111,21 @@ fn in_a_task_a_css_animation_is_on_the_document_timeline() {
 /// painted value the one for that time (Chrome "late": 0 and 0 in 25 of 25 rows).
 #[test]
 fn in_a_late_frame_a_css_animation_is_on_the_document_timeline_and_paints_its_time() {
+    late_frame_case(false);
+}
+
+/// The same with one animation round per turn (RAF-ONE-ROUND on), where the late frame is the
+/// frame of the turn's time (CLOCK-AT-PRESENT): the animations are updated to it before its
+/// callbacks run, so a computed read in the callback is that time's value (ANIM-UPDATE-ORDER;
+/// Chrome `clock_at_present_probe_cft148.json` "frame": `currentTime - opacity * 10000` = 0 in
+/// 100 of 100 late frames). Was: the last turn's layout, 34 ms behind.
+#[test]
+fn in_a_late_frame_a_css_animation_is_on_the_document_timeline_and_paints_its_time_with_one_round_a_turn() {
+    late_frame_case(true);
+}
+
+fn late_frame_case(one_round: bool) {
+    crate::set_one_animation_round(one_round);
     let config = EngineConfig { deterministic_page_clock: true, ..EngineConfig::default() };
     let (mut engine, view, _server) = load_with(config, vec![("/", "text/html", page())]);
     pump(&mut engine, view, 100, 10);

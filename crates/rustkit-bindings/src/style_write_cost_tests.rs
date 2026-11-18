@@ -1,9 +1,24 @@
-//! What an inline style write costs, counted in VM opcodes (not time). MotionMark's per-stage split
-//! (docs/diagnostics/2026-11-17/motionmark_stage_split.md) puts most of a DOM subtest's frame in script,
-//! far beyond the interpreter's own gap to V8: the cost is in the host calls, and `el.style.x = v` is the
-//! one Multiply, Leaves and Design make per element per frame. Every such write runs the bindings' own
-//! `setProperty` (dom.rs) in the interpreter, so its count cannot regress without a failing test.
+//! What an inline style write costs in the JavaScript copy of `CSSStyleDeclaration`, counted in VM
+//! opcodes (not time). MotionMark's per-stage split (docs/diagnostics/2026-11-17/motionmark_stage_split.md)
+//! puts most of a DOM subtest's frame in script, and `el.style.x = v` is the write Multiply, Leaves and
+//! Design make per element per frame.
+//!
+//! Since NATIVE-SETPROPERTY (#1264) a page's writes take the native path (`inline_style.rs`), whose cost
+//! `style_set_cost_tests` guards. This file guards the JavaScript copy, kept behind
+//! `__rk.styleNative(false)`: every measurement here runs on it, so its count cannot regress unseen
+//! while it is the fallback.
 use super::*;
+
+/// Bindings with the JavaScript copy of the inline style in use.
+fn js_copy_bindings(html: &str) -> DomBindings {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(Document::parse_html(html).unwrap())).unwrap();
+    b.runtime
+        .borrow_mut()
+        .evaluate_host_bookkeeping("__rk.styleNative(false); return 0")
+        .unwrap();
+    b
+}
 
 fn grab_total(rep: &str) -> u64 {
     for l in rep.lines() {
@@ -16,11 +31,7 @@ fn grab_total(rep: &str) -> u64 {
 
 /// Opcodes one execution of `op` costs, net of the empty loop.
 fn per_op(op: &str) -> f64 {
-    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.set_document(Rc::new(
-        Document::parse_html("<html><body><div id=a style='position: absolute; left: 1px'></div></body></html>").unwrap(),
-    ))
-    .unwrap();
+    let b = js_copy_bindings("<html><body><div id=a style='position: absolute; left: 1px'></div></body></html>");
     b.evaluate("var el = document.getElementById('a'); var st = el.style; 'ok'").unwrap();
     let iters = 1000u64;
     let run = |body: &str| -> u64 {
@@ -79,29 +90,29 @@ fn inline_style_writes_stay_cheap() {
 }
 
 /// The quick answer for a value with no `url(` changes no result: a bad url in any letter case is still
-/// refused (the earlier value stands, CH2.E29), a good one is kept, and a value with none is written
-/// without the per-character walk (counted as calls to the page's `substr`, which the walk made once per
-/// character).
+/// refused (the earlier value stands, CH2.E29) and a good one is kept, in both copies. (That a value
+/// with no `url(` skips the walk is what the JavaScript copy's opcode counts above guard: the walk takes
+/// the page's built-ins at startup since SEC-STYLE-URL, so a page cannot count it.)
 #[test]
 fn a_bad_url_is_still_refused_in_any_case() {
-    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
-    b.set_document(Rc::new(Document::parse_html("<html><body><div id=a></div></body></html>").unwrap()))
-        .unwrap();
-    let got = b
-        .evaluate(
-            "var st = document.getElementById('a').style, out = [];
-             st.backgroundImage = 'url(ok.png)'; out.push(st.backgroundImage);
-             ['url(a b)', 'URL(a b)', 'uRl(a\"b)', 'none, url(a(b)'].forEach(function (v) { st.backgroundImage = v; out.push(st.backgroundImage); });
-             var calls = 0, sub = String.prototype.substr;
-             String.prototype.substr = function () { calls++; return sub.apply(this, arguments); };
-             st.transform = 'rotate(3deg)'; out.push(st.transform);
-             String.prototype.substr = sub;
-             out.push(calls); out.join('|')",
-        )
-        .unwrap();
-    let got = match got {
-        JsValue::String(s) => s,
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(got, "url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|rotate(3deg)|0");
+    for native in [false, true] {
+        let b = js_copy_bindings("<html><body><div id=a></div></body></html>");
+        b.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.styleNative({native}); return 0"))
+            .unwrap();
+        let got = b
+            .evaluate(
+                "var st = document.getElementById('a').style, out = [];
+                 st.backgroundImage = 'url(ok.png)'; out.push(st.backgroundImage);
+                 ['url(a b)', 'URL(a b)', 'uRl(a\"b)', 'none, url(a(b)'].forEach(function (v) { st.backgroundImage = v; out.push(st.backgroundImage); });
+                 st.transform = 'rotate(3deg)'; out.push(st.transform); out.join('|')",
+            )
+            .unwrap();
+        let got = match got {
+            JsValue::String(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(got, "url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|url(ok.png)|rotate(3deg)", "native {native}");
+    }
 }

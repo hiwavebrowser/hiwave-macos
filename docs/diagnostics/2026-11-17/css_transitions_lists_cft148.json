@@ -1,0 +1,416 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": 50,
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "box-shadow px+color",
+      "css": "#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}",
+      "read": "box-shadow",
+      "mid": "rgb(128, 0, 128) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px"
+    },
+    {
+      "label": "box-shadow none->shadow",
+      "css": "#h{box-shadow:none}#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px"
+    },
+    {
+      "label": "box-shadow shadow->none",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:none}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow 1->2 shadows",
+      "css": "#h{box-shadow:10px 10px 0px 0px rgb(255,0,0)}#h.on{box-shadow:20px 20px 0px 0px rgb(255,0,0),4px 4px 0px 0px rgb(0,0,255)}",
+      "read": "box-shadow",
+      "mid": "rgb(255, 0, 0) 15px 15px 0px 0px, rgba(0, 0, 255, 0.5) 2px 2px 0px 0px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 20px 20px 0px 0px, rgb(0, 0, 255) 4px 4px 0px 0px"
+    },
+    {
+      "label": "box-shadow inset->inset",
+      "css": "#h{box-shadow:inset 0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:inset 10px 10px 10px 2px rgb(255,0,0)}",
+      "read": "box-shadow",
+      "mid": "rgb(128, 0, 128) 5px 5px 5px 1px inset",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 10px 10px 2px inset"
+    },
+    {
+      "label": "box-shadow inset mismatch",
+      "css": "#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:inset 10px 10px 10px 2px rgb(255,0,0)}",
+      "read": "box-shadow",
+      "mid": "rgb(255, 0, 0) 10px 10px 10px 2px inset",
+      "transitions": [],
+      "events": [],
+      "end": "rgb(255, 0, 0) 10px 10px 10px 2px inset"
+    },
+    {
+      "label": "box-shadow currentcolor",
+      "css": "#h{color:rgb(0,0,255);box-shadow:0px 0px 0px 0px}#h.on{box-shadow:10px 10px 0px 0px rgb(255,0,0)}",
+      "read": "box-shadow",
+      "mid": "rgb(128, 0, 128) 5px 5px 0px 0px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 10px 0px 0px"
+    },
+    {
+      "label": "box-shadow tailwind ring",
+      "css": "#h{box-shadow:0 0 0 0px rgba(59,130,246,0.5)}#h.on{box-shadow:0 0 0 4px rgba(59,130,246,0.5)}",
+      "read": "box-shadow",
+      "mid": "rgba(59, 130, 246, 0.5) 0px 0px 0px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgba(59, 130, 246, 0.5) 0px 0px 0px 4px"
+    },
+    {
+      "label": "box-shadow initial",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:initial}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow unset",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:unset}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow revert",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow revert-layer",
+      "css": "#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow inherit",
+      "css": "body{box-shadow:10px 20px 30px 4px rgb(255,0,0),2px 2px 0px 0px rgb(0,0,255)}#h.on{box-shadow:inherit}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px, rgba(0, 0, 255, 0.5) 1px 1px 0px 0px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px, rgb(0, 0, 255) 2px 2px 0px 0px"
+    },
+    {
+      "label": "box-shadow inherit none",
+      "css": "body{box-shadow:none}#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:inherit}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "box-shadow revert-layer in a layer",
+      "css": "@layer a{#h.on{box-shadow:10px 20px 30px 4px rgb(255,0,0)}}@layer b{#h{box-shadow:0px 0px 0px 0px rgb(0,0,255)}#h.on{box-shadow:revert-layer}}",
+      "read": "box-shadow",
+      "mid": "rgb(128, 0, 128) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "rgb(255, 0, 0) 10px 20px 30px 4px"
+    },
+    {
+      "label": "box-shadow revert-layer to no earlier layer",
+      "css": "@layer a{#h{color:red}}@layer b{#h{box-shadow:10px 20px 30px 4px rgb(255,0,0)}#h.on{box-shadow:revert-layer}}",
+      "read": "box-shadow",
+      "mid": "rgba(255, 0, 0, 0.5) 5px 10px 15px 2px",
+      "transitions": [
+        "box-shadow"
+      ],
+      "events": [
+        "run:box-shadow",
+        "start:box-shadow",
+        "end:box-shadow"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "filter blur",
+      "css": "#h{filter:blur(0px)}#h.on{filter:blur(10px)}",
+      "read": "filter",
+      "mid": "blur(5px)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "blur(10px)"
+    },
+    {
+      "label": "filter none->blur",
+      "css": "#h{filter:none}#h.on{filter:blur(10px)}",
+      "read": "filter",
+      "mid": "blur(5px)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "blur(10px)"
+    },
+    {
+      "label": "filter blur->none",
+      "css": "#h{filter:blur(10px)}#h.on{filter:none}",
+      "read": "filter",
+      "mid": "blur(5px)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "filter none->grayscale",
+      "css": "#h{filter:none}#h.on{filter:grayscale(1)}",
+      "read": "filter",
+      "mid": "grayscale(0.5)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "grayscale(1)"
+    },
+    {
+      "label": "filter brightness",
+      "css": "#h{filter:brightness(1)}#h.on{filter:brightness(2)}",
+      "read": "filter",
+      "mid": "brightness(1.5)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "brightness(2)"
+    },
+    {
+      "label": "filter two functions",
+      "css": "#h{filter:blur(0px) brightness(1)}#h.on{filter:blur(10px) brightness(2)}",
+      "read": "filter",
+      "mid": "blur(5px) brightness(1.5)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "blur(10px) brightness(2)"
+    },
+    {
+      "label": "filter prefix list",
+      "css": "#h{filter:blur(0px)}#h.on{filter:blur(10px) brightness(2)}",
+      "read": "filter",
+      "mid": "blur(5px) brightness(1.5)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "blur(10px) brightness(2)"
+    },
+    {
+      "label": "filter mismatch",
+      "css": "#h{filter:blur(10px)}#h.on{filter:grayscale(1)}",
+      "read": "filter",
+      "mid": "grayscale(1)",
+      "transitions": [],
+      "events": [],
+      "end": "grayscale(1)"
+    },
+    {
+      "label": "filter drop-shadow",
+      "css": "#h{filter:drop-shadow(0px 0px 0px rgb(0,0,255))}#h.on{filter:drop-shadow(10px 10px 4px rgb(255,0,0))}",
+      "read": "filter",
+      "mid": "drop-shadow(rgb(128, 0, 128) 5px 5px 2px)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "drop-shadow(rgb(255, 0, 0) 10px 10px 4px)"
+    },
+    {
+      "label": "filter hue-rotate",
+      "css": "#h{filter:hue-rotate(0deg)}#h.on{filter:hue-rotate(180deg)}",
+      "read": "filter",
+      "mid": "hue-rotate(90deg)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "hue-rotate(180deg)"
+    },
+    {
+      "label": "filter opacity/saturate/contrast/invert/sepia",
+      "css": "#h{filter:opacity(1) saturate(1) contrast(1) invert(0) sepia(0)}#h.on{filter:opacity(0) saturate(2) contrast(2) invert(1) sepia(1)}",
+      "read": "filter",
+      "mid": "opacity(0.5) saturate(1.5) contrast(1.5) invert(0.5) sepia(0.5)",
+      "transitions": [
+        "filter"
+      ],
+      "events": [
+        "run:filter",
+        "start:filter",
+        "end:filter"
+      ],
+      "end": "opacity(0) saturate(2) contrast(2) invert(1) sepia(1)"
+    },
+    {
+      "label": "backdrop-filter blur",
+      "css": "#h{backdrop-filter:blur(0px)}#h.on{backdrop-filter:blur(10px)}",
+      "read": "backdrop-filter",
+      "mid": "blur(5px)",
+      "transitions": [
+        "backdrop-filter"
+      ],
+      "events": [
+        "run:backdrop-filter",
+        "start:backdrop-filter",
+        "end:backdrop-filter"
+      ],
+      "end": "blur(10px)"
+    }
+  ]
+}
