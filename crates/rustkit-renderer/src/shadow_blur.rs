@@ -100,9 +100,19 @@ impl Shape {
         let h = |c: CornerRadius| if c.is_zero() { 0.0 } else { c.h };
         let v = |c: CornerRadius| if c.is_zero() { 0.0 } else { c.v };
         if vertical {
-            [r.y, r.y + v(tl).max(v(tr)), r.bottom() - v(bl).max(v(br)), r.bottom()]
+            [
+                r.y,
+                r.y + v(tl).max(v(tr)),
+                r.bottom() - v(bl).max(v(br)),
+                r.bottom(),
+            ]
         } else {
-            [r.x, r.x + h(tl).max(h(bl)), r.right() - h(tr).max(h(br)), r.right()]
+            [
+                r.x,
+                r.x + h(tl).max(h(bl)),
+                r.right() - h(tr).max(h(br)),
+                r.right(),
+            ]
         }
     }
 }
@@ -139,7 +149,11 @@ pub(crate) fn blurred_coverage(shape: &Shape, sigma: f32, x: f32, y: f32) -> f32
             phi((rt - x) / sigma) - phi((l - x) / sigma)
         }
     };
-    let mut cuts: Vec<f32> = shape.breaks(true).into_iter().filter(|c| *c > lo && *c < hi).collect();
+    let mut cuts: Vec<f32> = shape
+        .breaks(true)
+        .into_iter()
+        .filter(|c| *c > lo && *c < hi)
+        .collect();
     cuts.push(lo);
     cuts.push(hi);
     cuts.sort_by(f32::total_cmp);
@@ -183,15 +197,22 @@ pub(crate) fn mesh_knots(
         return knots;
     }
     // Two stretches, near and far edge, merged if they meet.
-    let mut stretches = vec![(breaks[0] - reach, breaks[1] + reach), (breaks[2] - reach, breaks[3] + reach)];
+    let mut stretches = vec![
+        (breaks[0] - reach, breaks[1] + reach),
+        (breaks[2] - reach, breaks[3] + reach),
+    ];
     if stretches[0].1 >= stretches[1].0 {
         stretches = vec![(stretches[0].0, stretches[1].1)];
     }
-    let total: f32 = stretches.iter().map(|(a, b)| (b.min(hi) - a.max(lo)).max(0.0)).sum();
-    // Half a standard deviation (reach / 6) keeps linear interpolation
-    // within about a percent of the alpha; no finer than a pixel; no more
-    // than MAX_KNOTS.
-    let step = (reach / 6.0).max(1.0).max(total / MAX_KNOTS as f32);
+    let total: f32 = stretches
+        .iter()
+        .map(|(a, b)| (b.min(hi) - a.max(lo)).max(0.0))
+        .sum();
+    // A third of a standard deviation (reach / 9) keeps linear interpolation
+    // within about a percent of the alpha, corners included (half a sigma
+    // leaves 4 levels at a corner); no finer than a pixel; no more than
+    // MAX_KNOTS.
+    let step = (reach / 9.0).max(1.0).max(total / MAX_KNOTS as f32);
     for (a, b) in stretches {
         let (a, b) = (a.max(lo), b.min(hi));
         if b <= a {
@@ -244,14 +265,22 @@ fn quantize(v: f32) -> i32 {
 
 fn radii(r: &BorderRadius) -> [f32; 8] {
     let c = [r.top_left, r.top_right, r.bottom_right, r.bottom_left];
-    [c[0].h, c[0].v, c[1].h, c[1].v, c[2].h, c[2].v, c[3].h, c[3].v]
+    [
+        c[0].h, c[0].v, c[1].h, c[1].v, c[2].h, c[2].v, c[3].h, c[3].v,
+    ]
 }
 
 /// The mesh of an outer shadow (`inset` false: `shape` blurred, over the
 /// shape grown by the reach) or an inset one (`inset` true: one minus
 /// `shape` blurred, over `other`, the clip). `other` adds its own edges to
 /// the cuts. Positions are relative to `origin`.
-pub(crate) fn mesh_key(shape: &Shape, other: &Shape, sigma: f32, inset: bool, origin: (f32, f32)) -> MeshKey {
+pub(crate) fn mesh_key(
+    shape: &Shape,
+    other: &Shape,
+    sigma: f32,
+    inset: bool,
+    origin: (f32, f32),
+) -> MeshKey {
     let mut k = [0i32; 26];
     let (ox, oy) = origin;
     let rel = |r: Rect| [r.x - ox, r.y - oy, r.width, r.height];
@@ -268,11 +297,22 @@ pub(crate) fn mesh_key(shape: &Shape, other: &Shape, sigma: f32, inset: bool, or
 }
 
 /// Build the mesh `mesh_key` describes, relative to `origin`.
-pub(crate) fn build_mesh(shape: &Shape, other: &Shape, sigma: f32, inset: bool, origin: (f32, f32)) -> Mesh {
+pub(crate) fn build_mesh(
+    shape: &Shape,
+    other: &Shape,
+    sigma: f32,
+    inset: bool,
+    origin: (f32, f32),
+) -> Mesh {
     let reach = reach_of(sigma);
     let (ox, oy) = origin;
     let (x0, x1, y0, y1) = if inset {
-        (other.rect.x, other.rect.right(), other.rect.y, other.rect.bottom())
+        (
+            other.rect.x,
+            other.rect.right(),
+            other.rect.y,
+            other.rect.bottom(),
+        )
     } else {
         (
             shape.rect.x - reach,
@@ -318,11 +358,21 @@ mod tests {
     fn a_square_shape_blurs_separably() {
         let s = square(0.0, 0.0, 100.0, 60.0);
         let sigma = 8.0;
-        for (x, y) in [(-10.0, 30.0), (0.0, 0.0), (5.0, -3.0), (50.0, 30.0), (104.0, 62.0)] {
+        for (x, y) in [
+            (-10.0, 30.0),
+            (0.0, 0.0),
+            (5.0, -3.0),
+            (50.0, 30.0),
+            (104.0, 62.0),
+        ] {
             let fx = phi((100.0 - x) / sigma) - phi((0.0 - x) / sigma);
             let fy = phi((60.0 - y) / sigma) - phi((0.0 - y) / sigma);
             let got = blurred_coverage(&s, sigma, x, y);
-            assert!((got - fx * fy).abs() < 1e-3, "({x}, {y}): {got} vs {}", fx * fy);
+            assert!(
+                (got - fx * fy).abs() < 1e-3,
+                "({x}, {y}): {got} vs {}",
+                fx * fy
+            );
         }
         // Half at an edge, a quarter at a corner.
         assert!((blurred_coverage(&s, sigma, 0.0, 30.0) - 0.5).abs() < 1e-3);
@@ -334,13 +384,18 @@ mod tests {
     #[test]
     fn a_round_corner_is_lighter_and_a_circle_is_round() {
         let sq = square(0.0, 0.0, 100.0, 100.0);
-        let round = Shape::new(Rect::new(0.0, 0.0, 100.0, 100.0), BorderRadius {
-            top_left: CornerRadius::circular(50.0),
-            top_right: CornerRadius::circular(50.0),
-            bottom_right: CornerRadius::circular(50.0),
-            bottom_left: CornerRadius::circular(50.0),
-        });
-        assert!(blurred_coverage(&round, 8.0, 5.0, 5.0) < blurred_coverage(&sq, 8.0, 5.0, 5.0) * 0.2);
+        let round = Shape::new(
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            BorderRadius {
+                top_left: CornerRadius::circular(50.0),
+                top_right: CornerRadius::circular(50.0),
+                bottom_right: CornerRadius::circular(50.0),
+                bottom_left: CornerRadius::circular(50.0),
+            },
+        );
+        assert!(
+            blurred_coverage(&round, 8.0, 5.0, 5.0) < blurred_coverage(&sq, 8.0, 5.0, 5.0) * 0.2
+        );
         let d = 60.0;
         let east = blurred_coverage(&round, 8.0, 50.0 + d, 50.0);
         let diag = blurred_coverage(&round, 8.0, 50.0 + d * 0.707_106_8, 50.0 + d * 0.707_106_8);
@@ -352,8 +407,10 @@ mod tests {
         let k = mesh_knots(-30.0, 1030.0, [0.0, 0.0, 1000.0, 1000.0], 30.0, &[]);
         assert_eq!(*k.first().unwrap(), -30.0);
         assert_eq!(*k.last().unwrap(), 1030.0);
-        assert!(k.windows(2).all(|w| w[1] - w[0] <= 5.0 + 1e-3 || (w[0] >= 30.0 && w[1] <= 970.0)));
-        assert!(k.len() < 40, "{} knots", k.len());
+        assert!(k
+            .windows(2)
+            .all(|w| w[1] - w[0] <= 3.34 || (w[0] >= 30.0 && w[1] <= 970.0)));
+        assert!(k.len() < 60, "{} knots", k.len());
     }
 
     /// Two boxes of one shape anywhere share a mesh; a different blur or a
@@ -369,7 +426,10 @@ mod tests {
         assert_ne!(at(10.0, 20.0, 16.0), at(10.0, 20.0, 32.0));
         let shape = square(0.0, 0.0, 100.0, 40.0);
         let moved_hole = square(6.0, 4.0, 92.0, 32.0);
-        assert_ne!(at(0.0, 0.0, 16.0), mesh_key(&shape, &moved_hole, 8.0, false, (0.0, 0.0)));
+        assert_ne!(
+            at(0.0, 0.0, 16.0),
+            mesh_key(&shape, &moved_hole, 8.0, false, (0.0, 0.0))
+        );
         let mesh = build_mesh(&shape, &moved_hole, 8.0, false, (0.0, 0.0));
         assert_eq!(mesh.values.len(), mesh.xs.len() * mesh.ys.len());
         assert_eq!((mesh.xs[0], mesh.ys[0]), (-24.0, -24.0), "three sigma out");

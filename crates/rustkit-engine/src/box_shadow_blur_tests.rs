@@ -41,8 +41,10 @@ struct Oracle {
 }
 
 fn oracle() -> Oracle {
-    serde_json::from_str(include_str!("../../../tools/parity_oracle/box_shadow_blur_cases.json"))
-        .expect("box_shadow_blur_cases.json")
+    serde_json::from_str(include_str!(
+        "../../../tools/parity_oracle/box_shadow_blur_cases.json"
+    ))
+    .expect("box_shadow_blur_cases.json")
 }
 
 /// The same page `box_shadow_blur_log.mjs` builds.
@@ -58,11 +60,19 @@ fn page(background: &str, css: &str) -> String {
 fn frame(html: &str) -> Vec<[u8; 3]> {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
-        .create_headless_view(Bounds { x: 0, y: 0, width: W, height: H })
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: W,
+            height: H,
+        })
         .expect("view");
     engine.load_html(view, html).expect("load_html");
     let viewhost_id = engine.views[&view].viewhost_id;
-    let list = engine.views[&view].display_list.clone().expect("display list");
+    let list = engine.views[&view]
+        .display_list
+        .clone()
+        .expect("display list");
     let path = std::env::temp_dir().join(format!(
         "rustkit-shadow-blur-{}-{:?}.ppm",
         std::process::id(),
@@ -88,7 +98,11 @@ fn frame(html: &str) -> Vec<[u8; 3]> {
 /// the count past `TOL`, or `Ok`.
 fn check(name: &str, tol: u8) {
     let oracle = oracle();
-    assert!(oracle.chrome.starts_with("148.0.7778.216"), "pinned Chrome, got {}", oracle.chrome);
+    assert!(
+        oracle.chrome.starts_with("148.0.7778.216"),
+        "pinned Chrome, got {}",
+        oracle.chrome
+    );
     let case = oracle.cases.iter().find(|c| c.name == name).expect("case");
     let f = frame(&page(&case.background, &case.css));
     let at = |x: u32, y: u32| f[(y * W + x) as usize];
@@ -106,7 +120,12 @@ fn check(name: &str, tol: u8) {
     let mut worst = (0u8, 0, 0, [0u8; 3], [0u8; 3]);
     for (x, y, want) in samples {
         let got = at(x, y);
-        let d = got.iter().zip(want).map(|(g, w)| g.abs_diff(w)).max().unwrap();
+        let d = got
+            .iter()
+            .zip(want)
+            .map(|(g, w)| g.abs_diff(w))
+            .max()
+            .unwrap();
         if d > tol {
             off += 1;
         }
