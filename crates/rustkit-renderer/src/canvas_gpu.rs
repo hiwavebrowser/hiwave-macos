@@ -27,6 +27,12 @@ use rustkit_canvas::gpu::{GpuBatch, GpuBlend, GpuDraw, GpuPath, GpuReset};
 pub const CANVAS_TEXTURE_BUDGET: u64 = 128 << 20;
 /// The multisampled scratch target and its stencil, in bytes.
 pub const CANVAS_SCRATCH_BUDGET: u64 = 128 << 20;
+/// The most vertices one canvas replay draws (24 bytes each: 48 MB), and
+/// never more than the device's largest buffer holds. A replay that would
+/// take more (a frame of curves flattens to far more vertices than its
+/// recording's bytes) is not drawn: the canvas starts over from its CPU
+/// bitmap at its next batch.
+pub const CANVAS_VERTEX_CAP: usize = 2 << 20;
 const SAMPLES: u32 = 4;
 const SCRATCH_BYTES_PER_PX: u64 = 4 * SAMPLES as u64 + SAMPLES as u64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -79,6 +85,8 @@ pub(crate) struct CanvasGpu {
     scratch: Option<Scratch>,
     /// The canvas textures this renderer made, by key, and their bytes.
     canvases: HashMap<String, u64>,
+    /// Tests: a lower [`CANVAS_VERTEX_CAP`].
+    vertex_cap: Option<usize>,
 }
 
 const SHADER: &str = r#"
@@ -137,7 +145,7 @@ impl CanvasGpu {
             bind_group_layouts: &[&copy_bgl],
             push_constant_ranges: &[],
         });
-        Self { shader, plain_layout, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new() }
+        Self { shader, plain_layout, copy_bgl, copy_layout, pipes: HashMap::new(), scratch: None, canvases: HashMap::new(), vertex_cap: None }
     }
 
     fn pipe(&mut self, device: &wgpu::Device, p: Pipe) -> &wgpu::RenderPipeline {
@@ -309,14 +317,28 @@ impl Renderer {
         let cg = self.canvas_gpu.get_or_insert_with(|| Box::new(CanvasGpu::new(&device)));
         let textures = &self.texture_cache.textures;
         cg.canvases.retain(|k, _| textures.contains_key(k));
+        // Lowered first, under the vertex cap, before anything touches the
+        // GPU: past the cap nothing is drawn and the texture is as it was.
+        let fits_buffer = (device.limits().max_buffer_size / std::mem::size_of::<Vertex>() as u64).min(usize::MAX as u64) as usize;
+        let mut left = cg.vertex_cap.unwrap_or(CANVAS_VERTEX_CAP).min(fits_buffer);
+        let mut draws: Vec<GpuDraw> = Vec::new();
+        for b in batches {
+            let Some((d, n)) = b.lower_within(left) else {
+                return CanvasReplay::NeedsReset;
+            };
+            left -= n;
+            draws.extend(d);
+        }
+        let bytes = w as u64 * h as u64 * 4;
+        if reset.is_some() && have != Some((w, h)) {
+            let used: u64 = cg.canvases.iter().filter(|(k, _)| k.as_str() != key).map(|(_, b)| *b).sum();
+            if used + bytes > CANVAS_TEXTURE_BUDGET {
+                return CanvasReplay::Denied;
+            }
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("canvas_gpu") });
         if let Some(reset) = &reset {
             if have != Some((w, h)) {
-                let used: u64 = cg.canvases.iter().filter(|(k, _)| k.as_str() != key).map(|(_, b)| *b).sum();
-                let bytes = w as u64 * h as u64 * 4;
-                if used + bytes > CANVAS_TEXTURE_BUDGET {
-                    return CanvasReplay::Denied;
-                }
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(key),
                     size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -372,7 +394,6 @@ impl Renderer {
                 }
             }
         }
-        let draws: Vec<GpuDraw> = batches.iter().flat_map(|b| b.lower()).collect();
         let t = &self.texture_cache.textures[key];
         let mut i = 0;
         while i < draws.len() {
@@ -387,6 +408,13 @@ impl Renderer {
         }
         queue.submit(std::iter::once(encoder.finish()));
         CanvasReplay::Drawn
+    }
+
+    /// Tests: a lower vertex cap for canvas replays.
+    #[doc(hidden)]
+    pub fn set_canvas_vertex_cap(&mut self, cap: usize) {
+        let device = self.device.clone();
+        let _ = (device, cap); // RED: stub
     }
 
     /// Tests and tools: the canvas texture under `key` read back,

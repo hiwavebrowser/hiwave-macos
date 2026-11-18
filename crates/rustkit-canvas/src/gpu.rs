@@ -176,29 +176,40 @@ impl GpuBatch {
     /// presenter's thread: this is the path building, stroking and curve
     /// flattening the page thread no longer does.
     pub fn lower(&self) -> Vec<GpuDraw> {
-        let mut clips: std::collections::HashMap<usize, Arc<GpuClip>> = Default::default();
-        let mut clip_of = |c: Option<&Arc<crate::raster::Clip>>| -> Option<Arc<GpuClip>> {
-            let c = c?;
-            let chain = c.chain.as_ref()?;
-            let id = Arc::as_ptr(c) as usize;
-            Some(
-                clips
-                    .entry(id)
-                    .or_insert_with(|| Arc::new(GpuClip { id, links: chain.iter().map(|l| lower_link(l)).collect() }))
-                    .clone(),
-            )
+        self.lower_within(usize::MAX).map(|(d, _)| d).unwrap_or_default()
+    }
+
+    /// [`Self::lower`], unless the GPU replay of the batch would take more
+    /// than `max_vertices` vertices (the renderer's per-replay cap: a few
+    /// MB of curves can flatten to far more): `None` then, and lowering
+    /// stops as soon as it knows, so no more than about the cap is ever
+    /// built. With the draws, the vertices their replay takes: every fan
+    /// and cover quad, the full-target quads of each pass, and each
+    /// rebuild of the clip in the stencil.
+    pub fn lower_within(&self, max_vertices: usize) -> Option<(Vec<GpuDraw>, usize)> {
+        const QUAD: usize = 6;
+        let max_vertices = usize::MAX; // RED: stub, no cap
+        let left = std::cell::Cell::new(max_vertices);
+        let take = |n: usize| -> Option<()> {
+            let l = left.get().checked_sub(n)?;
+            left.set(l);
+            Some(())
         };
+        let mut clips: std::collections::HashMap<usize, Arc<GpuClip>> = Default::default();
         let mut out = Vec::with_capacity(self.ops.len());
+        // The clip the stencil holds as the replay reaches each draw.
+        let mut in_stencil: Option<usize> = None;
+        take(QUAD)?; // the first pass's load quad
         for op in &self.ops {
-            match &**op {
+            let (clip, draw) = match &**op {
                 Op::Fill { d, path, even_odd, style } => {
                     let (Some(blend), Some(color)) = (GpuBlend::of(d.op), solid(style)) else { continue };
                     let Some(p) = build_path(path).and_then(|p| p.transform(transform(&d.t))) else { continue };
-                    let path = flatten(&p, *even_odd);
+                    let path = flatten(&p, *even_odd, &left)?;
                     if path.tris.is_empty() {
                         continue;
                     }
-                    out.push(GpuDraw::Fill { path, color, blend, clip: clip_of(d.clip.as_ref()) });
+                    (d.clip.as_ref(), GpuDraw::Fill { path, color, blend, clip: None })
                 }
                 Op::Stroke { d, path, line, style } => {
                     let (Some(blend), Some(color)) = (GpuBlend::of(d.op), solid(style)) else { continue };
@@ -208,11 +219,11 @@ impl GpuBatch {
                     let Some(outline) = p.stroke(&skia_stroke(&line.style()), res_scale).and_then(|o| o.transform(ts)) else {
                         continue;
                     };
-                    let path = flatten(&outline, false);
+                    let path = flatten(&outline, false, &left)?;
                     if path.tris.is_empty() {
                         continue;
                     }
-                    out.push(GpuDraw::Fill { path, color, blend, clip: clip_of(d.clip.as_ref()) });
+                    (d.clip.as_ref(), GpuDraw::Fill { path, color, blend, clip: None })
                 }
                 Op::Clear { clip, rect, t } => {
                     let [x, y, w, h] = *rect;
@@ -227,14 +238,15 @@ impl GpuBatch {
                         if r[0] >= r[2] || r[1] >= r[3] {
                             continue;
                         }
+                        take(QUAD)?;
                         rect_path(r)
                     } else {
                         let Some(p) = build_path(&[PathCommand::Rect(x, y, w, h)]).and_then(|p| p.transform(transform(t))) else {
                             continue;
                         };
-                        flatten(&p, false)
+                        flatten(&p, false, &left)?
                     };
-                    out.push(GpuDraw::Fill { path, color: [0.0; 4], blend: GpuBlend::Clear, clip: clip_of(clip.as_ref()) });
+                    (clip.as_ref(), GpuDraw::Fill { path, color: [0.0; 4], blend: GpuBlend::Clear, clip: None })
                 }
                 Op::Put { rgba, width, dx, dy, .. } => {
                     if *width == 0 || *dx < 0 || *dy < 0 {
@@ -246,20 +258,58 @@ impl GpuBatch {
                         let c = tiny_skia::ColorU8::from_rgba(p[0], p[1], p[2], p[3]).premultiply();
                         px.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
                     }
+                    // The next draw starts a new pass: its load quad, and the
+                    // stencil starts empty.
+                    take(QUAD)?;
+                    in_stencil = None;
                     out.push(GpuDraw::Put { x: *dx as u32, y: *dy as u32, width: *width, height, rgba: px });
+                    continue;
                 }
-                Op::Image { .. } => {}
-            }
+                Op::Image { .. } => continue,
+            };
+            let GpuDraw::Fill { path, color, blend, .. } = draw else { continue };
+            take(QUAD)?; // the cover quad
+            let clip = match clip.and_then(|c| c.chain.as_ref().map(|chain| (c, chain))) {
+                None => None,
+                Some((c, chain)) => {
+                    let id = Arc::as_ptr(c) as usize;
+                    let gc = match clips.get(&id) {
+                        Some(gc) => gc.clone(),
+                        None => {
+                            let mut links = Vec::with_capacity(chain.len());
+                            for l in chain.iter() {
+                                links.push(lower_link(l, &left)?);
+                            }
+                            let gc = Arc::new(GpuClip { id, links });
+                            clips.insert(id, gc.clone());
+                            gc
+                        }
+                    };
+                    if in_stencil != Some(id) {
+                        // A rebuild: the set quad, and per link its fan, a
+                        // cut quad and a zero quad (a link's fan is also
+                        // charged when lowered: an over-count, on the safe
+                        // side).
+                        take(QUAD)?;
+                        for l in &gc.links {
+                            take(2 * QUAD + l.tris.len())?;
+                        }
+                        in_stencil = Some(id);
+                    }
+                    Some(gc)
+                }
+            };
+            out.push(GpuDraw::Fill { path, color, blend, clip });
         }
-        out
+        Some((out, max_vertices - left.get()))
     }
 }
 
-fn lower_link(l: &ClipLink) -> GpuPath {
+fn lower_link(l: &ClipLink, left: &std::cell::Cell<usize>) -> Option<GpuPath> {
     match build_path(&l.path).and_then(|p| p.transform(transform(&l.t))) {
-        Some(p) => flatten(&p, l.even_odd),
+        Some(p) => flatten(&p, l.even_odd, left),
         // No segments: the clip keeps nothing.
-        None => GpuPath { tris: Vec::new(), bounds: [0.0; 4], even_odd: l.even_odd },
+        None => Some(GpuPath { tris: Vec::new(), bounds: [0.0; 4], even_odd: l.even_odd }),
     }
 }
 
@@ -277,8 +327,10 @@ fn rect_path(r: [f32; 4]) -> GpuPath {
 }
 
 /// `path` (device space) as triangle fans, one per contour, curves cut to
-/// lines within [`TOLERANCE`].
-fn flatten(path: &tiny_skia::Path, even_odd: bool) -> GpuPath {
+/// lines within [`TOLERANCE`]; its vertices are taken from `left`, and
+/// `None` (stopping early) when they would not fit.
+fn flatten(path: &tiny_skia::Path, even_odd: bool, left: &std::cell::Cell<usize>) -> Option<GpuPath> {
+    let cap = left.get();
     let mut tris = Vec::new();
     let mut contour: Vec<[f32; 2]> = Vec::new();
     let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
@@ -335,15 +387,23 @@ fn flatten(path: &tiny_skia::Path, even_odd: bool) -> GpuPath {
             }
             PathSegment::Close => {}
         }
+        // A contour of n points fans into 3 (n - 2) vertices.
+        if tris.len().saturating_add(contour.len().saturating_mul(3)) > cap.saturating_add(6) {
+            return None;
+        }
     }
     fan(&mut contour, &mut tris);
+    if tris.len() > cap {
+        return None;
+    }
+    left.set(cap - tris.len());
     for p in &tris {
         bounds = [bounds[0].min(p[0]), bounds[1].min(p[1]), bounds[2].max(p[0]), bounds[3].max(p[1])];
     }
     if tris.is_empty() {
         bounds = [0.0; 4];
     }
-    GpuPath { tris, bounds, even_odd }
+    Some(GpuPath { tris, bounds, even_odd })
 }
 
 fn len(v: [f32; 2]) -> f32 {
@@ -631,6 +691,32 @@ mod gpu_recording_tests {
         assert_eq!(clip.links.len(), 1);
         assert!(path.tris.len() > 60, "the circle's outline is flattened: {}", path.tris.len());
         assert!(path.bounds[0] >= 10.0 + 2.0 - 1.0 && path.bounds[2] <= 10.0 + 18.0 + 1.0);
+    }
+
+    /// A frame of curves can lower to far more vertices than its bytes
+    /// suggest (#1299 R1): lowering under a cap stops with `None` once the
+    /// replay would pass it, and under a cap it fits, it says how many it
+    /// takes. Counts, no clock.
+    #[test]
+    fn lowering_stops_at_the_vertex_cap() {
+        let mut c = gpu_ctx(400, 400);
+        c.take_gpu_batch(false);
+        c.set_line_width(3.0);
+        c.set_line_dash(vec![1.0, 1.0]);
+        for i in 0..40 {
+            c.begin_path();
+            c.arc(200.0, 200.0, 20.0 + i as f32 * 4.0, 0.0, std::f32::consts::TAU, false);
+            c.stroke();
+        }
+        let b = c.take_gpu_batch(false);
+        let (draws, used) = b.lower_within(usize::MAX).expect("no cap");
+        assert_eq!(draws.len(), 40);
+        let fans: usize = draws.iter().map(|d| if let GpuDraw::Fill { path, .. } = d { path.tris.len() + 6 } else { 0 }).sum();
+        assert_eq!(used, fans + 6, "fans and cover quads, plus the pass's load quad");
+        assert!(used > 5_000, "40 dashed arcs: {used} vertices");
+        assert!(b.lower_within(used - 1).is_none(), "one short of what it takes: refused");
+        assert!(b.lower_within(used / 2).is_none());
+        assert_eq!(b.lower_within(used).map(|(_, n)| n), Some(used));
     }
 
     #[test]

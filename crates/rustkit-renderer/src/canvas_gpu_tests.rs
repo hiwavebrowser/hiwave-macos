@@ -354,3 +354,37 @@ fn a_clear_under_a_clip_clears_only_inside_it() {
     // Today's CPU bitmap (CLEAR-CLIP): the whole rect cleared.
     assert_eq!(alpha(&c, 35, 35), 0, "CLEAR-CLIP fixed? then compare this case with the CPU again");
 }
+
+/// A frame of curves past the vertex cap is not drawn (#1299 R1): no
+/// buffer is made for it, the texture keeps what it had, and the canvas is
+/// asked for a reset, which then draws. Counts, no clock.
+#[test]
+fn a_frame_past_the_vertex_cap_asks_for_a_reset_instead_of_drawing() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIPPED canvas_gpu: no GPU adapter");
+        return;
+    };
+    let mut r = renderer(&gpu);
+    r.set_canvas_vertex_cap(1_000);
+    let mut c = gpu_ctx(100, 80);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    c.set_fill_style(rgba(0, 0, 0, 1.0));
+    c.fill_rect(0.0, 0.0, 10.0, 10.0);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    let before = r.read_canvas_texture(KEY).expect("texture");
+    c.set_line_width(2.0);
+    c.set_line_dash(vec![1.0, 1.0]);
+    for i in 0..30 {
+        c.begin_path();
+        c.arc(50.0, 40.0, 5.0 + i as f32, 0.0, std::f32::consts::TAU, false);
+        c.stroke();
+    }
+    let heavy = c.take_gpu_batch(false);
+    assert!(heavy.lower_within(usize::MAX).expect("lowers").1 > 1_000);
+    assert_eq!(r.replay_canvas(KEY, &[heavy]), CanvasReplay::NeedsReset);
+    assert_eq!(r.read_canvas_texture(KEY).expect("texture"), before, "nothing drawn");
+    let reset = c.take_gpu_batch(true);
+    assert_eq!(r.replay_canvas(KEY, &[reset]), CanvasReplay::Drawn);
+    assert_eq!(r.read_canvas_texture(KEY).expect("texture"), c.premultiplied_pixels());
+    r.remove_image(KEY);
+}
