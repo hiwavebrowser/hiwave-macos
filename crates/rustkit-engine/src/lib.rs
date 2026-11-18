@@ -984,6 +984,8 @@ mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
 #[cfg(all(test, feature = "headless"))]
+mod box_shadow_blur_tests;
+#[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_global_lexical_tests;
