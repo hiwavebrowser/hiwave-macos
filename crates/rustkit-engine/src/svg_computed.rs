@@ -80,24 +80,66 @@ impl SvgPaintSnapshot {
         let document = self.document.upgrade()?;
         let node = document.get_node(NodeId::new(node))?;
         let svg = outermost_svg(&node)?;
+        self.answers(&svg, color_of).get(&node.id.raw()).cloned()
+    }
+
+    /// Every element of every inline `<svg>` of the document with its
+    /// computed fill and stroke text, by raw NodeId: what `fill_stroke`
+    /// answers for each, from the same resolutions. The whole-page
+    /// snapshot's svg rows (`geometry_with_root`).
+    #[cfg(test)]
+    pub(crate) fn every_fill_stroke(
+        &self,
+        color_of: &dyn Fn(usize) -> Option<Color>,
+    ) -> HashMap<usize, (String, String)> {
+        let mut out = HashMap::new();
+        let Some(document) = self.document.upgrade() else {
+            return out;
+        };
+        // (node, inside svg content): an `<svg>` met outside svg content is
+        // an outermost one; a `<foreignObject>`'s children are HTML again,
+        // as `outermost_svg` climbs.
+        let mut stack: Vec<(Rc<Node>, bool)> = document.root().children().into_iter().map(|c| (c, false)).collect();
+        while let Some((node, in_svg)) = stack.pop() {
+            if !matches!(node.node_type, NodeType::Element { .. }) {
+                continue;
+            }
+            let svg = is_tag(&node, "svg");
+            if svg && !in_svg {
+                out.extend(self.answers(&node, color_of).iter().map(|(k, v)| (*k, v.clone())));
+            }
+            let inside = (in_svg || svg) && !is_tag(&node, "foreignObject");
+            for child in node.children() {
+                stack.push((child, inside));
+            }
+        }
+        out
+    }
+
+    /// The outermost `<svg>` `svg`'s resolved answers, resolved on the
+    /// first ask at this DOM generation.
+    fn answers(
+        &self,
+        svg: &Rc<Node>,
+        color_of: &dyn Fn(usize) -> Option<Color>,
+    ) -> Rc<HashMap<usize, (String, String)>> {
         let gen = rustkit_dom::mutation_generation();
         let mut resolved = self.resolved.borrow_mut();
         if resolved.0 != gen {
             *resolved = (gen, HashMap::new());
         }
         let raw = svg.id.raw();
-        let answers = resolved
+        resolved
             .1
             .entry(raw)
             .or_insert_with(|| {
                 Rc::new(resolve_svg(
-                    &svg,
+                    svg,
                     &self.paint,
                     color_of(raw).unwrap_or(BLACK),
                 ))
             })
-            .clone();
-        answers.get(&node.id.raw()).cloned()
+            .clone()
     }
 }
 

@@ -31177,12 +31177,15 @@ fn layout_hit_tester(
 /// display: contents or none, dropped empty boxes, the root) added. A node
 /// that also produced a box keeps that box's style. `pseudos`
 /// (`ViewLayout::pseudo_styles`) join their element's lines, each row's
-/// name prefixed `::before ` or `::after `.
+/// name prefixed `::before ` or `::after `. `svg_paint`
+/// (`ViewLayout::svg_paint`) adds every inline svg element's `fill` and
+/// `stroke` rows, as `computed_lines_source` reads them (A2.1).
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
     boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
+    svg_paint: Option<&svg_computed::SvgPaintSnapshot>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     // `rem` is the root element's font size. The root element has no box of
     // its own here; its style is with the boxless ones.
@@ -31214,6 +31217,27 @@ fn geometry_with_root(
             for row in custom_property_lines(&style.custom_properties).lines().skip(2) {
                 lines.push_str(&format!("\n{pseudo} {row}"));
             }
+        }
+    }
+    // A2.1: svg content's fill / stroke, its `currentcolor` the `<svg>`
+    // box's `color` (the box `computed_lines_source` indexes). Content
+    // with no box and no boxless style has these rows alone.
+    if let Some(svg_paint) = svg_paint {
+        let index = style_box_index(layout);
+        let color_of = |svg: usize| -> Option<rustkit_css::Color> {
+            let (path, _) = index.get(&svg)?;
+            let mut b: &LayoutBox = layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b.style.color)
+        };
+        for (node, (fill, stroke)) in svg_paint.every_fill_stroke(&color_of) {
+            snapshot
+                .1
+                .entry(node)
+                .or_default()
+                .push_str(&format!("\nfill\t{fill}\nstroke\t{stroke}"));
         }
     }
     snapshot
