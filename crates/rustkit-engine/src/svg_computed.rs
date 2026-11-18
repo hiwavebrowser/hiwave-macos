@@ -27,9 +27,16 @@
 //! presentation attribute or the parent's value stands), and an author
 //! `inherit !important` ranks as a normal one.
 //!
-//! Cost: nothing at build time. The first read of an svg element's style
-//! after a build walks the document's inline svgs once and keeps the
-//! answers for that build (`computed_lines_source`).
+//! Cost: nothing at build time. A read walks up from the element to find
+//! its outermost `<svg>` (none: no rows, and nothing else is walked, so a
+//! page without inline svg pays only that climb). The first read in an
+//! svg resolves that svg's subtree once and keeps the answers until the
+//! DOM changes (`rustkit_dom::mutation_generation`), so a presentation
+//! attribute written where no relayout follows (a `display: none`
+//! subtree) is read at once. Author rules are the last build's.
+//!
+//! Page input drives no recursion: the subtree walk keeps its own stack,
+//! and a paint's fallback is read without re-entering `parse_paint`.
 //!
 //! Oracle: Chrome for Testing 148.0.7778.216 through
 //! `tools/parity_oracle/svg_computed_paint_log.mjs`, receipt
@@ -37,7 +44,8 @@
 
 use crate::SvgPaintStyle;
 use rustkit_css::Color;
-use rustkit_dom::{Node, NodeType};
+use rustkit_dom::{Document, Node, NodeId, NodeType};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -45,8 +53,77 @@ use std::rc::{Rc, Weak};
 /// view built last and its author paint map (`LayoutCtx::svg_paint_styles`
 /// as that build left it).
 pub(crate) struct SvgPaintSnapshot {
-    pub(crate) root: Weak<Node>,
+    pub(crate) document: Weak<Document>,
     pub(crate) paint: Rc<HashMap<usize, SvgPaintStyle>>,
+    /// Per outermost `<svg>` (raw NodeId): its elements' fill and stroke
+    /// text, at the DOM generation they were resolved at.
+    resolved: RefCell<(u64, HashMap<usize, Rc<HashMap<usize, (String, String)>>>)>,
+}
+
+impl SvgPaintSnapshot {
+    pub(crate) fn new(document: &Rc<Document>, paint: Rc<HashMap<usize, SvgPaintStyle>>) -> Self {
+        Self {
+            document: Rc::downgrade(document),
+            paint,
+            resolved: RefCell::default(),
+        }
+    }
+
+    /// `node`'s computed fill and stroke text when it is an element of an
+    /// inline `<svg>` (the `<svg>` included); `color_of` is an `<svg>`
+    /// element's `color`.
+    pub(crate) fn fill_stroke(
+        &self,
+        node: usize,
+        color_of: &dyn Fn(usize) -> Option<Color>,
+    ) -> Option<(String, String)> {
+        let document = self.document.upgrade()?;
+        let node = document.get_node(NodeId::new(node))?;
+        let svg = outermost_svg(&node)?;
+        let gen = rustkit_dom::mutation_generation();
+        let mut resolved = self.resolved.borrow_mut();
+        if resolved.0 != gen {
+            *resolved = (gen, HashMap::new());
+        }
+        let raw = svg.id.raw();
+        let answers = resolved
+            .1
+            .entry(raw)
+            .or_insert_with(|| {
+                Rc::new(resolve_svg(
+                    &svg,
+                    &self.paint,
+                    color_of(raw).unwrap_or(BLACK),
+                ))
+            })
+            .clone();
+        answers.get(&node.id.raw()).cloned()
+    }
+}
+
+fn is_tag(node: &Node, tag: &str) -> bool {
+    node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(tag))
+}
+
+/// The outermost `<svg>` at or above `node` whose content `node` is: the
+/// climb stops at a `<foreignObject>` above `node` (its HTML children are
+/// not svg content). `None` for anything else.
+fn outermost_svg(node: &Rc<Node>) -> Option<Rc<Node>> {
+    if !matches!(node.node_type, NodeType::Element { .. }) {
+        return None;
+    }
+    let mut svg = is_tag(node, "svg").then(|| node.clone());
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if is_tag(&n, "foreignObject") {
+            break;
+        }
+        if is_tag(&n, "svg") {
+            svg = Some(n.clone());
+        }
+        at = n.parent();
+    }
+    svg
 }
 
 /// A computed `<paint>` (SVG 2 §13.2): `currentcolor` already resolved.
@@ -73,7 +150,8 @@ thread_local! {
     static RESOLVES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// How many times this thread resolved svg paint (`resolve_all` walks).
+/// How many times this thread resolved svg paint (`resolve_svg` walks).
+#[cfg(test)]
 pub(crate) fn resolves() -> u64 {
     RESOLVES.with(|c| c.get())
 }
@@ -85,34 +163,60 @@ const BLACK: Color = Color {
     a: 1.0,
 };
 
-/// `value` as a paint, `currentcolor` as `current`; `None` when it does not
-/// read (the declaration is then ignored).
-pub(crate) fn parse_paint(value: &str, current: Color) -> Option<Paint> {
+fn starts_with_url(value: &str) -> bool {
+    value
+        .get(..4)
+        .is_some_and(|p| p.eq_ignore_ascii_case("url("))
+}
+
+/// `none`, `currentcolor` (as `current`) or a colour: what a paint server's
+/// fallback may be.
+fn parse_simple_paint(value: &str, current: Color) -> Option<Paint> {
     let value = value.trim();
-    let lower = value.to_ascii_lowercase();
-    if lower == "none" {
+    if value.eq_ignore_ascii_case("none") {
         return Some(Paint::None);
     }
-    if lower == "currentcolor" {
+    if value.eq_ignore_ascii_case("currentcolor") {
         return Some(Paint::Color(current));
     }
-    if lower.starts_with("url(") {
-        let close = value.find(')')?;
-        let inner = value[4..close].trim();
-        let inner = inner
-            .strip_prefix(['"', '\''])
-            .and_then(|s| s.strip_suffix(['"', '\'']))
-            .unwrap_or(inner);
-        let rest = value[close + 1..].trim();
-        if rest.is_empty() {
-            return Some(Paint::Url(inner.to_string(), None));
-        }
-        return match parse_paint(rest, current)? {
-            Paint::Url(..) => None,
-            fallback => Some(Paint::Url(inner.to_string(), Some(Box::new(fallback)))),
-        };
-    }
     crate::parse_color(value).map(Paint::Color)
+}
+
+/// A leading `url(...)`: its address and what follows it. A quoted address
+/// may hold `)` (`url("a)b")`).
+fn split_url(value: &str) -> Option<(&str, &str)> {
+    let body = value.get(4..)?.trim_start();
+    match body.chars().next()? {
+        quote @ ('"' | '\'') => {
+            let end = body[1..].find(quote)? + 1;
+            let rest = body[end + 1..].trim_start().strip_prefix(')')?;
+            Some((&body[1..end], rest))
+        }
+        _ => {
+            let end = body.find(')')?;
+            Some((body[..end].trim(), &body[end + 1..]))
+        }
+    }
+}
+
+/// `value` as a paint, `currentcolor` as `current`; `None` when it does not
+/// read (the declaration is then ignored). A paint server's fallback is
+/// read on its own: a second `url()` is invalid at once.
+pub(crate) fn parse_paint(value: &str, current: Color) -> Option<Paint> {
+    let value = value.trim();
+    if !starts_with_url(value) {
+        return parse_simple_paint(value, current);
+    }
+    let (url, rest) = split_url(value)?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(Paint::Url(url.to_string(), None));
+    }
+    if starts_with_url(rest) {
+        return None;
+    }
+    let fallback = parse_simple_paint(rest, current)?;
+    Some(Paint::Url(url.to_string(), Some(Box::new(fallback))))
 }
 
 /// The last `property` declaration of `text` (`name:value;` pairs, as
@@ -177,63 +281,35 @@ fn resolve(
         .unwrap_or_else(|| inherited.clone())
 }
 
-/// The computed `fill` and `stroke` text of every element of every inline
-/// `<svg>` under `root`, by raw NodeId. `color_of` is an `<svg>` element's
-/// `color` (black when it has none).
-pub(crate) fn resolve_all(
-    root: &Rc<Node>,
+/// The computed `fill` and `stroke` text of every element of the inline
+/// `<svg>` `svg`, by raw NodeId, its `currentcolor` `current`. The walk
+/// keeps its own stack (a page's nesting depth drives no recursion).
+fn resolve_svg(
+    svg: &Rc<Node>,
     paint: &HashMap<usize, SvgPaintStyle>,
-    color_of: &dyn Fn(usize) -> Option<Color>,
+    current: Color,
 ) -> HashMap<usize, (String, String)> {
-    fn walk(
-        node: &Rc<Node>,
-        inherited: Option<(&Paint, &Paint, Color)>,
-        paint: &HashMap<usize, SvgPaintStyle>,
-        color_of: &dyn Fn(usize) -> Option<Color>,
-        out: &mut HashMap<usize, (String, String)>,
-    ) {
-        let NodeType::Element { tag_name, .. } = &node.node_type else {
-            for child in node.children() {
-                walk(&child, inherited, paint, color_of, out);
-            }
-            return;
-        };
-        let raw = node.id.raw();
-        let (fill, stroke, current) = match inherited {
-            Some(parent) => parent,
-            None if tag_name.eq_ignore_ascii_case("svg") => (
-                &Paint::Color(BLACK),
-                &Paint::None,
-                color_of(raw).unwrap_or(BLACK),
-            ),
-            None => {
-                for child in node.children() {
-                    walk(&child, None, paint, color_of, out);
-                }
-                return;
-            }
-        };
-        let style = paint.get(&raw);
-        let fill = resolve(node, style, "fill", fill, current);
-        let stroke = resolve(node, style, "stroke", stroke, current);
-        out.insert(raw, (fill.css_text(), stroke.css_text()));
-        // A `<foreignObject>`'s children are HTML, with their own styles.
-        if tag_name.eq_ignore_ascii_case("foreignObject") {
-            return;
-        }
-        for child in node.children() {
-            walk(
-                &child,
-                Some((&fill, &stroke, current)),
-                paint,
-                color_of,
-                out,
-            );
-        }
-    }
     RESOLVES.with(|c| c.set(c.get() + 1));
     let mut out = HashMap::new();
-    walk(root, None, paint, color_of, &mut out);
+    let mut stack: Vec<(Rc<Node>, Rc<(Paint, Paint)>)> =
+        vec![(svg.clone(), Rc::new((Paint::Color(BLACK), Paint::None)))];
+    while let Some((node, parent)) = stack.pop() {
+        if !matches!(node.node_type, NodeType::Element { .. }) {
+            continue;
+        }
+        let style = paint.get(&node.id.raw());
+        let fill = resolve(&node, style, "fill", &parent.0, current);
+        let stroke = resolve(&node, style, "stroke", &parent.1, current);
+        out.insert(node.id.raw(), (fill.css_text(), stroke.css_text()));
+        // A `<foreignObject>`'s children are HTML, with their own styles.
+        if is_tag(&node, "foreignObject") {
+            continue;
+        }
+        let values = Rc::new((fill, stroke));
+        for child in node.children() {
+            stack.push((child, values.clone()));
+        }
+    }
     out
 }
 
@@ -259,6 +335,11 @@ mod tests {
         );
         assert_eq!(text("url(#gr) none").as_deref(), Some("url(\"#gr\") none"));
         assert_eq!(text("url(#a) url(#b)"), None);
+        assert_eq!(
+            text("url(\"a)b\") red").as_deref(),
+            Some("url(\"a)b\") rgb(255, 0, 0)")
+        );
+        assert_eq!(text("url(\"a"), None);
         assert_eq!(text("coral").as_deref(), Some("rgb(255, 127, 80)"));
         assert_eq!(text("bogus"), None);
     }

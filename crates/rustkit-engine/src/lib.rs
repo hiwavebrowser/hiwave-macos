@@ -20796,6 +20796,12 @@ impl Engine {
         let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
             .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
+        // The view's own document (a test may style a detached one).
+        if let Some(view) = view {
+            if let Some(own) = view.document.as_ref().filter(|d| std::ptr::eq(Rc::as_ptr(d), document)) {
+                self.lctx.note_svg_paint(&view.lay, own);
+            }
+        }
     }
 }
 
@@ -20884,7 +20890,6 @@ impl layout_ctx::LayoutCtx {
         };
         let kept = self.svg_prepass.borrow_mut().paint_for(document.root(), &key);
         if let Some(map) = kept {
-            Self::note_svg_paint(lay, document, &map);
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
@@ -20907,23 +20912,14 @@ impl layout_ctx::LayoutCtx {
             _ => Rc::new(map),
         };
         self.svg_prepass.borrow_mut().keep_paint(document.root(), key, map.clone());
-        Self::note_svg_paint(lay, document, &map);
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
-    /// Keep `map` and `document` on the view for svg content's computed
-    /// paint (`svg_computed`), read after the build.
-    fn note_svg_paint(
-        lay: Option<&layout_ctx::ViewLayout>,
-        document: &Document,
-        map: &Rc<HashMap<usize, SvgPaintStyle>>,
-    ) {
-        if let Some(lay) = lay {
-            *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot {
-                root: Rc::downgrade(document.root()),
-                paint: map.clone(),
-            }));
-        }
+    /// Keep `document` and the paint map just cached on `lay`'s view for
+    /// svg content's computed paint (`svg_computed`), read after the build.
+    fn note_svg_paint(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let paint = self.svg_paint_styles.borrow().clone();
+        *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot::new(document, paint)));
     }
 
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
@@ -26721,6 +26717,7 @@ impl Engine {
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
+            lctx.note_svg_paint(&lay, &document);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
@@ -31515,9 +31512,6 @@ fn computed_lines_source(
     lay: Rc<layout_ctx::ViewLayout>,
 ) -> rustkit_bindings::ComputedLines {
     let index: std::cell::OnceCell<HashMap<usize, (Vec<u32>, bool)>> = std::cell::OnceCell::new();
-    // A2.1: svg content's computed fill / stroke, resolved on the first
-    // read that needs them.
-    let svg_paint: std::cell::OnceCell<HashMap<usize, (String, String)>> = std::cell::OnceCell::new();
     Rc::new(move |node| {
         let layout = layout()?;
         let _snapshot_time = time_stage(Stage::Snapshot);
@@ -31536,13 +31530,10 @@ fn computed_lines_source(
             }
             Some(b)
         };
+        // A2.1: svg content's computed fill / stroke (`svg_computed`).
         let svg_rows = || -> Option<String> {
             let snapshot = lay.svg_paint.borrow().clone()?;
-            let paint = svg_paint.get_or_init(|| match snapshot.root.upgrade() {
-                Some(root) => svg_computed::resolve_all(&root, &snapshot.paint, &|svg| box_at(svg).map(|b| b.style.color)),
-                None => HashMap::new(),
-            });
-            let (fill, stroke) = paint.get(&node)?;
+            let (fill, stroke) = snapshot.fill_stroke(node, &|svg| box_at(svg).map(|b| b.style.color))?;
             Some(format!("\nfill\t{fill}\nstroke\t{stroke}"))
         };
         let mut lines = match index.get(&node) {
