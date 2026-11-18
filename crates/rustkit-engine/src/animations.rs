@@ -2370,12 +2370,20 @@ impl Animations {
         let mut out: HashMap<usize, Vec<String>> = HashMap::new();
         // A pseudo-element's are not its element's (its reads come from
         // the pseudo styles, which the frames keep).
-        for t in self.transitions.iter().filter(|t| split_key(t.node).1.is_none()) {
+        for t in self
+            .transitions
+            .iter()
+            .filter(|t| split_key(t.node).1.is_none())
+        {
             out.entry(t.node)
                 .or_default()
                 .push(PROPS[t.prop].name.to_string());
         }
-        for a in self.css.iter().filter(|a| !a.cancelled && split_key(a.node).1.is_none()) {
+        for a in self
+            .css
+            .iter()
+            .filter(|a| !a.cancelled && split_key(a.node).1.is_none())
+        {
             let props = out.entry(a.node).or_default();
             for prop in a.props() {
                 props.push(PROPS[prop].name.to_string());
@@ -2803,6 +2811,151 @@ mod tests {
                 "transitionstart",
                 "transitionend"
             ]
+        );
+    }
+
+    /// CSS-TRANS B (#1286): individual `translate` / `rotate` / `scale`,
+    /// including a transition through `none` and a rotate past 360°.
+    #[test]
+    fn individual_transforms_interpolate_none_and_past_a_turn() {
+        assert_eq!(interpolate_individual(&None, &None, 0.5), Some(None));
+        assert_eq!(
+            interpolate_individual(
+                &None,
+                &Some(TransformOp::TranslateX(Length::Px(100.0))),
+                0.5
+            ),
+            Some(Some(TransformOp::TranslateX(Length::Px(50.0))))
+        );
+        assert_eq!(
+            interpolate_individual(&Some(TransformOp::Scale(2.0, 2.0)), &None, 1.0),
+            Some(None),
+            "the end point is none itself, not the identity"
+        );
+        assert_eq!(
+            interpolate_individual(
+                &Some(TransformOp::Rotate(45.0)),
+                &Some(TransformOp::Rotate(405.0)),
+                0.5
+            ),
+            Some(Some(TransformOp::Rotate(225.0))),
+            "45deg to 405deg passes 225deg; no turn is taken off"
+        );
+    }
+
+    /// CSS-TRANS E (#1289): visible holds between ends; hidden↔collapse
+    /// starts no transition.
+    #[test]
+    fn visibility_holds_visible_and_refuses_hidden_to_collapse() {
+        assert_eq!(
+            interpolate_visibility(Visibility::Visible, Visibility::Hidden, 0.25),
+            Some(Visibility::Visible)
+        );
+        assert_eq!(
+            interpolate_visibility(Visibility::Hidden, Visibility::Visible, 0.75),
+            Some(Visibility::Visible)
+        );
+        assert_eq!(
+            interpolate_visibility(Visibility::Hidden, Visibility::Collapse, 0.5),
+            None
+        );
+        assert_eq!(
+            interpolate_visibility(Visibility::Hidden, Visibility::Hidden, 0.5),
+            Some(Visibility::Hidden)
+        );
+        assert_eq!(
+            interpolate_visibility(Visibility::Visible, Visibility::Hidden, 0.0),
+            Some(Visibility::Visible)
+        );
+        assert_eq!(
+            interpolate_visibility(Visibility::Visible, Visibility::Hidden, 1.0),
+            Some(Visibility::Hidden)
+        );
+    }
+
+    /// CSS-TRANS D (#1290): box-shadow list pad + inset mismatch; filter
+    /// prefix pad + mismatched function kinds.
+    #[test]
+    fn shadows_and_filters_pad_matching_lists_and_refuse_mismatches() {
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        };
+        let a = vec![BoxShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_radius: 0.0,
+            spread_radius: 0.0,
+            color: red,
+            inset: false,
+        }];
+        let b = vec![BoxShadow {
+            offset_x: 10.0,
+            offset_y: 20.0,
+            blur_radius: 4.0,
+            spread_radius: 0.0,
+            color: red,
+            inset: false,
+        }];
+        let mid = interpolate_shadows(&a, &b, 0.5).expect("same inset");
+        assert_eq!(mid.len(), 1);
+        assert_eq!(
+            (mid[0].offset_x, mid[0].offset_y, mid[0].blur_radius),
+            (5.0, 10.0, 2.0)
+        );
+
+        let inset = vec![BoxShadow {
+            inset: true,
+            ..b[0]
+        }];
+        assert!(
+            interpolate_shadows(&a, &inset, 0.5).is_none(),
+            "inset against outset is not interpolable"
+        );
+        assert_eq!(
+            interpolate_shadows(&a, &[], 1.0),
+            Some(vec![]),
+            "the end point of a transition to none is no shadow"
+        );
+
+        let blur = vec![FilterFn::Blur(10.0)];
+        assert_eq!(
+            interpolate_filter_fns(&[], &blur, 0.5),
+            Some(vec![FilterFn::Blur(5.0)]),
+            "none pads the missing function at its initial value"
+        );
+        assert!(
+            interpolate_filter_fns(
+                &[FilterFn::Blur(4.0)],
+                &[FilterFn::Amount("grayscale", 1.0)],
+                0.5
+            )
+            .is_none(),
+            "mismatched function kinds refuse"
+        );
+    }
+
+    /// CSS-TRANS G (#1291): same-shape track lists lerp; different lengths
+    /// start no transition.
+    #[test]
+    fn grid_templates_lerp_matching_shapes_only() {
+        let a = GridTemplate::from_sizes(vec![TrackSize::Px(100.0), TrackSize::Fr(1.0)]);
+        let b = GridTemplate::from_sizes(vec![TrackSize::Px(200.0), TrackSize::Fr(3.0)]);
+        let mid = interpolate_grid_template(&a, &b, 0.5).expect("same shape");
+        assert_eq!(mid.tracks[0].size, TrackSize::Px(150.0));
+        assert_eq!(mid.tracks[1].size, TrackSize::Fr(2.0));
+
+        let short = GridTemplate::from_sizes(vec![TrackSize::Px(100.0)]);
+        assert!(
+            interpolate_grid_template(&a, &short, 0.5).is_none(),
+            "different track counts are not interpolable"
+        );
+        assert_eq!(
+            interpolate_grid_template(&a, &b, 1.0),
+            Some(b),
+            "the end point is the list itself"
         );
     }
 }
