@@ -1,0 +1,7 @@
+# css_transitions_cost (debug test profile, -j 2, Mac, 2026-11-17); two runs each; head 00867937 + group G
+COST background-color: elements=200 frames=30 median_ms=28.75 max_ms=113.80 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST width px->%: elements=200 frames=30 median_ms=39.41 max_ms=133.90 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST grid-template-columns: elements=200 frames=30 median_ms=43.22 max_ms=136.52 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST background-color: elements=200 frames=30 median_ms=29.37 max_ms=123.25 full_relayouts=0 kept_layout_frames=30 animations=String("200")
+COST width px->%: elements=200 frames=30 median_ms=39.49 max_ms=130.69 full_relayouts=30 kept_layout_frames=0 animations=String("200")
+COST grid-template-columns: elements=200 frames=30 median_ms=40.54 max_ms=129.93 full_relayouts=30 kept_layout_frames=0 animations=String("200")
