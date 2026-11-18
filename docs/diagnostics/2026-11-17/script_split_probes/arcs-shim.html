@@ -1,0 +1,38 @@
+<!doctype html><html><body style="margin:0"><canvas id=c width=1200 height=700></canvas>
+<script>
+// SCRIPT-SPLIT probe: where Canvas Arcs' JS time goes: the page's own JS (stub context) vs the real
+// context's JS shims + host calls. MotionMark CanvasArc.draw, 1000 arcs.
+var seed = 42; function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+var W = 1200, H = 700, arcs = [];
+var dx = W / 6, dy = H / 4;
+for (var i = 0; i < 1000; i++) {
+  var ry = Math.min(3, Math.floor(rnd() * 4)), rx = Math.floor(rnd() * (6 - ry % 2));
+  var colors = ["#101010", "#808080", "#c0c0c0", ["#e01040", "#10c030", "#e05010"][(rx + Math.ceil(ry / 2)) % 3]];
+  arcs.push({ point: { x: dx * (rx + (ry % 2) / 2), y: dy * (ry + .5) }, radius: 20 + Math.pow(rnd(), 5) * (Math.min(dx, dy) / 1.8),
+    startAngle: rnd() * 6.28, endAngle: rnd() * 6.28, omega: (rnd() - 0.5) * 0.3, ccw: rnd() > 0.5,
+    color: colors[Math.floor(rnd() * 4)], lineWidth: 1 + Math.pow(rnd(), 5) * 30, doStroke: Math.floor(rnd() * 4) != 0 });
+}
+function draw(a, context) {
+  a.startAngle += a.omega; a.endAngle += a.omega / 2;
+  if (a.doStroke) {
+    context.strokeStyle = a.color; context.lineWidth = a.lineWidth; context.beginPath();
+    context.arc(a.point.x, a.point.y, a.radius, a.startAngle, a.endAngle, a.ccw); context.stroke();
+  } else {
+    context.fillStyle = a.color; context.beginPath(); context.lineTo(a.point.x, a.point.y);
+    context.arc(a.point.x, a.point.y, a.radius, a.startAngle, a.endAngle, a.ccw); context.lineTo(a.point.x, a.point.y); context.fill();
+  }
+}
+var stub = { strokeStyle: '', fillStyle: '', lineWidth: 1, beginPath: function () {}, arc: function () {}, lineTo: function () {},
+  stroke: function () {}, fill: function () {}, clearRect: function () {} };
+var real = document.getElementById('c').getContext('2d');
+function frame(ctx) { ctx.clearRect(0, 0, W, H); for (var i = 0; i < arcs.length; i++) draw(arcs[i], ctx); }
+function time(ctx, reps) { var t = performance.now(); for (var r = 0; r < reps; r++) frame(ctx); return (performance.now() - t) / reps; }
+var n = 0, tr = 0, ts = 0;
+function tick() {
+  var t0 = performance.now(); frame(real); var t1 = performance.now(); frame(stub); var t2 = performance.now();
+  if (n >= 10) { tr += t1 - t0; ts += t2 - t1; }
+  if (++n < 70) requestAnimationFrame(tick);
+  else console.log('ARCS-SHIM ' + JSON.stringify({ frames: n - 10, real_ms: tr / (n - 10), stub_ms: ts / (n - 10) }));
+}
+requestAnimationFrame(tick);
+</script></body></html>

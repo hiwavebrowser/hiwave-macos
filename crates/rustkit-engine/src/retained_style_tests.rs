@@ -313,16 +313,32 @@ fn assert_replays_match_a_fresh_cascade(name: &str, page: &str, splices: Option<
 /// The class flips every 4 frames, so a transition (2 s) is always running, reversed mid-way.
 #[test]
 fn a_running_transition_on_an_inherited_property_reaches_the_children() {
-    assert_replays_match_a_fresh_cascade(
-        "transition",
-        &page(
-            "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
-            "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
-            "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
-             document.getElementById('w').style.width = (10 + n % 50) + 'px';",
-        ),
-        None,
-    );
+    assert_replays_match_a_fresh_cascade("transition", &transition_page(), None);
+}
+
+fn transition_page() -> String {
+    page(
+        "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
+        "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
+        "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
+         document.getElementById('w').style.width = (10 + n % 50) + 'px';",
+    )
+}
+
+/// #1257 delta R1: `boxes-verify` must see a splice that sweeps the animation state like a full
+/// build. That bug (fixed in #1257) dropped the before-change style of every element the splice
+/// did not visit, so the next class change started no transition; `boxes-verify` hid it, because
+/// its comparison build visits every element inside the same `with_building`. With the fix undone
+/// (`IGNORE_LAST_BUILD_PARTIAL`), the verify run must count splice differences.
+#[test]
+fn boxes_verify_counts_a_splice_that_sweeps_like_a_full_build() {
+    crate::layout_ctx::IGNORE_LAST_BUILD_PARTIAL.with(|c| c.set(true));
+    let before = splice_mismatches_for_test();
+    let checked = run(&transition_page(), 8, RetainedStyles::BoxesVerify);
+    let found = splice_mismatches_for_test() - before;
+    crate::layout_ctx::IGNORE_LAST_BUILD_PARTIAL.with(|c| c.set(false));
+    assert!(checked.splices.0 > 0, "the verify run spliced (last miss {:?})", checked.splices.1);
+    assert!(found > 0, "boxes-verify found no difference in a splice that swept like a full build");
 }
 
 /// The same for an `@keyframes` animation of an inherited property on an ancestor.

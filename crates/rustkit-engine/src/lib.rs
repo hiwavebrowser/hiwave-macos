@@ -354,12 +354,19 @@ pub use content_thread::{
 };
 mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
+mod frame_stages;
+pub use frame_stages::{
+    frame_stage_line, frame_stage_totals, host_call_rows_line, set_frame_stage_timing, FrameStageTotals,
+    FRAME_STAGE_FIELDS,
+};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_commit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wgate_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_stages_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -416,6 +423,10 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_round_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_at_present_tests;
 mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
@@ -689,6 +700,20 @@ mod web_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_colors_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_individual_transforms_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_sizes_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_visibility_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_lists_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_grid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_cost_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_timeline_tests;
@@ -708,6 +733,8 @@ mod hidden_tiles_build_tests;
 mod retained_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
+mod paint_style_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2076,6 +2103,31 @@ const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 /// still due for the next turn. Callbacks that finish inside the budget
 /// still run in the one turn, which is what a pump of a few timers observes.
 const LIVE_FRAME_MS: u64 = 16;
+
+thread_local! {
+    /// RAF-ONE-ROUND on this thread (`set_one_animation_round`); `None`: `HIWAVE_RAF_ONE_ROUND`.
+    static ONE_ANIMATION_ROUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// RAF-ONE-ROUND: a frame tree's live turn (one presented frame) runs one animation-frame round
+/// on this thread's engines. Off, a late turn ran a second round, of the frame a late callback
+/// asked for (due already), before the turn returned: MotionMark's heavy cells counted two suite
+/// frames per presented frame. Off by default (on with `HIWAVE_RAF_ONE_ROUND=1`): on, a frame
+/// document's CSS animation clock can be read at the timers' clock on a turn that defers that
+/// frame, ahead of the time its animations report (`css_timeline_tests`, RAF-ONE-ROUND PR).
+pub fn set_one_animation_round(on: bool) {
+    ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
+}
+
+fn one_animation_round() -> bool {
+    ONE_ANIMATION_ROUND.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() == Some("1");
+            c.set(Some(on));
+            on
+        })
+    })
+}
 
 /// What a load lends the engine to at its safe points (LAT15): the content
 /// thread's endpoint, which applies the window's commands that may run
@@ -6927,6 +6979,14 @@ impl Engine {
     /// next turn at once. `real_clock`: see [`Self::pump_live_real`]; the
     /// tree's turn is on one clock, so its frames' turns take the same.
     async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
+        if one_animation_round() {
+            // The tree's late rounds are the frames of their turns' time (CLOCK-AT-PRESENT).
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.set_one_round(true) {
+                    debug!(error = %e, "the one-round mark failed");
+                }
+            }
+        }
         if !self.config.nested_contexts {
             return self.pump_live_turn(id, elapsed_ms, real_clock).await;
         }
@@ -6953,6 +7013,10 @@ impl Engine {
         // their documents' scripts asked of the network and of layout. The
         // turn's time is the tree's.
         let started = std::time::Instant::now();
+        // The turn is one presented frame, so it runs one animation-frame round, however many
+        // calls below run its parts (RAF-ONE-ROUND): a frame a late round's callbacks ask for,
+        // due already, is the next turn's, not a second round in a sub-turn or the stop's.
+        self.set_tree_turn(id, true);
         self.live_timer_cap = 0;
         let mut frames = self.pump_frames(id, 0, real_clock).await;
         self.live_timer_cap = 1;
@@ -6978,12 +7042,16 @@ impl Engine {
             // The turn's frame still comes (#776): the tree's due animation
             // frame callbacks run once before it returns.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                // The callbacks are page script: the W-gate hold and the frame stage totals
+                // charge their time to the script bucket, not to the turn's `other`.
+                let _script = wgate::script_turn();
                 if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
                     debug!(error = %e, "frames: the tree's animation round failed");
                 }
             }
             out.yielded_for_frame = true;
         }
+        self.set_tree_turn(id, false);
         // The frames lay out and send what this turn's tasks wrote and asked.
         self.live_timer_cap = 0;
         let after = self.pump_frames(id, 0, real_clock).await;
@@ -6996,6 +7064,18 @@ impl Engine {
             (a, b) => a.or(b),
         };
         self.frame_requests_wake(id, out)
+    }
+
+    /// Open or close the frame tree's turn on `id`'s timer queue (the tree's one).
+    fn set_tree_turn(&self, id: EngineViewId, open: bool) {
+        if !one_animation_round() {
+            return;
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+            if let Err(e) = bindings.set_tree_turn(open) {
+                debug!(error = %e, open, "frames: the tree's turn mark failed");
+            }
+        }
     }
 
     /// A frame request the page made during this turn asks for the next
@@ -13337,12 +13417,33 @@ impl layout_ctx::LayoutCtx {
                 };
                 match spliced {
                     Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
+                        // What the animation state's sweep would drop if the build ended with the
+                        // splice, as `with_building` decides it (#1257 delta R1): the comparison
+                        // build below visits every element, so the real sweep never shows it.
+                        let would_sweep = lay.as_ref().map_or_else(Vec::new, |lay| {
+                            lay.animations.borrow().would_sweep(layout_ctx::build_was_partial(false))
+                        });
                         let full = full_build();
-                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                        let note_difference = |difference: String| {
                             let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
                             #[cfg(test)]
                             SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        };
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            note_difference(difference);
+                        }
+                        // Before-change values the splice's sweep drops of elements that are
+                        // still there (the full build visited them): their next style change
+                        // would start no transition.
+                        let lost = lay.as_ref().map_or(0, |lay| {
+                            let animations = lay.animations.borrow();
+                            would_sweep.iter().filter(|node| animations.visited_this_build(**node)).count()
+                        });
+                        if lost > 0 {
+                            note_difference(format!(
+                                "the splice's sweep drops the before-change values of {lost} elements still styled"
+                            ));
                         }
                         full
                     }
@@ -18052,6 +18153,8 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            // The parent's whole list (R1 on #1290).
+            "box-shadow" => style.box_shadows = parent.box_shadows.clone(),
             // Not inherited by default, and asked for by name on nearly
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
@@ -19122,10 +19225,27 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "box-shadow" => {
-                // Parse box-shadow: offset-x offset-y blur spread color [inset]
-                // Simple parser for common formats
-                if let Some(shadow) = parse_box_shadow(value) {
-                    style.box_shadows.push(shadow);
+                // A declaration is the whole list (css-backgrounds-3 §7.1):
+                // `none` empties it, a comma list is that many shadows in
+                // its order (the first on top), and one shadow that does not
+                // read drops the declaration. Until CSS-TRANS D every
+                // matching declaration was appended and a comma list read as
+                // one shadow, so `#h.on{box-shadow:B}` painted A and B and a
+                // transition never saw a change.
+                // `revert` (and `revert-layer` reaching here, outside a
+                // layer) rolls back to the UA sheet, which has no shadow.
+                let value = value.trim();
+                if value.eq_ignore_ascii_case("none")
+                    || value.eq_ignore_ascii_case("revert")
+                    || value.eq_ignore_ascii_case("revert-layer")
+                {
+                    style.box_shadows.clear();
+                } else if let Some(list) = split_by_comma(value)
+                    .into_iter()
+                    .map(parse_box_shadow)
+                    .collect::<Option<Vec<_>>>()
+                {
+                    style.box_shadows = list;
                 }
             }
             "width" => {
@@ -19869,6 +19989,9 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            // `initial` / `unset`: no shadow (an earlier declaration's list
+            // stayed until R1 on #1290).
+            "box-shadow" => style.box_shadows.clear(),
             "transition" | "transition-property" => {
                 style.transitions.clear();
                 animations::sync_transition_scalars(style, false);
@@ -30914,6 +31037,23 @@ fn publish_geometry(
                 .try_borrow()
                 .ok()
                 .and_then(|index| index.as_ref().map(|ix| ix.reads.invalidation.has))
+                .unwrap_or(true)
+        })
+    })));
+    // TREE-REUSE step (2): whether an inline style write can change which rules match (a rule
+    // on the `style` attribute, or a `:has()`). The same live index; unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_style_attr_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| {
+                    index.as_ref().map(|ix| {
+                        let rules = &ix.reads.invalidation;
+                        rules.has || rules.attributes.contains_key("style")
+                    })
+                })
                 .unwrap_or(true)
         })
     })));
@@ -48265,7 +48405,9 @@ fn check_animation_frame(
                 return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
             }
             match animations::prop_name(*index) {
-                "transform" => {
+                // The individual transforms compose into the same matrix
+                // (`effective_transform`), so they come and go the same way.
+                "transform" | "translate" | "rotate" | "scale" => {
                     let identity = |v: &animations::AnimValue| {
                         let mut s = rustkit_css::ComputedStyle::default();
                         animations::set_prop_value(&mut s, *index, v);
