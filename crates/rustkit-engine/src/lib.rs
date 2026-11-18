@@ -737,6 +737,8 @@ mod retained_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
 #[cfg(all(test, feature = "headless"))]
+mod paint_style_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
@@ -30976,6 +30978,23 @@ fn publish_geometry(
                 .try_borrow()
                 .ok()
                 .and_then(|index| index.as_ref().map(|ix| ix.reads.invalidation.has))
+                .unwrap_or(true)
+        })
+    })));
+    // TREE-REUSE step (2): whether an inline style write can change which rules match (a rule
+    // on the `style` attribute, or a `:has()`). The same live index; unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_style_attr_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| {
+                    index.as_ref().map(|ix| {
+                        let rules = &ix.reads.invalidation;
+                        rules.has || rules.attributes.contains_key("style")
+                    })
+                })
                 .unwrap_or(true)
         })
     })));
