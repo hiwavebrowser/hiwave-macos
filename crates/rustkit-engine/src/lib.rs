@@ -31646,10 +31646,33 @@ fn corner_radii_px(
     width: f32,
     height: f32,
 ) -> (String, String) {
-    let axis = |length: &rustkit_css::Length, size: f32| {
-        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
-    };
-    (axis(&c.horizontal, width), axis(&c.vertical, height))
+    (
+        radius_computed(&c.horizontal, font_px, width),
+        radius_computed(&c.vertical, font_px, height),
+    )
+}
+
+/// One radius as its computed value (css-backgrounds-3 §5.1, Chrome 148):
+/// a percentage stays one, a `calc()` mix of a percentage and lengths is
+/// `calc(P% + Npx)` (em / rem folded to px), any other length is px.
+/// `min()` / `max()` / `clamp()` and viewport units still resolve against
+/// `size`, as before (computed reads have no viewport).
+fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
+    use rustkit_css::Length;
+    let resolved = || css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0));
+    match length {
+        Length::Percent(p) => format!("{}%", finite_f32(p.max(0.0))),
+        Length::Calc(sum) if sum.vw == 0.0 && sum.vh == 0.0 && sum.vmin == 0.0 && sum.vmax == 0.0 => {
+            let px = sum.px + sum.em * font_px + sum.rem * computed_read::root_font();
+            match (sum.percent, px) {
+                (p, _) if p == 0.0 => css_px(px.max(0.0)),
+                (p, px) if px == 0.0 => format!("{}%", finite_f32(p)),
+                (p, px) if px < 0.0 => format!("calc({}% - {})", finite_f32(p), css_px(-px)),
+                (p, px) => format!("calc({}% + {})", finite_f32(p), css_px(px)),
+            }
+        }
+        _ => resolved(),
+    }
 }
 
 fn corner_longhand(horizontal: &str, vertical: &str) -> String {
