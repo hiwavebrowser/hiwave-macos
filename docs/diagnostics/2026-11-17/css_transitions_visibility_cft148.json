@@ -1,0 +1,132 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": 50,
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "visible->hidden",
+      "css": "#h{visibility:visible}#h.on{visibility:hidden}",
+      "read": "visibility",
+      "mid": "visible",
+      "at": {
+        "0": "visible",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "visibility"
+      ],
+      "events": [
+        "run:visibility",
+        "start:visibility",
+        "end:visibility"
+      ],
+      "end": "hidden"
+    },
+    {
+      "label": "hidden->visible",
+      "css": "#h{visibility:hidden}#h.on{visibility:visible}",
+      "read": "visibility",
+      "mid": "visible",
+      "at": {
+        "0": "hidden",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "visibility"
+      ],
+      "events": [
+        "run:visibility",
+        "start:visibility",
+        "end:visibility"
+      ],
+      "end": "visible"
+    },
+    {
+      "label": "visible->collapse",
+      "css": "#h{visibility:visible}#h.on{visibility:collapse}",
+      "read": "visibility",
+      "mid": "visible",
+      "at": {
+        "0": "visible",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "visibility"
+      ],
+      "events": [
+        "run:visibility",
+        "start:visibility",
+        "end:visibility"
+      ],
+      "end": "collapse"
+    },
+    {
+      "label": "hidden->collapse",
+      "css": "#h{visibility:hidden}#h.on{visibility:collapse}",
+      "read": "visibility",
+      "mid": "collapse",
+      "at": {
+        "0": "collapse",
+        "1": "collapse",
+        "50": "collapse",
+        "99": "collapse"
+      },
+      "transitions": [],
+      "events": [],
+      "end": "collapse"
+    },
+    {
+      "label": "named visibility only",
+      "css": "#h{visibility:visible;transition:visibility 100ms linear}#h.on{visibility:hidden}",
+      "read": "visibility",
+      "mid": "visible",
+      "at": {
+        "0": "visible",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "visibility"
+      ],
+      "events": [
+        "run:visibility",
+        "start:visibility",
+        "end:visibility"
+      ],
+      "end": "hidden"
+    },
+    {
+      "label": "visible->hidden with opacity",
+      "css": "#h{visibility:visible;opacity:1}#h.on{visibility:hidden;opacity:0}",
+      "read": "visibility",
+      "mid": "visible",
+      "at": {
+        "0": "visible",
+        "1": "visible",
+        "50": "visible",
+        "99": "visible"
+      },
+      "transitions": [
+        "opacity",
+        "visibility"
+      ],
+      "events": [
+        "run:opacity",
+        "start:opacity",
+        "end:opacity",
+        "run:visibility",
+        "start:visibility",
+        "end:visibility"
+      ],
+      "end": "hidden"
+    }
+  ]
+}
