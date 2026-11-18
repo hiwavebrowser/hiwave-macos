@@ -6,7 +6,7 @@
 //! `docs/diagnostics/2026-11-17/using_binding_cases.json`, written by
 //! `tools/parity_oracle/js_cases_log.mjs --write`. No case depends on disposal (`Symbol.dispose`).
 
-use boa_engine::{Context, Source, js_string};
+use boa_engine::{Context, Module, Source, js_string};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Not held to Chrome here, a separate row: the parser does not read `for (using x of ...)` yet.
@@ -28,6 +28,29 @@ fn run(js: &str) -> String {
     r.to_string(&mut ctx).unwrap().to_std_string_escaped()
 }
 
+/// The module case's source: the oracle imports it as a data: URL module, which this harness cannot load,
+/// so it runs here through the module API.
+const MODULE_SRC: &str = "using x = null; await using y = undefined; export default \"ok \" + x + \" \" + y;";
+
+/// A module's default export as a string, after it is linked and evaluated.
+fn run_module(src: &str) -> String {
+    let mut ctx = Context::default();
+    let module = match Module::parse(Source::from_bytes(src), None, &mut ctx) {
+        Ok(m) => m,
+        Err(e) => return format!("threw {e}"),
+    };
+    let promise = module.load_link_evaluate(&mut ctx);
+    if let Err(e) = ctx.run_jobs() {
+        return format!("jobs error: {e}");
+    }
+    if let Err(e) = promise.state().as_rejected().map_or(Ok(()), |e| Err(e.display().to_string())) {
+        return format!("threw {e}");
+    }
+    let ns = module.namespace(&mut ctx);
+    let v = ns.get(js_string!("default"), &mut ctx).unwrap();
+    v.to_string(&mut ctx).unwrap().to_std_string_escaped()
+}
+
 #[test]
 fn using_declarations_outside_a_block_answer_as_chrome_does() {
     let doc: serde_json::Value = serde_json::from_str(CASES).unwrap();
@@ -40,7 +63,12 @@ fn using_declarations_outside_a_block_answer_as_chrome_does() {
         if ROWS.contains(&name) {
             continue;
         }
-        let got = catch_unwind(AssertUnwindSafe(|| run(js))).unwrap_or_else(|_| "no answer".to_string());
+        let got = if name == "module_top_level" {
+            assert!(js.contains("using x = null; await using y = undefined; export default"), "{js}");
+            catch_unwind(AssertUnwindSafe(|| run_module(MODULE_SRC))).unwrap_or_else(|_| "no answer".to_string())
+        } else {
+            catch_unwind(AssertUnwindSafe(|| run(js))).unwrap_or_else(|_| "no answer".to_string())
+        };
         if got != want {
             wrong.push(format!("{name}: chrome {want:?}, here {got:?}"));
         }
