@@ -345,18 +345,10 @@ pub fn decode(input: &str) -> String {
             }
 
             if found_end && !entity.is_empty() {
-                if entity.starts_with('#') {
-                    // Numeric entity
-                    if let Some(decoded) = decode_numeric(&entity[1..]) {
-                        result.push_str(&decoded);
-                        continue;
-                    }
-                } else {
-                    // Named entity
-                    if let Some(&decoded) = ENTITIES.get(entity.as_str()) {
-                        result.push_str(decoded);
-                        continue;
-                    }
+                let mut numeric = [0; 4];
+                if let Some(decoded) = decode_reference(&entity, &mut numeric) {
+                    result.push_str(decoded);
+                    continue;
                 }
             }
 
@@ -374,7 +366,16 @@ pub fn decode(input: &str) -> String {
     result
 }
 
-fn decode_numeric(num_str: &str) -> Option<String> {
+/// Resolve one scanned, semicolon-terminated name. Named values borrow the
+/// table and numeric values use the caller's UTF-8 buffer.
+pub(super) fn decode_reference<'a>(name: &str, numeric: &'a mut [u8; 4]) -> Option<&'a str> {
+    if let Some(digits) = name.strip_prefix('#') {
+        return Some(decode_numeric(digits)?.encode_utf8(numeric));
+    }
+    ENTITIES.get(name).copied()
+}
+
+fn decode_numeric(num_str: &str) -> Option<char> {
     let (radix, digits) = if num_str.starts_with('x') || num_str.starts_with('X') {
         (16, &num_str[1..])
     } else {
@@ -426,11 +427,7 @@ fn decode_numeric(num_str: &str) -> Option<String> {
         _ => None,
     };
 
-    if let Some(ch) = replacement {
-        return Some(ch.to_string());
-    }
-
-    char::from_u32(code_point).map(|c| c.to_string())
+    replacement.or_else(|| char::from_u32(code_point))
 }
 
 #[cfg(test)]

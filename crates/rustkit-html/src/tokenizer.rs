@@ -165,6 +165,7 @@ pub struct Tokenizer {
     current_attr_name: String,
     current_attr_value: String,
     self_closing: bool,
+    entity_buffer: String,
     current_comment: String,
     doctype_name: String,
     doctype_public_id: String,
@@ -186,6 +187,7 @@ impl Tokenizer {
             current_attr_name: String::new(),
             current_attr_value: String::new(),
             self_closing: false,
+            entity_buffer: String::new(),
             current_comment: String::new(),
             doctype_name: String::new(),
             doctype_public_id: String::new(),
@@ -321,11 +323,7 @@ impl Tokenizer {
         match self.consume() {
             Some('<') => self.state = State::TagOpen,
             Some('&') => {
-                // Decode entity in text content
-                let entity = self.consume_entity();
-                for ch in entity.chars() {
-                    self.emit(Token::Character(ch));
-                }
+                self.consume_entity();
             }
             Some(ch) => self.emit(Token::Character(ch)),
             None => {}
@@ -540,6 +538,10 @@ impl Tokenizer {
                 self.emit_current_attr();
                 self.finish_start_tag();
             }
+            Some('&') => {
+                self.state = State::AttributeValueUnquoted;
+                self.consume_entity();
+            }
             Some(ch) => {
                 self.current_attr_value.push(ch);
                 self.state = State::AttributeValueUnquoted;
@@ -558,9 +560,7 @@ impl Tokenizer {
                 self.state = State::AfterAttributeName;
             }
             Some('&') => {
-                // Decode entity
-                let entity = self.consume_entity();
-                self.current_attr_value.push_str(&entity);
+                self.consume_entity();
             }
             Some(ch) => {
                 self.current_attr_value.push(ch);
@@ -580,8 +580,7 @@ impl Tokenizer {
                 self.state = State::AfterAttributeName;
             }
             Some('&') => {
-                let entity = self.consume_entity();
-                self.current_attr_value.push_str(&entity);
+                self.consume_entity();
             }
             Some(ch) => {
                 self.current_attr_value.push(ch);
@@ -603,8 +602,7 @@ impl Tokenizer {
             }
             Some('&') => {
                 self.consume();
-                let entity = self.consume_entity();
-                self.current_attr_value.push_str(&entity);
+                self.consume_entity();
             }
             Some('>') => {
                 self.consume();
@@ -623,27 +621,33 @@ impl Tokenizer {
         }
     }
 
-    fn consume_entity(&mut self) -> String {
-        let mut entity_str = String::from("&");
-
-        while let Some(ch) = self.current_char() {
+    // The opening ampersand has been consumed. Keep one scratch string for
+    // the whole document, including the literal fallback for unknown names.
+    fn consume_entity(&mut self) {
+        self.entity_buffer.clear();
+        self.entity_buffer.push('&');
+        let mut numeric = [0; 4];
+        let mut decoded = None;
+        while self.entity_buffer.len() <= 32 {
+            let Some(ch) = self.current_char() else { break };
             if ch == ';' {
-                entity_str.push(ch);
                 self.consume();
-                break;
-            } else if ch.is_alphanumeric() || ch == '#' {
-                entity_str.push(ch);
-                self.consume();
-            } else {
+                decoded = entities::decode_reference(&self.entity_buffer[1..], &mut numeric);
+                self.entity_buffer.push(';');
                 break;
             }
-
-            if entity_str.len() > 32 {
+            if !ch.is_alphanumeric() && ch != '#' {
                 break;
             }
+            self.consume();
+            self.entity_buffer.push(ch);
         }
 
-        entities::decode(&entity_str)
+        let value = decoded.unwrap_or(&self.entity_buffer);
+        match self.state {
+            State::Data | State::RcData => self.tokens.extend(value.chars().map(Token::Character)),
+            _ => self.current_attr_value.push_str(value),
+        }
     }
 
     fn state_markup_declaration_open(&mut self) {
@@ -1123,10 +1127,7 @@ impl Tokenizer {
         // RCDATA mode (for textarea, title)
         match self.consume() {
             Some('&') => {
-                let entity = self.consume_entity();
-                for ch in entity.chars() {
-                    self.emit(Token::Character(ch));
-                }
+                self.consume_entity();
             }
             Some('<') if self.current_char() == Some('/') => {
                 self.consume(); // '/'
