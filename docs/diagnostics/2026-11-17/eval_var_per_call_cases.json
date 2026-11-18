@@ -60,6 +60,31 @@
    "name": "later_call_eval_code_reads_a_name_an_earlier_call_declared",
    "js": "var f = function (code) { return eval(code); }; String([f('var x = 2; x'), f('typeof x'), f('var x = 3; x'), f('typeof x')])",
    "chrome": "2,undefined,3,undefined"
+  },
+  {
+   "name": "closure_made_before_another_call_declared_reads_by_strict_eval",
+   "js": "var f = function (c) { if (c) return eval(c); return function (d) { return eval(d); }; }; var old = f(''); f(\"eval('var x = 2;')\"); var r = []; try { r.push(old(\"'use strict'; typeof x\")); } catch (e) { r.push(e.constructor.name); } try { r.push(old('typeof x')); } catch (e) { r.push(e.constructor.name); } String(r)",
+   "chrome": "undefined,undefined"
+  },
+  {
+   "name": "closure_made_before_another_call_declared_declares_it_too",
+   "js": "var f = function (c) { if (c) return eval(c); return function (d) { return eval(d); }; }; var old = f(''); f(\"eval('var x = 2;')\"); String([old('var x = 5; x'), old('typeof x')])",
+   "chrome": "5,undefined"
+  },
+  {
+   "name": "suspended_generator_resumed_after_another_call_declared",
+   "js": "function* g(c) { yield; return eval(c); } var a = g(\"'use strict'; typeof x\"); a.next(); var b = g(\"eval('var x = 2'); typeof x\"); b.next(); var rb = b.next().value; var r; try { r = a.next().value; } catch (e) { r = e.constructor.name; } String([rb, r])",
+   "chrome": "number,undefined"
+  },
+  {
+   "name": "arrow_made_before_another_call_declared",
+   "js": "var f = function (c) { if (c) return eval(c); return (d) => eval(d); }; var old = f(''); f(\"eval('var x = 2;')\"); var r; try { r = old(\"'use strict'; typeof x\"); } catch (e) { r = e.constructor.name; } String(r)",
+   "chrome": "undefined"
+  },
+  {
+   "name": "eval_in_eval_made_before_another_call_declared",
+   "js": "var f = function (c) { if (c) return eval(c); return function (d) { return eval(\"eval(d)\"); }; }; var old = f(''); f(\"eval('var x = 2;')\"); var r; try { r = old(\"'use strict'; typeof x\"); } catch (e) { r = e.constructor.name; } String(r)",
+   "chrome": "undefined"
   }
  ],
  "chrome_version": "148.0.7778.216"
