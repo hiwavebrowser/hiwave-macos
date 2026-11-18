@@ -1197,6 +1197,9 @@ of the function shares, and grows only the calling environment for them (`extend
 - **New slots:** the slots past the count at the scope's first activation start marked as
   eval-added (deletable), as `extend_from_compile` marks them, so the lookup above can tell them
   apart.
+- **Older environments:** an environment created before another call's eval grew the shared scope
+  is shorter than the indices code compiled after the growth uses. `get` answers such a slot as
+  uninitialized, and `set` adds it, marked eval-added (`FunctionEnvironment::get` / `set`).
 
 **Pin.** `crates/rustkit-js/tests/eval_var_per_call.rs`: 10 cases (reads, writes, `typeof`, `delete`,
 calls before and after the declaring call), each against Chrome for Testing 148.0.7778.216

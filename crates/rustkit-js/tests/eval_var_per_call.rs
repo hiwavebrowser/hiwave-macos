@@ -17,6 +17,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 const ROWS: &[&str] = &[
     "later_call_strict_eval_code_reads_a_name_an_earlier_call_declared",
     "later_call_eval_code_reads_a_name_an_earlier_call_declared",
+    "closure_made_before_another_call_declared_reads_by_strict_eval",
+    "closure_made_before_another_call_declared_declares_it_too",
+    "suspended_generator_resumed_after_another_call_declared",
+    "arrow_made_before_another_call_declared",
+    "eval_in_eval_made_before_another_call_declared",
 ];
 
 const CASES: &str = include_str!("../../../docs/diagnostics/2026-11-17/eval_var_per_call_cases.json");
