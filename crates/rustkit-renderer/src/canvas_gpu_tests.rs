@@ -215,6 +215,35 @@ fn cases() -> Vec<Case> {
             }
             c.set_global_composite_operation(CompositeOperation::SourceOver);
         }),
+        // #1300 R1: a gradient whose geometry is not finite as f32 (a
+        // page's 1e300) paints nothing on the CPU (tiny-skia refuses it);
+        // the GPU must not clear what it covers.
+        ("gradient-non-finite", |c, _| {
+            c.set_fill_style(rgba(0, 150, 0, 1.0));
+            c.fill_rect(0.0, 0.0, 100.0, 80.0);
+            let huge = 1e300_f64 as f32;
+            let mut g = rustkit_canvas::LinearGradient::new(0.0, 0.0, huge, 0.0);
+            g.add_color_stop(0.0, Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
+            c.set_fill_style(CanvasStyle::LinearGradient(g));
+            c.fill_rect(10.0, 10.0, 30.0, 30.0);
+            let mut g = rustkit_canvas::RadialGradient::new(50.0, 40.0, 0.0, 60.0, 40.0, huge);
+            g.add_color_stop(0.0, Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
+            c.set_fill_style(CanvasStyle::RadialGradient(g));
+            c.fill_rect(50.0, 10.0, 30.0, 30.0);
+        }),
+        // #1300 R1: a radial gradient whose end radius is 0 paints nothing
+        // on the CPU (tiny-skia's two-point conical needs a radius).
+        ("radial-end-radius-zero", |c, _| {
+            c.set_fill_style(rgba(0, 150, 0, 1.0));
+            c.fill_rect(0.0, 0.0, 100.0, 80.0);
+            let mut g = rustkit_canvas::RadialGradient::new(20.0, 20.0, 0.0, 60.0, 40.0, 0.0);
+            g.add_color_stop(0.0, Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
+            c.set_fill_style(CanvasStyle::RadialGradient(g));
+            c.fill_rect(5.0, 5.0, 90.0, 70.0);
+        }),
     ]
 }
 
@@ -440,4 +469,85 @@ fn a_canvas_over_the_cap_frame_after_frame_is_denied() {
     expected.push(CanvasReplay::Denied);
     assert_eq!(results, expected);
     r.remove_image(KEY);
+}
+
+/// #1300 R1: the gradients of a replay are counted against the device's
+/// storage-buffer binding limit before any GPU work, like the vertex cap:
+/// past it the canvas asks for a reset and, frame after frame, is denied,
+/// instead of failing validation (a reset every frame, never denied).
+#[test]
+fn gradients_past_the_storage_limit_ask_for_a_reset_then_deny() {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), ..Default::default() });
+    let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    })) else {
+        eprintln!("SKIPPED canvas_gpu: no GPU adapter");
+        return;
+    };
+    // Room for two gradient records.
+    let limits = wgpu::Limits { max_storage_buffer_binding_size: 1024, ..wgpu::Limits::default() };
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("low storage"), required_features: wgpu::Features::empty(), required_limits: limits, memory_hints: wgpu::MemoryHints::Performance },
+        None,
+    ))
+    .expect("device");
+    let mut r = Renderer::new(Arc::new(device), Arc::new(queue), wgpu::TextureFormat::Bgra8Unorm).expect("renderer");
+    let mut c = gpu_ctx(60, 20);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    let mut results = Vec::new();
+    for _ in 0..CANVAS_OVER_CAP_LIMIT {
+        for i in 0..3 {
+            let mut g = rustkit_canvas::LinearGradient::new(0.0, 0.0, 10.0 + i as f32, 0.0);
+            g.add_color_stop(0.0, Color::new(255, 0, 0, 1.0));
+            g.add_color_stop(1.0, Color::new(0, 0, 255, 1.0));
+            c.set_fill_style(CanvasStyle::LinearGradient(g));
+            c.fill_rect(i as f32 * 20.0, 0.0, 20.0, 20.0);
+        }
+        results.push(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]));
+        if results.last() == Some(&CanvasReplay::NeedsReset) {
+            assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(true)]), CanvasReplay::Drawn);
+        }
+    }
+    let mut expected = vec![CanvasReplay::NeedsReset; CANVAS_OVER_CAP_LIMIT as usize - 1];
+    expected.push(CanvasReplay::Denied);
+    assert_eq!(results, expected);
+}
+
+/// #1299 R1 nit: a canvas that goes away (its image removed) takes its
+/// over-cap count with it; a canvas later shown under the same key starts
+/// from zero.
+#[test]
+fn a_removed_canvas_forgets_its_over_cap_count() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIPPED canvas_gpu: no GPU adapter");
+        return;
+    };
+    let mut r = renderer(&gpu);
+    r.set_canvas_vertex_cap(1_000);
+    let heavy = |c: &mut CanvasRenderingContext2D| {
+        c.set_line_width(2.0);
+        c.set_line_dash(vec![1.0, 1.0]);
+        for i in 0..30 {
+            c.begin_path();
+            c.arc(50.0, 40.0, 5.0 + i as f32, 0.0, std::f32::consts::TAU, false);
+            c.stroke();
+        }
+    };
+    let mut c = gpu_ctx(100, 80);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    for _ in 0..CANVAS_OVER_CAP_LIMIT - 1 {
+        heavy(&mut c);
+        assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::NeedsReset);
+        assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(true)]), CanvasReplay::Drawn);
+    }
+    r.remove_image(KEY);
+    assert_eq!(r.canvas_over_cap_counts(), 0, "the count went with the canvas");
+    let mut c = gpu_ctx(100, 80);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::Drawn);
+    heavy(&mut c);
+    assert_eq!(r.replay_canvas(KEY, &[c.take_gpu_batch(false)]), CanvasReplay::NeedsReset, "counted from zero again");
+    r.retain_images(|_| false);
+    assert_eq!(r.canvas_over_cap_counts(), 0, "retain drops it too");
 }

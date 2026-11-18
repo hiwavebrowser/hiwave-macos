@@ -592,6 +592,12 @@ impl Renderer {
         readback.read_data_sync(&self.device).ok()
     }
 
+    /// Tests: canvases with an over-cap count.
+    #[doc(hidden)]
+    pub fn canvas_over_cap_counts(&self) -> usize {
+        self.canvas_gpu.as_ref().map_or(0, |cg| cg.over_cap.len())
+    }
+
     /// The canvas textures this renderer keeps, in bytes.
     pub fn canvas_texture_bytes(&self) -> u64 {
         let Some(cg) = &self.canvas_gpu else { return 0 };
