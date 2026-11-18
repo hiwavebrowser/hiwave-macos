@@ -367,28 +367,38 @@ fn knots_of(
 const MAX_SLICES: usize = 256;
 
 /// The horizontal slices `build_mesh` integrates over: the straight middle
-/// whole, each curved stretch in slices of at most half a sigma (at least
-/// `CURVED_SLICES`, at most `MAX_SLICES`).
-fn slices_of(shape: &Shape, sigma: f32) -> Vec<(f32, f32)> {
+/// whole, each curved stretch in at least `CURVED_SLICES` and at most
+/// `MAX_SLICES` slices, about half a sigma each on average. A curved
+/// stretch is cut evenly in angle from its tip (`t = tip + v (1 - cos)`),
+/// so slices are thinnest where the edge turns fastest.
+fn slices_of(shape: &Shape, sigma: f32) -> Vec<(f32, f32, f32)> {
     let [top, b1, b2, bottom] = shape.breaks(true);
     let mut out = Vec::new();
-    let mut curved = |a: f32, b: f32, out: &mut Vec<(f32, f32)>| {
-        if b <= a {
+    // A stretch of height `v` whose tip is at `tip`, running `dir` (+1 down
+    // from a top tip, -1 up from a bottom tip).
+    let mut curved = |tip: f32, v: f32, dir: f32, out: &mut Vec<(f32, f32, f32)>| {
+        if v <= 0.0 {
             return;
         }
-        let n =
-            (((b - a) / (0.5 * sigma).max(0.25)).ceil() as usize).clamp(CURVED_SLICES, MAX_SLICES);
-        let step = (b - a) / n as f32;
+        let n = ((v / (0.5 * sigma).max(0.25)).ceil() as usize).clamp(CURVED_SLICES, MAX_SLICES);
+        let at = |i: f32| {
+            let theta = std::f32::consts::FRAC_PI_2 * i / n as f32;
+            tip + dir * v * (1.0 - theta.cos())
+        };
         for i in 0..n {
-            out.push((a + step * i as f32, a + step * (i + 1) as f32));
+            let (p, q) = (at(i as f32), at(i as f32 + 1.0));
+            // The span is read at the slice's middle angle.
+            out.push((p.min(q), p.max(q), at(i as f32 + 0.5)));
         }
     };
     if b1 < b2 {
-        curved(top, b1, &mut out);
-        out.push((b1, b2));
-        curved(b2, bottom, &mut out);
+        curved(top, b1 - top, 1.0, &mut out);
+        out.push((b1, b2, 0.5 * (b1 + b2)));
+        curved(bottom, bottom - b2, -1.0, &mut out);
     } else {
-        curved(top, bottom, &mut out);
+        let mid = 0.5 * (top + bottom);
+        curved(top, mid - top, 1.0, &mut out);
+        curved(bottom, bottom - mid, -1.0, &mut out);
     }
     out
 }
@@ -425,8 +435,8 @@ fn mesh_values(shape: &Shape, sigma: f32, inset: bool, xs: &[f32], ys: &[f32]) -
         let slices = slices_of(shape, sigma);
         // across[s * nx + i]: slice s's span blurred along x, at column i.
         let mut across = vec![0.0f32; slices.len() * nx];
-        for (s, (a, b)) in slices.iter().enumerate() {
-            let (l, rt) = shape.span(0.5 * (a + b));
+        for (s, &(_, _, t)) in slices.iter().enumerate() {
+            let (l, rt) = shape.span(t);
             if rt <= l {
                 continue;
             }
@@ -437,7 +447,7 @@ fn mesh_values(shape: &Shape, sigma: f32, inset: bool, xs: &[f32], ys: &[f32]) -
         let window = 4.0 * sigma;
         for (j, &y) in ys.iter().enumerate() {
             let row = &mut values[j * nx..(j + 1) * nx];
-            for (s, &(a, b)) in slices.iter().enumerate() {
+            for (s, &(a, b, _)) in slices.iter().enumerate() {
                 if b < y - window || a > y + window {
                     continue;
                 }
@@ -668,8 +678,23 @@ mod tests {
         )
     }
 
-    /// The mesh's sliced integral is `blurred_coverage` at every knot, to
-    /// a level at full alpha (the two slice a corner differently).
+    /// `blurred_coverage`'s integral taken over 4000 even slices.
+    fn dense(shape: &Shape, sigma: f32, x: f32, y: f32) -> f32 {
+        let r = shape.rect;
+        let n = 4000;
+        let mut sum = 0.0f64;
+        for k in 0..n {
+            let a = r.y + r.height * k as f32 / n as f32;
+            let b = r.y + r.height * (k + 1) as f32 / n as f32;
+            let (l, rt) = shape.span(0.5 * (a + b));
+            let mass = phi((b - y) / sigma) - phi((a - y) / sigma);
+            sum += (mass * (phi((rt - x) / sigma) - phi((l - x) / sigma))) as f64;
+        }
+        sum as f32
+    }
+
+    /// The mesh holds the blurred coverage at every knot, to under half a
+    /// level at full alpha.
     #[test]
     fn a_mesh_holds_the_blurred_coverage_at_its_knots() {
         for (shape, sigma) in [
@@ -685,13 +710,13 @@ mod tests {
                     hole
                 };
                 let mesh = build_mesh(&shape, &other, sigma, inset, (0.0, 0.0), Detail::Fine);
-                for (j, y) in mesh.ys.iter().enumerate() {
-                    for (i, x) in mesh.xs.iter().enumerate() {
-                        let want = blurred_coverage(&shape, sigma, *x, *y);
+                for (j, y) in mesh.ys.iter().enumerate().step_by(3) {
+                    for (i, x) in mesh.xs.iter().enumerate().step_by(3) {
+                        let want = dense(&shape, sigma, *x, *y);
                         let want = if inset { 1.0 - want } else { want };
                         let got = mesh.values[j * mesh.xs.len() + i];
                         assert!(
-                            (got - want).abs() < 4e-3,
+                            (got - want).abs() < 1.5e-3,
                             "({x}, {y}) sigma {sigma}: {got} vs {want}"
                         );
                     }

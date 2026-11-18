@@ -169,4 +169,5 @@ cases! {
     inset_blur_matches_chrome => "inset16", 6;
     inset_offset_spread_round_matches_chrome => "inset_offset_round";
     inset_ring_matches_chrome => "inset_ring";
+    inset_in_a_bordered_box_matches_chrome => "inset_bordered", 6;
 }

@@ -29,6 +29,8 @@ export const CASES = [
   ['inset16', '#fff', 'background:#fff;box-shadow:inset 0 0 16px rgba(0,0,0,.6)'],
   ['inset_offset_round', '#fff', 'background:#fff;border-radius:16px;box-shadow:inset 6px 8px 12px 2px rgba(0,0,0,.6)'],
   ['inset_ring', '#fff', 'background:#fff;box-shadow:inset 0 0 0 3px #2563eb'],
+  // R1: a bordered box's inset shadow is inside the padding box, under inner radii.
+  ['inset_bordered', '#fff', 'background:#fff;border:6px solid #94a3b8;border-radius:20px;box-shadow:inset 0 3px 10px 1px rgba(0,0,0,.6)'],
 ];
 
 export const page = (bg, css) =>
