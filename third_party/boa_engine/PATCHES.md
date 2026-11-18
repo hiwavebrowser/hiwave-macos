@@ -1180,6 +1180,29 @@ the patch. Measured (not a test, release build, this machine): at 2^15 / 2^16 / 
 `match(/x/g)` 125 / 369 / 1295 ms before, 68 / 130 / 283 ms after; `replaceAll` 120 / 470 / 1875 ms
 before, 2 / 6 / 12 ms after; `split` 116 / 471 / 1871 ms before, 1 / 1 / 3 ms after.
 
+## Patch: `using` declarations outside a block are bound (`using-bindings`)
+
+**Files.** `third_party/boa_ast/src/scope_analyzer.rs` (global, function and eval declaration
+instantiation), `third_party/boa_parser/src/parser/mod.rs` (`ScriptBody`).
+
+**What.** A `using` or `await using` declaration in a function, arrow, method, generator, async
+function, async generator or class static block body, or through `new Function`, now has its names
+bound in that body's lexical scope, as block declaration instantiation already bound them in a block.
+Before, those three instantiations skipped both kinds (`_ => {}`), so the declaration had no binding
+to initialize. A `using` or `await using` declaration directly in a script's statement list, which is
+also eval code's, is a SyntaxError (Explicit Resource Management early error), as Chrome 148 reports.
+Inside a block, a function or a module it is allowed. Likewise, one directly in a `switch`
+statement's `case` or `default` clause is a SyntaxError (`boa_parser` `CaseBlock`); inside a block in
+the clause it is allowed.
+
+**Not changed.** Disposal: the bytecompiler still binds these names as `let` without adding the value
+to a disposal stack, so `Symbol.dispose` / `Symbol.asyncDispose` are not called and a non-object value
+is not refused. `for (using x of ...)` is not parsed yet. Both are separate rows.
+
+**Pin.** `crates/rustkit-js/tests/using_bindings.rs`: 19 cases against Chrome for Testing
+148.0.7778.216 (`docs/diagnostics/2026-11-17/using_binding_cases.json`); 18 held, the `for` head named
+as a row. Red without the patch: 17 of 19 gave no answer or the wrong one.
+
 ## Patch: a var declared by one call's direct eval belongs to that call (`eval-var-per-call`)
 
 **Files.** `third_party/boa_ast/src/scope.rs` (`Scope::activation_bindings`),
