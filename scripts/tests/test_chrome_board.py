@@ -146,7 +146,12 @@ class TestChromeBoard(unittest.TestCase):
         with self.assertRaises(chrome_board.BoardError):
             chrome_board.pinned_chrome_path({"PARITY_CHROME_PATH": "/nonexistent/chrome-for-testing"})
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(chrome_board.pinned_chrome_path({"PARITY_CHROME_PATH": tmp}), Path(tmp))
+            pin = {"PARITY_CHROME_PATH": tmp}
+            self.assertEqual(chrome_board.pinned_chrome_path(pin, version_of=lambda p: "148.0.7778.216"), Path(tmp))
+            # The path existing is not enough: the binary must be exactly the pin.
+            for other in ("143.0.7499.4", "148.0.7778.215", None):
+                with self.assertRaises(chrome_board.BoardError):
+                    chrome_board.pinned_chrome_path(pin, version_of=lambda p, v=other: v)
 
     def test_main_refuses_without_the_pin_before_any_capture(self):
         import os
@@ -171,6 +176,8 @@ class TestChromeBoard(unittest.TestCase):
             })
             header = (out / "BOARD.md").read_text(encoding="utf-8").splitlines()[2]
             self.assertIn("oracle Chrome for Testing 148.0.7778.216 (PARITY_CHROME_PATH)", header)
+            self.assertIn("metrics start on 148 from 2026-11-17; earlier rows were measured against Chromium 143",
+                          (out / "BOARD.md").read_text(encoding="utf-8"))
         self.assertIn("unpinned", chrome_board.oracle_text({"chromium": "143.0.7499.4"}))
         self.assertIn("NOT the pin", chrome_board.oracle_text(
             {"chromium": "149.0.1.2", "chromium_path": "/x", "chromium_pinned": "148.0.7778.216"}))
@@ -284,6 +291,7 @@ class GateTests(unittest.TestCase):
                 ["--parity-capture", sys.executable, "--board", str(BOARD_PATH), "--only", "shelf",
                  "--work", str(Path(tmp) / "work"), "--out", str(Path(tmp) / "out")],
                 capture=lambda *a, **k: ok,
+                chrome_version=lambda p: "148.0.7778.216",
             )
             self.assertEqual(rc, 0)
             run = json.loads((Path(tmp) / "out" / "board.json").read_text(encoding="utf-8"))["run"]

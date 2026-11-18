@@ -112,9 +112,23 @@ NODE_ENV = _node_env()
 PINNED_CHROME_VERSION = "148.0.7778.216"
 
 
-def pinned_chrome_path(env: Optional[Dict[str, str]] = None) -> Path:
-    """PARITY_CHROME_PATH, required and existing; raises BoardError otherwise."""
+def probe_chrome_version(path: Path) -> Optional[str]:
+    """`<binary> --version` ("Google Chrome for Testing 148.0.7778.216") -> "148.0.7778.216"."""
+    try:
+        proc = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
+    return match.group(1) if match else None
+
+
+def pinned_chrome_path(env: Optional[Dict[str, str]] = None,
+                       version_of: Optional[Callable[[Path], Optional[str]]] = None) -> Path:
+    """PARITY_CHROME_PATH, required, existing, and exactly PINNED_CHROME_VERSION
+    by `--version`; raises BoardError otherwise. chrome_board.mjs's
+    browser.version() is checked again per row in main()."""
     env = os.environ if env is None else env
+    version_of = version_of or probe_chrome_version
     raw = env.get("PARITY_CHROME_PATH", "")
     if not raw:
         raise BoardError("PARITY_CHROME_PATH not set: the chrome board's oracle is the pinned "
@@ -122,6 +136,9 @@ def pinned_chrome_path(env: Optional[Dict[str, str]] = None) -> Path:
     path = Path(raw)
     if not path.exists():
         raise BoardError(f"PARITY_CHROME_PATH set but not found: {raw}")
+    version = version_of(path)
+    if version != PINNED_CHROME_VERSION:
+        raise BoardError(f"PARITY_CHROME_PATH is Chrome {version or '?'}, not the pin {PINNED_CHROME_VERSION}")
     return path
 
 
@@ -494,6 +511,15 @@ def sort_key(entry: Dict[str, Any]):
     return (0 if entry["status"] != "ok" else 1, -(pct if pct is not None else 0.0))
 
 
+# The owner's note on the oracle move (2026-11-17), carried in every header so
+# a reader comparing against an older board knows the oracle changed under it.
+ORACLE_HISTORY_NOTE = (
+    "Oracle history: metrics start on 148 from 2026-11-17; earlier rows were measured against "
+    "Chromium 143 (Playwright-bundled 143.0.7499.4, PARITY_CHROME_PATH unset), so a row's change "
+    "across that date may be the oracle, not RustKit."
+)
+
+
 def oracle_text(run: Dict[str, Any]) -> str:
     """The BOARD.md header's oracle: the full browser version, and whether it
     came from the pin (PARITY_CHROME_PATH) or, in boards from before the pin,
@@ -518,6 +544,8 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         f"Run: {board_json['run']['at']} · head `{board_json['run']['sha']}` on develop "
         f"`{board_json['run'].get('base') or '?'}` · oracle {oracle_text(board_json['run'])} "
         f"· parity-capture `{board_json['run']['parity_capture']}`",
+        "",
+        ORACLE_HISTORY_NOTE,
         "",
         f"Gate (PLAN-z CH0, docs/GATES.md): a row is {gate_text()} "
         "(geometry matching Chrome leaves only rasterisation; a row whose geometry compare did not run "
@@ -623,7 +651,8 @@ def rescore(path: Path) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture) -> int:
+def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture,
+         chrome_version: Callable[[Path], Optional[str]] = probe_chrome_version) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parity-capture", help="path to a built parity-capture binary (required unless --rescore)")
     ap.add_argument("--board", default=str(DEFAULT_BOARD))
@@ -649,7 +678,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         if args.report_only:
             return report_only(board, out, Path(args.census) if args.census else latest_census())
         rows = plan(board, REPO_ROOT, work, only=args.only)
-        chrome_path = pinned_chrome_path()
+        chrome_path = pinned_chrome_path(version_of=chrome_version)
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -665,8 +694,9 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     for i, row in enumerate(rows, 1):
         result = capture(row, binary)
         row_version = result.get("chromium", {}).get("browser")
-        if chromium_version and row_version and row_version != chromium_version:
-            print(f"refused: oracle changed mid-run ({chromium_version} then {row_version})", file=sys.stderr)
+        if row_version and row_version != PINNED_CHROME_VERSION:
+            print(f"refused: {row.case_id} ran on Chrome {row_version}, not the pin {PINNED_CHROME_VERSION}",
+                  file=sys.stderr)
             return 2
         chromium_version = chromium_version or row_version
         entry = summarize(row, result)
