@@ -158,13 +158,17 @@ pub fn decode_png(bytes: &[u8]) -> Result<RgbaImage, CodecError> {
         .next_frame(&mut buf)
         .map_err(|e| CodecError::Decode(e.to_string()))?;
 
-    let buf = buf[..output.buffer_size()].to_vec();
+    // A subframe may occupy only part of the canvas-sized decode buffer.
+    buf.truncate(output.buffer_size());
 
     let width = output.width;
     let height = output.height;
 
     let rgba = match output.color_type {
-        png::ColorType::Rgba => buf,
+        png::ColorType::Rgba => {
+            buf.shrink_to_fit();
+            buf
+        }
         png::ColorType::Rgb => rgb_to_rgba(buf, 255),
         png::ColorType::GrayscaleAlpha => gray_alpha_to_rgba(buf),
         png::ColorType::Grayscale => gray_to_rgba(buf, 255),
