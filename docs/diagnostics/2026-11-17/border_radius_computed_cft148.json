@@ -1,0 +1,117 @@
+{
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    800,
+    600
+  ],
+  "cases": [
+    {
+      "label": "px",
+      "css": "border-radius:10px",
+      "border-radius": "10px",
+      "border-top-left-radius": "10px",
+      "border-top-right-radius": "10px",
+      "border-bottom-right-radius": "10px",
+      "border-bottom-left-radius": "10px"
+    },
+    {
+      "label": "percent",
+      "css": "border-radius:50%",
+      "border-radius": "50%",
+      "border-top-left-radius": "50%",
+      "border-top-right-radius": "50%",
+      "border-bottom-right-radius": "50%",
+      "border-bottom-left-radius": "50%"
+    },
+    {
+      "label": "percent elliptical",
+      "css": "border-radius:10% / 20%",
+      "border-radius": "10% / 20%",
+      "border-top-left-radius": "10% 20%",
+      "border-top-right-radius": "10% 20%",
+      "border-bottom-right-radius": "10% 20%",
+      "border-bottom-left-radius": "10% 20%"
+    },
+    {
+      "label": "mixed corners",
+      "css": "border-radius:10px 50% 2em 1rem",
+      "border-radius": "10px 50% 32px 16px",
+      "border-top-left-radius": "10px",
+      "border-top-right-radius": "50%",
+      "border-bottom-right-radius": "32px",
+      "border-bottom-left-radius": "16px"
+    },
+    {
+      "label": "em and rem",
+      "css": "border-radius:2em / 1.5rem",
+      "border-radius": "32px / 24px",
+      "border-top-left-radius": "32px 24px",
+      "border-top-right-radius": "32px 24px",
+      "border-bottom-right-radius": "32px 24px",
+      "border-bottom-left-radius": "32px 24px"
+    },
+    {
+      "label": "calc mix",
+      "css": "border-radius:calc(10px + 5%)",
+      "border-radius": "calc(5% + 10px)",
+      "border-top-left-radius": "calc(5% + 10px)",
+      "border-top-right-radius": "calc(5% + 10px)",
+      "border-bottom-right-radius": "calc(5% + 10px)",
+      "border-bottom-left-radius": "calc(5% + 10px)"
+    },
+    {
+      "label": "calc minus",
+      "css": "border-top-left-radius:calc(50% - 10px)",
+      "border-radius": "calc(50% - 10px) 0px 0px",
+      "border-top-left-radius": "calc(50% - 10px)",
+      "border-top-right-radius": "0px",
+      "border-bottom-right-radius": "0px",
+      "border-bottom-left-radius": "0px"
+    },
+    {
+      "label": "calc with em",
+      "css": "border-top-left-radius:calc(1em + 10%)",
+      "border-radius": "calc(10% + 16px) 0px 0px",
+      "border-top-left-radius": "calc(10% + 16px)",
+      "border-top-right-radius": "0px",
+      "border-bottom-right-radius": "0px",
+      "border-bottom-left-radius": "0px"
+    },
+    {
+      "label": "calc single unit",
+      "css": "border-top-left-radius:calc(2 * 10px)",
+      "border-radius": "20px 0px 0px",
+      "border-top-left-radius": "20px",
+      "border-top-right-radius": "0px",
+      "border-bottom-right-radius": "0px",
+      "border-bottom-left-radius": "0px"
+    },
+    {
+      "label": "corner longhand two values",
+      "css": "border-top-left-radius:10px 20%",
+      "border-radius": "10px 0px 0px / 20% 0px 0px",
+      "border-top-left-radius": "10px 20%",
+      "border-top-right-radius": "0px",
+      "border-bottom-right-radius": "0px",
+      "border-bottom-left-radius": "0px"
+    },
+    {
+      "label": "percent over 50",
+      "css": "border-radius:80%",
+      "border-radius": "80%",
+      "border-top-left-radius": "80%",
+      "border-top-right-radius": "80%",
+      "border-bottom-right-radius": "80%",
+      "border-bottom-left-radius": "80%"
+    },
+    {
+      "label": "vw",
+      "css": "border-top-left-radius:10vw",
+      "border-radius": "80px 0px 0px",
+      "border-top-left-radius": "80px",
+      "border-top-right-radius": "0px",
+      "border-bottom-right-radius": "0px",
+      "border-bottom-left-radius": "0px"
+    }
+  ]
+}
