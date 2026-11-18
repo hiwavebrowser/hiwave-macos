@@ -19143,10 +19143,22 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "box-shadow" => {
-                // Parse box-shadow: offset-x offset-y blur spread color [inset]
-                // Simple parser for common formats
-                if let Some(shadow) = parse_box_shadow(value) {
-                    style.box_shadows.push(shadow);
+                // A declaration is the whole list (css-backgrounds-3 §7.1):
+                // `none` empties it, a comma list is that many shadows in
+                // its order (the first on top), and one shadow that does not
+                // read drops the declaration. Until CSS-TRANS D every
+                // matching declaration was appended and a comma list read as
+                // one shadow, so `#h.on{box-shadow:B}` painted A and B and a
+                // transition never saw a change.
+                let value = value.trim();
+                if value.eq_ignore_ascii_case("none") {
+                    style.box_shadows.clear();
+                } else if let Some(list) = split_by_comma(value)
+                    .into_iter()
+                    .map(parse_box_shadow)
+                    .collect::<Option<Vec<_>>>()
+                {
+                    style.box_shadows = list;
                 }
             }
             "width" => {

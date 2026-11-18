@@ -148,7 +148,7 @@ fn transform_matrix(ops: &[TransformOp], font_px: f32, w: f32, h: f32) -> String
 }
 
 /// `name(args)` at the top level of a value, in order; `None` for anything else.
-fn functions(value: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn functions(value: &str) -> Option<Vec<(String, String)>> {
     let mut out = Vec::new();
     let mut rest = value.trim();
     while !rest.is_empty() {
