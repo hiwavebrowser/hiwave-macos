@@ -60,7 +60,7 @@ export function getPinnedExecutablePath({ required = false, env = process.env } 
   return p;
 }
 
-export function getDeterministicLaunchOptions() {
+export function getDeterministicLaunchOptions({ requirePinned = false } = {}) {
   // Note: some flags may be ignored depending on platform/Chromium build.
   // We keep them because they reduce variance in practice.
   const args = [
@@ -81,7 +81,7 @@ export function getDeterministicLaunchOptions() {
 
   return {
     headless: true,
-    executablePath: getPinnedExecutablePath(),
+    executablePath: getPinnedExecutablePath({ required: requirePinned }),
     args,
   };
 }
