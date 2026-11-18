@@ -296,4 +296,6 @@ fn rule_selector_text_discards_comments_without_rewriting_strings() {
             rule.selectorText"#),
         r#"[title="two  spaces /* literal */"] .child"#
     );
+    assert_eq!(ev(&b, "rule.selectorText = 'a/**/b'; rule.selectorText"),
+               r#"[title="two  spaces /* literal */"] .child"#);
 }
