@@ -176,9 +176,6 @@ impl GpuBatch {
     /// presenter's thread: this is the path building, stroking and curve
     /// flattening the page thread no longer does.
     pub fn lower(&self) -> Vec<GpuDraw> {
-        if true {
-            return Vec::new(); // RED: stub
-        }
         let mut clips: std::collections::HashMap<usize, Arc<GpuClip>> = Default::default();
         let mut clip_of = |c: Option<&Arc<crate::raster::Clip>>| -> Option<Arc<GpuClip>> {
             let c = c?;

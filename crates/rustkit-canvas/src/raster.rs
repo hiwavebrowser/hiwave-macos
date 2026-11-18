@@ -662,7 +662,7 @@ pub(crate) fn skia_stroke(line: &StrokeStyle) -> Stroke {
 /// of paths for the stencil ([`Clip::chain`]).
 pub(crate) fn clip_to(size: (u32, u32), old: &ClipMask, path: &[PathCommand], even_odd: bool, t: &Transform2D, gpu: bool) -> ClipMask {
     let unbuilt = 1 + old.as_ref().map_or(0, |c| if c.mask.get().is_some() { 0 } else { c.unbuilt });
-    let chain = if gpu && false {
+    let chain = if gpu {
         let before = match old {
             None => Some(Vec::new()),
             Some(c) => c.chain.as_ref().map(|v| v.as_ref().clone()),
@@ -862,8 +862,7 @@ enum GpuStart {
 impl Recorded {
     /// A recording; `gpu`: it keeps a GPU position (A1).
     pub(crate) fn new(gpu: bool) -> Self {
-        let _ = gpu; // RED: stub, no GPU position yet
-        Self::default()
+        Self { gpu_on: gpu, gpu_reset: if gpu { GpuStart::Blank } else { GpuStart::Continue }, ..Self::default() }
     }
 
     fn end(&self) -> u64 {
@@ -948,7 +947,7 @@ impl Recorded {
     /// so neither replays it. The bitmap is wiped instead of replayed (it
     /// is made when a dropped op would have made it).
     pub(crate) fn full_clear(&mut self, size: (u32, u32)) {
-        if true || !self.gpu_on || self.immediate {
+        if !self.gpu_on || self.immediate {
             return;
         }
         let from = (self.cpu - self.base) as usize;
@@ -1002,9 +1001,6 @@ impl Recorded {
     /// asks (`force_reset`: it lost the texture), or when an op is one the
     /// GPU replay does not draw at A1 ([`crate::gpu::supported`]).
     pub(crate) fn take_gpu(&mut self, size: (u32, u32), force_reset: bool) -> crate::gpu::GpuBatch {
-        if true {
-            return crate::gpu::GpuBatch::reset(size, None); // RED: stub
-        }
         let from = (self.gpu - self.base) as usize;
         let unsupported = self.ops[from..].iter().any(|op| !crate::gpu::supported(op));
         let start = std::mem::take(&mut self.gpu_reset);

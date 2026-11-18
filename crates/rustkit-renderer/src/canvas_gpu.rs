@@ -288,9 +288,6 @@ impl Renderer {
     /// every batch before it); without one, the texture must exist at the
     /// batches' size.
     pub fn replay_canvas(&mut self, key: &str, batches: &[GpuBatch]) -> CanvasReplay {
-        if true {
-            return CanvasReplay::Denied; // RED: stub
-        }
         let start = batches.iter().rposition(|b| b.reset.is_some()).unwrap_or(0);
         let batches = &batches[start..];
         let Some(last) = batches.last() else { return CanvasReplay::Drawn };
