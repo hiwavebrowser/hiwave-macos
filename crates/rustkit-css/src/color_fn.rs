@@ -225,7 +225,7 @@ pub(crate) fn parse_hwb(value: &str) -> Option<Color> {
         Arg::Percent(_) => return None,
     };
     let percent = |token| match parse_arg(token)? {
-        Arg::Percent(p) | Arg::Number(p) => Some(f64::from(p).max(0.0).min(100.0) / 100.0),
+        Arg::Percent(p) | Arg::Number(p) => Some(f64::from(p).max(0.0) / 100.0),
         Arg::None => Some(0.0),
         Arg::Degrees(_) => None,
     };
