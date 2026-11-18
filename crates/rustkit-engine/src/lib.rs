@@ -19439,11 +19439,21 @@ impl layout_ctx::LayoutCtx {
                     style.z_index_declared = false;
                 }
             }
-            "text-decoration" | "text-decoration-line" => {
-                // `text-decoration` is a shorthand and may carry a colour and
-                // a style as well as the line. Only the line is read here; a
-                // value naming no line keyword at all (a colour on its own)
-                // leaves the existing line alone instead of clearing it
+            // The shorthand (css-text-decor-3 §2.4): `<line> || <style> ||
+            // <color> || <thickness>`, each part left out reset to its
+            // initial value (a colour alone is no line, Chrome 148), and a
+            // part that does not read drops the declaration. Only the line
+            // was read before: `underline red` drew the line in the text
+            // colour. The thickness is read and not kept.
+            "text-decoration" => {
+                if let Some((line, deco_style, color)) = parse_text_decoration_shorthand(value) {
+                    style.text_decoration_line = line;
+                    style.text_decoration_style = deco_style;
+                    style.text_decoration_color = color;
+                }
+            }
+            "text-decoration-line" => {
+                // A value naming no line keyword leaves the line alone
                 // (hiwave-windows #64).
                 let mut line = rustkit_css::TextDecorationLine::NONE;
                 let mut saw_line_keyword = false;
@@ -29655,6 +29665,74 @@ fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::Transfo
         }
     }
     Some(Some(rustkit_css::TransformOp::Translate(x, y)))
+}
+
+/// `text-decoration` shorthand parts: the line, the style and the colour
+/// (`None` for currentcolor); `None` when a part does not read or repeats.
+fn parse_text_decoration_shorthand(
+    value: &str,
+) -> Option<(
+    rustkit_css::TextDecorationLine,
+    rustkit_css::TextDecorationStyle,
+    Option<rustkit_css::Color>,
+)> {
+    use rustkit_css::TextDecorationStyle as S;
+    let mut line = rustkit_css::TextDecorationLine::NONE;
+    // `none`, then each line keyword (`blink` is valid and not drawn).
+    let (mut none, mut blink) = (false, false);
+    let (mut deco_style, mut color, mut thickness) = (None, None, false);
+    for part in split_outside_functions(value.trim()) {
+        let lower = part.to_ascii_lowercase();
+        let flag = match lower.as_str() {
+            "none" => Some(&mut none),
+            "underline" => Some(&mut line.underline),
+            "overline" => Some(&mut line.overline),
+            "line-through" => Some(&mut line.line_through),
+            "blink" => Some(&mut blink),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            if *flag {
+                return None;
+            }
+            *flag = true;
+            continue;
+        }
+        let parsed_style = match lower.as_str() {
+            "solid" => Some(S::Solid),
+            "double" => Some(S::Double),
+            "dotted" => Some(S::Dotted),
+            "dashed" => Some(S::Dashed),
+            "wavy" => Some(S::Wavy),
+            _ => None,
+        };
+        if let Some(parsed) = parsed_style {
+            if deco_style.replace(parsed).is_some() {
+                return None;
+            }
+            continue;
+        }
+        if lower == "currentcolor" || parse_color(part).is_some() {
+            if color.replace(parse_color(part)).is_some() {
+                return None;
+            }
+            continue;
+        }
+        if lower == "auto" || lower == "from-font" || parse_length(part).is_some() {
+            if thickness {
+                return None;
+            }
+            thickness = true;
+            continue;
+        }
+        return None;
+    }
+    let lines = line != rustkit_css::TextDecorationLine::NONE || blink;
+    // `none` is the line on its own; an empty value is no declaration.
+    if none && lines || (!none && !lines && deco_style.is_none() && color.is_none() && !thickness) {
+        return None;
+    }
+    Some((line, deco_style.unwrap_or(S::Solid), color.flatten()))
 }
 
 /// The parts of a value between the white space outside functions:
@@ -43287,16 +43365,20 @@ mod cascade_wire_tests {
         );
     }
 
+    /// The shorthand resets an omitted line: a colour alone is no line
+    /// (Chrome 148, `text_decoration_shorthand_cft148.json`; this asserted
+    /// the opposite until the shorthand was read whole). The
+    /// `text-decoration-line` longhand still ignores a value with no line.
     #[test]
-    fn a_value_naming_no_line_keyword_leaves_the_line_alone() {
+    fn a_shorthand_naming_no_line_keyword_resets_the_line() {
         let e = engine();
         let mut s = ComputedStyle::default();
         e.lctx.apply_style_property(&mut s, "text-decoration", "underline");
         e.lctx.apply_style_property(&mut s, "text-decoration", "red");
-        assert!(
-            s.text_decoration_line.underline,
-            "a colour-only value must not clear an already-set line"
-        );
+        assert!(!s.text_decoration_line.underline, "a colour alone is no line");
+        e.lctx.apply_style_property(&mut s, "text-decoration-line", "underline");
+        e.lctx.apply_style_property(&mut s, "text-decoration-line", "red");
+        assert!(s.text_decoration_line.underline, "the longhand ignores a colour");
     }
 
     // flex item properties (#66)

@@ -369,14 +369,12 @@
    {
     "prop": "text-decoration",
     "value": "line-through #c00",
-    "chrome": "line-through rgb(204, 0, 0)",
-    "gap": "the shorthand stores only the line"
+    "chrome": "line-through rgb(204, 0, 0)"
    },
    {
     "prop": "text-decoration",
     "value": "underline dotted",
-    "chrome": "underline dotted",
-    "gap": "the shorthand stores only the line"
+    "chrome": "underline dotted"
    },
    {
     "prop": "text-decoration",
