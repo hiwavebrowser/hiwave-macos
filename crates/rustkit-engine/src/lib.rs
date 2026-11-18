@@ -618,6 +618,8 @@ mod canvas_context_tests;
 #[cfg(test)]
 mod canvas_pixels_tests;
 #[cfg(test)]
+mod canvas_gpu_screen_tests;
+#[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
 mod flex_cross_size_tests;

@@ -82,6 +82,21 @@ pub(crate) struct Clip {
     t: Transform2D,
     /// `None` inside: no mask (the bitmap has no area), so nothing clips.
     mask: OnceLock<Option<Mask>>,
+    /// GPU canvas A1 (switch on only): every `clip()` in force, oldest
+    /// first, as paths, for the GPU replay's stencil. The mask's build lets
+    /// go of `parent`, so the chain is kept here as paths only (no masks).
+    /// `None` with the switch off, and past [`CLIP_CHAIN_MAX`] links (the
+    /// GPU replay does not draw under such a clip: the canvas shows its CPU
+    /// bitmap for that frame).
+    pub(crate) chain: Option<Arc<Vec<Arc<ClipLink>>>>,
+}
+
+/// One `clip()` of a chain, as the GPU replay draws it into its stencil.
+#[derive(Debug)]
+pub(crate) struct ClipLink {
+    pub(crate) path: Vec<PathCommand>,
+    pub(crate) even_odd: bool,
+    pub(crate) t: Transform2D,
 }
 
 impl Clip {
@@ -374,17 +389,7 @@ impl Raster {
     pub(crate) fn apply(&mut self, op: &Op) {
         match op {
             Op::Fill { d, path, even_odd, style } => self.fill(&d.ctx(), path, *even_odd, style, &d.t),
-            Op::Stroke { d, path, line, style } => {
-                let line = StrokeStyle {
-                    width: line.width,
-                    cap: line.cap,
-                    join: line.join,
-                    miter_limit: line.miter_limit,
-                    dash: &line.dash,
-                    dash_offset: line.dash_offset,
-                };
-                self.stroke(&d.ctx(), path, &line, style, &d.t)
-            }
+            Op::Stroke { d, path, line, style } => self.stroke(&d.ctx(), path, &line.style(), style, &d.t),
             Op::Clear { clip, rect, t } => self.clear(clip_mask(clip), rect[0], rect[1], rect[2], rect[3], t),
             Op::Image { d, image, src, dst } => self.draw_image(&d.ctx(), image, *src, *dst, &d.t),
             Op::Put { size, rgba, width, dx, dy, dirty } => self.put(*size, rgba, *width, *dx, *dy, *dirty),
@@ -394,6 +399,19 @@ impl Raster {
     /// Drops the pixels (a resize, a context reset).
     pub(crate) fn reset(&mut self) {
         self.pixmap = None;
+    }
+
+    /// The pixels cleared to transparent black, as a full clear would
+    /// leave them after the draws it hides; `make`: one of those draws
+    /// would have made the bitmap.
+    pub(crate) fn wipe(&mut self, size: (u32, u32), make: bool) {
+        match self.pixmap.as_mut() {
+            Some(pm) => pm.fill(tiny_skia::Color::TRANSPARENT),
+            None if make => {
+                self.pixmap(size.0, size.1);
+            }
+            None => {}
+        }
     }
 
     fn pixmap(&mut self, width: u32, height: u32) -> Option<&mut Pixmap> {
@@ -452,25 +470,7 @@ impl Raster {
         let Some(path) = build_path(path) else {
             return;
         };
-        let stroke = Stroke {
-            width: line.width,
-            miter_limit: line.miter_limit,
-            line_cap: match line.cap {
-                LineCap::Butt => tiny_skia::LineCap::Butt,
-                LineCap::Round => tiny_skia::LineCap::Round,
-                LineCap::Square => tiny_skia::LineCap::Square,
-            },
-            line_join: match line.join {
-                LineJoin::Miter => tiny_skia::LineJoin::Miter,
-                LineJoin::Round => tiny_skia::LineJoin::Round,
-                LineJoin::Bevel => tiny_skia::LineJoin::Bevel,
-            },
-            dash: if line.dash.is_empty() || line.dash.iter().all(|d| *d == 0.0) {
-                None
-            } else {
-                StrokeDash::new(line.dash.to_vec(), line.dash_offset)
-            },
-        };
+        let stroke = skia_stroke(line);
         // The outline is filled rather than handed to `stroke_path`, which
         // draws a stroke no wider than a device pixel as a hairline, without
         // joins or caps; Chrome draws its true outline ("stroke-rect-thin").
@@ -632,11 +632,48 @@ impl Raster {
     }
 }
 
+/// tiny-skia's stroke for `line` (both pictures outline a stroke with it).
+pub(crate) fn skia_stroke(line: &StrokeStyle) -> Stroke {
+    Stroke {
+        width: line.width,
+        miter_limit: line.miter_limit,
+        line_cap: match line.cap {
+            LineCap::Butt => tiny_skia::LineCap::Butt,
+            LineCap::Round => tiny_skia::LineCap::Round,
+            LineCap::Square => tiny_skia::LineCap::Square,
+        },
+        line_join: match line.join {
+            LineJoin::Miter => tiny_skia::LineJoin::Miter,
+            LineJoin::Round => tiny_skia::LineJoin::Round,
+            LineJoin::Bevel => tiny_skia::LineJoin::Bevel,
+        },
+        dash: if line.dash.is_empty() || line.dash.iter().all(|d| *d == 0.0) {
+            None
+        } else {
+            StrokeDash::new(line.dash.to_vec(), line.dash_offset)
+        },
+    }
+}
+
 /// The clip after clipping to `path` (HTML §4.12.5.1.10: the new clip is
 /// the old one intersected with the path), on a `size` bitmap. Recorded:
 /// the mask is built when first used (see [`Clip`]).
-pub(crate) fn clip_to(size: (u32, u32), old: &ClipMask, path: &[PathCommand], even_odd: bool, t: &Transform2D) -> ClipMask {
+/// `gpu`: the context keeps a GPU picture (A1), so the clip keeps its chain
+/// of paths for the stencil ([`Clip::chain`]).
+pub(crate) fn clip_to(size: (u32, u32), old: &ClipMask, path: &[PathCommand], even_odd: bool, t: &Transform2D, gpu: bool) -> ClipMask {
     let unbuilt = 1 + old.as_ref().map_or(0, |c| if c.mask.get().is_some() { 0 } else { c.unbuilt });
+    let chain = if gpu {
+        let before = match old {
+            None => Some(Vec::new()),
+            Some(c) => c.chain.as_ref().map(|v| v.as_ref().clone()),
+        };
+        before.filter(|v| v.len() < CLIP_CHAIN_MAX).map(|mut v| {
+            v.push(Arc::new(ClipLink { path: path.to_vec(), even_odd, t: *t }));
+            Arc::new(v)
+        })
+    } else {
+        None
+    };
     let clip = Arc::new(Clip {
         parent: Mutex::new(old.clone()),
         unbuilt,
@@ -645,6 +682,7 @@ pub(crate) fn clip_to(size: (u32, u32), old: &ClipMask, path: &[PathCommand], ev
         even_odd,
         t: *t,
         mask: OnceLock::new(),
+        chain,
     });
     if unbuilt > CLIP_CHAIN_MAX {
         clip.mask();
@@ -679,6 +717,19 @@ pub(crate) struct Line {
     pub dash_offset: f32,
 }
 
+impl Line {
+    pub(crate) fn style(&self) -> StrokeStyle<'_> {
+        StrokeStyle {
+            width: self.width,
+            cap: self.cap,
+            join: self.join,
+            miter_limit: self.miter_limit,
+            dash: &self.dash,
+            dash_offset: self.dash_offset,
+        }
+    }
+}
+
 /// One recorded raster operation: everything the raster takes for it,
 /// resolved at the call.
 #[derive(Debug)]
@@ -696,7 +747,7 @@ pub(crate) enum Op {
 
 impl Op {
     /// The clip the op draws under.
-    fn clip(&self) -> Option<&Arc<Clip>> {
+    pub(crate) fn clip(&self) -> Option<&Arc<Clip>> {
         match self {
             Op::Fill { d, .. } | Op::Stroke { d, .. } | Op::Image { d, .. } => d.clip.as_ref(),
             Op::Clear { clip, .. } => clip.as_ref(),
@@ -765,10 +816,20 @@ pub(crate) fn put_op(size: (u32, u32), rgba: &[u8], width: u32, dx: i32, dy: i32
 }
 
 /// The bitmap and the draws recorded since it was last brought up to date.
+///
+/// GPU canvas A1: with the switch on, the recording keeps two positions,
+/// the CPU replay's (`cpu`, how far the bitmap is up to date) and the GPU
+/// replay's (`gpu`, how far ops have been handed to the presenter), and an
+/// op is dropped only when both have passed it. Positions are absolute op
+/// numbers; `base` is the number of `ops[0]`. With the switch off `gpu` is
+/// never read and every flush drops everything, as at A0.
 #[derive(Debug, Default)]
 pub(crate) struct Recorded {
     raster: Raster,
-    ops: Vec<Op>,
+    ops: Vec<Arc<Op>>,
+    base: u64,
+    cpu: u64,
+    gpu: u64,
     bytes: usize,
     /// What the pending ops share, by address, each counted once in
     /// `bytes` (and kept alive here, so an address is not reused while
@@ -778,18 +839,45 @@ pub(crate) struct Recorded {
     patterns: std::collections::HashMap<usize, Arc<CanvasBitmap>>,
     /// Tests: rasterize at the call, as before the recording.
     immediate: bool,
+    /// The context keeps a GPU picture (A1 switch on at its creation).
+    gpu_on: bool,
+    /// How the GPU picture starts over at its next batch, if it must.
+    gpu_reset: GpuStart,
+}
+
+/// How the next GPU batch starts the texture.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum GpuStart {
+    /// From where the last batch left it.
+    #[default]
+    Continue,
+    /// Blank, then every op held from the GPU position (a new context, a
+    /// reset or resize: nothing was drawn before those ops).
+    Blank,
+    /// From the CPU bitmap, brought up to date (ops were dropped before the
+    /// GPU took them).
+    Bitmap,
 }
 
 impl Recorded {
-    pub(crate) fn push(&mut self, op: Op) {
-        if self.immediate {
-            self.raster.apply(&op);
-            return;
-        }
+    /// A recording; `gpu`: it keeps a GPU position (A1).
+    pub(crate) fn new(gpu: bool) -> Self {
+        Self { gpu_on: gpu, gpu_reset: if gpu { GpuStart::Blank } else { GpuStart::Continue }, ..Self::default() }
+    }
+
+    fn end(&self) -> u64 {
+        self.base + self.ops.len() as u64
+    }
+
+    /// Counts what `op` holds into `bytes` (shared things once).
+    fn count(&mut self, op: &Op) {
         self.bytes += op.bytes();
         if let Some(c) = op.clip() {
             if let std::collections::hash_map::Entry::Vacant(e) = self.clips.entry(Arc::as_ptr(c) as usize) {
                 self.bytes += c.size.0 as usize * c.size.1 as usize + c.path.len() * std::mem::size_of::<PathCommand>();
+                if let Some(chain) = &c.chain {
+                    self.bytes += chain.iter().map(|l| l.path.len() * std::mem::size_of::<PathCommand>()).sum::<usize>();
+                }
                 e.insert(c.clone());
             }
         }
@@ -799,35 +887,95 @@ impl Recorded {
                 e.insert(p.clone());
             }
         }
-        self.ops.push(op);
+    }
+
+    pub(crate) fn push(&mut self, op: Op) {
+        if self.immediate {
+            self.raster.apply(&op);
+            return;
+        }
+        self.count(&op);
+        self.ops.push(Arc::new(op));
         if self.bytes > crate::PENDING_BYTE_BUDGET {
             self.flush();
+            if self.gpu_on && self.gpu < self.end() {
+                // The GPU fell behind past the cap (no frame presented):
+                // its picture starts over from the bitmap.
+                self.gpu = self.end();
+                self.gpu_reset = GpuStart::Bitmap;
+                self.trim();
+            }
         }
     }
 
     /// The bitmap with every pending op replayed into it.
     pub(crate) fn flush(&mut self) -> &mut Raster {
-        for op in self.ops.drain(..) {
-            self.raster.apply(&op);
+        let from = (self.cpu - self.base) as usize;
+        for op in &self.ops[from..] {
+            self.raster.apply(op);
         }
+        self.cpu = self.end();
+        self.trim();
+        &mut self.raster
+    }
+
+    /// Drops the ops both replays have passed (the CPU's alone with the
+    /// switch off), recounting what the rest hold.
+    fn trim(&mut self) {
+        let keep = if self.gpu_on { self.cpu.min(self.gpu) } else { self.cpu };
+        let n = (keep - self.base) as usize;
+        if n == 0 {
+            return;
+        }
+        self.base = keep;
         self.bytes = 0;
         self.clips.clear();
         self.patterns.clear();
-        &mut self.raster
+        if n >= self.ops.len() {
+            self.ops.clear();
+            return;
+        }
+        self.ops.drain(..n);
+        for op in std::mem::take(&mut self.ops) {
+            self.count(&op);
+            self.ops.push(op);
+        }
+    }
+
+    /// A clear of the whole `size` bitmap with no clip, about to be pushed
+    /// (switch on only): what was drawn before it shows in neither picture,
+    /// so neither replays it. The bitmap is wiped instead of replayed (it
+    /// is made when a dropped op would have made it).
+    pub(crate) fn full_clear(&mut self, size: (u32, u32)) {
+        if !self.gpu_on || self.immediate {
+            return;
+        }
+        let from = (self.cpu - self.base) as usize;
+        let makes = self.ops[from..].iter().any(|op| !matches!(**op, Op::Clear { .. }));
+        self.raster.wipe(size, makes);
+        self.cpu = self.end();
+        self.gpu = self.end();
+        self.trim();
     }
 
     /// The pixels dropped (a resize, a context reset): nothing pending is
     /// left to replay.
     pub(crate) fn reset(&mut self) {
         self.ops.clear();
+        self.base = self.end();
+        self.cpu = self.base;
+        self.gpu = self.base;
         self.bytes = 0;
         self.clips.clear();
         self.patterns.clear();
         self.raster.reset();
+        if self.gpu_on {
+            self.gpu_reset = GpuStart::Blank;
+        }
     }
 
     pub(crate) fn pending_ops(&self) -> usize {
-        self.ops.len()
+        self.ops.len() - (self.cpu - self.base) as usize
     }
 
     pub(crate) fn pending_bytes(&self) -> usize {
@@ -840,6 +988,60 @@ impl Recorded {
         }
         self.immediate = on;
     }
+
+    pub(crate) fn gpu_on(&self) -> bool {
+        self.gpu_on
+    }
+
+    /// The ops the GPU has not taken yet, handed over as a batch, and the
+    /// GPU position moved to the end. A batch starts the texture blank when
+    /// nothing was drawn before its ops (a new context, a reset or resize),
+    /// and starts it over from the CPU bitmap (brought up to date here)
+    /// when ops were dropped before the GPU took them, when the presenter
+    /// asks (`force_reset`: it lost the texture), or when an op is one the
+    /// GPU replay does not draw at A1 ([`crate::gpu::supported`]).
+    pub(crate) fn take_gpu(&mut self, size: (u32, u32), force_reset: bool) -> crate::gpu::GpuBatch {
+        let from = (self.gpu - self.base) as usize;
+        let unsupported = self.ops[from..].iter().any(|op| !crate::gpu::supported(op));
+        let start = std::mem::take(&mut self.gpu_reset);
+        if unsupported || start == GpuStart::Bitmap || (force_reset && start != GpuStart::Blank) {
+            self.flush();
+            let pixels = self.raster.pixmap.as_ref().map(|pm| pm.data().to_vec());
+            self.gpu = self.end();
+            self.trim();
+            return crate::gpu::GpuBatch::reset(size, pixels);
+        }
+        let ops = self.ops[from..].to_vec();
+        self.gpu = self.end();
+        self.trim();
+        let mut batch = crate::gpu::GpuBatch::ops(size, ops);
+        if start == GpuStart::Blank {
+            batch.reset = Some(crate::gpu::GpuReset::Blank);
+        }
+        batch
+    }
+
+    /// The GPU picture is given up for good (the presenter denied it): the
+    /// recording goes back to one position.
+    pub(crate) fn leave_gpu(&mut self) {
+        self.gpu_on = false;
+        self.gpu_reset = GpuStart::Continue;
+        self.trim();
+    }
+
+    /// Ops the GPU has not taken yet.
+    pub(crate) fn gpu_pending(&self) -> usize {
+        if self.gpu_on {
+            (self.end() - self.gpu) as usize
+        } else {
+            0
+        }
+    }
+}
+
+/// [`unpremultiply`], for the GPU compare.
+pub(crate) fn unpremultiply_px(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
+    unpremultiply(r, g, b, a)
 }
 
 /// Skia's unpremultiply (SkUnPreMultiply): `c * 255 / a`, rounded.
