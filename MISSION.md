@@ -18,7 +18,7 @@ the story too.
    written in Rust. No Chromium, WebKit or system webview underneath. The end
    state is 100% RustKit on Windows, macOS and Linux, and deleting the borrowed
    webview dependencies is the proof.
-2. **Free and open source, outside Google's ecosystem.** MPL-2.0, and no
+2. **Free and open source, outside Google's ecosystem.** AGPL-3.0-or-later, and no
    Chromium dependency.
 3. **More secure and private by default.** Tracking protection and privacy are
    foundations, not add-ons. We don't collect your data.
