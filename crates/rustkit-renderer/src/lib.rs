@@ -54,6 +54,8 @@ const SHADOW_ALPHA_FLOOR: f32 = 0.25 / 255.0;
 
 
 pub mod dither;
+mod canvas_gpu;
+pub use canvas_gpu::{CanvasReplay, CANVAS_OVER_CAP_LIMIT, CANVAS_SCRATCH_BUDGET, CANVAS_TEXTURE_BUDGET, CANVAS_VERTEX_CAP};
 mod cull;
 mod shadow_blur;
 mod frame_stats;
@@ -574,6 +576,9 @@ pub struct Renderer {
 
     // Caches
     texture_cache: TextureCache,
+    /// GPU canvas A1: pipelines and scratch for canvas replays, made on the
+    /// first one (`canvas_gpu.rs`).
+    canvas_gpu: Option<Box<canvas_gpu::CanvasGpu>>,
     glyph_cache: GlyphCache,
 
     // Texture bind group layout (for sharing)
@@ -891,6 +896,7 @@ impl Renderer {
             legacy_layers: false,
             per_pass: false,
             texture_cache,
+            canvas_gpu: None,
             glyph_cache,
             texture_bind_group_layout,
             intermediate_texture: None,

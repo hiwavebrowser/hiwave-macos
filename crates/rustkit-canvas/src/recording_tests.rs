@@ -9,12 +9,20 @@
 use crate::*;
 use std::sync::Arc;
 
+/// These tests pin the CPU recording's own bookkeeping (a read empties the
+/// pending store), so they keep the GPU canvas off on this thread whatever the
+/// environment says: with it on, a read keeps draws until the GPU has taken them.
+fn cpu_ctx(w: u32, h: u32) -> CanvasRenderingContext2D {
+    crate::gpu::set_gpu_canvas(Some(false));
+    CanvasRenderingContext2D::new(w, h)
+}
+
 /// Draws `draw` on an immediate and a recording `w` x `h` context; returns
 /// the recording one, already checked against the other.
 fn both(w: u32, h: u32, draw: impl Fn(&mut CanvasRenderingContext2D)) -> CanvasRenderingContext2D {
-    let mut direct = CanvasRenderingContext2D::new(w, h);
+    let mut direct = cpu_ctx(w, h);
     direct.set_immediate_raster(true);
-    let mut recorded = CanvasRenderingContext2D::new(w, h);
+    let mut recorded = cpu_ctx(w, h);
     draw(&mut direct);
     draw(&mut recorded);
     assert_eq!(direct.pending_ops(), 0, "an immediate context records nothing");
@@ -134,9 +142,9 @@ fn strokes_with_every_cap_join_and_dash_record_and_replay_the_same_pixels() {
 #[test]
 fn clears_under_a_transform_and_a_clip_record_and_replay_the_same_pixels() {
     // A clear before anything is drawn leaves no bitmap, in both.
-    let mut direct = CanvasRenderingContext2D::new(40, 30);
+    let mut direct = cpu_ctx(40, 30);
     direct.set_immediate_raster(true);
-    let mut recorded = CanvasRenderingContext2D::new(40, 30);
+    let mut recorded = cpu_ctx(40, 30);
     for c in [&mut direct, &mut recorded] {
         c.clear_rect(0.0, 0.0, 10.0, 10.0);
     }
@@ -267,9 +275,9 @@ fn put_image_data_records_and_replays_the_same_pixels() {
         c.fill_rect(5.0, 0.0, 10.0, 10.0);
     });
     // A put wholly off the bitmap, before anything is drawn, still makes it.
-    let mut direct = CanvasRenderingContext2D::new(30, 20);
+    let mut direct = cpu_ctx(30, 20);
     direct.set_immediate_raster(true);
-    let mut recorded = CanvasRenderingContext2D::new(30, 20);
+    let mut recorded = cpu_ctx(30, 20);
     for c in [&mut direct, &mut recorded] {
         c.put_image_data_dirty(&data, 100, 100, [0, 0, 6, 4]);
     }
@@ -286,7 +294,7 @@ fn reset_and_resize_drop_what_is_pending() {
         c.reset_bitmap(50, 20);
         c.fill_rect(30.0, 5.0, 10.0, 10.0);
     });
-    let mut c = CanvasRenderingContext2D::new(40, 30);
+    let mut c = cpu_ctx(40, 30);
     c.fill_rect(0.0, 0.0, 40.0, 30.0);
     c.reset_bitmap(40, 30);
     assert_eq!(c.pending_ops(), 0, "a resize clears the bitmap: nothing before it is left to replay");
@@ -295,9 +303,9 @@ fn reset_and_resize_drop_what_is_pending() {
 
 #[test]
 fn reads_between_draws_see_exactly_what_was_drawn_before_them() {
-    let mut direct = CanvasRenderingContext2D::new(50, 40);
+    let mut direct = cpu_ctx(50, 40);
     direct.set_immediate_raster(true);
-    let mut recorded = CanvasRenderingContext2D::new(50, 40);
+    let mut recorded = cpu_ctx(50, 40);
     for step in 0..6 {
         for c in [&mut direct, &mut recorded] {
             c.set_fill_style(color(40 * step as u8, 255 - 40 * step as u8, 90, 0.7));
@@ -313,9 +321,9 @@ fn reads_between_draws_see_exactly_what_was_drawn_before_them() {
 
 #[test]
 fn a_page_drawing_forever_without_reading_holds_at_most_the_budget_pending() {
-    let mut direct = CanvasRenderingContext2D::new(300, 200);
+    let mut direct = cpu_ctx(300, 200);
     direct.set_immediate_raster(true);
-    let mut recorded = CanvasRenderingContext2D::new(300, 200);
+    let mut recorded = cpu_ctx(300, 200);
     let mut most = 0;
     let mut flushed = false;
     for i in 0..30_000u32 {
@@ -361,7 +369,7 @@ fn pattern_bitmaps_held_by_pending_draws_count_toward_the_cap() {
     let side = 512u32;
     let pattern_bytes = (side * side * 4) as usize;
     let source = CanvasBitmap::from_rgba(side, side, &vec![200u8; pattern_bytes]).unwrap();
-    let mut c = CanvasRenderingContext2D::new(64, 64);
+    let mut c = cpu_ctx(64, 64);
     for i in 0..64 {
         c.set_fill_style(CanvasStyle::Pattern(CanvasPattern { bitmap: Arc::new(source.clone()), repetition: PatternRepetition::Repeat }));
         c.fill_rect((i % 8) as f32, 0.0, 8.0, 8.0);
@@ -370,7 +378,7 @@ fn pattern_bitmaps_held_by_pending_draws_count_toward_the_cap() {
         assert!(c.pending_bytes() >= c.pending_ops() * pattern_bytes, "fill {i}: the count misses the patterns");
     }
     // One pattern shared by many draws counts once.
-    let mut c = CanvasRenderingContext2D::new(64, 64);
+    let mut c = cpu_ctx(64, 64);
     c.set_fill_style(CanvasStyle::Pattern(CanvasPattern { bitmap: Arc::new(source), repetition: PatternRepetition::Repeat }));
     for i in 0..64 {
         c.fill_rect((i % 8) as f32, 0.0, 8.0, 8.0);
@@ -386,7 +394,7 @@ fn pattern_bitmaps_held_by_pending_draws_count_toward_the_cap() {
 fn clip_paths_held_by_pending_draws_count_toward_the_cap() {
     let points = 20_000usize;
     let path_bytes = points * std::mem::size_of::<PathCommand>();
-    let mut c = CanvasRenderingContext2D::new(32, 32);
+    let mut c = cpu_ctx(32, 32);
     for i in 0..200 {
         c.save();
         c.begin_path();

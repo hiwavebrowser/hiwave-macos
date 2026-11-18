@@ -12,6 +12,8 @@ rustkit-layout = { path = "../rustkit-layout" }
 rustkit-css = { path = "../rustkit-css" }
 # rustkit-svg = { path = "../rustkit-svg" }
 rustkit-common = { path = "../rustkit-common" }
+# GPU canvas A1: the recording the canvas replay lowers (canvas_gpu.rs)
+rustkit-canvas = { path = "../rustkit-canvas" }
 
 # GPU rendering
 wgpu = "24"
