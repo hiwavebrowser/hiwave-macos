@@ -264,6 +264,27 @@ impl Tokenizer {
     }
 
     pub fn tokenize(mut self) -> ParseResult<Vec<Token>> {
+        self.scan(|_| Ok(()))?;
+        Ok(self.tokens)
+    }
+
+    pub(super) fn for_each_token(
+        mut self,
+        scripting: bool,
+        mut accept: impl FnMut(Token) -> ParseResult<()>,
+    ) -> ParseResult<()> {
+        self.scripting = scripting;
+        self.scan(|tokens| tokens.drain(..).try_for_each(&mut accept))?;
+        self.tokens.into_iter().try_for_each(accept)
+    }
+
+    fn scan(
+        &mut self,
+        mut flush_batch: impl FnMut(&mut Vec<Token>) -> ParseResult<()>,
+    ) -> ParseResult<()> {
+        // A state transition can emit several tokens (e.g. an unknown entity).
+        // Hand off complete transitions and reuse the vector on the parse path.
+        const BATCH_SIZE: usize = 256;
         while self.pos < self.input.len() || self.state != State::Data {
             match self.state {
                 State::Data => self.state_data(),
@@ -305,6 +326,9 @@ impl Tokenizer {
                 State::ScriptData => self.state_script_data(),
             }
 
+            if self.tokens.len() >= BATCH_SIZE {
+                flush_batch(&mut self.tokens)?;
+            }
             // Safety check to prevent infinite loops
             if self.pos > self.input.len() + 100 {
                 return Err(ParseError::TokenizerError(
@@ -314,7 +338,7 @@ impl Tokenizer {
         }
 
         self.emit(Token::Eof);
-        Ok(self.tokens)
+        Ok(())
     }
 
     fn state_data(&mut self) {
