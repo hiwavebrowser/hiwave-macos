@@ -341,6 +341,14 @@ pub(crate) struct DomHost {
     /// rule index), so a write deep in a subtree can restyle an ancestor.
     /// `None` until the engine installs it: assumed yes.
     pub(crate) has_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// Whether some rule of the page's sheets reads the `style` attribute (`[style*=..]`) or
+    /// uses `:has()` (the engine's rule index), so an inline style write can change which rules
+    /// match. `None` until the engine installs it: assumed yes (TREE-REUSE step (2)).
+    pub(crate) style_attr_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// NATIVE-SETPROPERTY: each element's inline declarations as last parsed, with the attribute text
+    /// they were parsed from (`style_decls`). A pure function of the text, so an entry is right for any
+    /// element whose attribute holds that text; at most `STYLE_DECLS_KEPT` are kept.
+    style_cache: RefCell<HashMap<usize, (String, Rc<Vec<crate::inline_style::Decl>>)>>,
     /// Whether a read since the count was taken answered from the last
     /// layout instead (budget spent, or the build state busy): logged once.
     forced_declined: bool,
@@ -410,7 +418,38 @@ pub(crate) struct DomHost {
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
 
+/// How many elements' inline declarations `DomHost::style_decls` keeps (then it starts again).
+const STYLE_DECLS_KEPT: usize = 4096;
+
 impl DomHost {
+    /// The inline declarations of element `node` whose `style` attribute is `text`: parsed once per
+    /// text, then kept (NATIVE-SETPROPERTY; `inline_style::parse_decls`).
+    pub(crate) fn style_decls(&self, node: usize, text: &str) -> Rc<Vec<crate::inline_style::Decl>> {
+        let mut cache = self.style_cache.borrow_mut();
+        if let Some((kept, decls)) = cache.get(&node) {
+            if kept == text {
+                return decls.clone();
+            }
+        }
+        let decls = Rc::new(crate::inline_style::parse_decls(text));
+        if cache.len() >= STYLE_DECLS_KEPT {
+            cache.clear();
+        }
+        cache.insert(node, (text.to_string(), decls.clone()));
+        decls
+    }
+
+    /// Keep `decls` as element `node`'s declarations for attribute text `text`, which a native write is
+    /// about to write: only a list that reads back from `text` as itself
+    /// (`inline_style::reads_back_as_itself`).
+    pub(crate) fn keep_style_decls(&self, node: usize, text: &str, decls: Vec<crate::inline_style::Decl>) {
+        let mut cache = self.style_cache.borrow_mut();
+        if cache.len() >= STYLE_DECLS_KEPT {
+            cache.clear();
+        }
+        cache.insert(node, (text.to_string(), Rc::new(decls)));
+    }
+
     /// Build the geometry and computed styles from the pending source, if
     /// the layout changed since script last read them.
     pub(crate) fn ensure_geometry(&mut self) {
@@ -559,10 +598,11 @@ impl DomHost {
         if !dirty.needs_layout_for(read) {
             return;
         }
-        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        // Only a paint write is pending: an inline style's (TREE-REUSE step (2)), which names
+        // itself, or Web Animations' layer (LAT7c), which does not.
         let cause = match dirty.written_since_layout() {
             true => dirty.cause().unwrap_or("other"),
-            false => "animation",
+            false => dirty.cause().unwrap_or("animation"),
         };
         let forced = {
             let mut h = host.borrow_mut();
@@ -1478,6 +1518,10 @@ enum Reach {
     /// script settles (the bucket and the mutation log are kept), so what
     /// it builds next is the same; only the read in between is spared.
     Unseen,
+    /// TREE-REUSE step (2): an inline `style` write that changed only paint properties
+    /// (`paint_style_reads`, the read bits it carries). No box moves: only a read that sees
+    /// the values (`getComputedStyle`, and a hit test after `opacity`) lays the page out.
+    Paint(u8),
 }
 
 impl Reach {
@@ -1485,8 +1529,70 @@ impl Reach {
         match self {
             Reach::Seen => dirty.mark(bucket, cause, logged),
             Reach::Unseen => dirty.mark_unseen(bucket, logged),
+            Reach::Paint(reads) => dirty.mark_paint_style(bucket, cause, reads, logged),
         }
     }
+}
+
+/// Inline style properties a change of which moves no box (TREE-REUSE step (2)), with the reads
+/// that see the change beyond `getComputedStyle`. Longhands and the one colour shorthand only:
+/// `background` and `border` also set what lays out.
+const PAINT_STYLE_PROPERTIES: &[(&str, u8)] = &[
+    ("color", crate::LAYER_PAINT),
+    ("background-color", crate::LAYER_PAINT),
+    ("border-color", crate::LAYER_PAINT),
+    ("border-top-color", crate::LAYER_PAINT),
+    ("border-right-color", crate::LAYER_PAINT),
+    ("border-bottom-color", crate::LAYER_PAINT),
+    ("border-left-color", crate::LAYER_PAINT),
+    ("outline-color", crate::LAYER_PAINT),
+    ("text-decoration-color", crate::LAYER_PAINT),
+    ("caret-color", crate::LAYER_PAINT),
+    ("opacity", crate::LAYER_PAINT | crate::LAYER_STACKING),
+];
+
+/// An inline style's declarations as `name -> value` (names ASCII-lowercased, the last of a name
+/// wins), or `None` when the text holds anything a split on `;` and `:` could misread: a quote, an
+/// escape, a comment, a brace, or brackets left open across a `;`.
+fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
+    if text.contains(['"', '\'', '\\', '{', '}']) || text.contains("/*") {
+        return None;
+    }
+    let mut declarations = HashMap::new();
+    for declaration in text.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        if declaration.matches('(').count() != declaration.matches(')').count() {
+            return None;
+        }
+        let (name, value) = declaration.split_once(':')?;
+        declarations.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    Some(declarations)
+}
+
+/// The read bits of a write of `node`'s `style` attribute from `old` to `new` (`None`: removed)
+/// when every declaration it adds, removes or changes is a paint property
+/// (`PAINT_STYLE_PROPERTIES`); `None` when one may move a box, or when the page has a rule that
+/// reads the attribute or a `:has()` (`DomHost::style_attr_rules`), through which the write can
+/// change which rules match.
+fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Option<u8> {
+    if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
+        return None;
+    }
+    let old = plain_declarations(old.unwrap_or(""))?;
+    let new = plain_declarations(new.unwrap_or(""))?;
+    let mut reads = 0;
+    for name in old.keys().chain(new.keys()) {
+        if old.get(name) == new.get(name) {
+            continue;
+        }
+        let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| property == name)?;
+        reads |= bits;
+    }
+    (reads != 0).then_some(reads)
 }
 
 /// Elements a write under or to which may change something outside its
@@ -1584,6 +1690,14 @@ fn write_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (R
     let container = if node.is_element() { Some(node.clone()) } else { node.parent() };
     match container {
         Some(c) if under_hidden(host, &c, dirty) => (Reach::Unseen, cause),
+        _ if cause == "style" && is_html_element(&node) => {
+            let new = (op == "setAttr").then(|| string_arg(args, 4).unwrap_or(""));
+            let old = node.get_attribute("style");
+            match paint_style_reads(host, old.as_deref(), new) {
+                Some(reads) => (Reach::Paint(reads), cause),
+                None => (Reach::Seen, cause),
+            }
+        }
         _ => (Reach::Seen, cause),
     }
 }
@@ -1611,6 +1725,36 @@ fn mutate_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (
         return (Reach::Unseen, cause);
     }
     (Reach::Seen, cause)
+}
+
+/// `__rustkit_dom_write(gen, op, id, a, b)`: the write, its mutation record, its trace and its dirty
+/// mark. A string answer is the DOMException name to throw. The inline style's native write
+/// (`__rustkit_style_write`) takes this same path.
+fn dom_write(
+    h: &SharedDomHost,
+    d: &crate::DirtyMark,
+    m: &RefCell<ScriptMutations>,
+    l: &RefCell<MutationLog>,
+    args: &[JsValue],
+) -> JsValue {
+    let record = write_record(&h.borrow(), args);
+    let (reach, cause) = write_reach(&h.borrow(), args, d);
+    match write(&h.borrow(), args) {
+        Ok((result, bucket)) => {
+            let logged = match record.filter(|_| bucket != DomDirty::Clean) {
+                Some(record) => {
+                    l.borrow_mut().push(record);
+                    crate::Logged::Yes
+                }
+                None => crate::Logged::No,
+            };
+            trace_dirty(&h.borrow(), args, bucket);
+            note_mutation(m, bucket, write_kind(args), || node_label(&h.borrow(), args, 2));
+            reach.mark(d, bucket, cause, logged);
+            result
+        }
+        Err(name) => JsValue::String(name.to_string()),
+    }
 }
 
 /// Record a write that dirtied the page (`bucket` not `Clean`).
@@ -2689,27 +2833,97 @@ pub(crate) fn install(
         "__rustkit_dom_write",
         5,
         1,
+        Box::new(move |args| dom_write(&h, &d, &m, &l, args)),
+    )?;
+
+    // NATIVE-SETPROPERTY: an element's inline style (`el.style`) read and written in Rust
+    // (`inline_style`). style_read(gen, id, op, arg): `value` / `priority` of the property named `arg`,
+    // `item` (`arg` an index), `length`, `text` (cssText). style_write(gen, id, op, name, value,
+    // priority): `set` answers whether the attribute was written, `remove` the value the property had
+    // (written exactly when it had one); either answers -1 when the element is not found. A write
+    // takes `__rustkit_dom_write`'s own path (`dom_write`), as `setAttribute('style', text)` does.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_style_read",
+        4,
         Box::new(move |args| {
-            let record = write_record(&h.borrow(), args);
-            let (reach, cause) = write_reach(&h.borrow(), args, &d);
-            match write(&h.borrow(), args) {
-            Ok((result, bucket)) => {
-                let logged = match record.filter(|_| bucket != DomDirty::Clean) {
-                    Some(record) => {
-                        l.borrow_mut().push(record);
-                        crate::Logged::Yes
-                    }
-                    None => crate::Logged::No,
-                };
-                trace_dirty(&h.borrow(), args, bucket);
-                note_mutation(&m, bucket, write_kind(args), || {
-                    node_label(&h.borrow(), args, 2)
-                });
-                reach.mark(&d, bucket, cause, logged);
-                result
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Number(-1.0);
+            };
+            let raw = node.get_attribute("style");
+            let decls = host.style_decls(node.id.raw(), raw.as_deref().unwrap_or(""));
+            match string_arg(args, 2).unwrap_or("") {
+                "value" | "priority" => {
+                    let name = crate::inline_style::js_trim(string_arg(args, 3).unwrap_or("")).to_lowercase();
+                    let found = decls.iter().find(|d| d.name == name);
+                    JsValue::String(match (string_arg(args, 2), found) {
+                        (Some("value"), Some(d)) => d.value.clone(),
+                        (_, Some(d)) if d.important => "important".to_string(),
+                        _ => String::new(),
+                    })
+                }
+                "item" => {
+                    let i = number_arg(args, 3).unwrap_or(0.0);
+                    JsValue::String(
+                        decls.get(i as usize).filter(|_| i >= 0.0).map(|d| d.name.clone()).unwrap_or_default(),
+                    )
+                }
+                "length" => JsValue::Number(decls.len() as f64),
+                // An empty or absent attribute reads as no text at all.
+                "text" if raw.as_deref().is_some_and(|t| !t.is_empty()) => {
+                    JsValue::String(crate::inline_style::serialize_decls(&decls))
+                }
+                _ => JsValue::String(String::new()),
             }
-            Err(name) => JsValue::String(name.to_string()),
+        }),
+    )?;
+    let h = host.clone();
+    let d = dirty.clone();
+    let m = mutations.clone();
+    let l = log.clone();
+    runtime.register_host_function(
+        "__rustkit_style_write",
+        6,
+        Box::new(move |args| {
+            let found = h.borrow().node(args).map(|node| {
+                let raw = node.get_attribute("style");
+                (node.id.raw(), h.borrow().style_decls(node.id.raw(), raw.as_deref().unwrap_or("")))
+            });
+            let Some((id, decls)) = found else {
+                return JsValue::Number(-1.0);
+            };
+            let name = string_arg(args, 3).unwrap_or("");
+            let (answer, written) = match string_arg(args, 2).unwrap_or("") {
+                "remove" => {
+                    let (old, written) = crate::inline_style::remove_property(&decls, name);
+                    (JsValue::String(old), written)
+                }
+                _ => {
+                    let written = crate::inline_style::set_property(
+                        &decls,
+                        name,
+                        string_arg(args, 4).unwrap_or(""),
+                        string_arg(args, 5).unwrap_or(""),
+                    );
+                    (JsValue::Boolean(written.is_some()), written)
+                }
+            };
+            if let Some(decls) = written {
+                let text = crate::inline_style::serialize_decls(&decls);
+                // The next read or write of this text needs no parse, when the list reads back as itself
+                // (the JS copy's `exactOf`). Kept before the write: a write the page's own code changes
+                // again (a custom element's callback) leaves other text, which is parsed.
+                if crate::inline_style::reads_back_as_itself(&decls) {
+                    h.borrow().keep_style_decls(id, &text, decls);
+                }
+                let write_args =
+                    [args[0].clone(), JsValue::String("setAttr".into()), JsValue::Number(id as f64), JsValue::String("style".into()), JsValue::String(text)];
+                if let JsValue::String(_) = dom_write(&h, &d, &m, &l, &write_args) {
+                    return JsValue::Number(-1.0);
+                }
             }
+            answer
         }),
     )?;
 
@@ -2895,8 +3109,11 @@ const WRAPPERS_JS: &str = r#"
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
-        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
+        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated,
+        styleRead: __rustkit_style_read, styleWrite: __rustkit_style_write
     };
+    delete g.__rustkit_style_read;
+    delete g.__rustkit_style_write;
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
         'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
@@ -5272,16 +5489,46 @@ const WRAPPERS_JS: &str = r#"
         }
         return out;
     }
+    // NATIVE-SETPROPERTY: inline style reads and writes are one host call each (`inline_style.rs`, the
+    // same results as the JavaScript copy here, which interprets ~6,800 opcodes per write). Only what
+    // runs page code stays here: the arguments' string conversions, and a MutationObserver's or a
+    // custom element's hook around a write that changed the attribute, made as `putPlain` makes them.
+    // `__rk.styleNative(false)` puts the JavaScript copy back, for the cross-check tests.
+    var styleNative = true, styleString = String;
+    __rk.styleNative = function (on) { styleNative = on === true; };
+    function styleRead(st, op, arg) {
+        var s = slotOf(st[OWNER]), r = N.styleRead(s.gen, s.id, op, arg);
+        return r === -1 ? (op === 'length' ? 0 : '') : r;
+    }
+    function styleWrite(el, op, name, value, priority) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'style');
+        var ar = HOOKS.attrs && HOOKS.watched.style === true && HOOKS.attrs(el, 'setAttr', 'style', true);
+        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, op, name, value, priority);
+        if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+        // `set` answers whether it wrote; `remove` the value the property had, written when it had one.
+        if (r === true || (op === 'remove' && r !== '')) {
+            if (m) m();
+            if (ar) ar();
+        }
+        return r;
+    }
     var styleMethods = {
         getPropertyValue: function (name) {
+            if (styleNative) return styleRead(this, 'value', styleString(name));
             var d = declNamed(this, propertyName(name));
             return d ? d.value : '';
         },
         getPropertyPriority: function (name) {
+            if (styleNative) return styleRead(this, 'priority', styleString(name));
             var d = declNamed(this, propertyName(name));
             return d && d.important ? 'important' : '';
         },
         setProperty: function (name, value, priority) {
+            if (styleNative) {
+                styleWrite(this[OWNER], 'set', styleString(name), value == null ? '' : styleString(value), styleString(priority || ''));
+                return;
+            }
             name = propertyName(name);
             value = value == null ? '' : cssTrimValue(toDOMString(value));
             // Plain strings from here on: what is serialised is what is kept and checked.
@@ -5303,6 +5550,7 @@ const WRAPPERS_JS: &str = r#"
             storeDecls(this, ds);
         },
         removeProperty: function (name) {
+            if (styleNative) return styleWrite(this[OWNER], 'remove', styleString(name), '', '');
             name = propertyName(name);
             if (typeof name !== 'string') name = '' + name;
             var ds = decls(this), old = this.getPropertyValue(name), kept = newList();
@@ -5310,11 +5558,17 @@ const WRAPPERS_JS: &str = r#"
             if (kept.n !== ds.n) storeDecls(this, kept);
             return old;
         },
-        item: function (i) { var ds = keptDecls(this); i = i >>> 0; return i < ds.n ? ds[i].name : ''; }
+        item: function (i) {
+            if (styleNative) return styleRead(this, 'item', i >>> 0);
+            var ds = keptDecls(this); i = i >>> 0; return i < ds.n ? ds[i].name : '';
+        }
     };
     Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
-    getter(CSSStyleDeclaration.prototype, 'length', function () { return keptDecls(this).n; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () {
+        return styleNative ? styleRead(this, 'length', 0) : keptDecls(this).n;
+    });
     accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
+        if (styleNative) return styleRead(this, 'text', '');
         return this[OWNER].getAttribute('style') ? serializeDecls(keptDecls(this)) : '';
     }, function (v) { this[OWNER].setAttribute('style', v == null ? '' : String(v)); });
     // Property names (el.style.backgroundColor) go through a Proxy, so any
@@ -5333,7 +5587,9 @@ const WRAPPERS_JS: &str = r#"
             },
             set: function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
-                t.setProperty(cssName(p), v);
+                // `setProperty(name, v)` with no priority, without the method call (NATIVE-SETPROPERTY).
+                if (styleNative) styleWrite(t[OWNER], 'set', cssName(p), v == null ? '' : styleString(v), '');
+                else t.setProperty(cssName(p), v);
                 return true;
             }
         });
