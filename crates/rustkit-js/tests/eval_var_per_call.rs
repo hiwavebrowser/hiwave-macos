@@ -67,3 +67,24 @@ fn an_eval_var_belongs_to_the_call_that_declared_it() {
     }
     assert!(wrong.is_empty(), "{} of {} differ:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
 }
+
+/// A store into a declarative environment at an index its scope declares but the environment was not
+/// sized for gives an answer (the lexical / global / module guard). A body-level `using` declaration
+/// is such a store while the scope analysis does not bind it there (see the `using-bindings` patch).
+#[test]
+fn a_store_past_an_environments_end_gives_an_answer() {
+    for src in [
+        "(function () { using x = null; return 'ok'; })()",
+        "(function () { await using x = undefined; return 'ok'; })",
+    ] {
+        let got = catch_unwind(AssertUnwindSafe(|| {
+            let mut ctx = Context::default();
+            match ctx.eval(Source::from_bytes(src)) {
+                Ok(_) => "answer".to_string(),
+                Err(e) => format!("error: {e}"),
+            }
+        }))
+        .unwrap_or_else(|_| "no answer".to_string());
+        assert_ne!(got, "no answer", "{src}");
+    }
+}
