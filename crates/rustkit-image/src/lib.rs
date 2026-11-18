@@ -666,6 +666,12 @@ impl ImageManager {
         self.cache.read().unwrap().stats()
     }
 
+    /// How many images the memory cache has taken in ([`ImageCache::inserts`]): it moves whenever
+    /// an image arrives, so layout built before it may hold a stale natural size.
+    pub fn cache_generation(&self) -> u64 {
+        self.cache.read().unwrap().inserts()
+    }
+
     /// Check if an image is cached
     pub fn is_cached(&self, url: &Url) -> bool {
         self.cache.read().unwrap().contains(url)

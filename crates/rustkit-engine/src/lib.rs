@@ -13315,6 +13315,11 @@ impl layout_ctx::LayoutCtx {
         if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
             return miss("script animations moved since the kept tree was built");
         }
+        // An image that arrived since the kept tree was built: its kept box has the natural size of
+        // before (BOXES-DIFF receipt: 150x150 spliced, 184x184 built, one live capture of two).
+        if self.image_manager.cache_generation() != lay.script_unlaid_images.get() {
+            return miss("an image arrived since the kept tree was built");
+        }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
             Err(why) => return miss(why),
@@ -13538,6 +13543,7 @@ impl layout_ctx::LayoutCtx {
             lay.script_unlaid_unpublished.set(keep && forced);
             lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
+            lay.script_unlaid_images.set(self.image_manager.cache_generation());
         }
 
         // Layout computation
