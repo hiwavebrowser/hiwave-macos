@@ -596,6 +596,49 @@ fn elements_after_a_contents_wrapper_read_and_hit_alike_spliced_or_built() {
     }
 }
 
+/// BOXES-DIFF receipt (head 765d73a3): one live-site capture of two had an image box 150x150 in the
+/// splice and 184x184 in the full build, the same URL. The kept tree holds an image's natural size as
+/// of its build; an image can reach the cache before its own relayout (`ImageLoaded`, a full build)
+/// runs, and a script relayout in between spliced the stale box beside the written one. Here the
+/// image lands in the cache between the kept build and the script write, with no relayout of its own.
+#[test]
+fn an_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196,
+        137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 252, 207, 192, 80, 15, 0, 4, 133, 1, 128, 132, 169, 140, 33, 0, 0,
+        0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, server) = load(
+        "<!doctype html><style>body{margin:0} .h{height:10px}</style>\
+         <div id=u><div class=h id=a></div><img id=im src=\"/late.png\"><div class=h id=b></div></div>",
+    );
+    let write = |engine: &mut Engine, width: u32| {
+        engine
+            .execute_script(view, &format!("document.getElementById('b').style.width = '{width}px'"))
+            .expect("write");
+    };
+    // The kept tree: a full build, then a splice, with the image not in the cache.
+    for width in [20, 30] {
+        write(&mut engine, width);
+        frame(&mut engine, view);
+    }
+    let (mismatches, spliced) = (splice_mismatches_for_test(), splices_for_test().0);
+    // The image arrives; no relayout of its own runs before the next script write.
+    let url = Url::parse(&format!("http://127.0.0.1:{}/late.png", server.port)).unwrap();
+    engine.lctx.image_manager.insert_fetched(&url, Some("image/png"), PNG).expect("the PNG decodes");
+    write(&mut engine, 40);
+    frame(&mut engine, view);
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "a splice kept the image's size from before it arrived (spliced {}, last miss {miss:?})",
+        now - spliced
+    );
+}
+
 /// A written inline holding only a block is a culled inline: a full build makes it a block box
 /// (`rebox_culled_inline`) before its parent keeps it. The splice's box for it must be that box.
 #[test]
