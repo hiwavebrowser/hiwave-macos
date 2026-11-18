@@ -7154,10 +7154,6 @@ FAIL	test/language/statements/await-using/syntax/await-using-outer-inner-using-b
 FAIL	test/language/statements/await-using/syntax/await-using-valid-for-await-using-of-of.js	sloppy
 FAIL	test/language/statements/await-using/syntax/await-using-valid-for-await-using-of-of.js	strict
 FAIL	test/language/statements/await-using/syntax/await-using.js	module
-FAIL	test/language/statements/await-using/syntax/with-initializer-case-expression-statement-list.js	sloppy
-FAIL	test/language/statements/await-using/syntax/with-initializer-case-expression-statement-list.js	strict
-FAIL	test/language/statements/await-using/syntax/with-initializer-default-statement-list.js	sloppy
-FAIL	test/language/statements/await-using/syntax/with-initializer-default-statement-list.js	strict
 FAIL	test/language/statements/await-using/throws-error-as-is-if-only-one-error-during-disposal.js	sloppy
 FAIL	test/language/statements/await-using/throws-error-as-is-if-only-one-error-during-disposal.js	strict
 FAIL	test/language/statements/await-using/throws-if-initializer-Symbol.asyncDispose-property-is-null.js	sloppy
@@ -7318,16 +7314,8 @@ FAIL	test/language/statements/using/syntax/using-invalid-assignment-next-express
 FAIL	test/language/statements/using/syntax/using-invalid-assignment-next-expression-for.js	strict
 FAIL	test/language/statements/using/syntax/using-invalid-assignment-statement-body-for-of.js	sloppy
 FAIL	test/language/statements/using/syntax/using-invalid-assignment-statement-body-for-of.js	strict
-FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-caseclause.js	sloppy
-FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-caseclause.js	strict
-FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-defaultclause.js	sloppy
-FAIL	test/language/statements/using/syntax/using-invalid-switchstatement-defaultclause.js	strict
 FAIL	test/language/statements/using/syntax/using-outer-inner-using-bindings.js	sloppy
 FAIL	test/language/statements/using/syntax/using-outer-inner-using-bindings.js	strict
-FAIL	test/language/statements/using/syntax/with-initializer-case-expression-statement-list.js	sloppy
-FAIL	test/language/statements/using/syntax/with-initializer-case-expression-statement-list.js	strict
-FAIL	test/language/statements/using/syntax/with-initializer-default-statement-list.js	sloppy
-FAIL	test/language/statements/using/syntax/with-initializer-default-statement-list.js	strict
 FAIL	test/language/statements/using/throws-error-as-is-if-only-one-error-during-disposal.js	sloppy
 FAIL	test/language/statements/using/throws-error-as-is-if-only-one-error-during-disposal.js	strict
 FAIL	test/language/statements/using/throws-if-initializer-Symbol.dispose-property-is-null.js	sloppy
