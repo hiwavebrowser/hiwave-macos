@@ -1191,7 +1191,9 @@ bound in that body's lexical scope, as block declaration instantiation already b
 Before, those three instantiations skipped both kinds (`_ => {}`), so the declaration had no binding
 to initialize. A `using` or `await using` declaration directly in a script's statement list, which is
 also eval code's, is a SyntaxError (Explicit Resource Management early error), as Chrome 148 reports.
-Inside a block, a function or a module it is allowed.
+Inside a block, a function or a module it is allowed. Likewise, one directly in a `switch`
+statement's `case` or `default` clause is a SyntaxError (`boa_parser` `CaseBlock`); inside a block in
+the clause it is allowed.
 
 **Not changed.** Disposal: the bytecompiler still binds these names as `let` without adding the value
 to a disposal stack, so `Symbol.dispose` / `Symbol.asyncDispose` are not called and a non-object value
