@@ -708,6 +708,8 @@ mod css_transitions_sizes_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_visibility_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_lists_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
