@@ -9,13 +9,16 @@ import { chromium } from 'playwright';
 import { writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { getDeterministicLaunchOptions } from './deterministic.mjs';
+import { getDeterministicLaunchOptions, getPinnedExecutablePath } from './deterministic.mjs';
 
 const PIN = '148.0.7778.216';
 const RECEIPT = join(dirname(fileURLToPath(import.meta.url)),
   '../../docs/diagnostics/2026-11-17/css_transitions_sizes_cft148.json');
 
-const browser = await chromium.launch(getDeterministicLaunchOptions({ requirePinned: true }));
+const browser = await chromium.launch({
+  ...getDeterministicLaunchOptions(),
+  executablePath: getPinnedExecutablePath({ required: true }),
+});
 if (browser.version() !== PIN) {
   throw new Error(`expected Chrome for Testing ${PIN}, got ${browser.version()}`);
 }

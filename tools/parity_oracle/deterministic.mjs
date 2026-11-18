@@ -32,18 +32,26 @@ function getResetCssWithAbsoluteFontPaths() {
 const RESET_CSS = getResetCssWithAbsoluteFontPaths();
 
 // Campaign pin: PARITY_CHROME_PATH points at the exact Chrome for Testing
-// binary recorded in trench/BASELINE-<os>.md. Without it, captures fall back
-// to Playwright's bundled Chromium, whose version drifts with the npm package
-// — fine for local iteration, invalid for pinned-baseline capture.
-// `required: true` makes an unset PARITY_CHROME_PATH an error instead of the
-// silent bundled-Chromium fallback (the chrome board uses it: its rows were
-// scored against bundled Chromium 143 for exactly that reason).
-export function getPinnedExecutablePath({ required = false } = {}) {
-  const p = process.env.PARITY_CHROME_PATH;
+// binary recorded in trench/BASELINE-<os>.md. Playwright's bundled Chromium
+// drifts with the npm package, so an output taken with it is not a pinned
+// expectation. An oracle that writes expectations passes { required: true }:
+// without the pin it fails. Otherwise a run without the pin says so on stderr
+// and uses the bundled browser (boards and gates that do not set the pin yet;
+// failing them closed is a follow-up once each sets it). Record
+// browser.version() in any output.
+export function getPinnedExecutablePath({ required = false, env = process.env } = {}) {
+  const p = env.PARITY_CHROME_PATH;
   if (!p) {
     if (required) {
-      throw new Error('PARITY_CHROME_PATH not set — refusing to fall back to Playwright\'s bundled Chromium; point it at the pinned Chrome for Testing 148.0.7778.216');
+      throw new Error(
+        'PARITY_CHROME_PATH is not set: point it at the pinned Chrome for Testing ' +
+        '(trench/BASELINE-<os>.md); this output is a pinned expectation.'
+      );
     }
+    console.error(
+      "deterministic.mjs: PARITY_CHROME_PATH is not set; using Playwright's bundled " +
+      'Chromium, which is not the pinned Chrome (not a pinned expectation).'
+    );
     return undefined;
   }
   if (!existsSync(p)) {
@@ -52,7 +60,7 @@ export function getPinnedExecutablePath({ required = false } = {}) {
   return p;
 }
 
-export function getDeterministicLaunchOptions({ requirePinned = false } = {}) {
+export function getDeterministicLaunchOptions() {
   // Note: some flags may be ignored depending on platform/Chromium build.
   // We keep them because they reduce variance in practice.
   const args = [
@@ -73,7 +81,7 @@ export function getDeterministicLaunchOptions({ requirePinned = false } = {}) {
 
   return {
     headless: true,
-    executablePath: getPinnedExecutablePath({ required: requirePinned }),
+    executablePath: getPinnedExecutablePath(),
     args,
   };
 }
