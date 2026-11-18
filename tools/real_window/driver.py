@@ -210,7 +210,12 @@ class App:
         # logs IPC bodies whole, which the checks read (#907 R1 nits 1, 2).
         # A RustKit panel's IPC is never logged whole (#910 R1).
         # A check may turn the hooks off (a6_url_log reads the default log).
-        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1")
+        # HIWAVE_TEST_SIDEBAR=open: the checks were written against a window
+        # whose sidebar is open (their clicks and crops sit right of its
+        # 220 px: a2, e4's tab, a4/b11's Settings button), so it is pinned
+        # here rather than read from the profile's settings.json. Measuring
+        # launchers (tools/stress/run.py, tools/latency) pass `closed`.
+        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1", HIWAVE_TEST_SIDEBAR="open")
         env.update(self.env)
         self.log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([str(self.binary)], env=env, stdout=self.log,

@@ -547,7 +547,9 @@ thread ends, for a probe that exits without calling the function. Pin:
 and at most 48 characters (anything else is one bucket), and computed keys are never recorded.
 Cost with the flag off,
 measured (release, Linux, min of 11, two rounds each way): within +/-1.5% of develop on property
-reads, a script call and arithmetic loops.
+reads, a script call and arithmetic loops. `vm_stats::opcode_count(name)` (CANVAS-SHIM, #1268) reads one opcode's count by
+name for a test, any opcode rather than the report's top 40; `None` when the counters are off or the
+name is no opcode.
 ## Patch: whole-number double keys without a string (`js-perf1`)
 
 **Why.** `obj[n]` with `n` a double (`Math.floor(x / 2)`, `i + 0.5 - 0.5`, a parser's offset

@@ -1,0 +1,328 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": 50,
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "translate none->100px 50px",
+      "css": "#h.on{translate:100px 50px}",
+      "read": "translate",
+      "mid": "50px 25px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "100px 50px"
+    },
+    {
+      "label": "translate 0->100px",
+      "css": "#h{translate:0px}#h.on{translate:100px}",
+      "read": "translate",
+      "mid": "50px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "100px"
+    },
+    {
+      "label": "translate 10px 20px->30px 60px",
+      "css": "#h{translate:10px 20px}#h.on{translate:30px 60px}",
+      "read": "translate",
+      "mid": "20px 40px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "30px 60px"
+    },
+    {
+      "label": "translate 0%->100%",
+      "css": "#h{translate:0%}#h.on{translate:100%}",
+      "read": "translate",
+      "mid": "50%",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "100%"
+    },
+    {
+      "label": "translate 0px->50%",
+      "css": "#h{translate:0px}#h.on{translate:50%}",
+      "read": "translate",
+      "mid": "25%",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "translate 10px->50%",
+      "css": "#h{translate:10px}#h.on{translate:50%}",
+      "read": "translate",
+      "mid": "calc(25% + 5px)",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "translate one value->two",
+      "css": "#h{translate:10px}#h.on{translate:30px 40px}",
+      "read": "translate",
+      "mid": "20px 20px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "30px 40px"
+    },
+    {
+      "label": "translate two values->one",
+      "css": "#h{translate:30px 40px}#h.on{translate:10px}",
+      "read": "translate",
+      "mid": "20px 20px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "10px"
+    },
+    {
+      "label": "translate rem->percent",
+      "css": "#h{translate:1rem}#h.on{translate:50%}",
+      "read": "translate",
+      "mid": "calc(25% + 8px)",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "scale one value->two",
+      "css": "#h{scale:1}#h.on{scale:2 3}",
+      "read": "scale",
+      "mid": "1.5 2",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "2 3"
+    },
+    {
+      "label": "scale two values->one",
+      "css": "#h{scale:2 3}#h.on{scale:1}",
+      "read": "scale",
+      "mid": "1.5 2",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "1"
+    },
+    {
+      "label": "translate 100px->none",
+      "css": "#h{translate:100px}#h.on{translate:none}",
+      "read": "translate",
+      "mid": "50px",
+      "transform": "none",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "rotate none->90deg",
+      "css": "#h.on{rotate:90deg}",
+      "read": "rotate",
+      "mid": "45deg",
+      "transform": "none",
+      "transitions": [
+        "rotate"
+      ],
+      "events": [
+        "run:rotate",
+        "start:rotate",
+        "end:rotate"
+      ],
+      "end": "90deg"
+    },
+    {
+      "label": "rotate 45deg->405deg",
+      "css": "#h{rotate:45deg}#h.on{rotate:405deg}",
+      "read": "rotate",
+      "mid": "225deg",
+      "transform": "none",
+      "transitions": [
+        "rotate"
+      ],
+      "events": [
+        "run:rotate",
+        "start:rotate",
+        "end:rotate"
+      ],
+      "end": "405deg"
+    },
+    {
+      "label": "rotate 0deg->1turn",
+      "css": "#h{rotate:0deg}#h.on{rotate:1turn}",
+      "read": "rotate",
+      "mid": "180deg",
+      "transform": "none",
+      "transitions": [
+        "rotate"
+      ],
+      "events": [
+        "run:rotate",
+        "start:rotate",
+        "end:rotate"
+      ],
+      "end": "360deg"
+    },
+    {
+      "label": "rotate z 0deg->z 90deg",
+      "css": "#h{rotate:z 0deg}#h.on{rotate:z 90deg}",
+      "read": "rotate",
+      "mid": "45deg",
+      "transform": "none",
+      "transitions": [
+        "rotate"
+      ],
+      "events": [
+        "run:rotate",
+        "start:rotate",
+        "end:rotate"
+      ],
+      "end": "90deg"
+    },
+    {
+      "label": "rotate 90deg->none",
+      "css": "#h{rotate:90deg}#h.on{rotate:none}",
+      "read": "rotate",
+      "mid": "45deg",
+      "transform": "none",
+      "transitions": [
+        "rotate"
+      ],
+      "events": [
+        "run:rotate",
+        "start:rotate",
+        "end:rotate"
+      ],
+      "end": "none"
+    },
+    {
+      "label": "scale none->2",
+      "css": "#h.on{scale:2}",
+      "read": "scale",
+      "mid": "1.5",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "2"
+    },
+    {
+      "label": "scale 1 2->3 4",
+      "css": "#h{scale:1 2}#h.on{scale:3 4}",
+      "read": "scale",
+      "mid": "2 3",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "3 4"
+    },
+    {
+      "label": "scale 50%->150%",
+      "css": "#h{scale:50%}#h.on{scale:150%}",
+      "read": "scale",
+      "mid": "1",
+      "transform": "none",
+      "transitions": [
+        "scale"
+      ],
+      "events": [
+        "run:scale",
+        "start:scale",
+        "end:scale"
+      ],
+      "end": "1.5"
+    }
+  ]
+}
