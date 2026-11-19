@@ -97,6 +97,12 @@ mod form_control_appearance_tests;
 mod replaced_size_unit_tests;
 
 #[cfg(test)]
+mod media_no_ratio_size_tests;
+
+#[cfg(test)]
+mod block_replaced_margin_unit_tests;
+
+#[cfg(test)]
 mod replaced_transferred_width_tests;
 
 #[cfg(test)]
