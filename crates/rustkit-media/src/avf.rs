@@ -75,10 +75,14 @@ impl MediaSource {
         s.total.get_or_insert(total);
     }
 
-    /// Keep `bytes`, fetched from `start`.
+    /// Keep `bytes`, fetched from `start`. A span whose end would overflow is not kept
+    /// (the engine refuses such a response before this; this is the store's own guard).
     pub fn add(&self, start: u64, bytes: Bytes) {
         let mut s = self.state.lock().unwrap();
-        if bytes.is_empty() || s.chunks.contains_key(&start) {
+        if bytes.is_empty()
+            || s.chunks.contains_key(&start)
+            || start.checked_add(bytes.len() as u64).is_none()
+        {
             return;
         }
         s.chunks.insert(start, bytes);
@@ -103,7 +107,11 @@ impl MediaSource {
         let mut s = self.state.lock().unwrap();
         let held: u64 = s.chunks.values().map(|b| b.len() as u64).sum();
         let continues = |start: u64, s: &SourceState| {
-            start > 0 && s.chunks.range(..start).next_back().is_some_and(|(a, b)| a + b.len() as u64 == start)
+            start > 0
+                && s.chunks
+                    .range(..start)
+                    .next_back()
+                    .is_some_and(|(a, b)| a.saturating_add(b.len() as u64) == start)
         };
         let (now, later): (Vec<(u64, u64)>, Vec<(u64, u64)>) = std::mem::take(&mut s.wants)
             .into_iter()
@@ -114,7 +122,13 @@ impl MediaSource {
 
     /// Bytes held.
     pub fn held(&self) -> usize {
-        self.state.lock().unwrap().chunks.values().map(Bytes::len).sum()
+        self.state
+            .lock()
+            .unwrap()
+            .chunks
+            .values()
+            .map(Bytes::len)
+            .sum()
     }
 
     /// The resource's length, once a response gave it.
@@ -131,7 +145,7 @@ impl MediaSource {
             if *start > at {
                 return false;
             }
-            at = at.max(start + bytes.len() as u64);
+            at = at.max(start.saturating_add(bytes.len() as u64));
         }
         at >= total
     }
@@ -139,7 +153,11 @@ impl MediaSource {
     /// The held bytes from `offset`, at most `max` (within one chunk).
     fn read(&self, offset: u64, max: u64) -> Option<Bytes> {
         let s = self.state.lock().unwrap();
-        let (start, bytes) = s.chunks.range(..=offset).rev().find(|(start, b)| offset < **start + b.len() as u64)?;
+        let (start, bytes) = s
+            .chunks
+            .range(..=offset)
+            .rev()
+            .find(|(start, b)| offset < start.saturating_add(b.len() as u64))?;
         let from = (offset - start) as usize;
         let to = (from as u64 + max).min(bytes.len() as u64) as usize;
         Some(bytes.slice(from..to))
@@ -162,7 +180,12 @@ impl MediaSource {
 /// essence, parameters ignored). Unknown types are offered as MPEG-4, which is what
 /// AVFoundation would sniff most media as; a wrong guess fails as unplayable.
 fn uti_for(content_type: &str) -> &'static str {
-    let essence = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match essence.as_str() {
         "audio/mp4" | "audio/x-m4a" | "audio/aac" => "com.apple.m4a-audio",
         "audio/mpeg" | "audio/mp3" => "public.mp3",
@@ -190,15 +213,26 @@ define_class!(
     unsafe impl AVAssetResourceLoaderDelegate for Loader {
         /// Every request waits for the bytes it names.
         #[unsafe(method(resourceLoader:shouldWaitForLoadingOfRequestedResource:))]
-        fn should_wait(&self, _loader: &AVAssetResourceLoader, request: &AVAssetResourceLoadingRequest) -> bool {
+        fn should_wait(
+            &self,
+            _loader: &AVAssetResourceLoader,
+            request: &AVAssetResourceLoadingRequest,
+        ) -> bool {
             self.ivars().pending.borrow_mut().push(request.retain());
             self.service();
             true
         }
 
         #[unsafe(method(resourceLoader:didCancelLoadingRequest:))]
-        fn did_cancel(&self, _loader: &AVAssetResourceLoader, request: &AVAssetResourceLoadingRequest) {
-            self.ivars().pending.borrow_mut().retain(|r| !std::ptr::eq(&**r, request));
+        fn did_cancel(
+            &self,
+            _loader: &AVAssetResourceLoader,
+            request: &AVAssetResourceLoadingRequest,
+        ) {
+            self.ivars()
+                .pending
+                .borrow_mut()
+                .retain(|r| !std::ptr::eq(&**r, request));
         }
     }
 );
@@ -238,7 +272,11 @@ impl Loader {
             let end = if data.requestsAllDataToEndOfResource() {
                 total
             } else {
-                ((data.requestedOffset() + data.requestedLength() as i64).max(0) as u64).min(total)
+                (data
+                    .requestedOffset()
+                    .saturating_add(data.requestedLength() as i64)
+                    .max(0) as u64)
+                    .min(total)
             };
             loop {
                 let at = data.currentOffset().max(0) as u64;
@@ -388,13 +426,21 @@ mod tests {
     /// The codecs of the MEDIA-AVF fixtures play; an unknown type does not.
     #[test]
     fn h264_and_aac_in_mp4_are_playable() {
-        assert!(is_playable_extended_mime_type("video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""));
-        assert!(is_playable_extended_mime_type("audio/mp4; codecs=\"mp4a.40.2\""));
+        assert!(is_playable_extended_mime_type(
+            "video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""
+        ));
+        assert!(is_playable_extended_mime_type(
+            "audio/mp4; codecs=\"mp4a.40.2\""
+        ));
         assert!(!is_playable_extended_mime_type("video/x-unknown"));
     }
 
     fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(format!("{}/../../fixtures/media/{name}", env!("CARGO_MANIFEST_DIR"))).expect("fixture")
+        std::fs::read(format!(
+            "{}/../../fixtures/media/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture")
     }
 
     /// Play the engine: answer the probe's wants from `resource` (ranged, as a server
@@ -413,7 +459,10 @@ mod tests {
                     (0, resource.len() as u64)
                 };
                 source.set_info(Some("video/mp4".into()), resource.len() as u64);
-                source.add(start, Bytes::copy_from_slice(&resource[start as usize..end as usize]));
+                source.add(
+                    start,
+                    Bytes::copy_from_slice(&resource[start as usize..end as usize]),
+                );
                 fetched.push((start, end));
             }
             if !wants.is_empty() {
@@ -431,7 +480,11 @@ mod tests {
     #[test]
     fn a_probe_reads_the_fixtures_metadata() {
         match settle(&fixture("color-steps.mp4"), true).0 {
-            ProbeState::Ready { duration, video, audio } => {
+            ProbeState::Ready {
+                duration,
+                video,
+                audio,
+            } => {
                 assert!((duration - 2.0).abs() < 0.01, "duration {duration}");
                 assert_eq!(video, Some((64.0, 48.0)));
                 assert!(audio);
@@ -442,7 +495,10 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_media_fail() {
-        assert_eq!(settle(&b"this is not a media file ".repeat(40), true).0, ProbeState::Failed);
+        assert_eq!(
+            settle(&b"this is not a media file ".repeat(40), true).0,
+            ProbeState::Failed
+        );
     }
 
     /// The metadata is read from what AVFoundation needs, not the whole resource: the
@@ -458,7 +514,11 @@ mod tests {
         let (state, fetched, source) = settle(&resource, true);
         assert!(matches!(state, ProbeState::Ready { .. }), "{state:?}");
         let held = source.held();
-        assert!(held < (2 << 20), "held {held} of {} bytes: {fetched:?}", resource.len());
+        assert!(
+            held < (2 << 20),
+            "held {held} of {} bytes: {fetched:?}",
+            resource.len()
+        );
         assert!(!source.complete());
     }
 
@@ -494,14 +554,33 @@ mod tests {
         resource.extend_from_slice(&file[moov..]);
         let (state, fetched, source) = settle(&resource, true);
         match state {
-            ProbeState::Ready { duration, video, .. } => {
+            ProbeState::Ready {
+                duration, video, ..
+            } => {
                 assert!((duration - 2.0).abs() < 0.01);
                 assert_eq!(video, Some((64.0, 48.0)));
             }
             other => panic!("{other:?}: {fetched:?}"),
         }
         let held = source.held();
-        assert!(held < (3 << 20), "held {held} of {}: {fetched:?}", resource.len());
+        assert!(
+            held < (3 << 20),
+            "held {held} of {}: {fetched:?}",
+            resource.len()
+        );
+    }
+
+    /// #1344 delta R1: a span near u64::MAX is not kept and breaks no offset sum.
+    #[test]
+    fn a_span_that_would_overflow_is_not_kept() {
+        let source = MediaSource::new();
+        source.set_info(None, u64::MAX);
+        source.add(u64::MAX - 1, Bytes::from_static(b"0123"));
+        assert_eq!(source.held(), 0);
+        source.add(0, Bytes::from_static(b"0123"));
+        assert!(!source.complete());
+        assert!(source.read(u64::MAX - 1, 10).is_none());
+        assert_eq!(source.take_wants(0), Vec::new());
     }
 
     #[test]

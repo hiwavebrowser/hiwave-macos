@@ -175,6 +175,9 @@ pub(crate) enum FetchFailed {
     NotSupported,
     /// Too large to hold (`WHOLE_CAP`): `MEDIA_ERR_NETWORK`.
     TooLarge,
+    /// A response whose range does not add up (not where it was asked, past its total,
+    /// or overflowing): `MEDIA_ERR_NETWORK`.
+    BadResponse,
 }
 
 /// The response to a ranged GET from `start`, read into a span. A 206 gives its
@@ -185,44 +188,58 @@ pub(crate) async fn read_span(
 ) -> Result<FetchedSpan, FetchFailed> {
     let content_type = response.content_type.as_ref().map(|m| m.to_string());
     let status = response.status.as_u16();
-    let range_total = response
+    let content_range = response
         .headers
         .get("content-range")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.rsplit_once('/'))
-        .and_then(|(range, total)| {
-            let first = range
-                .trim()
-                .strip_prefix("bytes")?
-                .trim()
-                .split('-')
-                .next()?
-                .trim()
-                .parse::<u64>()
-                .ok()?;
-            Some((first, total.trim().parse::<u64>().ok()?))
-        });
+        .map(str::to_string);
     let bytes = response
         .bytes()
         .await
         .map_err(|_| FetchFailed::NotSupported)?;
-    match (status, range_total) {
-        (206, Some((first, total))) => Ok(FetchedSpan {
-            start: first,
-            total,
-            content_type,
-            bytes,
-        }),
-        (200, _) => Ok(FetchedSpan {
-            start: 0,
-            total: bytes.len() as u64,
-            content_type,
-            bytes,
-        }),
-        _ => {
-            let _ = start;
-            Err(FetchFailed::NotSupported)
+    let (start, total) = span_of(status, content_range.as_deref(), bytes.len() as u64, start)?;
+    Ok(FetchedSpan {
+        start,
+        total,
+        content_type,
+        bytes,
+    })
+}
+
+/// Where a response's `len` bytes sit, and the resource's length: a 206's
+/// `Content-Range: bytes first-last/total`, or a 200's whole body. The numbers are the
+/// server's: a 206 must start where it was asked to (`asked`), and its span must end
+/// within its total without overflowing; anything else is a bad response
+/// (`MEDIA_ERR_NETWORK`), never offset arithmetic that wraps.
+pub(crate) fn span_of(
+    status: u16,
+    content_range: Option<&str>,
+    len: u64,
+    asked: u64,
+) -> Result<(u64, u64), FetchFailed> {
+    match status {
+        206 => {
+            let (range, total) = content_range
+                .and_then(|v| v.rsplit_once('/'))
+                .ok_or(FetchFailed::BadResponse)?;
+            let first = range
+                .trim()
+                .strip_prefix("bytes")
+                .and_then(|r| r.trim().split('-').next())
+                .and_then(|f| f.trim().parse::<u64>().ok())
+                .ok_or(FetchFailed::BadResponse)?;
+            let total = total
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| FetchFailed::BadResponse)?;
+            let end = first.checked_add(len).ok_or(FetchFailed::BadResponse)?;
+            if first != asked || end > total {
+                return Err(FetchFailed::BadResponse);
+            }
+            Ok((first, total))
         }
+        200 => Ok((0, len)),
+        _ => Err(FetchFailed::NotSupported),
     }
 }
 
@@ -316,7 +333,7 @@ impl MediaElements {
             };
             for (start, end) in source.take_wants(METADATA_BUDGET) {
                 let end = end
-                    .min(start + CHUNK)
+                    .min(start.saturating_add(CHUNK))
                     .min(source.total().unwrap_or(u64::MAX));
                 if start < end {
                     out.push(MediaFetch {
@@ -463,7 +480,9 @@ impl MediaElements {
         let span = match fetched.span {
             Ok(span) => span,
             Err(FetchFailed::NotSupported) => return self.fail(node, SRC_NOT_SUPPORTED),
-            Err(FetchFailed::TooLarge) => return self.fail(node, NETWORK),
+            Err(FetchFailed::TooLarge | FetchFailed::BadResponse) => {
+                return self.fail(node, NETWORK)
+            }
         };
         let cap = whole_cap();
         let e = self.elements.get_mut(&node).expect("checked");
@@ -615,6 +634,60 @@ pub(crate) fn can_play_type(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1344 delta R1: a hostile `Content-Range` near u64::MAX is a bad response, not
+    /// an overflow.
+    #[test]
+    fn a_content_range_that_overflows_is_a_bad_response() {
+        let max = u64::MAX;
+        let bad = |status, range: &str, len, asked| {
+            matches!(
+                span_of(status, Some(range), len, asked),
+                Err(FetchFailed::BadResponse)
+            )
+        };
+        assert!(
+            bad(
+                206,
+                &format!("bytes {}-{}/{}", max - 2, max, max),
+                16,
+                max - 2
+            ),
+            "first + len overflows"
+        );
+        assert!(
+            bad(206, &format!("bytes {}-{}/{}", max, max, max), 1, max),
+            "first + len overflows"
+        );
+        assert!(
+            bad(
+                206,
+                &format!("bytes 0-99/{}", 18_446_744_073_709_551_616u128),
+                100,
+                0
+            ),
+            "total past u64"
+        );
+        assert!(bad(206, "bytes 0-99/50", 100, 0), "past its total");
+        assert!(
+            bad(206, "bytes 100-199/1000", 100, 0),
+            "not where it was asked"
+        );
+        assert!(bad(206, "bytes x-199/1000", 100, 0), "unreadable");
+        assert!(
+            matches!(span_of(206, None, 100, 0), Err(FetchFailed::BadResponse)),
+            "no Content-Range"
+        );
+        assert!(matches!(
+            span_of(206, Some("bytes 0-99/1000"), 100, 0),
+            Ok((0, 1000))
+        ));
+        assert!(matches!(span_of(200, None, 1234, 0), Ok((0, 1234))));
+        assert!(matches!(
+            span_of(404, None, 0, 0),
+            Err(FetchFailed::NotSupported)
+        ));
+    }
 
     #[test]
     fn preload_reads_as_chrome() {
