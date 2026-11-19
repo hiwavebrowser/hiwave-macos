@@ -26,6 +26,7 @@ AB = HERE.parent / 'ab.py'
 #                three inline scripts started, then 140 forced reads
 #   urlstall     like timeout, but the last script is an external URL with a query
 #   crash        exits 101 with nothing on stdout
+#   cnnonly      timeout for a URL containing 'cnn', ok-255 for any other
 FAKE = textwrap.dedent("""\
     #!{python}
     import json, pathlib, sys
@@ -34,6 +35,8 @@ FAKE = textwrap.dedent("""\
     def arg(k):
         return args[args.index(k) + 1]
     tmo = int(arg('--timeout-ms'))
+    if mode == 'cnnonly':
+        mode = 'timeout' if 'cnn' in arg('--url') else 'ok-255'
     if mode.startswith('ok-'):
         level = int(mode[3:])
         pathlib.Path(arg('--dump-frame')).write_bytes(b'P6\\n4 4\\n255\\n' + bytes([level]) * 48)
@@ -70,7 +73,7 @@ def wt(tmp_path):
     (tmp_path / 'websuite' / 'realsite-top20.json').write_text(json.dumps({'sites': SITES}))
     bins = tmp_path / 'bins'
     bins.mkdir()
-    for mode in ('ok-255', 'ok-0', 'timeout', 'urlstall', 'crash'):
+    for mode in ('ok-255', 'ok-0', 'timeout', 'urlstall', 'crash', 'cnnonly'):
         p = bins / mode
         p.write_text(FAKE.format(python=sys.executable))
         p.chmod(p.stat().st_mode | stat.S_IXUSR)
@@ -138,7 +141,7 @@ def test_one_arm_failing_entirely_is_also_no_evidence(wt):
 
 
 def test_a_run_ends_with_a_no_evidence_footer_listing_each_such_site(wt):
-    table = run_ab(wt, 'timeout', 'timeout')
+    table = run_ab(wt, 'cnnonly', 'cnnonly')
     footer = table.strip().splitlines()[-1]
     assert footer.startswith('no evidence (1 of 2 sites):'), footer
     assert 'cnn' in footer and 'alpha' not in footer
