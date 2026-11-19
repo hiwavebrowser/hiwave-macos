@@ -900,9 +900,12 @@ impl ResourceLoader {
             "Response received"
         );
         
-        // Cache successful GET responses
+        // Cache successful GET responses. Never a 206: a partial body under the plain
+        // URL would answer a request for the whole resource (`Ineligible::Ranged`
+        // keeps every ranged request out; this also covers a server that sends 206
+        // unasked).
         if let Some(key) = cache_key {
-            if http_response.status.is_success() {
+            if http_response.status.is_success() && http_response.status != StatusCode::PARTIAL_CONTENT {
                 use std::time::Instant;
                 
                 // Determine TTL from Cache-Control, falling back to the
