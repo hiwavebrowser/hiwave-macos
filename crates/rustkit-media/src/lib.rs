@@ -5,7 +5,7 @@
 //! ## Features
 //!
 //! - **HTMLMediaElement**: Base interface for audio/video
-//! - **Audio playback**: Via rodio audio backend
+//! - **Audio playback**: AVPlayer outputs its own audio (MEDIA-AVF)
 //! - **Video rendering**: Frame extraction for display
 //! - **Media controls**: Play, pause, seek, volume
 //! - **Media events**: play, pause, ended, timeupdate, etc.
@@ -20,7 +20,7 @@
 //! ```text
 //! HTMLMediaElement (base)
 //!     ├── HTMLAudioElement
-//!     │      └── AudioPlayer (rodio)
+//!     │      └── AudioPlayer (AVPlayer, MEDIA-AVF)
 //!     └── HTMLVideoElement
 //!            └── VideoDecoder (TODO)
 //! ```
@@ -568,17 +568,13 @@ impl Default for HTMLMediaElement {
 
 // ==================== Audio Player ====================
 
-/// Audio player using rodio.
+/// Audio player (AVPlayer through `avf` as MEDIA-AVF wires it).
 pub struct AudioPlayer {
     /// Media element state.
     pub element: HTMLMediaElement,
     
     /// Event receiver.
     event_rx: mpsc::UnboundedReceiver<MediaEvent>,
-    
-    // TODO: Add rodio stream/sink when audio feature is fully implemented
-    // _stream: Option<rodio::OutputStream>,
-    // sink: Option<rodio::Sink>,
 }
 
 impl AudioPlayer {

@@ -18032,6 +18032,13 @@ impl layout_ctx::LayoutCtx {
         // want of a font can finally be applied.
         self.resolve_ch_lengths(&mut style, &ch_pending);
 
+        // MEDIA-AVF (#1332 R1): Chrome's UA sheet has `audio:not([controls]) { display:
+        // none !important }`, which no author declaration beats (an `!important` UA
+        // declaration outranks author ones). The plain UA default above is not enough.
+        if tag_name.eq_ignore_ascii_case("audio") && !attributes.contains_key("controls") {
+            style.display = rustkit_css::Display::None;
+        }
+
         // A `none`/`hidden` side has a zero used width, whichever of width
         // and style was declared last (`border: 5px solid; border-style: none`
         // used to keep the 5px frame). A side nothing gave a style is `none`
