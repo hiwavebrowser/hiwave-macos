@@ -391,3 +391,65 @@ fn an_unmoving_svg_adds_no_frames_to_an_html_transition() {
         "(relayouts, painted frames) with the svg and without"
     );
 }
+
+/// The svg cache keys `view`'s inline svgs paint under, as its last
+/// build keyed them (the engine's paint map is that build's until another
+/// view builds).
+fn svg_keys(engine: &Engine, view: EngineViewId) -> Vec<String> {
+    let document = engine.views[&view].document.clone().expect("document");
+    document
+        .get_elements_by_tag_name("svg")
+        .iter()
+        .map(|svg| engine.lctx.inline_svg_key_for(svg))
+        .collect()
+}
+
+/// R1 on #1330 (delta): the svg cache is one per engine. An icon a page
+/// added while its svg transition ran, and the frame on screen, stay
+/// cached when another view relayouts: that view's pass evicts only its
+/// own per-frame keys.
+#[test]
+fn another_views_relayout_keeps_this_views_svgs() {
+    let (mut engine, a, _server) = load(&page(
+        "#p{fill:blue;transition:fill 2000ms linear}#p.on{fill:red}",
+        "",
+    ));
+    read(
+        &mut engine,
+        a,
+        "(document.getElementById('p').classList.add('on'), getComputedStyle(document.getElementById('p')).fill)",
+    );
+    pump(&mut engine, a, 20);
+    read(
+        &mut engine,
+        a,
+        "(document.body.insertAdjacentHTML('beforeend', '<svg id=icon width=20 height=20><rect width=20 height=20 fill=lime /></svg>'), 1)",
+    );
+    pump(&mut engine, a, 20);
+    let keys = svg_keys(&engine, a);
+    assert_eq!(keys.len(), 2, "the moving svg and the icon: {keys:?}");
+
+    let other_server = serve_routes(vec![(
+        "/",
+        "text/html",
+        "<!doctype html><svg width=10 height=10><circle r=5 fill=navy /></svg>".to_string(),
+    )]);
+    let b = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", other_server.port)).unwrap();
+    rt().block_on(engine.load_url(b, url)).expect("load_url");
+    engine.relayout(b).expect("relayout b");
+
+    let cache = engine.lctx.svg_cache.borrow();
+    let missing: Vec<&String> = keys.iter().filter(|k| !cache.contains_key(*k)).collect();
+    assert!(
+        missing.is_empty(),
+        "view b's relayout evicted view a's svgs: {missing:?}"
+    );
+}
