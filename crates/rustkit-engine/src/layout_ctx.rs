@@ -49,11 +49,6 @@ pub(crate) struct LayoutCtx {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
-    /// The keys of `svg_cache` that inline svg passes parsed while an svg
-    /// paint transition wrote moving values into the markup (A2.2): one
-    /// per frame, evicted by the next pass that no longer uses them, so a
-    /// long transition keeps the cache flat.
-    pub(crate) svg_transient_keys: RefCell<Vec<String>>,
     /// The SVG images of `svg_cache` (fetched or data: URLs, not inline
     /// `<svg>`), shared with the canvas image loader: a canvas
     /// `drawImage` of an SVG `<img>` rasterizes its path list (STR-7
@@ -84,7 +79,6 @@ impl Default for LayoutCtx {
             style_trace: RefCell::default(),
             building: RefCell::default(),
             svg_cache: RefCell::default(),
-            svg_transient_keys: RefCell::default(),
             canvas_svgs: Default::default(),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
@@ -601,6 +595,13 @@ pub(crate) struct ViewLayout {
     /// styled its inline svgs with, for `getComputedStyle(fill / stroke)`
     /// on svg content (`svg_computed`, A2.1).
     pub(crate) svg_paint: RefCell<Option<Rc<crate::svg_computed::SvgPaintSnapshot>>>,
+    /// The keys of the engine's `svg_cache` that this view's inline svg
+    /// passes parsed for an svg holding a moving svg paint value (A2.2):
+    /// one per frame, evicted by this view's next pass that no longer uses
+    /// them, so a long transition keeps the cache flat. Per view: the cache
+    /// is shared, and another view's pass must not evict what this one
+    /// paints.
+    pub(crate) svg_transient_keys: RefCell<Vec<String>>,
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
