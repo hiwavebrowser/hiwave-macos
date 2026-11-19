@@ -1233,3 +1233,22 @@ of the function shares, and grows only the calling environment for them (`extend
 calls before and after the declaring call), each against Chrome for Testing 148.0.7778.216
 (`docs/diagnostics/2026-11-17/eval_var_per_call_cases.json`). Red without the patch: 9 of 10 differed
 (wrong value, a wrong ReferenceError, or no answer).
+
+## Patch: a direct eval in a class element keeps the bindings around the class (`class-element-eval`)
+
+**Files.** `third_party/boa_ast/src/operations/mod.rs` (`contains`, `visit_class_element`).
+
+**What.** Boa decides which scopes keep their bindings in environments, rather than in registers, from
+`contains(node, ContainsSymbol::DirectEval)`: a scope holding a direct eval, or holding a function
+that does, keeps them all, so the eval can find them by name at run time. For a class element the
+answer was always no: method bodies were skipped, a field was asked only about its name, and a
+static block not at all. So `{ let x = 1; class C { m() { return eval('x'); } } }` left `x` in a
+register, where the eval could not find it by name. It now answers as a
+nested function does: a method by its `contains_direct_eval`, and a field, private field or static
+field initializer and a static block by what they contain. Every other symbol keeps the spec's
+ComputedPropertyContains rule (only a computed name is looked at).
+
+**Pin.** `crates/rustkit-js/tests/class_element_eval.rs`: 21 cases, run as classic scripts, against
+Chrome for Testing 148.0.7778.216 (`docs/diagnostics/2026-11-17/class_element_eval_cases.json`). Red
+without the patch: 16 of 21 differed (no answer, a wrong value such as `undefined` for a static
+block's read, or the class instead of the value).
