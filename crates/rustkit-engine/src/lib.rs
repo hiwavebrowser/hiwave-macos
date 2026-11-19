@@ -732,6 +732,8 @@ mod media_box_tests;
 #[cfg(all(test, feature = "headless"))]
 mod media_load_tests;
 #[cfg(all(test, feature = "headless"))]
+mod media_fetch_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
@@ -1588,7 +1590,8 @@ struct DocState {
     /// MEDIA-AVF: the document's `<video>` / `<audio>` elements and their resources'
     /// fetches in flight (`media.rs`).
     media: media::MediaElements,
-    live_media: Vec<script_net::LiveFuture<media::MediaFetched>>,
+    /// Each with the element and run it is for: a fetch nobody waits on is dropped.
+    live_media: Vec<(usize, u64, script_net::LiveFuture<media::MediaFetched>)>,
     /// Stylesheet fetches still out: the load's past its subresource
     /// budget (Z row S6) and those for links scripts inserted (CH2.E20).
     /// Each lands in `fetched_sheets` under its URL on a live turn.
@@ -22390,31 +22393,44 @@ impl Engine {
         let reload = bindings.take_media_loads();
         let generation = view.frame_generation;
         if !reload.is_empty() || view.media.synced_for != Some(generation) {
-            // `sync` resolves URLs through the engine: the host is taken out and put back.
-            let mut host = std::mem::take(&mut self.views.get_mut(&id).expect("checked").media);
-            let fetches = host.sync(&document, &reload, &|raw| self.resolve_resource_url_in(id, raw), &media::can_play_type);
-            host.synced_for = Some(generation);
-            self.views.get_mut(&id).expect("checked").media = host;
+            // `sync` resolves URLs through the engine: the elements are taken out and put back.
+            let mut media = std::mem::take(&mut self.views.get_mut(&id).expect("checked").media);
+            media.sync(&document, &reload, &|raw| self.resolve_resource_url_in(id, raw), &media::can_play_type);
+            media.synced_for = Some(generation);
+            let view = self.views.get_mut(&id).expect("checked");
+            view.media = media;
+            // A removed element's, or an earlier resource's, requests are dropped (cancelled).
+            let mut live = std::mem::take(&mut view.live_media);
+            live.retain(|(node, serial, _)| view.media.wants_fetch(*node, *serial));
+            view.live_media = live;
+        }
+        // What the probes wait on, by range.
+        let fetches = self.views.get_mut(&id).expect("checked").media.take_fetches();
+        if !fetches.is_empty() {
             let referrer = self.subresource_referrer(id);
             let loader = self.loader.clone();
-            let started: Vec<script_net::LiveFuture<media::MediaFetched>> = fetches
+            let cap = media::whole_cap() as usize;
+            let started: Vec<(usize, u64, script_net::LiveFuture<media::MediaFetched>)> = fetches
                 .into_iter()
                 .map(|f| {
-                    let request = referrer.get_for(f.url, RequestDestination::Other);
+                    let range = format!("bytes={}-{}", f.start, f.end - 1);
+                    let request = referrer.get_for(f.url, RequestDestination::Other).header(
+                        http::header::RANGE,
+                        http::HeaderValue::from_str(&range).expect("ascii"),
+                    );
                     let loader = loader.clone();
-                    Box::pin(async move {
-                        let bytes = match loader.fetch(request).await {
-                            Ok(response) if response.status.is_success() => {
-                                let content_type = response.content_type.as_ref().map(|m| m.to_string()).unwrap_or_default();
-                                match response.bytes().await {
-                                    Ok(data) => Ok(rustkit_media::avf::MediaBytes { content_type, data: data.to_vec() }),
-                                    Err(_) => Err(()),
-                                }
+                    let (node, serial, start) = (f.node, f.serial, f.start);
+                    let future = Box::pin(async move {
+                        let span = match loader.fetch_capped(request, cap).await {
+                            Ok(response) => media::read_span(response, start).await,
+                            Err(rustkit_net::NetError::HttpError(rustkit_http::HttpError::BodyTooLarge(_))) => {
+                                Err(media::FetchFailed::TooLarge)
                             }
-                            _ => Err(()),
+                            Err(_) => Err(media::FetchFailed::NotSupported),
                         };
-                        media::MediaFetched { node: f.node, serial: f.serial, bytes }
-                    }) as script_net::LiveFuture<media::MediaFetched>
+                        media::MediaFetched { node, serial, span }
+                    }) as script_net::LiveFuture<media::MediaFetched>;
+                    (node, serial, future)
                 })
                 .collect();
             if let Some(view) = self.views.get_mut(&id) {
@@ -22422,7 +22438,7 @@ impl Engine {
             }
         }
         let landed = match self.views.get_mut(&id) {
-            Some(view) => script_net::settle_live(&mut view.live_media, LIVE_NETWORK_SLICE).await,
+            Some(view) => media::settle_keyed(&mut view.live_media, LIVE_NETWORK_SLICE).await,
             None => return false,
         };
         let Some(view) = self.views.get_mut(&id) else { return false };

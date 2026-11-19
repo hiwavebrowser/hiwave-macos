@@ -18,7 +18,7 @@
 //! timing of its own; the event names are compared).
 
 use super::*;
-use crate::script_net_tests::serve_byte_routes;
+use crate::media_fetch_tests::serve_media;
 
 const RECEIPT: &str = include_str!("../../../docs/diagnostics/2026-11-18/media_load_cft148.json");
 const COLOR_STEPS: &[u8] = include_bytes!("../../../fixtures/media/color-steps.mp4");
@@ -73,7 +73,7 @@ fn run(label: &str) -> (serde_json::Value, serde_json::Value) {
         .unwrap_or_else(|| panic!("no case {label:?}"))
         .clone();
     let html = page(&receipt, case["markup"].as_str().unwrap());
-    let server = serve_byte_routes(vec![
+    let server = serve_media(vec![
         ("/", "text/html", html.into_bytes()),
         ("/color-steps.mp4", "video/mp4", COLOR_STEPS.to_vec()),
         ("/size-32x24.mp4", "video/mp4", SIZE_32X24.to_vec()),
@@ -252,7 +252,7 @@ fn can_play_type_answers() {
         ("application/vnd.apple.mpegurl", ""),
         ("audio/mpeg", "maybe"),
     ];
-    let server = serve_byte_routes(vec![(
+    let server = serve_media(vec![(
         "/",
         "text/html",
         b"<!doctype html><video id=m></video>".to_vec(),

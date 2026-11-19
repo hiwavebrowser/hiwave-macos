@@ -36,9 +36,33 @@ pub mod avf {
         false
     }
 
-    pub struct MediaBytes {
-        pub content_type: String,
-        pub data: Vec<u8>,
+    pub const CHUNK: u64 = 1 << 20;
+
+    #[derive(Default)]
+    pub struct MediaSource;
+
+    impl MediaSource {
+        pub fn new() -> Arc<MediaSource> {
+            Arc::new(MediaSource)
+        }
+        pub fn set_info(&self, _content_type: Option<String>, _total: u64) {}
+        pub fn add(&self, _start: u64, _bytes: bytes::Bytes) {}
+        pub fn fail(&self) {}
+        pub fn failed(&self) -> bool {
+            true
+        }
+        pub fn take_wants(&self, _sequential_budget: u64) -> Vec<(u64, u64)> {
+            Vec::new()
+        }
+        pub fn held(&self) -> usize {
+            0
+        }
+        pub fn total(&self) -> Option<u64> {
+            None
+        }
+        pub fn complete(&self) -> bool {
+            false
+        }
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -51,9 +75,10 @@ pub mod avf {
     pub struct Probe;
 
     impl Probe {
-        pub fn start(_bytes: Arc<MediaBytes>) -> Probe {
+        pub fn start(_source: Arc<MediaSource>) -> Probe {
             Probe
         }
+        pub fn bytes_changed(&self) {}
         pub fn poll(&mut self) -> ProbeState {
             ProbeState::Failed
         }

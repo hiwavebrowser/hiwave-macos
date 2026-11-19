@@ -2,27 +2,33 @@
 //!
 //! Step 1 added the dependency and `is_playable_extended_mime_type`. Step 2 adds
 //! [`Probe`]: an `AVURLAsset` on a private URL scheme whose every byte comes from a
-//! [`MediaBytes`] the engine fetched through rustkit-net (and so through the shield),
+//! [`MediaSource`] the engine fills through rustkit-net (and so through the shield),
 //! answered by an `AVAssetResourceLoaderDelegate` on a serial dispatch queue of our own
-//! (§3.4). The probe loads the asset's `playable`, `duration` and `tracks` and reports
-//! them when they are in: what `loadedmetadata` needs. It never plays.
+//! (§3.4). AVFoundation asks for byte ranges as it reads; what is not held yet becomes a
+//! *want* the engine fetches by `Range`, a chunk at a time. So loading the metadata
+//! fetches what AVFoundation reads for it (the header, and the `moov` atom wherever it
+//! sits), never the whole resource. The probe loads `playable`, `duration` and `tracks`
+//! and reports them: what `loadedmetadata` needs. It never plays.
 //!
-//! Threading: `AVURLAsset` and its resource loader are not main-thread-only, so a probe
-//! is created and polled on the engine's thread. Its delegate runs only on the probe's
-//! own queue and reads only the immutable bytes. (`AVPlayer` and `AVPlayerItem` ARE
-//! main-thread-only in the SDK, which steps 3 and 4 have to take into account.)
+//! Threading: `AVURLAsset` and its resource loader are not main-thread only, so a probe
+//! is created and polled on the engine's thread. Its delegate, and everything it keeps,
+//! is touched only on the probe's own queue. (`AVPlayer` and `AVPlayerItem` are
+//! main-thread only: step 3's `MediaHost`, §3.2.)
 
+use bytes::Bytes;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, Message};
 use objc2_av_foundation::{
     AVAssetResourceLoader, AVAssetResourceLoaderDelegate, AVAssetResourceLoadingRequest,
     AVAsynchronousKeyValueLoading, AVMediaTypeAudio, AVMediaTypeVideo, AVURLAsset,
 };
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Whether AVFoundation can play `mime`, an extended MIME type (`video/mp4;
 /// codecs="avc1.42E01E"`): `+[AVURLAsset isPlayableExtendedMIMEType:]`.
@@ -31,24 +37,132 @@ pub fn is_playable_extended_mime_type(mime: &str) -> bool {
     unsafe { AVURLAsset::isPlayableExtendedMIMEType(&mime) }
 }
 
-/// A media resource's bytes, as the engine fetched them, with the response's
-/// `Content-Type`. Immutable once made: step 2 fetches the whole resource first (ranged
-/// fetches come with playback).
-pub struct MediaBytes {
-    pub content_type: String,
-    pub data: Vec<u8>,
+/// The most one ranged fetch asks for. AVFoundation may ask for the rest of a resource;
+/// it gets it a chunk at a time, as it reads.
+pub const CHUNK: u64 = 1 << 20;
+
+/// A media resource's bytes as the engine has fetched them so far, shared by the engine
+/// (which fetches) and the probe's delegate (which answers AVFoundation from them).
+/// Chunks are kept as rustkit-net returned them (`Bytes`): stored without a copy.
+#[derive(Default)]
+pub struct MediaSource {
+    state: Mutex<SourceState>,
+}
+
+#[derive(Default)]
+struct SourceState {
+    content_type: Option<String>,
+    total: Option<u64>,
+    /// Fetched spans by start offset.
+    chunks: BTreeMap<u64, Bytes>,
+    /// Spans AVFoundation asked for and that are not held: [start, end).
+    wants: Vec<(u64, u64)>,
+    failed: bool,
+}
+
+impl MediaSource {
+    pub fn new() -> Arc<MediaSource> {
+        Arc::new(MediaSource::default())
+    }
+
+    /// The response's `Content-Type` and the resource's length, from the first response
+    /// (`Content-Range`'s total, or a whole 200's length).
+    pub fn set_info(&self, content_type: Option<String>, total: u64) {
+        let mut s = self.state.lock().unwrap();
+        if s.content_type.is_none() {
+            s.content_type = content_type;
+        }
+        s.total.get_or_insert(total);
+    }
+
+    /// Keep `bytes`, fetched from `start`.
+    pub fn add(&self, start: u64, bytes: Bytes) {
+        let mut s = self.state.lock().unwrap();
+        if bytes.is_empty() || s.chunks.contains_key(&start) {
+            return;
+        }
+        s.chunks.insert(start, bytes);
+    }
+
+    /// The fetch failed (refused, blocked, not found): every waiting request fails.
+    pub fn fail(&self) {
+        self.state.lock().unwrap().failed = true;
+    }
+
+    pub fn failed(&self) -> bool {
+        self.state.lock().unwrap().failed
+    }
+
+    /// The spans AVFoundation waits for that the engine is to fetch now, taken (each is
+    /// fetched once). A span that only continues what is held (AVFoundation reading on,
+    /// sequentially) is left waiting once `sequential_budget` bytes are held: loading
+    /// metadata, AVFoundation reads ahead far past what it needs, and only a seek (a span
+    /// that starts where nothing is held, the `moov` atom at the end say) is still
+    /// fetched past the budget. Playback (step 3) raises the budget.
+    pub fn take_wants(&self, sequential_budget: u64) -> Vec<(u64, u64)> {
+        let mut s = self.state.lock().unwrap();
+        let held: u64 = s.chunks.values().map(|b| b.len() as u64).sum();
+        let continues = |start: u64, s: &SourceState| {
+            start > 0 && s.chunks.range(..start).next_back().is_some_and(|(a, b)| a + b.len() as u64 == start)
+        };
+        let (now, later): (Vec<(u64, u64)>, Vec<(u64, u64)>) = std::mem::take(&mut s.wants)
+            .into_iter()
+            .partition(|(start, _)| held < sequential_budget || !continues(*start, &s));
+        s.wants = later;
+        now
+    }
+
+    /// Bytes held.
+    pub fn held(&self) -> usize {
+        self.state.lock().unwrap().chunks.values().map(Bytes::len).sum()
+    }
+
+    /// The resource's length, once a response gave it.
+    pub fn total(&self) -> Option<u64> {
+        self.state.lock().unwrap().total
+    }
+
+    /// Whether every byte of the resource is held.
+    pub fn complete(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        let Some(total) = s.total else { return false };
+        let mut at = 0u64;
+        for (start, bytes) in &s.chunks {
+            if *start > at {
+                return false;
+            }
+            at = at.max(start + bytes.len() as u64);
+        }
+        at >= total
+    }
+
+    /// The held bytes from `offset`, at most `max` (within one chunk).
+    fn read(&self, offset: u64, max: u64) -> Option<Bytes> {
+        let s = self.state.lock().unwrap();
+        let (start, bytes) = s.chunks.range(..=offset).rev().find(|(start, b)| offset < **start + b.len() as u64)?;
+        let from = (offset - start) as usize;
+        let to = (from as u64 + max).min(bytes.len() as u64) as usize;
+        Some(bytes.slice(from..to))
+    }
+
+    fn want(&self, start: u64, end: u64) {
+        let mut s = self.state.lock().unwrap();
+        if start < end && !s.wants.iter().any(|w| w.0 == start) {
+            s.wants.push((start, end));
+        }
+    }
+
+    fn info(&self) -> Option<(String, u64)> {
+        let s = self.state.lock().unwrap();
+        Some((s.content_type.clone().unwrap_or_default(), s.total?))
+    }
 }
 
 /// The Uniform Type Identifier AVFoundation wants for a response's `Content-Type` (its
 /// essence, parameters ignored). Unknown types are offered as MPEG-4, which is what
 /// AVFoundation would sniff most media as; a wrong guess fails as unplayable.
 fn uti_for(content_type: &str) -> &'static str {
-    let essence = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    let essence = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     match essence.as_str() {
         "audio/mp4" | "audio/x-m4a" | "audio/aac" => "com.apple.m4a-audio",
         "audio/mpeg" | "audio/mp3" => "public.mp3",
@@ -59,7 +173,9 @@ fn uti_for(content_type: &str) -> &'static str {
 }
 
 struct LoaderIvars {
-    bytes: Arc<MediaBytes>,
+    source: Arc<MediaSource>,
+    /// The requests AVFoundation waits on. Touched only on the probe's queue.
+    pending: RefCell<Vec<Retained<AVAssetResourceLoadingRequest>>>,
 }
 
 define_class!(
@@ -72,48 +188,81 @@ define_class!(
     unsafe impl NSObjectProtocol for Loader {}
 
     unsafe impl AVAssetResourceLoaderDelegate for Loader {
-        /// Every request is answered at once from the bytes in memory.
+        /// Every request waits for the bytes it names.
         #[unsafe(method(resourceLoader:shouldWaitForLoadingOfRequestedResource:))]
-        fn should_wait(
-            &self,
-            _loader: &AVAssetResourceLoader,
-            request: &AVAssetResourceLoadingRequest,
-        ) -> bool {
-            self.answer(request);
+        fn should_wait(&self, _loader: &AVAssetResourceLoader, request: &AVAssetResourceLoadingRequest) -> bool {
+            self.ivars().pending.borrow_mut().push(request.retain());
+            self.service();
             true
+        }
+
+        #[unsafe(method(resourceLoader:didCancelLoadingRequest:))]
+        fn did_cancel(&self, _loader: &AVAssetResourceLoader, request: &AVAssetResourceLoadingRequest) {
+            self.ivars().pending.borrow_mut().retain(|r| !std::ptr::eq(&**r, request));
         }
     }
 );
 
 impl Loader {
-    fn new(bytes: Arc<MediaBytes>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(LoaderIvars { bytes });
+    fn new(source: Arc<MediaSource>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(LoaderIvars {
+            source,
+            pending: RefCell::new(Vec::new()),
+        });
         unsafe { msg_send![super(this), init] }
     }
 
-    fn answer(&self, request: &AVAssetResourceLoadingRequest) {
-        let bytes = &self.ivars().bytes;
-        unsafe {
+    /// Answer what the held bytes can and ask the engine for the rest. On the queue.
+    fn service(&self) {
+        let source = &self.ivars().source;
+        let failed = source.failed();
+        self.ivars().pending.borrow_mut().retain(|request| unsafe {
+            if failed {
+                request.finishLoadingWithError(None);
+                return false;
+            }
+            let Some((content_type, total)) = source.info() else {
+                // Nothing is known until a first response: ask for the start.
+                source.want(0, CHUNK);
+                return true;
+            };
             if let Some(info) = request.contentInformationRequest() {
-                info.setContentType(Some(&NSString::from_str(uti_for(&bytes.content_type))));
-                info.setContentLength(bytes.data.len() as i64);
+                info.setContentType(Some(&NSString::from_str(uti_for(&content_type))));
+                info.setContentLength(total as i64);
                 info.setByteRangeAccessSupported(true);
             }
-            if let Some(data) = request.dataRequest() {
-                let len = bytes.data.len() as i64;
-                let start = data.currentOffset().clamp(0, len);
-                let end = if data.requestsAllDataToEndOfResource() {
-                    len
-                } else {
-                    (data.requestedOffset() + data.requestedLength() as i64).clamp(start, len)
-                };
-                let chunk = NSData::with_bytes(&bytes.data[start as usize..end as usize]);
-                data.respondWithData(&chunk);
+            let Some(data) = request.dataRequest() else {
+                request.finishLoading();
+                return false;
+            };
+            let end = if data.requestsAllDataToEndOfResource() {
+                total
+            } else {
+                ((data.requestedOffset() + data.requestedLength() as i64).max(0) as u64).min(total)
+            };
+            loop {
+                let at = data.currentOffset().max(0) as u64;
+                if at >= end {
+                    request.finishLoading();
+                    return false;
+                }
+                match source.read(at, end - at) {
+                    Some(bytes) => data.respondWithData(&NSData::with_bytes(&bytes)),
+                    None => {
+                        source.want(at, end);
+                        return true;
+                    }
+                }
             }
-            request.finishLoading();
-        }
+        });
     }
 }
+
+/// The probe's loader, handed to its queue. It is only ever used there (its delegate
+/// methods run there too), which is what makes sending it sound.
+struct OnQueue(Retained<Loader>);
+// SAFETY: see above.
+unsafe impl Send for OnQueue {}
 
 /// What a [`Probe`] knows.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,33 +276,41 @@ pub enum ProbeState {
         video: Option<(f64, f64)>,
         audio: bool,
     },
-    /// Not media AVFoundation can play (or not media at all).
+    /// Not media AVFoundation can play (or not media at all), or the fetch failed.
     Failed,
 }
 
 /// Each probe's URL is its own (`rustkit-media://probe/<n>`).
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 
-/// One resource's metadata, loaded by AVFoundation from bytes we hold.
+/// One resource's metadata, loaded by AVFoundation from bytes the engine fetches for it.
 pub struct Probe {
     asset: Retained<AVURLAsset>,
     // Kept alive: the resource loader holds its delegate weakly.
-    _loader: Retained<Loader>,
-    _queue: DispatchRetained<DispatchQueue>,
+    loader: Retained<Loader>,
+    queue: DispatchRetained<DispatchQueue>,
     loaded: Arc<AtomicBool>,
     state: Option<ProbeState>,
 }
 
+impl Drop for Probe {
+    /// The element went, or took another resource: AVFoundation stops asking.
+    fn drop(&mut self) {
+        unsafe { self.asset.cancelLoading() };
+    }
+}
+
 impl Probe {
-    /// Start loading `bytes`' metadata. Nothing blocks: [`Probe::poll`] reports it.
-    pub fn start(bytes: Arc<MediaBytes>) -> Probe {
+    /// Start loading the metadata of `source`'s resource. Nothing blocks: what
+    /// AVFoundation reads shows up as `source`'s wants, and [`Probe::poll`] reports.
+    pub fn start(source: Arc<MediaSource>) -> Probe {
         let id = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
         // The scheme is ours alone, so AVFoundation cannot load it without the delegate.
         let url = NSURL::URLWithString(&NSString::from_str(&format!("rustkit-media://probe/{id}")))
             .expect("a valid URL");
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
         let queue = DispatchQueue::new("org.hiwave.rustkit-media.loader", None);
-        let loader = Loader::new(bytes);
+        let loader = Loader::new(source);
         unsafe {
             asset
                 .resourceLoader()
@@ -170,11 +327,20 @@ impl Probe {
         unsafe { asset.loadValuesAsynchronouslyForKeys_completionHandler(&keys, Some(&handler)) };
         Probe {
             asset,
-            _loader: loader,
-            _queue: queue,
+            loader,
+            queue,
             loaded,
             state: None,
         }
+    }
+
+    /// Bytes came, or the fetch failed: answer the waiting requests, on the queue.
+    pub fn bytes_changed(&self) {
+        let loader = OnQueue(self.loader.clone());
+        self.queue.exec_async(move || {
+            let loader = loader;
+            loader.0.service();
+        });
     }
 
     /// The probe's state now. Once out of `Pending` it does not change.
@@ -222,47 +388,50 @@ mod tests {
     /// The codecs of the MEDIA-AVF fixtures play; an unknown type does not.
     #[test]
     fn h264_and_aac_in_mp4_are_playable() {
-        assert!(is_playable_extended_mime_type(
-            "video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""
-        ));
-        assert!(is_playable_extended_mime_type(
-            "audio/mp4; codecs=\"mp4a.40.2\""
-        ));
+        assert!(is_playable_extended_mime_type("video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""));
+        assert!(is_playable_extended_mime_type("audio/mp4; codecs=\"mp4a.40.2\""));
         assert!(!is_playable_extended_mime_type("video/x-unknown"));
     }
 
     fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(format!(
-            "{}/../../fixtures/media/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .expect("fixture")
+        std::fs::read(format!("{}/../../fixtures/media/{name}", env!("CARGO_MANIFEST_DIR"))).expect("fixture")
     }
 
-    /// Poll for up to 5 s of wall time: AVFoundation loads on its own threads.
-    fn settle(probe: &mut Probe) -> ProbeState {
+    /// Play the engine: answer the probe's wants from `resource` (ranged, as a server
+    /// would), with a 1 MB sequential budget, for up to 5 s of wall time. Returns the
+    /// state and every span fetched.
+    fn settle(resource: &[u8], ranged: bool) -> (ProbeState, Vec<(u64, u64)>, Arc<MediaSource>) {
+        let source = MediaSource::new();
+        let mut probe = Probe::start(source.clone());
+        let mut fetched = Vec::new();
         for _ in 0..500 {
+            let wants = source.take_wants(1 << 20);
+            for (start, end) in &wants {
+                let (start, end) = if ranged {
+                    (*start, (*end).min(start + CHUNK).min(resource.len() as u64))
+                } else {
+                    (0, resource.len() as u64)
+                };
+                source.set_info(Some("video/mp4".into()), resource.len() as u64);
+                source.add(start, Bytes::copy_from_slice(&resource[start as usize..end as usize]));
+                fetched.push((start, end));
+            }
+            if !wants.is_empty() {
+                probe.bytes_changed();
+            }
             match probe.poll() {
                 ProbeState::Pending => std::thread::sleep(std::time::Duration::from_millis(10)),
-                done => return done,
+                done => return (done, fetched, source),
             }
         }
-        ProbeState::Pending
+        (ProbeState::Pending, fetched, source)
     }
 
     /// Chrome 148 (media_load_cft148.json): duration 2, 64x48, and an audio track.
     #[test]
-    fn a_probe_reads_the_fixtures_metadata_from_memory() {
-        let mut probe = Probe::start(Arc::new(MediaBytes {
-            content_type: "video/mp4".into(),
-            data: fixture("color-steps.mp4"),
-        }));
-        match settle(&mut probe) {
-            ProbeState::Ready {
-                duration,
-                video,
-                audio,
-            } => {
+    fn a_probe_reads_the_fixtures_metadata() {
+        match settle(&fixture("color-steps.mp4"), true).0 {
+            ProbeState::Ready { duration, video, audio } => {
                 assert!((duration - 2.0).abs() < 0.01, "duration {duration}");
                 assert_eq!(video, Some((64.0, 48.0)));
                 assert!(audio);
@@ -273,10 +442,85 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_media_fail() {
-        let mut probe = Probe::start(Arc::new(MediaBytes {
-            content_type: "video/mp4".into(),
-            data: b"this is not a media file ".repeat(40),
-        }));
-        assert_eq!(settle(&mut probe), ProbeState::Failed);
+        assert_eq!(settle(&b"this is not a media file ".repeat(40), true).0, ProbeState::Failed);
+    }
+
+    /// The metadata is read from what AVFoundation needs, not the whole resource: the
+    /// fixture followed by an 8 MB `free` box (valid MP4, skipped by readers).
+    /// AVFoundation would read on through the box; the sequential budget stops it.
+    #[test]
+    fn the_metadata_needs_only_what_avfoundation_reads() {
+        let mut resource = fixture("color-steps.mp4");
+        let pad: u32 = 8 << 20;
+        resource.extend_from_slice(&pad.to_be_bytes());
+        resource.extend_from_slice(b"free");
+        resource.resize(resource.len() + pad as usize - 8, 0);
+        let (state, fetched, source) = settle(&resource, true);
+        assert!(matches!(state, ProbeState::Ready { .. }), "{state:?}");
+        let held = source.held();
+        assert!(held < (2 << 20), "held {held} of {} bytes: {fetched:?}", resource.len());
+        assert!(!source.complete());
+    }
+
+    /// The `moov` atom at the end, past 8 MB that metadata does not need (a `free` box
+    /// put between the media data and it): AVFoundation seeks there, a span that does
+    /// not continue anything held, which is fetched past the budget.
+    #[test]
+    fn a_moov_at_the_end_is_fetched_by_range() {
+        let file = fixture("color-steps.mp4");
+        // The top-level boxes: (offset, size, type).
+        let mut at = 0usize;
+        let mut moov = None;
+        while at + 8 <= file.len() {
+            let mut size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            // `1`: a 64-bit size follows the type (AVAssetWriter's `mdat`).
+            if size == 1 {
+                size = u64::from_be_bytes(file[at + 8..at + 16].try_into().unwrap()) as usize;
+            }
+            if &file[at + 4..at + 8] == b"moov" {
+                moov = Some(at);
+            }
+            if size < 8 {
+                break;
+            }
+            at += size;
+        }
+        let moov = moov.expect("a moov box");
+        let pad: u32 = 8 << 20;
+        let mut resource = file[..moov].to_vec();
+        resource.extend_from_slice(&pad.to_be_bytes());
+        resource.extend_from_slice(b"free");
+        resource.resize(resource.len() + pad as usize - 8, 0);
+        resource.extend_from_slice(&file[moov..]);
+        let (state, fetched, source) = settle(&resource, true);
+        match state {
+            ProbeState::Ready { duration, video, .. } => {
+                assert!((duration - 2.0).abs() < 0.01);
+                assert_eq!(video, Some((64.0, 48.0)));
+            }
+            other => panic!("{other:?}: {fetched:?}"),
+        }
+        let held = source.held();
+        assert!(held < (3 << 20), "held {held} of {}: {fetched:?}", resource.len());
+    }
+
+    #[test]
+    fn a_failed_fetch_fails_the_probe() {
+        let source = MediaSource::new();
+        let mut probe = Probe::start(source.clone());
+        for _ in 0..500 {
+            if !source.take_wants(1 << 20).is_empty() {
+                source.fail();
+                probe.bytes_changed();
+            }
+            match probe.poll() {
+                ProbeState::Pending => std::thread::sleep(std::time::Duration::from_millis(10)),
+                done => {
+                    assert_eq!(done, ProbeState::Failed);
+                    return;
+                }
+            }
+        }
+        panic!("the probe never settled");
     }
 }

@@ -12,6 +12,7 @@ rustkit-dom = { path = "../rustkit-dom" }
 rustkit-common = { path = "../rustkit-common" }
 
 # Core
+bytes = "1"
 thiserror = "1.0"
 tracing = "0.1"
 url = "2.5"

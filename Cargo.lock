@@ -5524,6 +5524,7 @@ name = "rustkit-media"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "bytes",
  "dispatch2",
  "hashbrown 0.14.5",
  "objc2 0.6.3",

@@ -8,16 +8,25 @@
 //! document after each layout and after `load()` calls, and an element whose resource changed (its `src`, its first
 //! acceptable `<source>`, or a `load()`) runs the algorithm again:
 //!
-//! 1. `loadstart`. With `preload=none` the element then idles (`suspend`).
-//! 2. The resource is fetched through rustkit-net, so through the shield, as one GET:
-//!    step 2 holds whole resources in memory (ranged fetches come with playback). A
-//!    failed or blocked fetch is `MEDIA_ERR_SRC_NOT_SUPPORTED` (Chrome 148 reports 4
-//!    for a 404).
-//! 3. `progress`, `suspend`, and an AVFoundation probe of the bytes
-//!    (`rustkit_media::avf::Probe`), polled each turn. Not media: error 4.
+//! 1. `loadstart`. With `preload=none` the element then idles (`suspend`) and fetches
+//!    nothing.
+//! 2. An AVFoundation probe (`rustkit_media::avf::Probe`) starts reading the resource.
+//!    What it reads and is not held becomes a *want*, fetched through rustkit-net (so
+//!    through the shield) with `Range`, at most [`CHUNK`] per request, as AVFoundation
+//!    reads: loading metadata fetches the header and the `moov` atom (wherever it
+//!    sits), not the resource. Sequential read-ahead stops at [`METADATA_BUDGET`] held;
+//!    a seek is still fetched. A server that ignores `Range` answers 200 with the whole
+//!    body, refused past [`WHOLE_CAP`]; an element never holds more than [`WHOLE_CAP`]
+//!    (`MEDIA_ERR_NETWORK`). A failed, blocked or 404 fetch is
+//!    `MEDIA_ERR_SRC_NOT_SUPPORTED` (Chrome 148 reports 4 for a 404).
+//! 3. `progress` and `suspend` when the first bytes come.
 //! 4. Metadata: `durationchange`, `resize` (video), `loadedmetadata` at
-//!    HAVE_METADATA; then, with every byte in hand, `loadeddata`, `canplay`,
-//!    `canplaythrough` at HAVE_ENOUGH_DATA.
+//!    HAVE_METADATA. When every byte is in hand (a small resource), `loadeddata`,
+//!    `canplay`, `canplaythrough` at HAVE_ENOUGH_DATA follow. The probe and its bytes
+//!    are then let go: nothing plays in step 2.
+//!
+//! Removing an element, or giving it another resource, drops its fetches (the requests
+//! are cancelled) and its bytes.
 //!
 //! The state each event carries is the element's as of that event (pushed with it to
 //! the getters in dom.rs). The order is Chrome 148's
@@ -32,8 +41,29 @@ use std::sync::Arc;
 /// under it from step 3; nothing paints yet).
 pub(crate) const VIDEO_KEY_PREFIX: &str = "rustkit-video:";
 
+/// `MEDIA_ERR_NETWORK`.
+const NETWORK: u16 = 2;
 /// `MEDIA_ERR_SRC_NOT_SUPPORTED`.
 const SRC_NOT_SUPPORTED: u16 = 4;
+
+pub(crate) use rustkit_media::avf::CHUNK;
+
+/// Sequential bytes the metadata may read ahead (an MP3's ID3 tag with cover art can be
+/// a few MB): see `MediaSource::take_wants`.
+pub(crate) const METADATA_BUDGET: u64 = 8 << 20;
+
+/// The most an element holds, and the largest whole body (a server that ignores
+/// `Range`) it accepts: past it, `MEDIA_ERR_NETWORK`.
+pub(crate) const WHOLE_CAP: u64 = 64 << 20;
+
+thread_local! {
+    /// Tests lower [`WHOLE_CAP`] to reach it with a small resource.
+    pub(crate) static CAP_FOR_TESTS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn whole_cap() -> u64 {
+    CAP_FOR_TESTS.with(|c| c.get()).unwrap_or(WHOLE_CAP)
+}
 
 /// What a media element's getters read (pushed as JSON, dom.rs `MEDIA_INITIAL`).
 #[derive(Clone, Debug, PartialEq)]
@@ -102,9 +132,14 @@ impl Preload {
 enum Stage {
     /// Nothing to load (no source), or waiting (`preload=none`).
     Idle,
-    /// The fetch of this serial is in flight.
-    Fetching,
-    Probing(rustkit_media::avf::Probe),
+    /// The probe reads, and its wants are fetched by range.
+    Loading {
+        source: Arc<rustkit_media::avf::MediaSource>,
+        probe: rustkit_media::avf::Probe,
+        /// Whether `progress` / `suspend` fired (the first bytes came).
+        announced: bool,
+        url: url::Url,
+    },
     /// Metadata in, or an error: nothing more until the resource changes.
     Done,
 }
@@ -120,11 +155,75 @@ pub(crate) struct MediaElement {
     pub(crate) state: MediaState,
 }
 
-/// A fetch's outcome, for the element and run that asked.
+/// A ranged fetch's outcome, for the element and run that asked.
 pub(crate) struct MediaFetched {
     pub(crate) node: usize,
     pub(crate) serial: u64,
-    pub(crate) bytes: Result<rustkit_media::avf::MediaBytes, ()>,
+    pub(crate) span: Result<FetchedSpan, FetchFailed>,
+}
+
+/// Bytes a response brought: from `start`, of a resource `total` long.
+pub(crate) struct FetchedSpan {
+    pub(crate) start: u64,
+    pub(crate) total: u64,
+    pub(crate) content_type: Option<String>,
+    pub(crate) bytes: bytes::Bytes,
+}
+
+pub(crate) enum FetchFailed {
+    /// Refused, blocked, not found, or not media: `MEDIA_ERR_SRC_NOT_SUPPORTED`.
+    NotSupported,
+    /// Too large to hold (`WHOLE_CAP`): `MEDIA_ERR_NETWORK`.
+    TooLarge,
+}
+
+/// The response to a ranged GET from `start`, read into a span. A 206 gives its
+/// `Content-Range`; a 200 (a server that ignores `Range`) is the whole resource.
+pub(crate) async fn read_span(
+    response: rustkit_net::Response,
+    start: u64,
+) -> Result<FetchedSpan, FetchFailed> {
+    let content_type = response.content_type.as_ref().map(|m| m.to_string());
+    let status = response.status.as_u16();
+    let range_total = response
+        .headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit_once('/'))
+        .and_then(|(range, total)| {
+            let first = range
+                .trim()
+                .strip_prefix("bytes")?
+                .trim()
+                .split('-')
+                .next()?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            Some((first, total.trim().parse::<u64>().ok()?))
+        });
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| FetchFailed::NotSupported)?;
+    match (status, range_total) {
+        (206, Some((first, total))) => Ok(FetchedSpan {
+            start: first,
+            total,
+            content_type,
+            bytes,
+        }),
+        (200, _) => Ok(FetchedSpan {
+            start: 0,
+            total: bytes.len() as u64,
+            content_type,
+            bytes,
+        }),
+        _ => {
+            let _ = start;
+            Err(FetchFailed::NotSupported)
+        }
+    }
 }
 
 /// An event to fire, with the element's state as of it.
@@ -143,11 +242,13 @@ pub(crate) struct MediaElements {
     pub(crate) synced_for: Option<u64>,
 }
 
-/// What a sync asks of the engine: fetches to start (node, serial, URL).
+/// A ranged fetch to start: `url`'s bytes [start, end) for `node`'s run `serial`.
 pub(crate) struct MediaFetch {
     pub(crate) node: usize,
     pub(crate) serial: u64,
     pub(crate) url: url::Url,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
 }
 
 fn is_tag(node: &Node, tag: &str) -> bool {
@@ -176,14 +277,59 @@ impl MediaElements {
         std::mem::take(&mut self.events)
     }
 
-    /// Whether the live loop has to keep turning for the media: a fetch or a probe is
-    /// under way, or events wait.
+    /// Whether the live loop has to keep turning for the media: a load is under way,
+    /// or events wait.
     pub(crate) fn busy(&self) -> bool {
         !self.events.is_empty()
             || self
                 .elements
                 .values()
-                .any(|e| matches!(e.stage, Stage::Fetching | Stage::Probing(_)))
+                .any(|e| matches!(e.stage, Stage::Loading { .. }))
+    }
+
+    /// Whether a fetch for `node`'s run `serial` is still wanted (the element is there,
+    /// still loading that resource). The engine drops the others' requests.
+    pub(crate) fn wants_fetch(&self, node: usize, serial: u64) -> bool {
+        self.elements
+            .get(&node)
+            .is_some_and(|e| e.serial == serial && matches!(e.stage, Stage::Loading { .. }))
+    }
+
+    /// Bytes the elements hold, in all.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.elements
+            .values()
+            .map(|e| match &e.stage {
+                Stage::Loading { source, .. } => source.held(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// The ranged fetches the probes wait on, to start now.
+    pub(crate) fn take_fetches(&mut self) -> Vec<MediaFetch> {
+        let mut out = Vec::new();
+        for (node, e) in &self.elements {
+            let Stage::Loading { source, url, .. } = &e.stage else {
+                continue;
+            };
+            for (start, end) in source.take_wants(METADATA_BUDGET) {
+                let end = end
+                    .min(start + CHUNK)
+                    .min(source.total().unwrap_or(u64::MAX));
+                if start < end {
+                    out.push(MediaFetch {
+                        node: *node,
+                        serial: e.serial,
+                        url: url.clone(),
+                        start,
+                        end,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Every video's display size whose metadata is in, by raw NodeId.
@@ -203,15 +349,15 @@ impl MediaElements {
     /// Bring the host in line with `document`: forget elements that left it, and run
     /// the load algorithm for each one whose selected resource changed or whose
     /// `load()` script called (`reload`). `resolve` makes a URL absolute against the
-    /// document; `can_play` is `canPlayType`. Returns the fetches to start.
+    /// document; `can_play` is `canPlayType`. The fetches the new loads ask for come
+    /// from [`MediaElements::take_fetches`].
     pub(crate) fn sync(
         &mut self,
         document: &Document,
         reload: &[usize],
         resolve: &dyn Fn(&str) -> Option<url::Url>,
         can_play: &dyn Fn(&str) -> &'static str,
-    ) -> Vec<MediaFetch> {
-        let mut fetches = Vec::new();
+    ) {
         let mut alive = std::collections::HashSet::new();
         for node in media_elements(document) {
             let raw = node.id.raw();
@@ -250,20 +396,25 @@ impl MediaElements {
                 continue;
             }
             entry.state.network_state = 2;
-            entry.stage = Stage::Fetching;
-            let serial = entry.serial;
-            self.queue(raw, "loadstart");
             match url::Url::parse(&url) {
-                Ok(url) => fetches.push(MediaFetch {
-                    node: raw,
-                    serial,
-                    url,
-                }),
-                Err(_) => self.fail(raw),
+                Ok(url) => {
+                    let source = rustkit_media::avf::MediaSource::new();
+                    entry.stage = Stage::Loading {
+                        probe: rustkit_media::avf::Probe::start(source.clone()),
+                        source,
+                        announced: false,
+                        url,
+                    };
+                    self.queue(raw, "loadstart");
+                }
+                Err(_) => {
+                    self.queue(raw, "loadstart");
+                    self.fail(raw, SRC_NOT_SUPPORTED);
+                }
             }
         }
+        // An element that left the document: its probe, bytes and fetches go.
         self.elements.retain(|node, _| alive.contains(node));
-        fetches
     }
 
     /// The element's resource (HTML §4.8.11.5, resource selection): its `src`, else the
@@ -292,36 +443,50 @@ impl MediaElements {
         })
     }
 
-    fn fail(&mut self, node: usize) {
+    fn fail(&mut self, node: usize, code: u16) {
         let Some(e) = self.elements.get_mut(&node) else {
             return;
         };
+        // Its probe and bytes go with the stage.
         e.stage = Stage::Done;
         e.state.network_state = 3;
-        e.state.error = Some(SRC_NOT_SUPPORTED);
+        e.state.error = Some(code);
         self.queue(node, "error");
     }
 
-    /// A fetch came back.
+    /// A ranged fetch came back.
     pub(crate) fn fetched(&mut self, fetched: MediaFetched) {
-        let Some(e) = self.elements.get_mut(&fetched.node) else {
-            return;
-        };
-        if e.serial != fetched.serial || !matches!(e.stage, Stage::Fetching) {
+        if !self.wants_fetch(fetched.node, fetched.serial) {
             return;
         }
-        match fetched.bytes {
-            Ok(bytes) => {
-                e.state.network_state = 1;
-                e.stage = Stage::Probing(rustkit_media::avf::Probe::start(Arc::new(bytes)));
-                self.queue(fetched.node, "progress");
-                self.queue(fetched.node, "suspend");
-            }
-            Err(()) => {
-                // A 404 or a blocked request: Chrome 148 fires `error` with no
-                // `progress` (code 4).
-                self.fail(fetched.node);
-            }
+        let node = fetched.node;
+        let span = match fetched.span {
+            Ok(span) => span,
+            Err(FetchFailed::NotSupported) => return self.fail(node, SRC_NOT_SUPPORTED),
+            Err(FetchFailed::TooLarge) => return self.fail(node, NETWORK),
+        };
+        let cap = whole_cap();
+        let e = self.elements.get_mut(&node).expect("checked");
+        let Stage::Loading {
+            source,
+            probe,
+            announced,
+            ..
+        } = &mut e.stage
+        else {
+            return;
+        };
+        if source.held() as u64 + span.bytes.len() as u64 > cap {
+            return self.fail(node, NETWORK);
+        }
+        source.set_info(span.content_type, span.total);
+        source.add(span.start, span.bytes);
+        probe.bytes_changed();
+        if !std::mem::replace(announced, true) {
+            // Chrome 148: `progress` and `suspend` before the metadata events.
+            e.state.network_state = 1;
+            self.queue(node, "progress");
+            self.queue(node, "suspend");
         }
     }
 
@@ -332,25 +497,30 @@ impl MediaElements {
         let nodes: Vec<usize> = self
             .elements
             .iter()
-            .filter(|(_, e)| matches!(e.stage, Stage::Probing(_)))
+            .filter(|(_, e)| matches!(e.stage, Stage::Loading { .. }))
             .map(|(n, _)| *n)
             .collect();
         for node in nodes {
             let e = self.elements.get_mut(&node).expect("listed");
-            let Stage::Probing(probe) = &mut e.stage else {
+            let Stage::Loading { probe, source, .. } = &mut e.stage else {
                 continue;
             };
+            let complete = source.complete();
             match probe.poll() {
                 rustkit_media::avf::ProbeState::Pending => {}
-                rustkit_media::avf::ProbeState::Failed => self.fail(node),
+                rustkit_media::avf::ProbeState::Failed => self.fail(node, SRC_NOT_SUPPORTED),
                 rustkit_media::avf::ProbeState::Ready {
                     duration, video, ..
                 } => {
+                    // Nothing plays in step 2: the probe and its bytes go.
                     e.stage = Stage::Done;
+                    e.state.network_state = 1;
                     e.state.ready_state = 1;
                     e.state.duration = Some(duration);
-                    e.state.buffered = vec![(0.0, duration)];
                     e.state.seekable = vec![(0.0, duration)];
+                    if complete {
+                        e.state.buffered = vec![(0.0, duration)];
+                    }
                     let sized = match (e.video, video) {
                         (true, Some((w, h))) if w > 0.0 && h > 0.0 => {
                             e.state.width = w.round() as u32;
@@ -365,20 +535,54 @@ impl MediaElements {
                         self.queue(node, "resize");
                     }
                     self.queue(node, "loadedmetadata");
-                    // Every byte is in hand: the data is all there.
-                    self.elements
-                        .get_mut(&node)
-                        .expect("listed")
-                        .state
-                        .ready_state = 4;
-                    self.queue(node, "loadeddata");
-                    self.queue(node, "canplay");
-                    self.queue(node, "canplaythrough");
+                    if complete {
+                        // Every byte is in hand: the data is all there.
+                        self.elements
+                            .get_mut(&node)
+                            .expect("listed")
+                            .state
+                            .ready_state = 4;
+                        self.queue(node, "loadeddata");
+                        self.queue(node, "canplay");
+                        self.queue(node, "canplaythrough");
+                    }
                 }
             }
         }
         resized
     }
+}
+
+/// `script_net::settle_live` over fetches kept with their element and run: the ones
+/// that finished within `slice` (or at once), removed and returned.
+pub(crate) async fn settle_keyed<T>(
+    in_flight: &mut Vec<(usize, u64, crate::script_net::LiveFuture<T>)>,
+    slice: std::time::Duration,
+) -> Vec<T> {
+    let mut done = Vec::new();
+    if in_flight.is_empty() {
+        return done;
+    }
+    let pause = tokio::time::sleep(slice);
+    tokio::pin!(pause);
+    std::future::poll_fn(|cx| {
+        let mut i = 0;
+        while i < in_flight.len() {
+            match std::future::Future::poll(in_flight[i].2.as_mut(), cx) {
+                std::task::Poll::Ready(outcome) => {
+                    drop(in_flight.remove(i));
+                    done.push(outcome);
+                }
+                std::task::Poll::Pending => i += 1,
+            }
+        }
+        if !done.is_empty() {
+            return std::task::Poll::Ready(());
+        }
+        std::future::Future::poll(pause.as_mut(), cx)
+    })
+    .await;
+    done
 }
 
 /// `canPlayType` (HTML §4.8.11.3) from AVFoundation: `"probably"` for a type with
