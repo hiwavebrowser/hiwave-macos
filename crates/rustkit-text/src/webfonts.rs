@@ -233,7 +233,7 @@ pub fn inspect(data: &[u8]) -> Result<FontContainer, FontRejection> {
 
 /// Identity of a face's bytes: equal for the same file however often it is
 /// installed, different for different files. Never 0 (0 means "no web face").
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn content_id(data: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -266,7 +266,7 @@ pub(crate) fn bump_generation() {
 }
 
 /// Invalidate this thread's family-name resolutions (its slot changed).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn bump_local_generation() {
     LOCAL_GENERATION.with(|g| g.set(g.get() + 1));
 }
@@ -428,7 +428,197 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    //! The Windows registry: the same per-thread slot and selection as macOS, holding DirectWrite
+    //! faces built from the bytes (a WOFF or WOFF2 file is unpacked by DirectWrite first).
+    use super::{FontContainer, WebFontFace};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use windows::Win32::Graphics::DirectWrite::{
+        DWriteCreateFactory, IDWriteFactory5, IDWriteFontFace, IDWriteFontFile, IDWriteFontFileStream,
+        IDWriteInMemoryFontFileLoader, DWRITE_CONTAINER_TYPE, DWRITE_CONTAINER_TYPE_WOFF,
+        DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FACE_TYPE,
+        DWRITE_FONT_FILE_TYPE, DWRITE_FONT_SIMULATIONS_NONE,
+    };
+
+    struct Face {
+        weight: u16,
+        italic: bool,
+        /// `content_id` of the bytes `face` was built from.
+        id: u64,
+        face: IDWriteFontFace,
+    }
+
+    struct Active {
+        tag: String,
+        families: HashMap<String, Vec<Face>>,
+    }
+
+    /// The factory and the in-memory loader registered with it, for this thread.
+    struct Loader {
+        factory: IDWriteFactory5,
+        loader: IDWriteInMemoryFontFileLoader,
+    }
+
+    thread_local! {
+        static SLOT: RefCell<Active> = RefCell::new(Active { tag: String::new(), families: HashMap::new() });
+        static LOADER: Option<Loader> = make_loader();
+    }
+
+    fn make_loader() -> Option<Loader> {
+        unsafe {
+            let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+            let loader = factory.CreateInMemoryFontFileLoader().ok()?;
+            factory.RegisterFontFileLoader(&loader).ok()?;
+            Some(Loader { factory, loader })
+        }
+    }
+
+    fn with_slot<R>(f: impl FnOnce(&mut Active) -> R) -> R {
+        SLOT.with(|slot| f(&mut slot.borrow_mut()))
+    }
+
+    fn key(family: &str) -> String {
+        family.trim().to_ascii_lowercase()
+    }
+
+    /// The sfnt bytes of a WOFF or WOFF2 file, as DirectWrite unpacks them.
+    fn unpacked(factory: &IDWriteFactory5, kind: DWRITE_CONTAINER_TYPE, data: &[u8]) -> Option<Vec<u8>> {
+        unsafe {
+            let stream: IDWriteFontFileStream =
+                factory.UnpackFontFile(kind, data.as_ptr().cast(), u32::try_from(data.len()).ok()?).ok()?;
+            let size = stream.GetFileSize().ok()?;
+            let mut start = std::ptr::null_mut();
+            let mut context = std::ptr::null_mut();
+            stream.ReadFileFragment(&mut start, 0, size, &mut context).ok()?;
+            let bytes = std::slice::from_raw_parts(start as *const u8, usize::try_from(size).ok()?).to_vec();
+            stream.ReleaseFileFragment(context);
+            Some(bytes)
+        }
+    }
+
+    /// A DirectWrite face for `data` (sfnt, WOFF or WOFF2), or `None` when DirectWrite rejects it.
+    fn build(loader: &Loader, container: FontContainer, data: &[u8]) -> Option<IDWriteFontFace> {
+        let owned;
+        let sfnt: &[u8] = match container {
+            FontContainer::Woff => {
+                owned = unpacked(&loader.factory, DWRITE_CONTAINER_TYPE_WOFF, data)?;
+                &owned
+            }
+            FontContainer::Woff2 => {
+                owned = unpacked(&loader.factory, DWRITE_CONTAINER_TYPE_WOFF2, data)?;
+                &owned
+            }
+            FontContainer::Sfnt | FontContainer::Collection => data,
+        };
+        unsafe {
+            // No owner object: the loader copies the bytes.
+            let file: IDWriteFontFile = loader
+                .loader
+                .CreateInMemoryFontFileReference(&loader.factory, sfnt.as_ptr().cast(), u32::try_from(sfnt.len()).ok()?, None)
+                .ok()?;
+            let mut supported = windows::core::BOOL(0);
+            let mut file_type = DWRITE_FONT_FILE_TYPE::default();
+            let mut face_type = DWRITE_FONT_FACE_TYPE::default();
+            let mut faces = 0u32;
+            file.Analyze(&mut supported, &mut file_type, Some(&mut face_type), &mut faces).ok()?;
+            if !supported.as_bool() || faces == 0 {
+                return None;
+            }
+            loader.factory.CreateFontFace(face_type, &[Some(file)], 0, DWRITE_FONT_SIMULATIONS_NONE).ok()
+        }
+    }
+
+    /// Install `faces` as this thread's document font set (as on macOS). Returns how many faces
+    /// were accepted; one that fails `inspect` or that DirectWrite rejects is dropped and counted
+    /// against that number.
+    pub fn install(tag: &str, faces: &[WebFontFace]) -> usize {
+        let installed = with_slot(|active| {
+            (!tag.is_empty() && active.tag == tag).then(|| active.families.values().map(Vec::len).sum())
+        });
+        if let Some(count) = installed {
+            return count;
+        }
+        let mut families: HashMap<String, Vec<Face>> = HashMap::new();
+        let mut accepted = 0usize;
+        LOADER.with(|loader| {
+            let Some(loader) = loader else { return };
+            for face in faces {
+                let Ok(container) = super::inspect(&face.data) else { continue };
+                let Some(built) = build(loader, container, &face.data) else { continue };
+                accepted += 1;
+                families.entry(key(&face.family)).or_default().push(Face {
+                    weight: face.weight,
+                    italic: face.italic,
+                    id: super::content_id(&face.data),
+                    face: built,
+                });
+            }
+        });
+        with_slot(|active| {
+            active.tag = tag.to_string();
+            active.families = families;
+        });
+        super::bump_local_generation();
+        accepted
+    }
+
+    pub fn clear() {
+        let changed = with_slot(|active| {
+            let changed = !active.tag.is_empty() || !active.families.is_empty();
+            active.tag.clear();
+            active.families.clear();
+            changed
+        });
+        if changed {
+            super::bump_local_generation();
+        }
+    }
+
+    pub fn is_installed(family: &str) -> bool {
+        with_slot(|active| active.families.contains_key(&key(family)))
+    }
+
+    fn select<'a>(faces: &'a [Face], weight: u16, italic: bool) -> Option<&'a Face> {
+        faces.iter().min_by_key(|f| {
+            let style_penalty: u32 = if f.italic == italic { 0 } else { 10_000 };
+            style_penalty + (f.weight as i32 - weight as i32).unsigned_abs()
+        })
+    }
+
+    /// The registered face of `family` closest to the requested style.
+    pub fn lookup(family: &str, weight: u16, italic: bool) -> Option<IDWriteFontFace> {
+        with_slot(|active| {
+            let faces = active.families.get(&key(family))?;
+            select(faces, weight, italic).map(|f| f.face.clone())
+        })
+    }
+
+    pub fn face_id(family_list: &str, weight: u16, italic: bool) -> u64 {
+        with_slot(|active| {
+            if active.families.is_empty() {
+                return 0;
+            }
+            for family in family_list.split(',') {
+                let family = family.trim().trim_matches('"').trim_matches('\'');
+                if let Some(faces) = active.families.get(&key(family)) {
+                    return select(faces, weight, italic).map_or(0, |f| f.id);
+                }
+            }
+            0
+        })
+    }
+
+    pub fn lookup_descriptor(family: &str, weight: u16, italic: bool) -> Option<(u16, bool)> {
+        with_slot(|active| {
+            let faces = active.families.get(&key(family))?;
+            select(faces, weight, italic).map(|f| (f.weight, f.italic))
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
     use super::WebFontFace;
 
@@ -516,7 +706,7 @@ pub fn install_set(set: &FaceSet) -> usize {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use imp::lookup;
 
 #[cfg(test)]
@@ -888,5 +1078,88 @@ mod tests {
         assert_eq!(pick(400, false), (400, false));
         assert_eq!(pick(900, false), (400, false), "upright 900 prefers the upright face");
         assert_eq!(pick(400, true), (700, true), "italic 400 prefers the italic face");
+    }
+}
+
+/// The Windows registry (DirectWrite faces from the bytes): the macOS registry tests' behaviour,
+/// read through DirectWrite.
+#[cfg(all(test, windows))]
+mod windows_registry_tests {
+    use super::*;
+    use std::sync::Arc;
+    use windows::Win32::Graphics::DirectWrite::IDWriteFontFace;
+
+    const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
+    const AHEM_WOFF: &[u8] = include_bytes!("../tests/fixtures/Ahem.woff");
+    const AHEM_WOFF2: &[u8] = include_bytes!("../tests/fixtures/Ahem.woff2");
+
+    fn face_from(family: &str, weight: u16, italic: bool, data: &[u8]) -> WebFontFace {
+        WebFontFace { family: family.into(), weight, italic, data: Arc::new(data.to_vec()) }
+    }
+
+    /// The glyph `face` maps `c` to (0: the font has no glyph for it).
+    fn glyph(face: &IDWriteFontFace, c: char) -> u16 {
+        let mut index = [0u16];
+        unsafe { face.GetGlyphIndices([c as u32].as_ptr(), 1, index.as_mut_ptr()) }.expect("glyph indices");
+        index[0]
+    }
+
+    #[test]
+    fn an_installed_face_resolves_by_family_case_insensitively() {
+        assert_eq!(install("win-a", &[face_from("WinWebfontsAhem", 400, false, AHEM)]), 1);
+        let face = lookup("WINWEBFONTSAHEM", 400, false).expect("registered family resolves");
+        assert_ne!(glyph(&face, 'X'), 0, "the face is Ahem's, which maps X");
+        assert!(is_installed("winwebfontsahem"));
+        clear();
+        assert!(lookup("WinWebfontsAhem", 400, false).is_none());
+    }
+
+    #[test]
+    fn a_family_nobody_declared_does_not_resolve() {
+        install("win-b", &[face_from("WinWebfontsAhem", 400, false, AHEM)]);
+        assert!(lookup("WinWebfontsNeverDeclared", 400, false).is_none());
+        clear();
+    }
+
+    #[test]
+    fn garbage_bytes_are_rejected_not_registered() {
+        let garbage = vec![0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        assert_eq!(install("win-c", &[face_from("WinWebfontsGarbage", 400, false, &garbage)]), 0);
+        assert!(lookup("WinWebfontsGarbage", 400, false).is_none());
+        clear();
+    }
+
+    #[test]
+    fn ttf_woff_and_woff2_faces_install_with_their_own_glyphs() {
+        let faces = [
+            face_from("WinWebfontsTtf", 400, false, AHEM),
+            face_from("WinWebfontsWoff", 400, false, AHEM_WOFF),
+            face_from("WinWebfontsWoff2", 400, false, AHEM_WOFF2),
+        ];
+        assert_eq!(install("win-d", &faces), 3, "every container decodes");
+        for family in ["WinWebfontsTtf", "WinWebfontsWoff", "WinWebfontsWoff2"] {
+            let face = lookup(family, 400, false).unwrap_or_else(|| panic!("{family} resolves"));
+            assert_ne!(glyph(&face, 'X'), 0, "{family} maps X");
+        }
+        clear();
+    }
+
+    #[test]
+    fn a_face_id_names_the_file_and_the_nearest_style_wins() {
+        install(
+            "win-e",
+            &[
+                face_from("WinWebfontsStyled", 400, false, AHEM),
+                face_from("WinWebfontsStyled", 700, false, AHEM_WOFF),
+                face_from("WinWebfontsStyled", 400, true, AHEM_WOFF2),
+            ],
+        );
+        assert_eq!(lookup_descriptor("WinWebfontsStyled", 650, false), Some((700, false)));
+        assert_eq!(lookup_descriptor("WinWebfontsStyled", 700, true), Some((400, true)), "italic outranks weight");
+        let regular = face_id("'WinWebfontsStyled', serif", 400, false);
+        let bold = face_id("WinWebfontsStyled", 700, false);
+        assert!(regular != 0 && bold != 0 && regular != bold, "{regular} {bold}");
+        assert_eq!(face_id("serif", 400, false), 0);
+        clear();
     }
 }
