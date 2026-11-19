@@ -330,11 +330,14 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
     assert_replays_match_a_fresh_cascade("transition", &transition_page(), None);
 }
 
+/// The class flips every four frames, first at the fourth: the frames before it write only the
+/// width, so the first measured frames can splice (a class flip from a full build starts a
+/// transition, and a running transition is a full build).
 fn transition_page() -> String {
     page(
         "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
         "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
-        "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
+        "document.getElementById('p').className = n % 8 >= 4 ? 'on' : ''; \
          document.getElementById('w').style.width = (10 + n % 50) + 'px';",
     )
 }
