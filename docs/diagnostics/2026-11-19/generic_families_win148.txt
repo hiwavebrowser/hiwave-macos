@@ -1,0 +1,25 @@
+# Chrome for Testing 148.0.7778.216 win64 (Playwright, headless), Windows 11: canvas measureText of
+# "The quick brown fox jumps over the lazy dog 0123456789 WMiil" at 40px. A generic family equals
+# exactly one face: sans-serif = Arial, serif = Times New Roman, monospace = Consolas,
+# cursive = Comic Sans MS, fantasy = Impact, system-ui = Segoe UI. (Papyrus equals Times New Roman: not installed.)
+W sans-serif: 1133.926
+W serif: 1057.598
+W monospace: 1319.531
+W cursive: 1205.859
+W fantasy: 1022.559
+W system-ui: 1132.832
+W Arial: 1133.926
+W Segoe UI: 1132.832
+W Times New Roman: 1057.598
+W Georgia: 1136.465
+W Consolas: 1319.531
+W Cascadia Code: 1406.250
+W Courier New: 1440.234
+W Lucida Console: 1446.094
+W Comic Sans MS: 1205.859
+W Gabriola: 778.320
+W Impact: 1022.559
+W Segoe Script: 1435.957
+W Papyrus: 1057.598
+W Microsoft Sans Serif: 1130.449
+W Tahoma: 1134.160
