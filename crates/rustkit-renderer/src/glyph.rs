@@ -1225,12 +1225,8 @@ fn rasterize_glyph_directwrite(
             };
 
         // A face the document registered via @font-face outranks the system collection, as
-        // in shaping (rustkit-text `webfonts`): the first family of the list it registered.
-        let web_face = key
-            .font_family
-            .split(',')
-            .map(|family| family.trim().trim_matches('"').trim_matches('\''))
-            .find_map(|family| rustkit_text::webfonts::lookup(family, key.font_weight, key.font_style == 1));
+        // in shaping: the face `webfonts::face_id` names for this family list (the glyph key's).
+        let web_face = rustkit_text::webfonts::lookup_list(&key.font_family, key.font_weight, key.font_style == 1);
         let face = match web_face {
             Some(face) => face,
             None => {

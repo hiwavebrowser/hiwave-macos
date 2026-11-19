@@ -432,22 +432,124 @@ mod imp {
 mod imp {
     //! The Windows registry: the same per-thread slot and selection as macOS, holding DirectWrite
     //! faces built from the bytes (a WOFF or WOFF2 file is unpacked by DirectWrite first).
+    //!
+    //! The bytes are served to DirectWrite by this module's own font file loader, keyed by the
+    //! content id of the bytes, from a process-wide table that counts the registry faces using
+    //! them. A face that leaves its slot (a new set, `clear`, the thread ending) gives its count
+    //! back, and the bytes go with the last one; a stream DirectWrite already opened holds its own
+    //! reference until DirectWrite releases it. The key is the content id, so two threads' faces
+    //! name their files by content, never by an ordinal one thread's loader handed out.
     use super::{FontContainer, WebFontFace};
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use windows::core::implement;
     use windows::Win32::Graphics::DirectWrite::{
-        DWriteCreateFactory, IDWriteFactory5, IDWriteFontFace, IDWriteFontFile, IDWriteFontFileStream,
-        IDWriteInMemoryFontFileLoader, DWRITE_CONTAINER_TYPE, DWRITE_CONTAINER_TYPE_WOFF,
-        DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FACE_TYPE,
-        DWRITE_FONT_FILE_TYPE, DWRITE_FONT_SIMULATIONS_NONE,
+        DWriteCreateFactory, IDWriteFactory5, IDWriteFontFace, IDWriteFontFile, IDWriteFontFileLoader,
+        IDWriteFontFileLoader_Impl, IDWriteFontFileStream, IDWriteFontFileStream_Impl, DWRITE_CONTAINER_TYPE,
+        DWRITE_CONTAINER_TYPE_WOFF, DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_FACTORY_TYPE_SHARED,
+        DWRITE_FONT_FACE_TYPE, DWRITE_FONT_FILE_TYPE, DWRITE_FONT_SIMULATIONS_NONE,
     };
+
+    /// The bytes registry faces use, by content id, with how many faces use each.
+    static BYTES: Mutex<Option<HashMap<u64, (Arc<Vec<u8>>, usize)>>> = Mutex::new(None);
+
+    fn bytes_table<R>(f: impl FnOnce(&mut HashMap<u64, (Arc<Vec<u8>>, usize)>) -> R) -> R {
+        let mut table = BYTES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(table.get_or_insert_with(HashMap::new))
+    }
+
+    fn retain(id: u64, bytes: Vec<u8>) {
+        bytes_table(|table| table.entry(id).or_insert_with(|| (Arc::new(bytes), 0)).1 += 1);
+    }
+
+    fn release(id: u64) {
+        bytes_table(|table| {
+            if let Some(entry) = table.get_mut(&id) {
+                entry.1 -= 1;
+                if entry.1 == 0 {
+                    table.remove(&id);
+                }
+            }
+        });
+    }
+
+    fn bytes_of(id: u64) -> Option<Arc<Vec<u8>>> {
+        bytes_table(|table| table.get(&id).map(|entry| entry.0.clone()))
+    }
+
+    /// Font bytes the registry holds for live faces, in bytes and files (for the tests).
+    pub(crate) fn held_bytes() -> (usize, usize) {
+        bytes_table(|table| (table.values().map(|entry| entry.0.len()).sum(), table.len()))
+    }
+
+    /// One font file's bytes, as DirectWrite reads them.
+    #[implement(IDWriteFontFileStream)]
+    struct Stream {
+        bytes: Arc<Vec<u8>>,
+    }
+
+    impl IDWriteFontFileStream_Impl for Stream_Impl {
+        fn ReadFileFragment(
+            &self,
+            fragmentstart: *mut *mut core::ffi::c_void,
+            fileoffset: u64,
+            fragmentsize: u64,
+            fragmentcontext: *mut *mut core::ffi::c_void,
+        ) -> windows::core::Result<()> {
+            let fits = fileoffset.checked_add(fragmentsize).is_some_and(|end| end <= self.bytes.len() as u64);
+            if !fits || fragmentstart.is_null() || fragmentcontext.is_null() {
+                return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+            }
+            unsafe {
+                *fragmentstart = self.bytes.as_ptr().add(fileoffset as usize) as *mut core::ffi::c_void;
+                *fragmentcontext = std::ptr::null_mut();
+            }
+            Ok(())
+        }
+
+        fn ReleaseFileFragment(&self, _fragmentcontext: *mut core::ffi::c_void) {}
+
+        fn GetFileSize(&self) -> windows::core::Result<u64> {
+            Ok(self.bytes.len() as u64)
+        }
+
+        fn GetLastWriteTime(&self) -> windows::core::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// Serves the bytes `BYTES` holds for a content id (the 8-byte key).
+    #[implement(IDWriteFontFileLoader)]
+    struct Loader;
+
+    impl IDWriteFontFileLoader_Impl for Loader_Impl {
+        fn CreateStreamFromKey(
+            &self,
+            key: *const core::ffi::c_void,
+            key_size: u32,
+        ) -> windows::core::Result<IDWriteFontFileStream> {
+            if key.is_null() || key_size as usize != std::mem::size_of::<u64>() {
+                return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+            }
+            let id = unsafe { std::ptr::read_unaligned(key as *const u64) };
+            let bytes = bytes_of(id).ok_or(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG))?;
+            Ok(Stream { bytes }.into())
+        }
+    }
 
     struct Face {
         weight: u16,
         italic: bool,
-        /// `content_id` of the bytes `face` was built from.
+        /// `content_id` of the bytes `face` was built from: its `BYTES` entry.
         id: u64,
         face: IDWriteFontFace,
+    }
+
+    impl Drop for Face {
+        fn drop(&mut self) {
+            release(self.id);
+        }
     }
 
     struct Active {
@@ -455,23 +557,41 @@ mod imp {
         families: HashMap<String, Vec<Face>>,
     }
 
-    /// The factory and the in-memory loader registered with it, for this thread.
-    struct Loader {
+    /// This thread's factory and its registration of the loader, undone when the thread ends.
+    struct Registration {
         factory: IDWriteFactory5,
-        loader: IDWriteInMemoryFontFileLoader,
+        loader: IDWriteFontFileLoader,
+    }
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            let _ = unsafe { self.factory.UnregisterFontFileLoader(&self.loader) };
+            LOADERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Loaders registered and not yet unregistered (one per thread that installed faces).
+    static LOADERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Registered loaders (for the tests).
+    pub(crate) fn registered_loaders() -> usize {
+        LOADERS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     thread_local! {
+        // Declared before SLOT: thread-locals drop in reverse order, so the slot's faces give
+        // their bytes back before the loader is unregistered.
+        static REGISTRATION: Option<Registration> = register();
         static SLOT: RefCell<Active> = RefCell::new(Active { tag: String::new(), families: HashMap::new() });
-        static LOADER: Option<Loader> = make_loader();
     }
 
-    fn make_loader() -> Option<Loader> {
+    fn register() -> Option<Registration> {
         unsafe {
             let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-            let loader = factory.CreateInMemoryFontFileLoader().ok()?;
+            let loader: IDWriteFontFileLoader = Loader.into();
             factory.RegisterFontFileLoader(&loader).ok()?;
-            Some(Loader { factory, loader })
+            LOADERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(Registration { factory, loader })
         }
     }
 
@@ -498,35 +618,42 @@ mod imp {
         }
     }
 
-    /// A DirectWrite face for `data` (sfnt, WOFF or WOFF2), or `None` when DirectWrite rejects it.
-    fn build(loader: &Loader, container: FontContainer, data: &[u8]) -> Option<IDWriteFontFace> {
-        let owned;
-        let sfnt: &[u8] = match container {
-            FontContainer::Woff => {
-                owned = unpacked(&loader.factory, DWRITE_CONTAINER_TYPE_WOFF, data)?;
-                &owned
-            }
-            FontContainer::Woff2 => {
-                owned = unpacked(&loader.factory, DWRITE_CONTAINER_TYPE_WOFF2, data)?;
-                &owned
-            }
-            FontContainer::Sfnt | FontContainer::Collection => data,
+    /// A DirectWrite face for `data` (sfnt, WOFF or WOFF2) whose bytes `BYTES` holds under `id`,
+    /// or `None` when DirectWrite rejects it (and nothing is held).
+    fn build(registration: &Registration, container: FontContainer, data: &[u8], id: u64) -> Option<Face> {
+        let sfnt = match container {
+            FontContainer::Woff => unpacked(&registration.factory, DWRITE_CONTAINER_TYPE_WOFF, data)?,
+            FontContainer::Woff2 => unpacked(&registration.factory, DWRITE_CONTAINER_TYPE_WOFF2, data)?,
+            FontContainer::Sfnt | FontContainer::Collection => data.to_vec(),
         };
-        unsafe {
-            // No owner object: the loader copies the bytes.
-            let file: IDWriteFontFile = loader
-                .loader
-                .CreateInMemoryFontFileReference(&loader.factory, sfnt.as_ptr().cast(), u32::try_from(sfnt.len()).ok()?, None)
-                .ok()?;
-            let mut supported = windows::core::BOOL(0);
-            let mut file_type = DWRITE_FONT_FILE_TYPE::default();
-            let mut face_type = DWRITE_FONT_FACE_TYPE::default();
-            let mut faces = 0u32;
-            file.Analyze(&mut supported, &mut file_type, Some(&mut face_type), &mut faces).ok()?;
-            if !supported.as_bool() || faces == 0 {
-                return None;
+        retain(id, sfnt);
+        // Held from here: a `Face` gives it back when dropped, and every early return below
+        // builds none, so it gives it back itself.
+        let face = unsafe {
+            let built = (|| {
+                let key = id.to_ne_bytes();
+                let file: IDWriteFontFile = registration
+                    .factory
+                    .CreateCustomFontFileReference(key.as_ptr().cast(), key.len() as u32, &registration.loader)
+                    .ok()?;
+                let mut supported = windows::core::BOOL(0);
+                let mut file_type = DWRITE_FONT_FILE_TYPE::default();
+                let mut face_type = DWRITE_FONT_FACE_TYPE::default();
+                let mut faces = 0u32;
+                file.Analyze(&mut supported, &mut file_type, Some(&mut face_type), &mut faces).ok()?;
+                if !supported.as_bool() || faces == 0 {
+                    return None;
+                }
+                registration.factory.CreateFontFace(face_type, &[Some(file)], 0, DWRITE_FONT_SIMULATIONS_NONE).ok()
+            })();
+            built
+        };
+        match face {
+            Some(face) => Some(Face { weight: 0, italic: false, id, face }),
+            None => {
+                release(id);
+                None
             }
-            loader.factory.CreateFontFace(face_type, &[Some(file)], 0, DWRITE_FONT_SIMULATIONS_NONE).ok()
         }
     }
 
@@ -542,18 +669,16 @@ mod imp {
         }
         let mut families: HashMap<String, Vec<Face>> = HashMap::new();
         let mut accepted = 0usize;
-        LOADER.with(|loader| {
-            let Some(loader) = loader else { return };
+        REGISTRATION.with(|registration| {
+            let Some(registration) = registration else { return };
             for face in faces {
                 let Ok(container) = super::inspect(&face.data) else { continue };
-                let Some(built) = build(loader, container, &face.data) else { continue };
+                let id = super::content_id(&face.data);
+                let Some(mut built) = build(registration, container, &face.data, id) else { continue };
+                built.weight = face.weight;
+                built.italic = face.italic;
                 accepted += 1;
-                families.entry(key(&face.family)).or_default().push(Face {
-                    weight: face.weight,
-                    italic: face.italic,
-                    id: super::content_id(&face.data),
-                    face: built,
-                });
+                families.entry(key(&face.family)).or_default().push(built);
             }
         });
         with_slot(|active| {
@@ -595,18 +720,24 @@ mod imp {
         })
     }
 
+    /// The registered faces of the first family in a CSS family LIST the document registered.
+    fn first_registered<'a>(active: &'a Active, family_list: &str) -> Option<&'a Vec<Face>> {
+        family_list
+            .split(',')
+            .map(|family| family.trim().trim_matches('"').trim_matches('\''))
+            .find_map(|family| active.families.get(&key(family)))
+    }
+
     pub fn face_id(family_list: &str, weight: u16, italic: bool) -> u64 {
         with_slot(|active| {
-            if active.families.is_empty() {
-                return 0;
-            }
-            for family in family_list.split(',') {
-                let family = family.trim().trim_matches('"').trim_matches('\'');
-                if let Some(faces) = active.families.get(&key(family)) {
-                    return select(faces, weight, italic).map_or(0, |f| f.id);
-                }
-            }
-            0
+            first_registered(active, family_list).and_then(|faces| select(faces, weight, italic)).map_or(0, |f| f.id)
+        })
+    }
+
+    /// The face `face_id` names for a CSS family LIST: the same family, the same selection.
+    pub fn lookup_list(family_list: &str, weight: u16, italic: bool) -> Option<IDWriteFontFace> {
+        with_slot(|active| {
+            first_registered(active, family_list).and_then(|faces| select(faces, weight, italic)).map(|f| f.face.clone())
         })
     }
 
@@ -708,6 +839,8 @@ pub fn install_set(set: &FaceSet) -> usize {
 
 #[cfg(any(target_os = "macos", windows))]
 pub use imp::lookup;
+#[cfg(windows)]
+pub use imp::lookup_list;
 
 #[cfg(test)]
 mod container_tests {
@@ -1097,6 +1230,12 @@ mod windows_registry_tests {
         WebFontFace { family: family.into(), weight, italic, data: Arc::new(data.to_vec()) }
     }
 
+    /// The registry's byte table and loader count are process-wide: one test at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The glyph `face` maps `c` to (0: the font has no glyph for it).
     fn glyph(face: &IDWriteFontFace, c: char) -> u16 {
         let mut index = [0u16];
@@ -1106,6 +1245,7 @@ mod windows_registry_tests {
 
     #[test]
     fn an_installed_face_resolves_by_family_case_insensitively() {
+        let _serial = serial();
         assert_eq!(install("win-a", &[face_from("WinWebfontsAhem", 400, false, AHEM)]), 1);
         let face = lookup("WINWEBFONTSAHEM", 400, false).expect("registered family resolves");
         assert_ne!(glyph(&face, 'X'), 0, "the face is Ahem's, which maps X");
@@ -1116,6 +1256,7 @@ mod windows_registry_tests {
 
     #[test]
     fn a_family_nobody_declared_does_not_resolve() {
+        let _serial = serial();
         install("win-b", &[face_from("WinWebfontsAhem", 400, false, AHEM)]);
         assert!(lookup("WinWebfontsNeverDeclared", 400, false).is_none());
         clear();
@@ -1123,6 +1264,7 @@ mod windows_registry_tests {
 
     #[test]
     fn garbage_bytes_are_rejected_not_registered() {
+        let _serial = serial();
         let garbage = vec![0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         assert_eq!(install("win-c", &[face_from("WinWebfontsGarbage", 400, false, &garbage)]), 0);
         assert!(lookup("WinWebfontsGarbage", 400, false).is_none());
@@ -1131,6 +1273,7 @@ mod windows_registry_tests {
 
     #[test]
     fn ttf_woff_and_woff2_faces_install_with_their_own_glyphs() {
+        let _serial = serial();
         let faces = [
             face_from("WinWebfontsTtf", 400, false, AHEM),
             face_from("WinWebfontsWoff", 400, false, AHEM_WOFF),
@@ -1146,6 +1289,7 @@ mod windows_registry_tests {
 
     #[test]
     fn a_face_id_names_the_file_and_the_nearest_style_wins() {
+        let _serial = serial();
         install(
             "win-e",
             &[
@@ -1161,5 +1305,56 @@ mod windows_registry_tests {
         assert!(regular != 0 && bold != 0 && regular != bold, "{regular} {bold}");
         assert_eq!(face_id("serif", 400, false), 0);
         clear();
+    }
+
+    /// #1343 R1 item 1: font bytes go with the faces. Installing set after set, on threads that end
+    /// and on one thread, leaves no bytes and no loader behind once the faces are gone.
+    #[test]
+    fn installs_and_teardowns_leave_no_bytes_or_loaders_behind() {
+        let _serial = serial();
+        clear();
+        let base = imp::held_bytes();
+        for round in 0..20 {
+            std::thread::spawn(move || {
+                let faces = [
+                    face_from("WinWebfontsRoundTtf", 400, false, AHEM),
+                    face_from("WinWebfontsRoundWoff2", 400, false, AHEM_WOFF2),
+                ];
+                assert_eq!(install(&format!("round-{round}"), &faces), 2);
+                assert!(imp::held_bytes().0 > base.0, "the set's bytes are held while it is installed");
+                assert!(imp::registered_loaders() >= 1);
+            })
+            .join()
+            .expect("round thread");
+        }
+        assert_eq!(imp::held_bytes(), base, "20 threads' sets are gone with their threads");
+        assert_eq!(imp::registered_loaders(), 0, "each thread's loader is unregistered as it ends");
+
+        for round in 0..20 {
+            let data = if round % 2 == 0 { AHEM } else { AHEM_WOFF };
+            assert_eq!(install(&format!("same-thread-{round}"), &[face_from("WinWebfontsSame", 400, false, data)]), 1);
+            assert_eq!(imp::held_bytes().1, base.1 + 1, "one set's file is held, not every set's so far");
+        }
+        clear();
+        assert_eq!(imp::held_bytes(), base, "clear gives the last set's bytes back");
+    }
+
+    /// #1343 R1 item 2: two views on two threads that install different font files never share a
+    /// face id, so the process-wide face table cannot paint one view's runs with the other's font.
+    #[test]
+    fn two_threads_web_faces_get_different_face_ids() {
+        let _serial = serial();
+        let interned = |tag: &'static str, data: &'static [u8]| {
+            std::thread::spawn(move || {
+                assert_eq!(install(tag, &[face_from("WinWebfontsView", 400, false, data)]), 1);
+                let face = crate::web_font_face("WinWebfontsView", 400, false).expect("the view's face");
+                crate::intern_face(&face)
+            })
+            .join()
+            .expect("view thread")
+        };
+        let first = interned("view-a", AHEM);
+        let second = interned("view-b", AHEM_WOFF2);
+        assert_ne!(first, second, "two views' different fonts share a face id");
     }
 }
