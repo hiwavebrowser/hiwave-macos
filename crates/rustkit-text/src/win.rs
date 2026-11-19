@@ -61,7 +61,19 @@ impl FontCollection {
         })
     }
 
+    /// The family named `name`, or the family Windows substitutes for it (`family_substitute`:
+    /// "Times" is Times New Roman, "Helvetica" Arial), as Chrome on Windows resolves it.
     pub fn font_family_by_name(&self, name: &str) -> Result<Option<FontFamily>, TextBackendError> {
+        if let Some(family) = self.font_family_by_exact_name(name)? {
+            return Ok(Some(family));
+        }
+        match family_substitute(name) {
+            Some(substitute) if !substitute.eq_ignore_ascii_case(name) => self.font_family_by_exact_name(&substitute),
+            _ => Ok(None),
+        }
+    }
+
+    fn font_family_by_exact_name(&self, name: &str) -> Result<Option<FontFamily>, TextBackendError> {
         let name_w = to_wide_null(name);
         let mut index: u32 = 0;
         let mut exists = BOOL(0);
@@ -274,4 +286,72 @@ pub fn intern_face(face: &FontFace) -> u64 {
 /// Windows counterpart of `macos::face_font`.
 pub fn face_by_id(id: u64) -> Option<FontFace> {
     face_table::with(|faces| faces.get(&id).cloned())
+}
+
+/// The family Windows substitutes for `name` (HKLM `...\Windows NT\CurrentVersion\FontSubstitutes`:
+/// "Times" -> "Times New Roman", "Helvetica" -> "Arial"), which Chrome on Windows also consults for a
+/// family the system collection does not have. `None` when Windows names no substitute. Read once
+/// per name.
+pub fn family_substitute(name: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+    let key = name.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.get_or_insert_with(HashMap::new).entry(key).or_insert_with(|| read_substitute(name.trim())).clone()
+}
+
+fn read_substitute(name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let subkey = to_wide_null(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes");
+    let value = to_wide_null(name);
+    let mut buf = [0u16; 128];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let chars = (size as usize / 2).min(buf.len());
+    let text = String::from_utf16_lossy(&buf[..chars]);
+    // "Arial,0": the part before a charset suffix; an empty value names nothing.
+    let family = text.trim_end_matches('\0').split(',').next().unwrap_or("").trim().to_string();
+    (!family.is_empty()).then_some(family)
+}
+
+#[cfg(test)]
+mod family_substitute_tests {
+    use super::*;
+
+    fn postscript_of(name: &str) -> Option<String> {
+        let collection = FontCollection::system().expect("the system collection");
+        let family = collection.font_family_by_name(name).expect("lookup")?;
+        let font = family
+            .first_matching_font(FontWeight(400), FontStretch(5), FontStyle::Normal)
+            .expect("a font");
+        Some(font.postscript_name())
+    }
+
+    /// Windows names the classic families by substitution (FontSubstitutes): "Times" is Times New
+    /// Roman and "Helvetica" Arial, as Chrome on Windows resolves them. DirectWrite's collection
+    /// alone knows neither name, so text fell back to Segoe UI.
+    #[test]
+    fn the_classic_family_names_resolve_by_windows_substitution() {
+        assert_eq!(postscript_of("Times").as_deref(), Some("TimesNewRomanPSMT"));
+        assert_eq!(postscript_of("helvetica").as_deref(), Some("ArialMT"));
+        assert_eq!(postscript_of("Times New Roman").as_deref(), Some("TimesNewRomanPSMT"));
+        assert_eq!(postscript_of("NoSuchFamilyAnywhere"), None);
+    }
 }
