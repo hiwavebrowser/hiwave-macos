@@ -41,6 +41,10 @@ fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt().block_on(engine.load_url(view, url)).expect("load_url");
+    // The page's writes start now (`page`): the load runs as many frames as its time allows.
+    engine
+        .execute_script(view, "window.WRITES = true")
+        .expect("start the writes");
     (engine, view, server)
 }
 
@@ -49,11 +53,13 @@ fn frame(engine: &mut Engine, view: EngineViewId) {
 }
 
 /// `body` with an animation-frame loop that runs `write` (with `n` the frame number) each frame
-/// until `window.STOP`. The load itself runs a few hundred frames, so `n` starts large.
+/// from the first frame after the load (`load` sets `window.WRITES`) until `window.STOP`. The load
+/// runs as many frames as its time allows, so a loop that counted them would start each run at
+/// another point of its writes.
 fn page(style: &str, body: &str, write: &str) -> String {
     format!(
         "<!doctype html><style>body{{margin:0;font:14px sans-serif}}{style}</style>{body}\
-         <script>var n = 0; requestAnimationFrame(function f() {{ n++; if (!window.STOP) {{ {write} }} requestAnimationFrame(f); }});</script>"
+         <script>var n = 0; requestAnimationFrame(function f() {{ if (window.WRITES) {{ n++; if (!window.STOP) {{ {write} }} }} requestAnimationFrame(f); }});</script>"
     )
 }
 
@@ -110,6 +116,14 @@ struct Run {
 fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
+    // The arms are compared frame by frame, so each must start from the same point of the page's
+    // writes: none written during the load, whose frame count follows the machine's speed (300 idle,
+    // 193 to 204 under load), and the first written in the first frame measured.
+    assert_eq!(
+        engine.execute_script(view, "String(n)").expect("n"),
+        "String(\"0\")",
+        "the page wrote during the load"
+    );
     let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
     let spliced = splices_for_test().0;
     for i in 0..frames {
@@ -316,11 +330,14 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
     assert_replays_match_a_fresh_cascade("transition", &transition_page(), None);
 }
 
+/// The class flips every four frames, first at the fourth: the frames before it write only the
+/// width, so the first measured frames can splice (a class flip from a full build starts a
+/// transition, and a running transition is a full build).
 fn transition_page() -> String {
     page(
         "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
         "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
-        "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
+        "document.getElementById('p').className = n % 8 >= 4 ? 'on' : ''; \
          document.getElementById('w').style.width = (10 + n % 50) + 'px';",
     )
 }
