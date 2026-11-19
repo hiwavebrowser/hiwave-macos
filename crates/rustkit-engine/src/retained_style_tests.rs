@@ -41,6 +41,10 @@ fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt().block_on(engine.load_url(view, url)).expect("load_url");
+    // The page's writes start now (`page`): the load runs as many frames as its time allows.
+    engine
+        .execute_script(view, "window.WRITES = true")
+        .expect("start the writes");
     (engine, view, server)
 }
 
@@ -49,11 +53,13 @@ fn frame(engine: &mut Engine, view: EngineViewId) {
 }
 
 /// `body` with an animation-frame loop that runs `write` (with `n` the frame number) each frame
-/// until `window.STOP`. The load itself runs a few hundred frames, so `n` starts large.
+/// from the first frame after the load (`load` sets `window.WRITES`) until `window.STOP`. The load
+/// runs as many frames as its time allows, so a loop that counted them would start each run at
+/// another point of its writes.
 fn page(style: &str, body: &str, write: &str) -> String {
     format!(
         "<!doctype html><style>body{{margin:0;font:14px sans-serif}}{style}</style>{body}\
-         <script>var n = 0; requestAnimationFrame(function f() {{ n++; if (!window.STOP) {{ {write} }} requestAnimationFrame(f); }});</script>"
+         <script>var n = 0; requestAnimationFrame(function f() {{ if (window.WRITES) {{ n++; if (!window.STOP) {{ {write} }} }} requestAnimationFrame(f); }});</script>"
     )
 }
 
@@ -110,6 +116,14 @@ struct Run {
 fn run(page: &str, frames: usize, mode: RetainedStyles) -> Run {
     set_retained_styles_for_test(Some(mode));
     let (mut engine, view, _server) = load(page);
+    // The arms are compared frame by frame, so each must start from the same point of the page's
+    // writes: none written during the load, whose frame count follows the machine's speed (300 idle,
+    // 193 to 204 under load), and the first written in the first frame measured.
+    assert_eq!(
+        engine.execute_script(view, "String(n)").expect("n"),
+        "String(\"0\")",
+        "the page wrote during the load"
+    );
     let (mut lists, mut cascades, mut built) = (Vec::new(), 0, 0);
     let spliced = splices_for_test().0;
     for i in 0..frames {
@@ -316,11 +330,14 @@ fn a_running_transition_on_an_inherited_property_reaches_the_children() {
     assert_replays_match_a_fresh_cascade("transition", &transition_page(), None);
 }
 
+/// The class flips every four frames, first at the fourth: the frames before it write only the
+/// width, so the first measured frames can splice (a class flip from a full build starts a
+/// transition, and a running transition is a full build).
 fn transition_page() -> String {
     page(
         "#p{color:rgb(0,0,255);transition:color 2s linear} #p.on{color:rgb(255,0,0)} #w{width:10px}",
         "<div id=p><span id=s>x<em id=e>y</em></span></div><div id=w></div>",
-        "document.getElementById('p').className = n % 8 < 4 ? 'on' : ''; \
+        "document.getElementById('p').className = n % 8 >= 4 ? 'on' : ''; \
          document.getElementById('w').style.width = (10 + n % 50) + 'px';",
     )
 }
@@ -637,6 +654,51 @@ fn an_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
         splice_mismatches_for_test() - mismatches,
         0,
         "a splice kept the image's size from before it arrived (spliced {}, last miss {miss:?})",
+        now - spliced
+    );
+}
+
+/// The #1304 follow-up (batch 108's receipt, the microsoft capture again, 1 of 2): the same stale
+/// 150x150 image box, from an SVG image. Its natural size comes from the SVG cache, not the raster
+/// cache the kept tree's image check followed, so its arrival did not refuse the splice. The SVG
+/// arrives as fetched SVGs do (`keep_fetched_images`), and, as in the race the capture hit, the
+/// script write comes before the image's own relayout runs.
+#[test]
+fn an_svg_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="184" height="184"><rect width="184" height="184" fill="blue"/></svg>"#;
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, server) = load(
+        "<!doctype html><style>body{margin:0} .h{height:10px}</style>\
+         <div id=u><div class=h id=a></div><img id=im src=\"/late.svg\"><div class=h id=b></div></div>",
+    );
+    let write = |engine: &mut Engine, width: u32| {
+        engine
+            .execute_script(view, &format!("document.getElementById('b').style.width = '{width}px'"))
+            .expect("write");
+    };
+    // The kept tree: a full build, then a splice, with the SVG not in.
+    for width in [20, 30] {
+        write(&mut engine, width);
+        frame(&mut engine, view);
+    }
+    let (mismatches, spliced) = (splice_mismatches_for_test(), splices_for_test().0);
+    assert!(spliced > 0, "the frames before the image spliced (last miss {:?})", splices_for_test().1);
+    // The SVG arrives; the image's own relayout has not run before the next script write.
+    let url = format!("http://127.0.0.1:{}/late.svg", server.port);
+    let doc = rustkit_svg::SvgDocument::parse(SVG).expect("the SVG parses");
+    engine.keep_fetched_images(
+        view,
+        FetchedImages { loaded: 0, svgs: vec![(url, doc)], failed: Vec::new(), gave_up: Vec::new(), offscreen: 0 },
+    );
+    engine.views[&view].lay.loaded_images.borrow_mut().due = false;
+    write(&mut engine, 40);
+    frame(&mut engine, view);
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "a splice kept the SVG image's size from before it arrived (spliced {}, last miss {miss:?})",
         now - spliced
     );
 }

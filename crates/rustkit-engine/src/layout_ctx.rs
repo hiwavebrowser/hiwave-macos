@@ -54,6 +54,10 @@ pub(crate) struct LayoutCtx {
     /// `drawImage` of an SVG `<img>` rasterizes its path list (STR-7
     /// slice 3).
     pub(crate) canvas_svgs: crate::canvas_paint::CanvasSvgs,
+    /// Moves whenever an SVG image (fetched or a `data:` URL) enters `svg_cache`: an `<img>`'s
+    /// natural size can come from there, so a kept box tree built before it is stale
+    /// ([`Self::image_generation`]).
+    pub(crate) svg_images: std::cell::Cell<u64>,
     /// The SVG paint declarations (`fill`, `stroke`, `stop-color`, ...)
     /// author rules give each element inside an inline `<svg>`, by raw
     /// NodeId. Filled by `cache_svg_paint_styles` before each build (a
@@ -80,10 +84,20 @@ impl Default for LayoutCtx {
             building: RefCell::default(),
             svg_cache: RefCell::default(),
             canvas_svgs: Default::default(),
+            svg_images: std::cell::Cell::new(0),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
             nested_contexts: std::cell::Cell::new(false),
         }
+    }
+}
+
+impl LayoutCtx {
+    /// What an `<img>`'s natural size can come from has changed when this moves: a raster image
+    /// entered or left the image cache, or an SVG image entered the SVG cache. The kept box tree
+    /// records it at its build and is refused when it differs (#1304; the SVG half after batch 108).
+    pub(crate) fn image_generation(&self) -> u64 {
+        self.image_manager.cache_generation().wrapping_add(self.svg_images.get())
     }
 }
 
