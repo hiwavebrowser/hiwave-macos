@@ -2956,13 +2956,26 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
             .collect()
     }
 
+    /// [`budget_stops`] of the page's scripts only. Once a load script has
+    /// spent the budget, every lifecycle step after it (`event:*`, the
+    /// load's `timers`) runs with the 50 ms stop grace, and one the page
+    /// thread is held in past that (heavy machine load: #1015, #1034) logs
+    /// a stop of its own. That is a claim about the step, not the script
+    /// (T44).
+    fn script_stops(log: &str) -> Vec<(String, u64)> {
+        budget_stops(log)
+            .into_iter()
+            .filter(|(source, _)| !source.starts_with("event:") && source != "timers")
+            .collect()
+    }
+
     /// Stage 1 (watchdog): h19_spin.html's script, during the load, on the
     /// content thread with the app's builder. Stopped at the 15 s load
     /// budget, and the log names it and how long it ran.
     #[test]
     fn content_thread_a_load_script_that_never_ends_is_stopped_at_the_15_s_budget_and_logged() {
         let (_view, took, log) = load_spin(H19_PAGE);
-        let stops = budget_stops(&log);
+        let stops = script_stops(&log);
         assert_eq!(stops.len(), 1, "{log}");
         assert_eq!(stops[0].0, "inline#1", "{log}");
         assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
@@ -2975,7 +2988,7 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
     #[test]
     fn content_thread_a_pure_js_spin_with_no_host_call_is_stopped_at_the_15_s_budget() {
         let (view, took, log) = load_spin(PURE_CALLBACK_SPIN_PAGE);
-        let stops = budget_stops(&log);
+        let stops = script_stops(&log);
         assert_eq!(stops.len(), 1, "{log}");
         assert!((15_000..16_000).contains(&stops[0].1), "stopped after {} ms", stops[0].1);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
@@ -2989,7 +3002,7 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
     /// (until H19 nothing in the log said why the load just took longer).
     #[test]
     fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
-        assert_bare_spin_stopped_and_said(PURE_SPIN_PAGE, "inline#1");
+        let _ = assert_bare_spin_stopped_and_said(PURE_SPIN_PAGE, "inline#1");
     }
 
     /// T44: the same bare loop, with a `load` listener that outlives the
@@ -3000,7 +3013,10 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
     /// at 29): it is not a second line about the loop.
     #[test]
     fn content_thread_a_bare_while_true_is_logged_once_when_a_lifecycle_step_is_stopped_too() {
-        assert_bare_spin_stopped_and_said(PURE_SPIN_THEN_HELD_LOAD_PAGE, "inline#2");
+        let log = assert_bare_spin_stopped_and_said(PURE_SPIN_THEN_HELD_LOAD_PAGE, "inline#2");
+        // The fixture did hold the step: its own line is there.
+        let steps = budget_stops(&log);
+        assert!(steps.iter().any(|(source, _)| source == "event:load"), "{log}");
     }
 
     /// [`PURE_SPIN_PAGE`] after a script that holds `load` for 200 ms.
@@ -3010,17 +3026,21 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
 <script>window.after = true;</script></body>";
 
     /// Loads `page`, whose script `source` is a bare `while (true) {}`, and
-    /// checks the budget ended it and exactly one log line says so.
-    fn assert_bare_spin_stopped_and_said(page: &'static str, source: &str) {
-        let (view, took, log) = load_spin(page);
+    /// checks the budget ended it and exactly one log line says so. The line
+    /// is written on the page thread before the load ends, so it is waited
+    /// for (bounded) rather than read once; a lifecycle step's own stop is
+    /// not a line about the script ([`script_stops`]).
+    fn assert_bare_spin_stopped_and_said(page: &'static str, source: &str) -> String {
+        let mark = log_mark();
+        let (view, took, _) = load_spin(page);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
-        let why: Vec<&str> = log
-            .lines()
-            .filter(|line| line.contains("Script stopped at the script budget"))
-            .collect();
-        assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
-        assert!(why[0].contains(&format!("source={source}")), "{}", why[0]);
+        let _ = wake_while(&view, Duration::from_secs(10), |v| !script_stops(&view_log(v, mark)).is_empty());
+        let log = view_log(&view, mark);
+        let why = script_stops(&log);
+        assert_eq!(why.len(), 1, "not one line says why the script ended:\n{log}");
+        assert_eq!(why[0].0, source, "{log}");
         assert_eq!(read(&view, "String(window.first)"), r#"String("true")"#);
+        log
     }
 
     /// Stage 1, after the load: a timer's bare `while (true) {}` is ended,
