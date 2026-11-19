@@ -19,6 +19,8 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_System_Registry",
 ] }
+# The `#[implement]` macro (the web-font registry's own font file loader) names this crate.
+windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "20.1"
