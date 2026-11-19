@@ -13370,7 +13370,7 @@ impl layout_ctx::LayoutCtx {
         }
         // An image that arrived since the kept tree was built: its kept box has the natural size of
         // before (BOXES-DIFF receipt: 150x150 spliced, 184x184 built, one live capture of two).
-        if self.image_manager.cache_generation() != lay.script_unlaid_images.get() {
+        if self.image_generation() != lay.script_unlaid_images.get() {
             return miss("an image arrived since the kept tree was built");
         }
         let plan = match restyle_plan(document, written) {
@@ -13597,7 +13597,7 @@ impl layout_ctx::LayoutCtx {
             lay.script_unlaid_animated
                 .set(keep && (lay.animations.borrow().running() || lay.animations.borrow().svg_moving()));
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
-            lay.script_unlaid_images.set(self.image_manager.cache_generation());
+            lay.script_unlaid_images.set(self.image_generation());
         }
 
         // Layout computation
@@ -21804,6 +21804,7 @@ impl Engine {
                     svgs.insert(url.to_string(), std::sync::Arc::new(doc.clone()));
                 }
                 self.lctx.svg_cache.borrow_mut().insert(url.to_string(), doc);
+                self.lctx.svg_images.set(self.lctx.svg_images.get() + 1);
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -22581,6 +22582,9 @@ impl Engine {
         }
         if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
             svgs.extend(fetched.svgs.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))));
+        }
+        if !fetched.svgs.is_empty() {
+            self.lctx.svg_images.set(self.lctx.svg_images.get() + 1);
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {

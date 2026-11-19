@@ -658,6 +658,51 @@ fn an_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
     );
 }
 
+/// The #1304 follow-up (batch 108's receipt, the microsoft capture again, 1 of 2): the same stale
+/// 150x150 image box, from an SVG image. Its natural size comes from the SVG cache, not the raster
+/// cache the kept tree's image check followed, so its arrival did not refuse the splice. The SVG
+/// arrives as fetched SVGs do (`keep_fetched_images`), and, as in the race the capture hit, the
+/// script write comes before the image's own relayout runs.
+#[test]
+fn an_svg_image_that_arrived_since_the_kept_build_is_not_spliced_stale() {
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="184" height="184"><rect width="184" height="184" fill="blue"/></svg>"#;
+    set_retained_styles_for_test(Some(RetainedStyles::BoxesVerify));
+    let (mut engine, view, server) = load(
+        "<!doctype html><style>body{margin:0} .h{height:10px}</style>\
+         <div id=u><div class=h id=a></div><img id=im src=\"/late.svg\"><div class=h id=b></div></div>",
+    );
+    let write = |engine: &mut Engine, width: u32| {
+        engine
+            .execute_script(view, &format!("document.getElementById('b').style.width = '{width}px'"))
+            .expect("write");
+    };
+    // The kept tree: a full build, then a splice, with the SVG not in.
+    for width in [20, 30] {
+        write(&mut engine, width);
+        frame(&mut engine, view);
+    }
+    let (mismatches, spliced) = (splice_mismatches_for_test(), splices_for_test().0);
+    assert!(spliced > 0, "the frames before the image spliced (last miss {:?})", splices_for_test().1);
+    // The SVG arrives; the image's own relayout has not run before the next script write.
+    let url = format!("http://127.0.0.1:{}/late.svg", server.port);
+    let doc = rustkit_svg::SvgDocument::parse(SVG).expect("the SVG parses");
+    engine.keep_fetched_images(
+        view,
+        FetchedImages { loaded: 0, svgs: vec![(url, doc)], failed: Vec::new(), gave_up: Vec::new(), offscreen: 0 },
+    );
+    engine.views[&view].lay.loaded_images.borrow_mut().due = false;
+    write(&mut engine, 40);
+    frame(&mut engine, view);
+    let (now, miss) = splices_for_test();
+    set_retained_styles_for_test(None);
+    assert_eq!(
+        splice_mismatches_for_test() - mismatches,
+        0,
+        "a splice kept the SVG image's size from before it arrived (spliced {}, last miss {miss:?})",
+        now - spliced
+    );
+}
+
 /// A written inline holding only a block is a culled inline: a full build makes it a block box
 /// (`rebox_culled_inline`) before its parent keeps it. The splice's box for it must be that box.
 #[test]
