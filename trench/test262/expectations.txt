@@ -7531,8 +7531,6 @@ FAIL	test/staging/sm/async-functions/async-property-name-error.js	sloppy
 FAIL	test/staging/sm/async-functions/async-property-name-error.js	strict
 FAIL	test/staging/sm/async-functions/create-function-parse-before-getprototype.js	sloppy
 FAIL	test/staging/sm/async-functions/create-function-parse-before-getprototype.js	strict
-FAIL	test/staging/sm/class/fields-static-class-name-binding-eval.js	sloppy
-FAIL	test/staging/sm/class/fields-static-class-name-binding-eval.js	strict
 FAIL	test/staging/sm/class/innerBinding.js	sloppy
 FAIL	test/staging/sm/class/innerBinding.js	strict
 FAIL	test/staging/sm/class/methDefn.js	sloppy
