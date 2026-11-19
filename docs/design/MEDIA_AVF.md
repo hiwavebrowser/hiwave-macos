@@ -318,8 +318,14 @@ their bytes come from memory instead of the network.
 
 ### 3.5 The element and its script surface (Milestone 1 scope)
 
-The stubbed members in dom.rs become host calls into the `MediaHost`. They follow the
-HTML spec's algorithms, and use the kept `HTMLMediaElement` model for state:
+The stubbed members in dom.rs become calls into the **engine** (`__rk.mediaCall`), never
+into the `MediaHost` directly (§3.2). The engine runs the HTML spec's algorithms on its
+element state machine (the kept `HTMLMediaElement` model). Anything that needs a player
+becomes a command on the channel to the main-thread `MediaHost`. The state the getters
+read comes back to the engine as snapshots, drained at frame ticks. The engine pushes it
+to the element with each event it fires, so a handler reads the state as of its own
+event. The path is script → engine → command channel → `MediaHost`, and back as
+snapshots → engine → events and getters.
 
 - **Attributes:** `src`, and `<source>` children (resource selection: first source with
   a type `canPlayType` does not reject), `currentSrc`, `preload` (default `metadata`),
@@ -353,7 +359,7 @@ HTML spec's algorithms, and use the kept `HTMLMediaElement` model for state:
 `controls` draws a control bar that RustKit renders in the page: a closed
 UA shadow tree of ordinary elements with play/pause, a scrubber, the time, mute,
 volume and fullscreen (fullscreen is a stub until the Fullscreen API exists). It is
-styled by a UA sheet and driven by the same host calls script uses. Being DOM, it is
+styled by a UA sheet and driven by the same engine calls script uses. Being DOM, it is
 hit-tested, focused and painted like page content, and it needs no new paint path.
 
 Its look is pinned against Chrome only for size: the bar's height and the element's
@@ -382,9 +388,14 @@ Each step is its own PR, red first, behind the `media-avf` feature until step 6:
 
 1. **Dependency and notices** (§2), plus the `<video>` replaced box: the 300x150
    default, the attribute sizes and the UA style pins. No playback yet.
-2. **`MediaHost` and the polling tick.** Metadata and events, using a local fixture
-   through the resource loader (rustkit-net serves the test server). `canPlayType`.
-3. **Frames, step 1a** (copy upload, present-only frames). This PR gets the pixel pins.
+2. **The element state machine and metadata, engine side** (`media.rs`): resource
+   selection, `preload`, loading through rustkit-net, metadata and events using a local
+   fixture, the getters, and `canPlayType`. No player and no `MediaHost` yet. The
+   metadata comes from an `AVURLAsset` probe fed by the resource loader. `AVURLAsset` is
+   not main-thread only, so the probe runs on the engine thread.
+3. **The main-thread `MediaHost`** (§3.2): its command channel (create, load, destroy
+   first) and its state snapshots, drained by the engine at frame ticks. Then **frames,
+   step 1a**: copy upload, present-only frames, with the pixel pins.
 4. **`play` / `pause` / seek / volume / rate / loop / autoplay policy**, with their
    event-order pins.
 5. **Controls.**
