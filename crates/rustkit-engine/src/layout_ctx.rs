@@ -49,6 +49,11 @@ pub(crate) struct LayoutCtx {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
+    /// The keys of `svg_cache` that inline svg passes parsed while an svg
+    /// paint transition wrote moving values into the markup (A2.2): one
+    /// per frame, evicted by the next pass that no longer uses them, so a
+    /// long transition keeps the cache flat.
+    pub(crate) svg_transient_keys: RefCell<Vec<String>>,
     /// The SVG images of `svg_cache` (fetched or data: URLs, not inline
     /// `<svg>`), shared with the canvas image loader: a canvas
     /// `drawImage` of an SVG `<img>` rasterizes its path list (STR-7
@@ -79,6 +84,7 @@ impl Default for LayoutCtx {
             style_trace: RefCell::default(),
             building: RefCell::default(),
             svg_cache: RefCell::default(),
+            svg_transient_keys: RefCell::default(),
             canvas_svgs: Default::default(),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),

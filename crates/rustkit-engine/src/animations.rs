@@ -1266,7 +1266,7 @@ impl Animations {
         !self.transitions.is_empty()
             || !self.events.is_empty()
             || self.css.iter().any(CssAnimation::moving)
-            || self.svg_moving()
+            || !self.svg_transitions.is_empty()
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<AnimationEvent> {
@@ -3059,9 +3059,11 @@ pub(crate) fn svg_spec_for<'a>(
 }
 
 impl Animations {
-    /// Whether an svg paint transition is running.
+    /// Whether an svg paint transition's value is moving at the clock: one
+    /// in its delay holds its start value, so its frames need no build
+    /// until the delay ends (`active()` keeps the frames turning).
     pub(crate) fn svg_moving(&self) -> bool {
-        !self.svg_transitions.is_empty()
+        self.svg_transitions.iter().any(|t| self.clock_ms >= t.t.start_ms())
     }
 
     /// Whether the svg lane holds nothing: no before-change value and no

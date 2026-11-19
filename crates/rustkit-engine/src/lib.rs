@@ -21473,8 +21473,18 @@ impl layout_ctx::LayoutCtx {
         if self.svg_prepass.borrow().pass_done(document.root(), &paint) {
             return;
         }
+        // A2.2: a pass under moving svg paint parses one document per frame
+        // for each animated svg. Those keys are transient: the next pass
+        // evicts the ones it no longer uses.
+        let animated = paint.values().any(|s| !s.animated.is_empty());
+        let transient = !self.svg_transient_keys.borrow().is_empty();
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut parsed: Vec<String> = Vec::new();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = self.inline_svg_key_for(&svg_el);
+            if animated || transient {
+                used.insert(key.clone());
+            }
             if self.svg_cache.borrow().contains_key(&key) || self.svg_prepass.borrow().failed.contains(&key) {
                 continue;
             }
@@ -21482,6 +21492,9 @@ impl layout_ctx::LayoutCtx {
             let xml = Engine::inline_svg_markup_from_parts(&parts, &paint);
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
+                    if animated {
+                        parsed.push(key.clone());
+                    }
                     self.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
@@ -21489,6 +21502,18 @@ impl layout_ctx::LayoutCtx {
                     self.svg_prepass.borrow_mut().failed.insert(key);
                 }
             }
+        }
+        if animated || transient {
+            let mut keys = self.svg_transient_keys.borrow_mut();
+            let mut cache = self.svg_cache.borrow_mut();
+            keys.retain(|key| {
+                let keep = used.contains(key);
+                if !keep {
+                    cache.remove(key);
+                }
+                keep
+            });
+            keys.extend(parsed);
         }
         self.svg_prepass.borrow_mut().note_pass(document.root(), &paint);
     }

@@ -279,3 +279,115 @@ fn an_html_transition_leaves_the_svg_lane_empty() {
         assert!(!lay.animations.borrow().svg_moving(), "the svg lane moved");
     }
 }
+
+/// R1 on #1330 (a): each frame of a moving svg paint parses its svg under
+/// a new key. The pass after evicts the keys it no longer uses, so the
+/// cache stays flat over a long transition (400 frames here).
+#[test]
+fn a_long_svg_transition_keeps_the_svg_cache_flat() {
+    let (mut engine, view, _server) = load(&page(
+        "#p{fill:blue;transition:fill 2000ms linear}#p.on{fill:red}",
+        "",
+    ));
+    read(
+        &mut engine,
+        view,
+        "(document.getElementById('p').classList.add('on'), getComputedStyle(document.getElementById('p')).fill)",
+    );
+    let at_start = engine.lctx.svg_cache.borrow().len();
+    let mut most = at_start;
+    for _ in 0..40 {
+        pump(&mut engine, view, 50);
+        most = most.max(engine.lctx.svg_cache.borrow().len());
+    }
+    assert!(
+        most <= at_start + 2,
+        "svg_cache grew from {at_start} to {most} entries during the transition"
+    );
+    pump(&mut engine, view, 100);
+    let end = read(
+        &mut engine,
+        view,
+        "getComputedStyle(document.getElementById('p')).fill",
+    );
+    assert_eq!(end, "rgb(255, 0, 0)");
+}
+
+fn frames(engine: &Engine, view: EngineViewId) -> (u32, u32) {
+    let stats = engine.relayout_stats(view).expect("stats");
+    (stats.relayouts, stats.animation_frames_painted)
+}
+
+/// R1 on #1330 (b): a transition in its delay holds its start value, so
+/// its frames take no build; the builds start with the value moving.
+#[test]
+fn an_svg_transition_in_its_delay_takes_no_build() {
+    let (mut engine, view, _server) = load(&page(
+        "#p{fill:blue;transition:fill 100ms linear 100ms}#p.on{fill:red}",
+        "",
+    ));
+    let fill = "getComputedStyle(document.getElementById('p')).fill";
+    read(
+        &mut engine,
+        view,
+        &format!("(document.getElementById('p').classList.add('on'), {fill})"),
+    );
+    let (relayouts, _) = frames(&engine, view);
+    for _ in 0..18 {
+        pump(&mut engine, view, 5);
+        let lay = engine.views[&view].lay.clone();
+        assert!(!lay.animations.borrow().svg_moving(), "moving in the delay");
+        assert!(lay.animations.borrow().active(), "the frames keep turning");
+    }
+    assert_eq!(
+        frames(&engine, view).0,
+        relayouts,
+        "no relayout in the delay"
+    );
+    assert_eq!(
+        read(&mut engine, view, fill),
+        "rgb(0, 0, 255)",
+        "the start value"
+    );
+    pump(&mut engine, view, 60);
+    assert!(
+        frames(&engine, view).0 > relayouts,
+        "the moving value rebuilds"
+    );
+    let mid = read(&mut engine, view, fill);
+    assert!(
+        mid != "rgb(0, 0, 255)" && mid != "rgb(255, 0, 0)",
+        "moving at 150 ms: {mid}"
+    );
+    pump(&mut engine, view, 100);
+    assert_eq!(read(&mut engine, view, fill), "rgb(255, 0, 0)");
+}
+
+/// #1292: pages whose svg paint does not move schedule the same frames as
+/// before. The same HTML transition, with and without an svg that names a
+/// transition but never changes paint, takes the same relayouts and
+/// painted frames on the deterministic clock.
+#[test]
+fn an_unmoving_svg_adds_no_frames_to_an_html_transition() {
+    let count = |svg: &str| {
+        let (mut engine, view, _server) = load(&format!(
+            "<!doctype html><style>#h{{color:blue;transition:color 100ms linear}}#h.on{{color:red}}\
+             #q{{fill:blue;transition:fill 100ms linear}}</style><div id=h>x</div>{svg}"
+        ));
+        read(
+            &mut engine,
+            view,
+            "(h.classList.add('on'), getComputedStyle(h).color)",
+        );
+        let before = frames(&engine, view);
+        pump(&mut engine, view, 150);
+        let after = frames(&engine, view);
+        (after.0 - before.0, after.1 - before.1)
+    };
+    let plain = count("");
+    let with_svg = count("<svg width=10 height=10><rect id=q width=10 height=10 /></svg>");
+    assert_eq!(
+        with_svg, plain,
+        "(relayouts, painted frames) with the svg and without"
+    );
+}
