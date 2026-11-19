@@ -52,6 +52,12 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
     static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
     if let Some(shared) = SHARED_COMPOSITOR.get() {
+        // wgpu frees what a dropped engine held (textures, buffers, bind groups) only when its
+        // device is maintained. With one device for the whole process, the previous test's are
+        // freed here, before this test allocates its own: on a software adapter (WARP, a hosted
+        // Windows runner) they are process memory, and ~10 MB a test reached 9 GB and ended the
+        // test binary partway through the suite.
+        shared.device().poll(wgpu::Maintain::Wait);
         return Ok(shared.share_device());
     }
     let compositor = Compositor::new()?;
@@ -301,6 +307,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod svg_computed;
 mod console_log;
 pub mod console_file;
 mod relayout_cause;
@@ -354,12 +361,19 @@ pub use content_thread::{
 };
 mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
+mod frame_stages;
+pub use frame_stages::{
+    frame_stage_line, frame_stage_totals, host_call_rows_line, set_frame_stage_timing, FrameStageTotals,
+    FRAME_STAGE_FIELDS,
+};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_commit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wgate_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_stages_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -416,6 +430,10 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_round_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_at_present_tests;
 mod script_error_detail;
 #[cfg(test)]
 mod window_error_event_tests;
@@ -607,6 +625,8 @@ mod canvas_context_tests;
 #[cfg(test)]
 mod canvas_pixels_tests;
 #[cfg(test)]
+mod canvas_gpu_screen_tests;
+#[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
 mod flex_cross_size_tests;
@@ -689,6 +709,26 @@ mod web_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_colors_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_individual_transforms_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_sizes_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_visibility_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_lists_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_grid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_computed_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_svg_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_cost_tests;
+#[cfg(all(test, feature = "headless"))]
+mod border_radius_computed_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_timeline_tests;
@@ -708,6 +748,8 @@ mod hidden_tiles_build_tests;
 mod retained_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
+mod paint_style_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -956,6 +998,8 @@ mod snapshot_stage_tests;
 mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_shadow_blur_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2076,6 +2120,55 @@ const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 /// still due for the next turn. Callbacks that finish inside the budget
 /// still run in the one turn, which is what a pump of a few timers observes.
 const LIVE_FRAME_MS: u64 = 16;
+
+thread_local! {
+    /// RAF-ONE-ROUND on this thread (`set_one_animation_round`); `None`: `HIWAVE_RAF_ONE_ROUND`.
+    static ONE_ANIMATION_ROUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// RAF-ONE-ROUND: a frame tree's live turn (one presented frame) runs one animation-frame round
+/// on this thread's engines. Off, a late turn ran a second round, of the frame a late callback
+/// asked for (due already), before the turn returned: MotionMark's heavy cells counted two suite
+/// frames per presented frame. Off by default (on with `HIWAVE_RAF_ONE_ROUND=1`): on, a frame
+/// document's CSS animation clock can be read at the timers' clock on a turn that defers that
+/// frame, ahead of the time its animations report (`css_timeline_tests`, RAF-ONE-ROUND PR).
+pub fn set_one_animation_round(on: bool) {
+    ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
+}
+
+thread_local! {
+    /// ANIM-UPDATE-ORDER: the frame time this thread's current turn updated its animations to
+    /// before its round (`Engine::presample_animations`), while one round a turn is on.
+    static PRESAMPLED_FRAME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The animation clock a turn leaves (ANIM-UPDATE-ORDER): the frame's stamp `clock`, or the time
+/// the turn updated its animations to before its round (`presampled`) when the stamp is within a
+/// millisecond of it (the stamp carries the clock's reads), so the settle does not draw the same
+/// frame again. Never below the presampled time: the animations were already drawn at it, and a
+/// stamp read lower (a real clock against the grid) would step the painted time back.
+fn turn_animation_clock(clock: f64, presampled: Option<f64>) -> f64 {
+    match presampled {
+        Some(at) if (clock - at).abs() < 1.0 => at,
+        Some(at) => clock.max(at),
+        None => clock,
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+pub(crate) fn turn_animation_clock_for_tests(clock: f64, presampled: Option<f64>) -> f64 {
+    turn_animation_clock(clock, presampled)
+}
+
+fn one_animation_round() -> bool {
+    ONE_ANIMATION_ROUND.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() == Some("1");
+            c.set(Some(on));
+            on
+        })
+    })
+}
 
 /// What a load lends the engine to at its safe points (LAT15): the content
 /// thread's endpoint, which applies the window's commands that may run
@@ -3400,12 +3493,37 @@ pub struct Engine {
 /// inherited one): the declaration is left out and the same-named
 /// presentation attribute dropped, so rustkit-svg's parse-time inheritance
 /// gives the parent's value.
+///
+/// A2.2: `transitions` holds the author `transition*` declarations that
+/// match the element, as (property, value) in the cascade's order, for the
+/// svg paint lane (`LayoutCtx::svg_paint_transitions`); never written into
+/// the markup. `animated` is the lane's running values (`fill:rgb(...);`),
+/// written after everything else, since a transition beats every origin.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SvgPaintStyle {
     normal: String,
     important: String,
     inherit: Vec<String>,
+    transitions: Vec<(String, String)>,
+    animated: String,
 }
+
+impl SvgPaintStyle {
+    /// Whether this changes the element's markup: a style that only names
+    /// transitions serializes as no entry, so its cache key stays.
+    fn paints(&self) -> bool {
+        !self.normal.is_empty() || !self.important.is_empty() || !self.inherit.is_empty() || !self.animated.is_empty()
+    }
+}
+
+/// The `transition*` properties the svg paint side cascade collects (A2.2).
+const SVG_TRANSITION_PROPERTIES: &[&str] = &[
+    "transition",
+    "transition-property",
+    "transition-duration",
+    "transition-timing-function",
+    "transition-delay",
+];
 
 /// Of `SVG_PAINT_PROPERTIES`, the ones that are not inherited (`unset` is
 /// `initial` for them).
@@ -6927,6 +7045,16 @@ impl Engine {
     /// next turn at once. `real_clock`: see [`Self::pump_live_real`]; the
     /// tree's turn is on one clock, so its frames' turns take the same.
     async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
+        if one_animation_round() {
+            // The tree's late rounds are the frames of their turns' time (CLOCK-AT-PRESENT).
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.set_one_round(true) {
+                    debug!(error = %e, "the one-round mark failed");
+                }
+            }
+            let at = self.presample_animations(id, elapsed_ms);
+            PRESAMPLED_FRAME.with(|p| p.set(at));
+        }
         if !self.config.nested_contexts {
             return self.pump_live_turn(id, elapsed_ms, real_clock).await;
         }
@@ -6953,6 +7081,10 @@ impl Engine {
         // their documents' scripts asked of the network and of layout. The
         // turn's time is the tree's.
         let started = std::time::Instant::now();
+        // The turn is one presented frame, so it runs one animation-frame round, however many
+        // calls below run its parts (RAF-ONE-ROUND): a frame a late round's callbacks ask for,
+        // due already, is the next turn's, not a second round in a sub-turn or the stop's.
+        self.set_tree_turn(id, true);
         self.live_timer_cap = 0;
         let mut frames = self.pump_frames(id, 0, real_clock).await;
         self.live_timer_cap = 1;
@@ -6978,12 +7110,16 @@ impl Engine {
             // The turn's frame still comes (#776): the tree's due animation
             // frame callbacks run once before it returns.
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                // The callbacks are page script: the W-gate hold and the frame stage totals
+                // charge their time to the script bucket, not to the turn's `other`.
+                let _script = wgate::script_turn();
                 if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
                     debug!(error = %e, "frames: the tree's animation round failed");
                 }
             }
             out.yielded_for_frame = true;
         }
+        self.set_tree_turn(id, false);
         // The frames lay out and send what this turn's tasks wrote and asked.
         self.live_timer_cap = 0;
         let after = self.pump_frames(id, 0, real_clock).await;
@@ -6996,6 +7132,55 @@ impl Engine {
             (a, b) => a.or(b),
         };
         self.frame_requests_wake(id, out)
+    }
+
+    /// ANIM-UPDATE-ORDER (one round a turn): when the turn `elapsed_ms` on will run an animation
+    /// frame, update the animations of `id` and of its frames to that frame's time first, as HTML's
+    /// update-the-rendering does before the animation frame callbacks, so a computed read in a
+    /// callback (or in a task of the turn, whose timeline is that frame's) is the frame's value,
+    /// and the frame's animation events reach script before the callbacks.
+    /// The after-turn settle then has nothing left to draw unless script wrote. Returns the time.
+    fn presample_animations(&mut self, id: EngineViewId, elapsed_ms: u64) -> Option<f64> {
+        let at = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .and_then(|b| b.turn_frame_at(elapsed_ms))?;
+        let mut views = vec![id];
+        if let Some(v) = self.views.get(&id) {
+            views.extend(v.frames.values().map(|f| f.view));
+        }
+        for vid in views {
+            {
+                let Some(view) = self.views.get(&vid) else { continue };
+                let mut anims = view.lay.animations.borrow_mut();
+                if !anims.active() {
+                    continue;
+                }
+                if at > anims.clock_ms {
+                    anims.clock_ms = at;
+                }
+            }
+            // Draw the frame at that time and send its animation and transition events, before
+            // the round (Chrome 148: every event before its frame's rAF callbacks,
+            // `anim_event_order_probe_cft148.json`); what their listeners write is laid out.
+            if let Err(e) = self.settle_animations(vid) {
+                debug!(error = %e, "the turn's animation update failed");
+            }
+        }
+        Some(at)
+    }
+
+    /// Open or close the frame tree's turn on `id`'s timer queue (the tree's one).
+    fn set_tree_turn(&self, id: EngineViewId, open: bool) {
+        if !one_animation_round() {
+            return;
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+            if let Err(e) = bindings.set_tree_turn(open) {
+                debug!(error = %e, open, "frames: the tree's turn mark failed");
+            }
+        }
     }
 
     /// A frame request the page made during this turn asks for the next
@@ -7158,7 +7343,11 @@ impl Engine {
         // it (TIMELINE2: the frame's time once this turn's frame ran), so
         // the layout below (and the one `settle_animations` makes) reads the
         // transitions at the time script animations read.
-        view.doc.lay.animations.borrow_mut().clock_ms = bindings.animation_clock_ms();
+        // ANIM-UPDATE-ORDER: a turn whose animations were updated to its frame's time before its
+        // round keeps that time when the frame's stamp is within a millisecond of it (the stamp
+        // carries the clock's reads), so the settle below does not draw the same frame again.
+        let clock = bindings.animation_clock_ms();
+        view.doc.lay.animations.borrow_mut().clock_ms = turn_animation_clock(clock, PRESAMPLED_FRAME.with(|p| p.get()));
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -11961,6 +12150,8 @@ impl Engine {
                     roots: roots.iter().copied().collect(),
                     pending,
                     found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
                     walked: 0,
                 })
             });
@@ -12033,7 +12224,12 @@ impl Engine {
                 .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
             view.lay.script_last_cooldown.set(Some(cooldown));
             view.lay.script_cooldown.set(cooldown);
-            view.lay.want_script_unlaid.set(cooldown == 0);
+            // With the box tree kept (`boxes`), the full build after this miss keeps its tree for
+            // the next relayout's splice whatever the cooldown: letting it go left that splice
+            // `no kept tree`, a full build of the page (BOXES-DIFF).
+            view.lay
+                .want_script_unlaid
+                .set(cooldown == 0 || retained_styles_mode().keeps_boxes());
             return miss(&why);
         }
         {
@@ -12271,6 +12467,8 @@ impl Engine {
                     roots: roots.iter().copied().collect(),
                     pending: pending.clone(),
                     found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
                     walked: 0,
                 })
             });
@@ -12870,6 +13068,11 @@ impl Engine {
         if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
             return miss("a relayout is pending");
         }
+        // A2.2: an svg paint transition re-rasterises its svg, which only a
+        // build does (no frame change carries an svg's raster yet).
+        if view.lay.animations.borrow().svg_moving() {
+            return miss("an svg paint transition runs");
+        }
         let size = match view.headless_bounds {
             Some(b) => (b.width, b.height),
             None => match self.presenter.as_mut().map(|p| p.host_bounds(view.viewhost_id)) {
@@ -13135,7 +13338,7 @@ impl layout_ctx::LayoutCtx {
         };
         // A running transition or animation moves boxes no write reached: their kept boxes hold
         // last frame's values (#1246 R1 item 1, carried into the splice).
-        if lay.animations.borrow().running() {
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
             return miss("animations running");
         }
         // One that moved while the kept tree was built may have moved on or ended since, in frames
@@ -13149,6 +13352,11 @@ impl layout_ctx::LayoutCtx {
         // write to that layer since the kept tree was built refuses it (#1247 delta R1).
         if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
             return miss("script animations moved since the kept tree was built");
+        }
+        // An image that arrived since the kept tree was built: its kept box has the natural size of
+        // before (BOXES-DIFF receipt: 150x150 spliced, 184x184 built, one live capture of two).
+        if self.image_manager.cache_generation() != lay.script_unlaid_images.get() {
+            return miss("an image arrived since the kept tree was built");
         }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
@@ -13168,6 +13376,8 @@ impl layout_ctx::LayoutCtx {
                 roots: plan.roots.iter().copied().collect(),
                 pending: plan.pending,
                 found: HashMap::new(),
+                dropped: Default::default(),
+                refused: None,
                 walked: 0,
             })
         });
@@ -13175,7 +13385,15 @@ impl layout_ctx::LayoutCtx {
         let Some(build) = RESTYLE_BUILD.with(|build| build.borrow_mut().take()) else {
             return miss("no restyle build");
         };
+        if let Some(why) = build.refused {
+            return miss(why);
+        }
         let mut found = build.found;
+        // A root whose box its parent's build drops has no box in a full build: it splices as one
+        // whose box went (BOXES-DIFF, board report.html's emptied `#error-container`).
+        for root in &build.dropped {
+            found.remove(root);
+        }
         let mut next_id = max_element_id(&tree) + 1;
         let block_level = |b: &LayoutBox| {
             !b.style.display.is_inline_level() && b.style.display != rustkit_css::Display::Contents
@@ -13303,19 +13521,53 @@ impl layout_ctx::LayoutCtx {
                     }
                     _ => None,
                 };
+                // BOXES-DIFF: with the box tree kept, a full build numbers its elements as a splice
+                // does (`number_in_document_order`: in tree order, one number per element with a
+                // box). The build itself numbers each element's box as it builds it, also boxes a
+                // parent then drops (an empty block, a `display: contents` element), so its numbers
+                // have gaps a splice cannot know of: the same element read 4 spliced and 5 built,
+                // and what compares numbers between builds saw a different number for one element.
+                let full_build = || {
+                    let mut tree = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                    if retained_styles_mode().keeps_boxes() {
+                        number_in_document_order(&mut tree);
+                    }
+                    tree
+                };
                 match spliced {
                     Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
-                        let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
-                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                        // What the animation state's sweep would drop if the build ended with the
+                        // splice, as `with_building` decides it (#1257 delta R1): the comparison
+                        // build below visits every element, so the real sweep never shows it.
+                        let would_sweep = lay.as_ref().map_or_else(Vec::new, |lay| {
+                            lay.animations.borrow().would_sweep(layout_ctx::build_was_partial(false))
+                        });
+                        let full = full_build();
+                        let note_difference = |difference: String| {
                             let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
                             #[cfg(test)]
                             SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        };
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            note_difference(difference);
+                        }
+                        // Before-change values the splice's sweep drops of elements that are
+                        // still there (the full build visited them): their next style change
+                        // would start no transition.
+                        let lost = lay.as_ref().map_or(0, |lay| {
+                            let animations = lay.animations.borrow();
+                            would_sweep.iter().filter(|node| animations.visited_this_build(**node)).count()
+                        });
+                        if lost > 0 {
+                            note_difference(format!(
+                                "the splice's sweep drops the before-change values of {lost} elements still styled"
+                            ));
                         }
                         full
                     }
                     Some(spliced) => spliced,
-                    None => self.build_layout_from_document(document, external_stylesheets, javascript_enabled),
+                    None => full_build(),
                 }
             })
         };
@@ -13327,8 +13579,10 @@ impl layout_ctx::LayoutCtx {
             let keep = lay.want_script_unlaid.get() && (lay.retain_script_unlaid_now.get() || forced);
             *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
             lay.script_unlaid_unpublished.set(keep && forced);
-            lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
+            lay.script_unlaid_animated
+                .set(keep && (lay.animations.borrow().running() || lay.animations.borrow().svg_moving()));
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
+            lay.script_unlaid_images.set(self.image_manager.cache_generation());
         }
 
         // Layout computation
@@ -13573,7 +13827,9 @@ impl layout_ctx::LayoutCtx {
     /// INC5 stage 2: the last layout again, without a build, when the view
     /// keeps it under the same key and nothing animates.
     fn skipped_build(&self, lay: &Rc<layout_ctx::ViewLayout>, bounds: (u32, u32)) -> Option<LayoutBox> {
-        if lay.animations.borrow().running() {
+        // A2.2: a moving svg paint is in the svg's raster key, which the
+        // kept layout holds as of its build.
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
             return None;
         }
         let mut slot = lay.incremental_layout.borrow_mut();
@@ -14161,7 +14417,12 @@ impl layout_ctx::LayoutCtx {
     /// value is one frame's: a tree kept now would replay that frame, and
     /// a kept tree taken now would skip the frame due.
     fn building_view_animates(&self) -> bool {
-        self.with_building_lay(|lay| lay.animations.borrow().running()).unwrap_or(false)
+        // A2.2: so is an svg paint transition (the svg's raster key moves).
+        self.with_building_lay(|lay| {
+            let anims = lay.animations.borrow();
+            anims.running() || anims.svg_moving()
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -14437,6 +14698,27 @@ impl Engine {
         }
 
         segment
+    }
+
+    /// Whether a parent's build keeps `child` (already reboxed if a culled inline) among its boxes:
+    /// blocks with children, visible styling or a part in layout while empty; inlines with content
+    /// or visible styling; text, images, form controls and line breaks always. A full build and a
+    /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
+    fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
+        match child.box_type {
+            BoxType::Block | BoxType::AnonymousBlock => {
+                !child.children.is_empty()
+                    || Engine::has_visible_styling(&child.style)
+                    || Engine::empty_block_affects_layout(child, parent_style)
+            }
+            BoxType::Inline => {
+                Engine::has_content_children(child) || Engine::has_visible_styling(&child.style)
+            }
+            BoxType::Text(_)
+            | BoxType::Image { .. }
+            | BoxType::FormControl(_)
+            | BoxType::LineBreak => true,
+        }
     }
 
     /// Attach element identity so the geometry oracle can join this box to
@@ -15683,8 +15965,49 @@ impl layout_ctx::LayoutCtx {
                     match restyle {
                         RestyleChild::Build => {}
                         RestyleChild::Root => {
+                            // BOXES-DIFF: the root's box as this build keeps it below, so a
+                            // splice puts in what a full build has: a culled inline reboxed,
+                            // and none where the box is dropped (an empty block with nothing
+                            // visible about it, hidden `<details>` content).
+                            let mut child_box = child_box;
+                            let contents =
+                                child_box.style.display == rustkit_css::Display::Contents;
+                            if !contents {
+                                Engine::rebox_culled_inline(&mut child_box);
+                            }
+                            let shown = !closed_details || details_summary == Some(child_index);
+                            let kept = contents
+                                || (shown && Engine::parent_keeps(&child_box, &layout_box.style));
+                            let refused = if is_details {
+                                Some("a written element in a <details>")
+                            } else if !kept
+                                && matches!(child_box.box_type, BoxType::Inline)
+                                && child_box.children.iter().any(|c| {
+                                    matches!(
+                                        c.position,
+                                        rustkit_layout::Position::Absolute
+                                            | rustkit_layout::Position::Fixed
+                                    )
+                                })
+                            {
+                                Some("a dropped inline keeps its out-of-flow boxes")
+                            } else {
+                                None
+                            };
+                            // A box the parent's build drops (or a `display: contents` one) is
+                            // still a styled element: noted for `getComputedStyle` as a full build
+                            // notes it below, or script read `display: none` after the splice.
+                            if contents || !kept {
+                                self.note_boxless_style(&child_box, Some(&layout_box.style));
+                            }
                             RESTYLE_BUILD.with(|build| {
                                 if let Some(build) = build.borrow_mut().as_mut() {
+                                    if !kept {
+                                        build.dropped.insert(child.id.raw());
+                                    }
+                                    if refused.is_some() {
+                                        build.refused = refused;
+                                    }
                                     build.found.insert(child.id.raw(), child_box);
                                 }
                             });
@@ -15737,25 +16060,7 @@ impl layout_ctx::LayoutCtx {
                     Engine::rebox_culled_inline(&mut child_box);
 
                     // Determine if box should be included in layout tree
-                    let should_include = match child_box.box_type {
-                        BoxType::Block | BoxType::AnonymousBlock => {
-                            // Include blocks if they have children, OR have visible styling,
-                            // OR still take part in layout while empty.
-                            !child_box.children.is_empty()
-                                || Engine::has_visible_styling(&child_box.style)
-                                || Engine::empty_block_affects_layout(&child_box, &layout_box.style)
-                        }
-                        BoxType::Inline => {
-                            // Include inline boxes if they have content children (text, images, form controls)
-                            // or have visible styling (padding, border, background)
-                            Engine::has_content_children(&child_box)
-                                || Engine::has_visible_styling(&child_box.style)
-                        }
-                        BoxType::Text(_)
-                        | BoxType::Image { .. }
-                        | BoxType::FormControl(_)
-                        | BoxType::LineBreak => true,
-                    };
+                    let should_include = Engine::parent_keeps(&child_box, &layout_box.style);
 
                     if should_include && shown {
                         let into = if is_details && details_summary == Some(child_index) {
@@ -17976,6 +18281,8 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            // The parent's whole list (R1 on #1290).
+            "box-shadow" => style.box_shadows = parent.box_shadows.clone(),
             // Not inherited by default, and asked for by name on nearly
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
@@ -19046,10 +19353,27 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "box-shadow" => {
-                // Parse box-shadow: offset-x offset-y blur spread color [inset]
-                // Simple parser for common formats
-                if let Some(shadow) = parse_box_shadow(value) {
-                    style.box_shadows.push(shadow);
+                // A declaration is the whole list (css-backgrounds-3 §7.1):
+                // `none` empties it, a comma list is that many shadows in
+                // its order (the first on top), and one shadow that does not
+                // read drops the declaration. Until CSS-TRANS D every
+                // matching declaration was appended and a comma list read as
+                // one shadow, so `#h.on{box-shadow:B}` painted A and B and a
+                // transition never saw a change.
+                // `revert` (and `revert-layer` reaching here, outside a
+                // layer) rolls back to the UA sheet, which has no shadow.
+                let value = value.trim();
+                if value.eq_ignore_ascii_case("none")
+                    || value.eq_ignore_ascii_case("revert")
+                    || value.eq_ignore_ascii_case("revert-layer")
+                {
+                    style.box_shadows.clear();
+                } else if let Some(list) = split_by_comma(value)
+                    .into_iter()
+                    .map(parse_box_shadow)
+                    .collect::<Option<Vec<_>>>()
+                {
+                    style.box_shadows = list;
                 }
             }
             "width" => {
@@ -19793,6 +20117,9 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            // `initial` / `unset`: no shadow (an earlier declaration's list
+            // stayed until R1 on #1290).
+            "box-shadow" => style.box_shadows.clear(),
             "transition" | "transition-property" => {
                 style.transitions.clear();
                 animations::sync_transition_scalars(style, false);
@@ -20608,7 +20935,7 @@ impl Engine {
                     out.push('<');
                     out.push_str(tag_name);
                     let styled;
-                    let attributes = match paint.get(&node.id.raw()) {
+                    let attributes = match paint.get(&node.id.raw()).filter(|p| p.paints()) {
                         Some(p) => {
                             let mut a = attributes.clone();
                             for property in &p.inherit {
@@ -20628,7 +20955,7 @@ impl Engine {
                                         .is_none_or(|(prop, _)| !own_important.contains(&prop.trim().to_ascii_lowercase()))
                                 })
                                 .collect();
-                            let style = format!("{}{};{}", p.normal, own, important);
+                            let style = format!("{}{};{}{}", p.normal, own, important, p.animated);
                             a.insert("style".to_string(), style);
                             styled = a;
                             &styled
@@ -20672,6 +20999,13 @@ impl Engine {
         let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
             .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
+        // The view's own document (a test may style a detached one).
+        if let Some(view) = view {
+            if let Some(own) = view.document.as_ref().filter(|d| std::ptr::eq(Rc::as_ptr(d), document)) {
+                self.lctx.svg_paint_transitions(&view.lay, own);
+                self.lctx.note_svg_paint(&view.lay, own);
+            }
+        }
     }
 }
 
@@ -20785,6 +21119,81 @@ impl layout_ctx::LayoutCtx {
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
+    /// A2.2: one pass of `lay`'s svg paint lane over `document` at its
+    /// animation clock (`Animations::svg_update`), then the running values
+    /// written into the paint map just cached (`SvgPaintStyle::animated`),
+    /// so the svg markup, its cache key and raster, and the computed read
+    /// (`svg_computed`) all take them. The lane's own `transition*` lists
+    /// are the side cascade's (`SvgPaintStyle::transitions`).
+    ///
+    /// Cost: nothing when no svg element names a transition and the lane
+    /// is empty. Otherwise the svgs are resolved only when the paint map or
+    /// the DOM changed since the last pass, or a transition runs; a
+    /// running one re-rasterises its svg every frame, as a moving
+    /// `currentcolor` does.
+    fn svg_paint_transitions(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let base = self.svg_paint_styles.borrow().clone();
+        let mut anims = lay.animations.borrow_mut();
+        let named = base.values().any(|s| !s.transitions.is_empty());
+        if !named && anims.svg_lane_empty() {
+            anims.svg_last = None;
+            return;
+        }
+        let gen = rustkit_dom::mutation_generation();
+        let unchanged = anims
+            .svg_last
+            .as_ref()
+            .is_some_and(|(map, at)| *at == gen && std::ptr::eq(map.as_ptr(), Rc::as_ptr(&base)));
+        if anims.svg_moving() || !unchanged {
+            // One parse per distinct declaration list.
+            let mut lists: HashMap<&[(String, String)], Rc<Vec<rustkit_css::TransitionItem>>> = HashMap::new();
+            let mut paints = Vec::new();
+            for svg in svg_computed::outermost_svgs(document) {
+                for (node, (fill, stroke)) in svg_computed::resolve_paints(&svg, &base, svg_computed::BLACK) {
+                    let declared = base.get(&node).map(|s| s.transitions.as_slice()).unwrap_or(&[]);
+                    let items = (!declared.is_empty()).then(|| {
+                        lists
+                            .entry(declared)
+                            .or_insert_with(|| {
+                                let mut scratch = ComputedStyle::default();
+                                for (property, value) in declared {
+                                    self.apply_style_property(&mut scratch, property, value);
+                                }
+                                Rc::new(scratch.transitions)
+                            })
+                            .clone()
+                    });
+                    for (prop, paint) in [("fill", fill), ("stroke", stroke)] {
+                        let spec = items.as_ref().and_then(|i| animations::svg_spec_for(i, prop).cloned());
+                        if spec.is_some() || anims.svg_holds(node, prop) {
+                            paints.push((node, prop, paint, spec));
+                        }
+                    }
+                }
+            }
+            anims.svg_update(&paints);
+            anims.svg_last = Some((Rc::downgrade(&base), gen));
+        }
+        let moving = anims.svg_overlay();
+        drop(anims);
+        if moving.is_empty() {
+            return;
+        }
+        let mut map = (*base).clone();
+        for (node, prop, colour) in moving {
+            let style = map.entry(node).or_default();
+            style.animated.push_str(&format!("{prop}:{};", css_color(colour)));
+        }
+        *self.svg_paint_styles.borrow_mut() = Rc::new(map);
+    }
+
+    /// Keep `document` and the paint map just cached on `lay`'s view for
+    /// svg content's computed paint (`svg_computed`), read after the build.
+    fn note_svg_paint(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let paint = self.svg_paint_styles.borrow().clone();
+        *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot::new(document, paint)));
+    }
+
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
     /// against: checkedness, the hovered and pressed chains, and the
     /// focused element with the elements above it.
@@ -20852,6 +21261,8 @@ impl layout_ctx::LayoutCtx {
             let keyed = KeyedElement::of(tag_name, attributes);
             // (important, specificity, order, property, value)
             let mut won: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
+            // A2.2: the `transition*` declarations, ranked the same way.
+            let mut transitions: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
             for (order, rule, keys) in &paint_rules {
                 let (order, rule) = (*order, *rule);
                 if !Engine::keys_may_match_keyed(keys, &keyed) {
@@ -20865,6 +21276,11 @@ impl layout_ctx::LayoutCtx {
                 let Some(specificity) = specificity else { continue };
                 for decl in &rule.declarations {
                     let rustkit_css::PropertyValue::Specified(value) = &decl.value else { continue };
+                    if SVG_TRANSITION_PROPERTIES.contains(&decl.property.as_str()) {
+                        let value = self.resolve_css_variables(value, root_vars);
+                        transitions.push((decl.important, specificity, order, decl.property.as_str(), value));
+                        continue;
+                    }
                     if !SVG_PAINT_PROPERTIES.contains(&decl.property.as_str()) {
                         continue;
                     }
@@ -20876,11 +21292,18 @@ impl layout_ctx::LayoutCtx {
                     won.push((decl.important, specificity, order, decl.property.as_str(), value));
                 }
             }
-            if won.is_empty() {
+            if won.is_empty() && transitions.is_empty() {
                 return None;
             }
             won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-            let mut style = SvgPaintStyle::default();
+            transitions.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+            let mut style = SvgPaintStyle {
+                transitions: transitions
+                    .into_iter()
+                    .map(|(_, _, _, property, value)| (property.to_string(), value))
+                    .collect(),
+                ..SvgPaintStyle::default()
+            };
             // The winner per property is its last entry; a CSS-wide
             // keyword there is applied here rather than written out.
             let mut keyword: HashMap<&str, String> = HashMap::new();
@@ -20897,7 +21320,7 @@ impl layout_ctx::LayoutCtx {
             }
             style.inherit.sort();
             won.retain(|(_, _, _, property, _)| !keyword.get(property).is_some_and(|v| wide(v)));
-            if won.is_empty() && style.inherit.is_empty() {
+            if won.is_empty() && style.inherit.is_empty() && style.transitions.is_empty() {
                 return None;
             }
             for (important, _, _, property, value) in won {
@@ -20977,7 +21400,10 @@ impl layout_ctx::LayoutCtx {
                 if !(rule.media.is_empty() || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))) {
                     continue;
                 }
-                if rule.declarations.iter().any(|d| SVG_PAINT_PROPERTIES.contains(&d.property.as_str())) {
+                if rule.declarations.iter().any(|d| {
+                    SVG_PAINT_PROPERTIES.contains(&d.property.as_str())
+                        || SVG_TRANSITION_PROPERTIES.contains(&d.property.as_str())
+                }) {
                     paint.push((order, source, index, self.subject_keys(&rule.selector)));
                 }
                 if selects_the_root(&rule.selector) {
@@ -21135,8 +21561,18 @@ impl layout_ctx::LayoutCtx {
         if self.svg_prepass.borrow().pass_done(document.root(), &paint) {
             return;
         }
+        // A2.2: a pass under moving svg paint parses one document per frame
+        // for each animated svg. Those keys are transient: the next pass
+        // evicts the ones it no longer uses.
+        let animated = paint.values().any(|s| !s.animated.is_empty());
+        let transient = !self.svg_transient_keys.borrow().is_empty();
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut parsed: Vec<String> = Vec::new();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = self.inline_svg_key_for(&svg_el);
+            if animated || transient {
+                used.insert(key.clone());
+            }
             if self.svg_cache.borrow().contains_key(&key) || self.svg_prepass.borrow().failed.contains(&key) {
                 continue;
             }
@@ -21144,6 +21580,9 @@ impl layout_ctx::LayoutCtx {
             let xml = Engine::inline_svg_markup_from_parts(&parts, &paint);
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
+                    if animated {
+                        parsed.push(key.clone());
+                    }
                     self.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
@@ -21151,6 +21590,18 @@ impl layout_ctx::LayoutCtx {
                     self.svg_prepass.borrow_mut().failed.insert(key);
                 }
             }
+        }
+        if animated || transient {
+            let mut keys = self.svg_transient_keys.borrow_mut();
+            let mut cache = self.svg_cache.borrow_mut();
+            keys.retain(|key| {
+                let keep = used.contains(key);
+                if !keep {
+                    cache.remove(key);
+                }
+                keep
+            });
+            keys.extend(parsed);
         }
         self.svg_prepass.borrow_mut().note_pass(document.root(), &paint);
     }
@@ -26580,6 +27031,8 @@ impl Engine {
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
+            lctx.svg_paint_transitions(&lay, &document);
+            lctx.note_svg_paint(&lay, &document);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
@@ -30841,6 +31294,23 @@ fn publish_geometry(
                 .unwrap_or(true)
         })
     })));
+    // TREE-REUSE step (2): whether an inline style write can change which rules match (a rule
+    // on the `style` attribute, or a `:has()`). The same live index; unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_style_attr_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| {
+                    index.as_ref().map(|ix| {
+                        let rules = &ix.reads.invalidation;
+                        rules.has || rules.attributes.contains_key("style")
+                    })
+                })
+                .unwrap_or(true)
+        })
+    })));
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
@@ -31020,12 +31490,15 @@ fn layout_hit_tester(
 /// display: contents or none, dropped empty boxes, the root) added. A node
 /// that also produced a box keeps that box's style. `pseudos`
 /// (`ViewLayout::pseudo_styles`) join their element's lines, each row's
-/// name prefixed `::before ` or `::after `.
+/// name prefixed `::before ` or `::after `. `svg_paint`
+/// (`ViewLayout::svg_paint`) adds every inline svg element's `fill` and
+/// `stroke` rows, as `computed_lines_source` reads them (A2.1).
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
     boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
+    svg_paint: Option<&svg_computed::SvgPaintSnapshot>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     // `rem` is the root element's font size. The root element has no box of
     // its own here; its style is with the boxless ones.
@@ -31057,6 +31530,27 @@ fn geometry_with_root(
             for row in custom_property_lines(&style.custom_properties).lines().skip(2) {
                 lines.push_str(&format!("\n{pseudo} {row}"));
             }
+        }
+    }
+    // A2.1: svg content's fill / stroke, its `currentcolor` the `<svg>`
+    // box's `color` (the box `computed_lines_source` indexes). Content
+    // with no box and no boxless style has these rows alone.
+    if let Some(svg_paint) = svg_paint {
+        let index = style_box_index(layout);
+        let color_of = |svg: usize| -> Option<rustkit_css::Color> {
+            let (path, _) = index.get(&svg)?;
+            let mut b: &LayoutBox = layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b.style.color)
+        };
+        for (node, (fill, stroke)) in svg_paint.every_fill_stroke(&color_of) {
+            snapshot
+                .1
+                .entry(node)
+                .or_default()
+                .push_str(&format!("\nfill\t{fill}\nstroke\t{stroke}"));
         }
     }
     snapshot
@@ -31384,6 +31878,20 @@ fn computed_lines_source(
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
         let index = index.get_or_init(|| style_box_index(&layout));
+        let box_at = |node: usize| -> Option<&LayoutBox> {
+            let (path, _) = index.get(&node)?;
+            let mut b: &LayoutBox = &layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b)
+        };
+        // A2.1: svg content's computed fill / stroke (`svg_computed`).
+        let svg_rows = || -> Option<String> {
+            let snapshot = lay.svg_paint.borrow().clone()?;
+            let (fill, stroke) = snapshot.fill_stroke(node, &|svg| box_at(svg).map(|b| b.style.color))?;
+            Some(format!("\nfill\t{fill}\nstroke\t{stroke}"))
+        };
         let mut lines = match index.get(&node) {
             Some((path, own_vars)) => {
                 let mut b: &LayoutBox = &layout;
@@ -31396,15 +31904,21 @@ fn computed_lines_source(
                 }
                 lines
             }
-            None => {
-                let style = boxless.get(&node)?;
-                let mut lines = computed_style_lines(&style.box_);
-                if style.own_vars {
-                    lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            None => match boxless.get(&node) {
+                Some(style) => {
+                    let mut lines = computed_style_lines(&style.box_);
+                    if style.own_vars {
+                        lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+                    }
+                    lines
                 }
-                lines
-            }
+                // svg content has no box and no style: its paint rows alone.
+                None => return svg_rows(),
+            },
         };
+        if let Some(rows) = svg_rows() {
+            lines.push_str(&rows);
+        }
         for ((at, pseudo), style) in lay.pseudo_styles.borrow().iter() {
             if *at != node {
                 continue;
@@ -31559,10 +32073,33 @@ fn corner_radii_px(
     width: f32,
     height: f32,
 ) -> (String, String) {
-    let axis = |length: &rustkit_css::Length, size: f32| {
-        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
-    };
-    (axis(&c.horizontal, width), axis(&c.vertical, height))
+    (
+        radius_computed(&c.horizontal, font_px, width),
+        radius_computed(&c.vertical, font_px, height),
+    )
+}
+
+/// One radius as its computed value (css-backgrounds-3 §5.1, Chrome 148):
+/// a percentage stays one, a `calc()` mix of a percentage and lengths is
+/// `calc(P% + Npx)` (em / rem folded to px), any other length is px.
+/// `min()` / `max()` / `clamp()` and viewport units still resolve against
+/// `size`, as before (computed reads have no viewport).
+fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
+    use rustkit_css::Length;
+    let resolved = || css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0));
+    match length {
+        Length::Percent(p) => format!("{}%", finite_f32(p.max(0.0))),
+        Length::Calc(sum) if sum.vw == 0.0 && sum.vh == 0.0 && sum.vmin == 0.0 && sum.vmax == 0.0 => {
+            let px = sum.px + sum.em * font_px + sum.rem * computed_read::root_font();
+            match (sum.percent, px) {
+                (p, _) if p == 0.0 => css_px(px.max(0.0)),
+                (p, px) if px == 0.0 => format!("{}%", finite_f32(p)),
+                (p, px) if px < 0.0 => format!("calc({}% - {})", finite_f32(p), css_px(-px)),
+                (p, px) => format!("calc({}% + {})", finite_f32(p), css_px(px)),
+            }
+        }
+        _ => resolved(),
+    }
 }
 
 fn corner_longhand(horizontal: &str, vertical: &str) -> String {
@@ -48189,7 +48726,9 @@ fn check_animation_frame(
                 return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
             }
             match animations::prop_name(*index) {
-                "transform" => {
+                // The individual transforms compose into the same matrix
+                // (`effective_transform`), so they come and go the same way.
+                "transform" | "translate" | "rotate" | "scale" => {
                     let identity = |v: &animations::AnimValue| {
                         let mut s = rustkit_css::ComputedStyle::default();
                         animations::set_prop_value(&mut s, *index, v);
@@ -48512,6 +49051,10 @@ struct RestyleBuild {
     /// children are skipped, as nothing they hold is read under a root.
     pending: HashMap<usize, usize>,
     found: HashMap<usize, LayoutBox>,
+    /// BOXES-DIFF: the roots in `found` whose box their parent's build drops (a full build has no
+    /// box for them), and why a splice of this build must not be made, if it must not.
+    dropped: std::collections::HashSet<usize>,
+    refused: Option<&'static str>,
     /// The child nodes the build went into.
     walked: usize,
 }
@@ -48783,10 +49326,33 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
     };
     let (sa, sb) = (shallow(a), shallow(b));
     if sa != sb {
-        return Some(at(path, format!("box {sa} vs {sb}")));
+        return Some(at(
+            path,
+            format!("box fields differ: {}", differing_fields(&sa, &sb)),
+        ));
     }
     if a.children.len() != b.children.len() {
-        return Some(at(path, format!("{} children vs {}", a.children.len(), b.children.len())));
+        let kids = |x: &LayoutBox| {
+            x.children
+                .iter()
+                .map(|c| match (c.node_id, c.identity.as_ref()) {
+                    (Some(n), Some(i)) => format!("{n}:{}", i.tag),
+                    (Some(n), None) => format!("{n}"),
+                    (None, _) => format!("anon {:?}", c.box_type),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Some(at(
+            path,
+            format!(
+                "{} children vs {}: [{}] vs [{}]",
+                a.children.len(),
+                b.children.len(),
+                kids(a),
+                kids(b)
+            ),
+        ));
     }
     for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
         path.push(i);
@@ -48796,6 +49362,58 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
         path.pop();
     }
     None
+}
+
+/// Each top-level field of two boxes' shallow `Debug` text (`LayoutBox { a: .., b: .. }`) that
+/// differs, as `name: left vs right` (BOXES-DIFF: the log names every differing field of the first
+/// differing box, not only that it differs).
+fn differing_fields(a: &str, b: &str) -> String {
+    fn fields(s: &str) -> Vec<&str> {
+        let body = s
+            .find('{')
+            .map_or(s, |open| &s[open + 1..s.len().saturating_sub(1)]);
+        let (mut out, mut depth, mut quoted, mut escaped, mut start) =
+            (Vec::new(), 0i32, false, false, 0);
+        for (i, c) in body.char_indices() {
+            if quoted {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(body[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(body[start..].trim());
+        out.retain(|f| !f.is_empty());
+        out
+    }
+    let (fa, fb) = (fields(a), fields(b));
+    if fa.len() != fb.len() {
+        return format!("{a} vs {b}");
+    }
+    fa.iter()
+        .zip(&fb)
+        .filter(|(x, y)| x != y)
+        .map(|(x, y)| match (x.split_once(": "), y.split_once(": ")) {
+            (Some((name, left)), Some((other, right))) if name == other => {
+                format!("{name}: {left} vs {right}")
+            }
+            _ => format!("{x} vs {y}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// A spliced tree's element numbers, as a full build gives them (#1247 R1 item 3). A full build

@@ -21,31 +21,116 @@
 //! `transitioncancel`) are queued here as the phases change and fired at
 //! the element after the build, in queue order, as Chrome orders them.
 //!
-//! What is interpolated: numbers (`opacity`), lengths of one unit (`px`
-//! with `px`, `%` with `%`; `auto` never transitions, as in Chrome),
-//! colours (premultiplied sRGB), and transform lists (function by function
+//! What is interpolated: numbers (`opacity`), lengths (one unit with
+//! itself, two units as a `calc()` mix of them; `auto` never transitions,
+//! as in Chrome),
+//! colours (premultiplied sRGB; `outline-color` and
+//! `text-decoration-color` keep `currentcolor` as a value of its own,
+//! `AnimValue::CurrentColor`), and transform lists (function by function
 //! when the lists match, `none` as the identity of the other list, else
 //! the two matrices component-wise, which is not the spec's decomposition
-//! and is a stated gap). Not here yet: the individual `translate`/
-//! `rotate`/`scale` properties, `border-radius`, `box-shadow`,
-//! `background-position`, `line-height`, `visibility`'s discrete rule,
+//! and is a stated gap), and the individual `translate`/`rotate`/`scale`
+//! properties (`none` as the identity), `line-height`, the four
+//! `border-*-radius` corners, `background-size`, `visibility` (its
+//! discrete rule: `visible` in between when either end is), `box-shadow`
+//! and `filter`/`backdrop-filter` lists. Not here yet: `background-position`,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
+use crate::svg_computed::{same_paint, Paint};
 use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
-    AnimationPlayState, Color, ComputedStyle, Display, Length, TimingFunction, TransformList,
-    TransformOp, TransitionItem,
+    AnimationPlayState, BackgroundSize, BoxShadow, Color, ComputedStyle, CornerRadius, Display,
+    GridTemplate, Length, LineHeight, TimingFunction, TrackDefinition, TrackRepeat, TrackSize,
+    TransformList, TransformOp, TransitionItem, Visibility,
 };
 use std::collections::HashMap;
 
 /// A value one of the transitionable properties takes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum AnimValue {
     Number(f32),
     Length(Length),
     Color(Color),
+    /// `currentcolor` of a colour property that keeps it as a keyword
+    /// (`outline-color`, `text-decoration-color`), with the element's
+    /// `color` when it was read. Two of them are equal whatever the colour:
+    /// `currentcolor` before and after is no change (Chrome 148 starts no
+    /// transition when only `color` jumps). Against a colour it
+    /// interpolates as that `color`, which is held where Chrome tracks a
+    /// `color` that is itself animating (a stated gap).
+    CurrentColor(Color),
     Transform(TransformList),
+    /// One of the individual transform properties (css-transforms-2 §5:
+    /// `translate`, `rotate`, `scale`); `None` is `none`.
+    Individual(Option<TransformOp>),
+    /// `line-height`: a number with a number, a length with a length;
+    /// `normal` and a number against a length are discrete (Chrome 148
+    /// starts no transition).
+    LineHeight(LineHeight),
+    /// A `border-*-radius` corner: both radii, each a length-percentage.
+    Radius(CornerRadius),
+    /// `background-size`, one per layer (bottom layer first, as stored).
+    BackgroundSizes(Vec<BackgroundSize>),
+    /// `visibility`: discrete, but `visible` between the end points when
+    /// either end is `visible` (`interpolate_visibility`).
+    Visibility(Visibility),
+    /// `box-shadow`, in the declaration's order (the first is on top).
+    Shadows(Vec<BoxShadow>),
+    /// `filter` / `backdrop-filter`: the declared text (what the style
+    /// keeps; empty is `none`) and its functions as read for
+    /// interpolation (`None` where a function is not one of the
+    /// interpolable ones, a `url()` say: such a list does not transition).
+    Filter(String, Option<Vec<FilterFn>>),
+    /// `grid-template-columns` / `grid-template-rows`: the track list as
+    /// declared (`repeat()` kept, which is what decides the shape).
+    Grid(GridTemplate),
+}
+
+/// One `filter` function as a transition reads it (filter-effects-1 §8):
+/// lengths in px, angles in degrees, amounts as numbers (`50%` is 0.5).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FilterFn {
+    Blur(f32),
+    /// `brightness`, `contrast`, `grayscale`, `invert`, `opacity`,
+    /// `saturate` or `sepia`.
+    Amount(&'static str, f32),
+    HueRotate(f32),
+    DropShadow {
+        x: f32,
+        y: f32,
+        blur: f32,
+        color: Color,
+    },
+}
+
+impl PartialEq for AnimValue {
+    fn eq(&self, other: &Self) -> bool {
+        use AnimValue::*;
+        match (self, other) {
+            (Number(a), Number(b)) => a == b,
+            (Length(a), Length(b)) => a == b,
+            (Color(a), Color(b)) => a == b,
+            (CurrentColor(_), CurrentColor(_)) => true,
+            (Transform(a), Transform(b)) => a == b,
+            (Individual(a), Individual(b)) => a == b,
+            (LineHeight(a), LineHeight(b)) => a == b,
+            (Radius(a), Radius(b)) => a == b,
+            (BackgroundSizes(a), BackgroundSizes(b)) => a == b,
+            (Visibility(a), Visibility(b)) => a == b,
+            (Shadows(a), Shadows(b)) => a == b,
+            (Filter(a, _), Filter(b, _)) => a == b,
+            (Grid(a), Grid(b)) => a == b,
+            // Every variant by name: a new one is a compile error here
+            // until its equality is decided.
+            (
+                Number(_) | Length(_) | Color(_) | CurrentColor(_) | Transform(_) | Individual(_)
+                | LineHeight(_) | Radius(_) | BackgroundSizes(_) | Visibility(_) | Shadows(_)
+                | Filter(..) | Grid(_),
+                _,
+            ) => false,
+        }
+    }
 }
 
 struct Prop {
@@ -93,6 +178,32 @@ macro_rules! inset_prop {
         }
     };
 }
+macro_rules! individual_prop {
+    ($name:literal, $field:ident) => {
+        Prop {
+            name: $name,
+            get: |s| AnimValue::Individual(s.$field.clone()),
+            set: |s, v| {
+                if let AnimValue::Individual(op) = v {
+                    s.$field = op.clone();
+                }
+            },
+        }
+    };
+}
+macro_rules! radius_prop {
+    ($name:literal, $field:ident) => {
+        Prop {
+            name: $name,
+            get: |s| AnimValue::Radius(s.$field.clone()),
+            set: |s, v| {
+                if let AnimValue::Radius(r) = v {
+                    s.$field = r.clone();
+                }
+            },
+        }
+    };
+}
 macro_rules! color_prop {
     ($name:literal, $field:ident) => {
         Prop {
@@ -102,6 +213,24 @@ macro_rules! color_prop {
                 if let AnimValue::Color(c) = v {
                     s.$field = *c;
                 }
+            },
+        }
+    };
+}
+
+/// A colour property whose `None` is `currentcolor`.
+macro_rules! current_color_prop {
+    ($name:literal, $($field:ident).+) => {
+        Prop {
+            name: $name,
+            get: |s| match s.$($field).+ {
+                Some(c) => AnimValue::Color(c),
+                None => AnimValue::CurrentColor(s.color),
+            },
+            set: |s, v| match v {
+                AnimValue::Color(c) => s.$($field).+ = Some(*c),
+                AnimValue::CurrentColor(_) => s.$($field).+ = None,
+                _ => {}
             },
         }
     };
@@ -129,12 +258,17 @@ const PROPS: &[Prop] = &[
             }
         },
     },
+    individual_prop!("translate", translate),
+    individual_prop!("rotate", rotate),
+    individual_prop!("scale", scale),
     color_prop!("color", color),
     color_prop!("background-color", background_color),
     color_prop!("border-top-color", border_top_color),
     color_prop!("border-right-color", border_right_color),
     color_prop!("border-bottom-color", border_bottom_color),
     color_prop!("border-left-color", border_left_color),
+    current_color_prop!("outline-color", outline.color),
+    current_color_prop!("text-decoration-color", text_decoration_color),
     len_prop!("width", width),
     len_prop!("height", height),
     len_prop!("min-width", min_width),
@@ -158,9 +292,102 @@ const PROPS: &[Prop] = &[
     inset_prop!("bottom", bottom),
     inset_prop!("left", left),
     len_prop!("font-size", font_size),
+    Prop {
+        name: "line-height",
+        get: |s| AnimValue::LineHeight(s.line_height),
+        set: |s, v| {
+            if let AnimValue::LineHeight(l) = v {
+                s.line_height = *l;
+            }
+        },
+    },
+    Prop {
+        name: "box-shadow",
+        get: |s| AnimValue::Shadows(s.box_shadows.clone()),
+        set: |s, v| {
+            if let AnimValue::Shadows(list) = v {
+                s.box_shadows = list.clone();
+            }
+        },
+    },
+    Prop {
+        name: "filter",
+        get: |s| AnimValue::Filter(s.filter.clone(), parse_filter_list(&s.filter, s.color)),
+        set: |s, v| {
+            if let AnimValue::Filter(text, _) = v {
+                s.filter = text.clone();
+            }
+        },
+    },
+    // A `backdrop-filter` stacks only while it is not `none`; a value on
+    // the way between two lists is never `none`.
+    Prop {
+        name: "backdrop-filter",
+        get: |s| {
+            AnimValue::Filter(
+                s.backdrop_filter.clone(),
+                parse_filter_list(&s.backdrop_filter, s.color),
+            )
+        },
+        set: |s, v| {
+            if let AnimValue::Filter(text, _) = v {
+                s.backdrop_filter = text.clone();
+                crate::set_stacks(s, rustkit_css::STACKS_BACKDROP, !text.is_empty());
+            }
+        },
+    },
+    Prop {
+        name: "visibility",
+        get: |s| AnimValue::Visibility(s.visibility),
+        set: |s, v| {
+            if let AnimValue::Visibility(x) = v {
+                s.visibility = *x;
+            }
+        },
+    },
+    radius_prop!("border-top-left-radius", border_top_left_radius),
+    radius_prop!("border-top-right-radius", border_top_right_radius),
+    radius_prop!("border-bottom-right-radius", border_bottom_right_radius),
+    radius_prop!("border-bottom-left-radius", border_bottom_left_radius),
+    // The layer list is the background-image list's: a size written for
+    // a different number of layers (a transition overlapping a change of
+    // images) is left alone.
+    Prop {
+        name: "background-size",
+        get: |s| {
+            AnimValue::BackgroundSizes(s.background_layers.iter().map(|l| l.size.clone()).collect())
+        },
+        set: |s, v| {
+            if let AnimValue::BackgroundSizes(sizes) = v {
+                if sizes.len() == s.background_layers.len() {
+                    for (layer, size) in s.background_layers.iter_mut().zip(sizes) {
+                        layer.size = size.clone();
+                    }
+                }
+            }
+        },
+    },
     len_prop!("letter-spacing", letter_spacing),
     len_prop!("word-spacing", word_spacing),
     len_prop!("text-indent", text_indent),
+    Prop {
+        name: "grid-template-columns",
+        get: |s| AnimValue::Grid(s.grid_template_columns.clone()),
+        set: |s, v| {
+            if let AnimValue::Grid(g) = v {
+                s.grid_template_columns = g.clone();
+            }
+        },
+    },
+    Prop {
+        name: "grid-template-rows",
+        get: |s| AnimValue::Grid(s.grid_template_rows.clone()),
+        set: |s, v| {
+            if let AnimValue::Grid(g) = v {
+                s.grid_template_rows = g.clone();
+            }
+        },
+    },
 ];
 
 /// The shorthands a `transition-property` name expands to.
@@ -197,8 +424,17 @@ fn expands_to(name: &str) -> &'static [&'static str] {
             "border-left-width",
         ],
         "inset" => &["top", "right", "bottom", "left"],
-        "background" => &["background-color"],
-        "font" => &["font-size"],
+        "outline" => &["outline-color"],
+        "text-decoration" => &["text-decoration-color"],
+        "background" => &["background-color", "background-size"],
+        "font" => &["font-size", "line-height"],
+        "grid-template" | "grid" => &["grid-template-columns", "grid-template-rows"],
+        "border-radius" => &[
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ],
         _ => &[],
     }
 }
@@ -258,7 +494,9 @@ fn interpolate_length(a: &Length, b: &Length, t: f32) -> Option<Length> {
         (Vmin(x), Vmin(y)) => Vmin(lerp(*x, *y, t)),
         (Vmax(x), Vmax(y)) => Vmax(lerp(*x, *y, t)),
         (Zero, Zero) => Zero,
-        _ => return None,
+        // Two units: a `calc()` mix of them (css-values-4 §3.2; Chrome 148
+        // reads `10px` to `50%` at the midpoint as `calc(25% + 5px)`).
+        _ => return Length::interpolate_as_calc(a, b, t),
     })
 }
 
@@ -366,15 +604,455 @@ fn interpolate_transform(a: &TransformList, b: &TransformList, t: f32) -> Transf
     }
 }
 
+/// css-transforms-2 §5 (individual transforms): `none` is the identity of
+/// the other value (`0px`, `0deg`, `1`), and a value interpolates
+/// component by component: `translate` per length (one unit each, as
+/// `interpolate_length` takes them), `rotate` as a number of degrees with
+/// no turn taken off (45deg to 405deg passes 225deg, Chrome 148), and
+/// `scale` per factor. The engine keeps only the 2D forms (`rotate`'s z
+/// axis), so there is no axis to match.
+fn interpolate_individual(
+    a: &Option<TransformOp>,
+    b: &Option<TransformOp>,
+    t: f32,
+) -> Option<Option<TransformOp>> {
+    // The end points are the values themselves: a transition to `none`
+    // ends on `none`, not on the identity it ran to (Chrome 148 reads
+    // `none` once it is over).
+    if t == 0.0 {
+        return Some(a.clone());
+    }
+    if t == 1.0 {
+        return Some(b.clone());
+    }
+    let (a, b) = match (a, b) {
+        (None, None) => return Some(None),
+        (None, Some(b)) => (identity_of(b), b.clone()),
+        (Some(a), None) => (a.clone(), identity_of(a)),
+        (Some(a), Some(b)) => (a.clone(), b.clone()),
+    };
+    interpolate_op(&a, &b, t).map(Some)
+}
+
+/// `box-shadow` (css-backgrounds-3 §7.2): shadow by shadow, the shorter
+/// list padded with transparent zero shadows of the other's kind; a pair
+/// whose `inset` differs is not interpolable. The end points are the
+/// lists themselves (a transition to `none` ends on no shadow).
+fn interpolate_shadows(a: &[BoxShadow], b: &[BoxShadow], t: f32) -> Option<Vec<BoxShadow>> {
+    if t == 0.0 {
+        return Some(a.to_vec());
+    }
+    if t == 1.0 {
+        return Some(b.to_vec());
+    }
+    let none = |other: &BoxShadow| BoxShadow {
+        color: Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.0,
+        },
+        inset: other.inset,
+        ..BoxShadow::default()
+    };
+    (0..a.len().max(b.len()))
+        .map(|i| {
+            let (x, y) = match (a.get(i), b.get(i)) {
+                (Some(x), Some(y)) => (*x, *y),
+                (Some(x), None) => (*x, none(x)),
+                (None, Some(y)) => (none(y), *y),
+                (None, None) => unreachable!("i is below the longer length"),
+            };
+            (x.inset == y.inset).then(|| BoxShadow {
+                offset_x: lerp(x.offset_x, y.offset_x, t),
+                offset_y: lerp(x.offset_y, y.offset_y, t),
+                blur_radius: lerp(x.blur_radius, y.blur_radius, t).max(0.0),
+                spread_radius: lerp(x.spread_radius, y.spread_radius, t),
+                color: interpolate_color(&x.color, &y.color, t),
+                inset: x.inset,
+            })
+        })
+        .collect()
+}
+
+/// A `filter` list's functions (`None` where one is not interpolable, or
+/// the text does not read). Empty text is `none`, no functions.
+/// `currentcolor` is the colour of a `drop-shadow()` that names none.
+pub(crate) fn parse_filter_list(text: &str, current: Color) -> Option<Vec<FilterFn>> {
+    let amount = |args: &str| -> Option<f32> {
+        let args = args.trim();
+        if args.is_empty() {
+            return Some(1.0);
+        }
+        match args.strip_suffix('%') {
+            Some(p) => p.trim().parse::<f32>().ok().map(|p| p / 100.0),
+            None => args.parse::<f32>().ok(),
+        }
+    };
+    let px = |token: &str| -> Option<f32> {
+        match crate::parse_length(token)? {
+            Length::Percent(_) | Length::Auto | Length::FitContent => None,
+            l => Some(l.to_px(16.0, 16.0, 0.0)),
+        }
+    };
+    crate::computed_read::functions(text)?
+        .into_iter()
+        .map(|(name, args)| {
+            Some(match name.as_str() {
+                "blur" if args.trim().is_empty() => FilterFn::Blur(0.0),
+                "blur" => FilterFn::Blur(px(&args)?),
+                "hue-rotate" if args.trim().is_empty() => FilterFn::HueRotate(0.0),
+                "hue-rotate" => FilterFn::HueRotate(crate::parse_angle(args.trim())?),
+                "brightness" => FilterFn::Amount("brightness", amount(&args)?),
+                "contrast" => FilterFn::Amount("contrast", amount(&args)?),
+                "grayscale" => FilterFn::Amount("grayscale", amount(&args)?),
+                "invert" => FilterFn::Amount("invert", amount(&args)?),
+                "opacity" => FilterFn::Amount("opacity", amount(&args)?),
+                "saturate" => FilterFn::Amount("saturate", amount(&args)?),
+                "sepia" => FilterFn::Amount("sepia", amount(&args)?),
+                "drop-shadow" => {
+                    let mut lengths = Vec::new();
+                    let mut color = None;
+                    for token in split_top_level(&args, ' ') {
+                        match crate::parse_color(token) {
+                            Some(c) => color = Some(c),
+                            None => lengths.push(px(token)?),
+                        }
+                    }
+                    if !(2..=3).contains(&lengths.len()) {
+                        return None;
+                    }
+                    FilterFn::DropShadow {
+                        x: lengths[0],
+                        y: lengths[1],
+                        blur: lengths.get(2).copied().unwrap_or(0.0),
+                        color: color.unwrap_or(current),
+                    }
+                }
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// The value a missing function takes in a filter interpolation (its
+/// initial value, filter-effects-1 §8).
+fn filter_initial(f: &FilterFn) -> FilterFn {
+    match f {
+        FilterFn::Blur(_) => FilterFn::Blur(0.0),
+        FilterFn::HueRotate(_) => FilterFn::HueRotate(0.0),
+        FilterFn::Amount(name, _) => FilterFn::Amount(
+            name,
+            match *name {
+                "grayscale" | "invert" | "sepia" => 0.0,
+                _ => 1.0,
+            },
+        ),
+        FilterFn::DropShadow { .. } => FilterFn::DropShadow {
+            x: 0.0,
+            y: 0.0,
+            blur: 0.0,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0.0,
+            },
+        },
+    }
+}
+
+/// filter-effects-1 §8: function by function when one list's functions
+/// are the other's first ones (a missing function at its initial value;
+/// `none` is the empty list), else not interpolable.
+fn interpolate_filter_fns(a: &[FilterFn], b: &[FilterFn], t: f32) -> Option<Vec<FilterFn>> {
+    (0..a.len().max(b.len()))
+        .map(|i| {
+            let (x, y) = match (a.get(i), b.get(i)) {
+                (Some(x), Some(y)) => (x.clone(), y.clone()),
+                (Some(x), None) => (x.clone(), filter_initial(x)),
+                (None, Some(y)) => (filter_initial(y), y.clone()),
+                (None, None) => unreachable!("i is below the longer length"),
+            };
+            Some(match (x, y) {
+                (FilterFn::Blur(p), FilterFn::Blur(q)) => FilterFn::Blur(lerp(p, q, t).max(0.0)),
+                (FilterFn::HueRotate(p), FilterFn::HueRotate(q)) => {
+                    FilterFn::HueRotate(lerp(p, q, t))
+                }
+                (FilterFn::Amount(n, p), FilterFn::Amount(m, q)) if n == m => {
+                    FilterFn::Amount(n, lerp(p, q, t).max(0.0))
+                }
+                (
+                    FilterFn::DropShadow {
+                        x: x0,
+                        y: y0,
+                        blur: b0,
+                        color: c0,
+                    },
+                    FilterFn::DropShadow {
+                        x: x1,
+                        y: y1,
+                        blur: b1,
+                        color: c1,
+                    },
+                ) => FilterFn::DropShadow {
+                    x: lerp(x0, x1, t),
+                    y: lerp(y0, y1, t),
+                    blur: lerp(b0, b1, t).max(0.0),
+                    color: interpolate_color(&c0, &c1, t),
+                },
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// A filter list as the style keeps it (the text paint and
+/// `getComputedStyle` read).
+fn filter_text(fns: &[FilterFn]) -> String {
+    let n = |v: f32| {
+        let r = (v * 1000.0).round() / 1000.0;
+        format!("{r}")
+    };
+    fns.iter()
+        .map(|f| match f {
+            FilterFn::Blur(px) => format!("blur({}px)", n(*px)),
+            FilterFn::HueRotate(deg) => format!("hue-rotate({}deg)", n(*deg)),
+            FilterFn::Amount(name, v) => format!("{name}({})", n(*v)),
+            FilterFn::DropShadow { x, y, blur, color } => format!(
+                "drop-shadow({}px {}px {}px rgba({}, {}, {}, {}))",
+                n(*x),
+                n(*y),
+                n(*blur),
+                color.r,
+                color.g,
+                color.b,
+                n(color.a)
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `visibility` (web-animations-1 §5.3, css-transitions-1): discrete,
+/// except that with `visible` at either end the value is `visible` for
+/// every progress strictly between 0 and 1. With neither end `visible`
+/// it is not interpolable, so no transition starts (Chrome 148: `hidden`
+/// to `collapse`).
+fn interpolate_visibility(a: Visibility, b: Visibility, t: f32) -> Option<Visibility> {
+    if a != Visibility::Visible && b != Visibility::Visible {
+        return (a == b).then_some(a);
+    }
+    Some(if t <= 0.0 {
+        a
+    } else if t >= 1.0 {
+        b
+    } else {
+        Visibility::Visible
+    })
+}
+
+/// `line-height`: numbers and lengths each with their own kind.
+fn interpolate_line_height(a: &LineHeight, b: &LineHeight, t: f32) -> Option<LineHeight> {
+    match (a, b) {
+        (LineHeight::Number(x), LineHeight::Number(y)) => Some(LineHeight::Number(lerp(*x, *y, t))),
+        (LineHeight::Px(x), LineHeight::Px(y)) => Some(LineHeight::Px(lerp(*x, *y, t))),
+        _ => None,
+    }
+}
+
+/// One `background-size` dimension: `None` is `auto` (only with `auto`),
+/// a negative number a percentage (`parse_background_size_dimension`'s
+/// encoding, `-0.0` for `0%`), else px. A px against a percentage is a
+/// `calc()` Chrome interpolates and this encoding cannot hold: not
+/// interpolable here (a stated gap).
+fn interpolate_size_dimension(a: Option<f32>, b: Option<f32>, t: f32) -> Option<Option<f32>> {
+    match (a, b) {
+        (None, None) => Some(None),
+        (Some(x), Some(y)) if x.is_sign_negative() == y.is_sign_negative() => {
+            let v = lerp(x, y, t);
+            // Keep `0%` a percentage on the way.
+            Some(Some(if x.is_sign_negative() { -v.abs() } else { v }))
+        }
+        _ => None,
+    }
+}
+
+/// `background-size`, layer by layer: explicit sizes per dimension;
+/// `cover`, `contain` and `auto` are discrete (Chrome 148: `auto` or
+/// `cover` to `30px 40px` starts no transition).
+fn interpolate_background_sizes(
+    a: &[BackgroundSize],
+    b: &[BackgroundSize],
+    t: f32,
+) -> Option<Vec<BackgroundSize>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| match (x, y) {
+            (
+                BackgroundSize::Explicit {
+                    width: aw,
+                    height: ah,
+                },
+                BackgroundSize::Explicit {
+                    width: bw,
+                    height: bh,
+                },
+            ) => Some(BackgroundSize::Explicit {
+                width: interpolate_size_dimension(*aw, *bw, t)?,
+                height: interpolate_size_dimension(*ah, *bh, t)?,
+            }),
+            (x, y) if x == y => Some(x.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A discrete pair: the first value before the midpoint, the second from
+/// it on (web-animations-1 §5.3, the 50% flip).
+fn flip<T: Clone>(a: &T, b: &T, t: f32) -> T {
+    if t < 0.5 {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// One grid track size (css-grid-2 §7.2.5): two of one kind interpolate
+/// (px, %, fr, the `fit-content()` limit, a `minmax()` end by end), equal
+/// keywords stay; `None` is a pair of different kinds, which flips at the
+/// midpoint while the rest of the list moves (Chrome 148: `1fr` against
+/// `100px`, `100px` against `auto`).
+fn interpolate_track_size(a: &TrackSize, b: &TrackSize, t: f32) -> Option<TrackSize> {
+    use TrackSize::*;
+    Some(match (a, b) {
+        (Px(x), Px(y)) => Px(lerp(*x, *y, t).max(0.0)),
+        (Percent(x), Percent(y)) => Percent(lerp(*x, *y, t).max(0.0)),
+        (Fr(x), Fr(y)) => Fr(lerp(*x, *y, t).max(0.0)),
+        (FitContent(x), FitContent(y)) => FitContent(lerp(*x, *y, t).max(0.0)),
+        (MinMax(a0, a1), MinMax(b0, b1)) => MinMax(
+            Box::new(interpolate_track_size(a0, b0, t)?),
+            Box::new(interpolate_track_size(a1, b1, t)?),
+        ),
+        (x, y) if x == y => x.clone(),
+        _ => return None,
+    })
+}
+
+/// Two track runs of one length, track by track; line names flip.
+fn interpolate_tracks(
+    a: &[TrackDefinition],
+    b: &[TrackDefinition],
+    t: f32,
+) -> Option<Vec<TrackDefinition>> {
+    (a.len() == b.len()).then(|| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| TrackDefinition {
+                size: interpolate_track_size(&x.size, &y.size, t)
+                    .unwrap_or_else(|| flip(&x.size, &y.size, t)),
+                line_names: flip(&x.line_names, &y.line_names, t),
+            })
+            .collect()
+    })
+}
+
+/// `grid-template-columns` / `-rows` (css-grid-2 §7.2.5): two lists of
+/// the same shape (as many tracks, the same `repeat()`s at the same
+/// places with the same counts and lengths) interpolate track by track;
+/// anything else (`none` against a list, a `repeat()` against the plain
+/// list it expands to, different lengths) is not interpolable, so no
+/// transition starts (Chrome 148).
+fn interpolate_grid_template(a: &GridTemplate, b: &GridTemplate, t: f32) -> Option<GridTemplate> {
+    let tracks = interpolate_tracks(&a.tracks, &b.tracks, t)?;
+    if a.repeats.len() != b.repeats.len() {
+        return None;
+    }
+    let repeats = a
+        .repeats
+        .iter()
+        .zip(&b.repeats)
+        .map(|((at, x), (bt, y))| {
+            if at != bt {
+                return None;
+            }
+            let repeat = match (x, y) {
+                (TrackRepeat::Count(n, x), TrackRepeat::Count(m, y)) if n == m => {
+                    TrackRepeat::Count(*n, interpolate_tracks(x, y, t)?)
+                }
+                (TrackRepeat::AutoFill(x), TrackRepeat::AutoFill(y)) => {
+                    TrackRepeat::AutoFill(interpolate_tracks(x, y, t)?)
+                }
+                (TrackRepeat::AutoFit(x), TrackRepeat::AutoFit(y)) => {
+                    TrackRepeat::AutoFit(interpolate_tracks(x, y, t)?)
+                }
+                _ => return None,
+            };
+            Some((*at, repeat))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // The end points are the lists themselves.
+    if t == 0.0 {
+        return Some(a.clone());
+    }
+    if t == 1.0 {
+        return Some(b.clone());
+    }
+    Some(GridTemplate {
+        tracks,
+        repeats,
+        final_line_names: flip(&a.final_line_names, &b.final_line_names, t),
+    })
+}
+
 fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
     Some(match (a, b) {
         (AnimValue::Number(x), AnimValue::Number(y)) => AnimValue::Number(lerp(*x, *y, t)),
         (AnimValue::Length(x), AnimValue::Length(y)) => {
             AnimValue::Length(interpolate_length(x, y, t)?)
         }
-        (AnimValue::Color(x), AnimValue::Color(y)) => AnimValue::Color(interpolate_color(x, y, t)),
+        (AnimValue::Color(x), AnimValue::Color(y))
+        | (AnimValue::CurrentColor(x), AnimValue::Color(y))
+        | (AnimValue::Color(x), AnimValue::CurrentColor(y)) => {
+            AnimValue::Color(interpolate_color(x, y, t))
+        }
+        (AnimValue::CurrentColor(_), AnimValue::CurrentColor(y)) => AnimValue::CurrentColor(*y),
         (AnimValue::Transform(x), AnimValue::Transform(y)) => {
             AnimValue::Transform(interpolate_transform(x, y, t))
+        }
+        (AnimValue::Individual(x), AnimValue::Individual(y)) => {
+            AnimValue::Individual(interpolate_individual(x, y, t)?)
+        }
+        (AnimValue::LineHeight(x), AnimValue::LineHeight(y)) => {
+            AnimValue::LineHeight(interpolate_line_height(x, y, t)?)
+        }
+        (AnimValue::Radius(x), AnimValue::Radius(y)) => AnimValue::Radius(CornerRadius {
+            horizontal: interpolate_length(&x.horizontal, &y.horizontal, t)?,
+            vertical: interpolate_length(&x.vertical, &y.vertical, t)?,
+        }),
+        (AnimValue::BackgroundSizes(x), AnimValue::BackgroundSizes(y)) => {
+            AnimValue::BackgroundSizes(interpolate_background_sizes(x, y, t)?)
+        }
+        (AnimValue::Visibility(x), AnimValue::Visibility(y)) => {
+            AnimValue::Visibility(interpolate_visibility(*x, *y, t)?)
+        }
+        (AnimValue::Shadows(x), AnimValue::Shadows(y)) => {
+            AnimValue::Shadows(interpolate_shadows(x, y, t)?)
+        }
+        // The end points keep the declared text.
+        (AnimValue::Filter(xt, x), AnimValue::Filter(yt, y)) => {
+            let fns = interpolate_filter_fns(x.as_ref()?, y.as_ref()?, t)?;
+            match t {
+                t if t == 0.0 => AnimValue::Filter(xt.clone(), Some(fns)),
+                t if t == 1.0 => AnimValue::Filter(yt.clone(), Some(fns)),
+                _ => AnimValue::Filter(filter_text(&fns), Some(fns)),
+            }
+        }
+        (AnimValue::Grid(x), AnimValue::Grid(y)) => {
+            AnimValue::Grid(interpolate_grid_template(x, y, t)?)
         }
         _ => return None,
     })
@@ -505,6 +1183,25 @@ pub(crate) struct Animations {
     /// and what the build painted of it, so that a frame can be restyled
     /// without a build (`LayoutCtx::animation_frame`).
     pub(crate) captured: HashMap<usize, Captured>,
+    /// A2.2: the svg paint lane (`svg_update`). `fill` / `stroke` of the
+    /// elements of inline svgs, which have no `ComputedStyle`: each one a
+    /// transition covers, with its resolved value as of the last pass, by
+    /// raw NodeId and property name.
+    svg_base: HashMap<(usize, &'static str), Paint>,
+    svg_transitions: Vec<SvgTransition>,
+    /// What the last lane pass resolved: the author paint map and the DOM
+    /// generation. While neither changed and nothing moves, a pass would
+    /// find what the last one found (`LayoutCtx::svg_paint_transitions`).
+    pub(crate) svg_last: Option<(std::rc::Weak<HashMap<usize, crate::SvgPaintStyle>>, u64)>,
+}
+
+/// A2.2: a `fill` or `stroke` transition of an element of an inline svg.
+/// Its timing is a `Transition`'s (its `prop` unused: svg paint is no
+/// `PROPS` row), between two colours.
+#[derive(Clone, Debug)]
+struct SvgTransition {
+    t: Transition,
+    prop: &'static str,
 }
 
 /// An animated element as the last build (or animation frame) left it.
@@ -552,6 +1249,7 @@ impl Animations {
             if name == "all"
                 || name == "none"
                 || PROPS.iter().any(|p| p.name == name)
+                || SVG_PAINT_PROPS.contains(&name.as_str())
                 || !expands_to(&name).is_empty()
                 || self.reported.contains(&name)
             {
@@ -568,6 +1266,7 @@ impl Animations {
         !self.transitions.is_empty()
             || !self.events.is_empty()
             || self.css.iter().any(CssAnimation::moving)
+            || !self.svg_transitions.is_empty()
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<AnimationEvent> {
@@ -640,6 +1339,26 @@ impl Animations {
         }
         self.captured.retain(|node, _| seen(*node, &self.seen));
         self.seen.retain(|_, s| *s == serial);
+    }
+
+    /// The elements whose before-change values `end_build` would drop if the build so far ended
+    /// now as `partial_build` says (none for a partial build): those the build has not visited.
+    /// `boxes-verify` reads it after a splice, before its comparison build visits the rest.
+    pub(crate) fn would_sweep(&self, partial_build: bool) -> Vec<usize> {
+        if partial_build {
+            return Vec::new();
+        }
+        let serial = self.build_serial;
+        self.base
+            .keys()
+            .copied()
+            .filter(|node| self.seen.get(node) != Some(&serial))
+            .collect()
+    }
+
+    /// Whether the build in progress has handed `node` to `on_style`.
+    pub(crate) fn visited_this_build(&self, node: usize) -> bool {
+        self.seen.get(&node) == Some(&self.build_serial)
     }
 
     /// Whether a build of this document has handed `node` to `on_style`:
@@ -740,6 +1459,19 @@ impl Animations {
         for a in gone {
             self.cancel_animation_event(&a);
         }
+        let mut gone = Vec::new();
+        self.svg_transitions.retain(|t| {
+            if alive(t.t.node) {
+                true
+            } else {
+                gone.push(t.clone());
+                false
+            }
+        });
+        for t in gone {
+            self.push_svg_event(&t, "transitioncancel", t.t.elapsed_at(now));
+        }
+        self.svg_base.retain(|(node, _), _| alive(*node));
     }
 
     /// The build's hand-off for one element: start the transitions its
@@ -824,11 +1556,6 @@ impl Animations {
                 } else if old == new {
                     continue;
                 }
-                // To the microsecond: `0.1` seconds as an f32 is 100.0000015
-                // ms as an f64, and an end at exactly 1100 would be missed.
-                let us = |ms: f64| (ms * 1000.0).round() / 1000.0;
-                let duration_ms = us((spec.duration.max(0.0) as f64) * 1000.0);
-                let delay_ms = us(spec.delay as f64 * 1000.0);
                 // The before-change value: what the element shows now.
                 let (from, reversing) = match running {
                     Some(at) => {
@@ -839,48 +1566,71 @@ impl Animations {
                     }
                     None => (old.clone(), None),
                 };
-                if duration_ms + delay_ms.max(0.0) <= 0.0 || interpolate(&from, new, 0.5).is_none()
-                {
+                let Some(t) = self.new_transition(node, *i, from, new, spec, reversing) else {
                     continue;
-                }
-                // css-transitions-1 §3, the reversing shortening factor:
-                // a transition back to where the cancelled one started
-                // takes as long as that one had got.
-                let (reversing_adjusted_start, factor) = match reversing {
-                    Some(t) if t.reversing_adjusted_start == *new => {
-                        let p = t.timing.evaluate(t.progress(now));
-                        let f = (p * t.reversing_shortening + (1.0 - t.reversing_shortening))
-                            .abs()
-                            .clamp(0.0, 1.0);
-                        (t.to.clone(), f)
-                    }
-                    _ => (from.clone(), 1.0),
-                };
-                let delay_ms = if delay_ms < 0.0 {
-                    us(delay_ms * factor as f64)
-                } else {
-                    delay_ms
-                };
-                let id = self.next_id();
-                let t = Transition {
-                    id,
-                    node,
-                    prop: *i,
-                    from,
-                    to: new.clone(),
-                    created_ms: now,
-                    delay_ms,
-                    duration_ms: us(duration_ms * factor as f64),
-                    timing: spec.timing.clone(),
-                    reversing_adjusted_start,
-                    reversing_shortening: factor,
-                    started: false,
-                    done: false,
                 };
                 self.push_event(&t, "transitionrun", t.elapsed_at_start());
                 self.transitions.push(t);
             }
         }
+    }
+
+    /// A transition of `node`'s property `prop` from `from` to `new` under
+    /// `spec`, starting at the clock; `reversing` is the running one it
+    /// replaces. `None` when there is nothing to run: no duration and no
+    /// delay, or values that do not interpolate.
+    fn new_transition(
+        &mut self,
+        node: usize,
+        prop: usize,
+        from: AnimValue,
+        new: &AnimValue,
+        spec: &TransitionItem,
+        reversing: Option<Transition>,
+    ) -> Option<Transition> {
+        let now = self.clock_ms;
+        // To the microsecond: `0.1` seconds as an f32 is 100.0000015
+        // ms as an f64, and an end at exactly 1100 would be missed.
+        let us = |ms: f64| (ms * 1000.0).round() / 1000.0;
+        let duration_ms = us((spec.duration.max(0.0) as f64) * 1000.0);
+        let delay_ms = us(spec.delay as f64 * 1000.0);
+        if duration_ms + delay_ms.max(0.0) <= 0.0 || interpolate(&from, new, 0.5).is_none() {
+            return None;
+        }
+        // css-transitions-1 §3, the reversing shortening factor:
+        // a transition back to where the cancelled one started
+        // takes as long as that one had got.
+        let (reversing_adjusted_start, factor) = match reversing {
+            Some(t) if t.reversing_adjusted_start == *new => {
+                let p = t.timing.evaluate(t.progress(now));
+                let f = (p * t.reversing_shortening + (1.0 - t.reversing_shortening))
+                    .abs()
+                    .clamp(0.0, 1.0);
+                (t.to.clone(), f)
+            }
+            _ => (from.clone(), 1.0),
+        };
+        let delay_ms = if delay_ms < 0.0 {
+            us(delay_ms * factor as f64)
+        } else {
+            delay_ms
+        };
+        let id = self.next_id();
+        Some(Transition {
+            id,
+            node,
+            prop,
+            from,
+            to: new.clone(),
+            created_ms: now,
+            delay_ms,
+            duration_ms: us(duration_ms * factor as f64),
+            timing: spec.timing.clone(),
+            reversing_adjusted_start,
+            reversing_shortening: factor,
+            started: false,
+            done: false,
+        })
     }
 
     /// Overlay the running transitions of this element.
@@ -1087,12 +1837,18 @@ pub(crate) fn is_paint_prop(index: usize) -> bool {
         PROPS[index].name,
         "opacity"
             | "transform"
+            | "translate"
+            | "rotate"
+            | "scale"
             | "color"
             | "background-color"
             | "border-top-color"
             | "border-right-color"
             | "border-bottom-color"
             | "border-left-color"
+            | "outline-color"
+            // Ink only: a shadow adds to no box and no overflow layout reads.
+            | "box-shadow"
     )
 }
 
@@ -1629,6 +2385,27 @@ impl Animations {
                 ended: false,
             });
         }
+        for (k, svg) in self.svg_transitions.iter().enumerate() {
+            let t = &svg.t;
+            out.push(CssAnimationInfo {
+                id: t.id,
+                node: t.node,
+                pseudo: None,
+                kind: "transition",
+                // After every `PROPS` row, in the lane's order.
+                index: PROPS.len() + k,
+                name: svg.prop.to_string(),
+                start_ms: t.created_ms,
+                paused_ms: None,
+                delay_ms: t.delay_ms,
+                duration_ms: t.duration_ms,
+                iterations: 1.0,
+                direction: "normal",
+                fill: "backwards",
+                easing: easing_text(&t.timing),
+                ended: false,
+            });
+        }
         for a in self.css.iter().filter(|a| !a.cancelled) {
             out.push(CssAnimationInfo {
                 id: a.id,
@@ -1688,6 +2465,21 @@ impl Animations {
     pub(crate) fn control(&mut self, c: &CssAnimationControl) {
         let now = self.clock_ms;
         if c.kind == "transition" {
+            if let Some(at) = self.svg_transitions.iter().position(|t| t.t.id == c.id) {
+                match c.op.as_str() {
+                    "cancel" => {
+                        let t = self.svg_transitions.remove(at);
+                        self.svg_base.remove(&(t.t.node, t.prop));
+                        self.push_svg_event(&t, "transitioncancel", t.t.elapsed_at(now));
+                    }
+                    "finish" => {
+                        let t = &mut self.svg_transitions[at].t;
+                        t.created_ms = now - t.delay_ms - t.duration_ms;
+                    }
+                    _ => {}
+                }
+                return;
+            }
             let Some(at) = self.transitions.iter().position(|t| t.id == c.id) else {
                 return;
             };
@@ -1823,6 +2615,155 @@ pub(crate) fn compose(underlying: &AnimValue, value: &AnimValue, composite: &str
 mod tests {
     use super::*;
 
+    const SVG_BLUE: Color = Color {
+        r: 0,
+        g: 0,
+        b: 255,
+        a: 1.0,
+    };
+    const SVG_RED: Color = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 1.0,
+    };
+
+    fn linear_100ms(property: &str) -> Option<TransitionItem> {
+        Some(TransitionItem {
+            property: property.to_string(),
+            duration: 0.1,
+            delay: 0.0,
+            timing: TimingFunction::Linear,
+        })
+    }
+
+    /// One lane pass at `at` ms with `fill` of node 7 as `paint`.
+    fn svg_pass(
+        a: &mut Animations,
+        at: f64,
+        paint: Paint,
+        spec: Option<TransitionItem>,
+    ) -> Vec<(usize, &'static str, Color)> {
+        a.clock_ms = at;
+        a.svg_update(&[(7, "fill", paint, spec)]);
+        a.svg_overlay()
+    }
+
+    fn kinds(a: &mut Animations) -> Vec<&'static str> {
+        a.take_events().iter().map(|e| e.kind).collect()
+    }
+
+    /// A2.2: a colour against a colour interpolates (premultiplied, as
+    /// `color`), with run, start and end at the element.
+    #[test]
+    fn svg_fill_colours_interpolate() {
+        let mut a = Animations::default();
+        assert!(svg_pass(&mut a, 0.0, Paint::Color(SVG_BLUE), linear_100ms("all")).is_empty());
+        let start = svg_pass(&mut a, 0.0, Paint::Color(SVG_RED), linear_100ms("all"));
+        assert_eq!(start, vec![(7, "fill", SVG_BLUE)]);
+        assert!(a.svg_moving() && a.active());
+        assert!(!a.running(), "the svg lane is not a `running()` one");
+        let mid = svg_pass(&mut a, 50.0, Paint::Color(SVG_RED), linear_100ms("all"));
+        assert_eq!(mid.len(), 1);
+        assert_eq!((mid[0].2.r, mid[0].2.g, mid[0].2.b), (128, 0, 128));
+        assert!(svg_pass(&mut a, 100.0, Paint::Color(SVG_RED), linear_100ms("all")).is_empty());
+        assert!(!a.svg_moving());
+        let events = a.take_events();
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| (e.node, e.kind, e.property.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (7, "transitionrun", "fill"),
+                (7, "transitionstart", "fill"),
+                (7, "transitionend", "fill")
+            ]
+        );
+    }
+
+    /// `none` and `url()` do not interpolate (Chrome 148): no transition,
+    /// no event; `currentcolor` both times is no change.
+    #[test]
+    fn svg_paint_keywords_are_discrete() {
+        let url = Paint::Url("#g".to_string(), None);
+        for (before, after) in [
+            (Paint::None, Paint::Color(SVG_RED)),
+            (Paint::Color(SVG_RED), Paint::None),
+            (url.clone(), Paint::Color(SVG_RED)),
+            (Paint::Color(SVG_RED), url),
+            (Paint::CurrentColor(SVG_BLUE), Paint::CurrentColor(SVG_RED)),
+        ] {
+            let mut a = Animations::default();
+            svg_pass(&mut a, 0.0, before.clone(), linear_100ms("fill"));
+            let moving = svg_pass(&mut a, 0.0, after.clone(), linear_100ms("fill"));
+            assert!(
+                moving.is_empty() && !a.svg_moving(),
+                "{before:?} to {after:?}"
+            );
+            assert!(
+                kinds(&mut a).is_empty(),
+                "{before:?} to {after:?}: no events"
+            );
+        }
+    }
+
+    /// A transition list that stops naming the property (no item covers
+    /// it: `None`), or an element that left the svg, cancels the running one (the lane's own sweep).
+    #[test]
+    fn svg_transitions_are_swept() {
+        let mut a = Animations::default();
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_BLUE), linear_100ms("fill"));
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_RED), linear_100ms("fill"));
+        assert!(svg_pass(&mut a, 20.0, Paint::Color(SVG_RED), None).is_empty());
+        assert_eq!(
+            kinds(&mut a),
+            vec!["transitionrun", "transitionstart", "transitioncancel"]
+        );
+        assert!(a.svg_lane_empty());
+
+        let mut a = Animations::default();
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_BLUE), linear_100ms("fill"));
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_RED), linear_100ms("fill"));
+        a.clock_ms = 20.0;
+        a.svg_update(&[]);
+        assert!(a.svg_lane_empty());
+        assert_eq!(
+            kinds(&mut a),
+            vec!["transitionrun", "transitionstart", "transitioncancel"]
+        );
+    }
+
+    /// Back to where it started midway: the running one is cancelled and
+    /// the new one runs from the value shown, shortened (css-transitions-1
+    /// §3), as the `PROPS` lane does.
+    #[test]
+    fn an_svg_transition_reverses_from_where_it_got_to() {
+        let mut a = Animations::default();
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_BLUE), linear_100ms("fill"));
+        svg_pass(&mut a, 0.0, Paint::Color(SVG_RED), linear_100ms("fill"));
+        let back = svg_pass(&mut a, 40.0, Paint::Color(SVG_BLUE), linear_100ms("fill"));
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            (back[0].2.r, back[0].2.b),
+            (102, 153),
+            "from the colour at 40 ms"
+        );
+        // 40 ms out, so 40 ms back.
+        assert!(svg_pass(&mut a, 80.0, Paint::Color(SVG_BLUE), linear_100ms("fill")).is_empty());
+        assert_eq!(
+            kinds(&mut a),
+            vec![
+                "transitionrun",
+                "transitionstart",
+                "transitioncancel",
+                "transitionrun",
+                "transitionstart",
+                "transitionend"
+            ]
+        );
+    }
+
     #[test]
     fn colours_interpolate_premultiplied() {
         let blue = Color {
@@ -1856,7 +2797,50 @@ mod tests {
     }
 
     #[test]
-    fn lengths_interpolate_only_within_a_unit() {
+    fn currentcolor_is_its_own_value_and_interpolates_as_the_colour() {
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 1.0,
+        };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        };
+        assert_eq!(
+            AnimValue::CurrentColor(blue),
+            AnimValue::CurrentColor(red),
+            "currentcolor before and after is no change"
+        );
+        assert_ne!(AnimValue::CurrentColor(blue), AnimValue::Color(blue));
+        assert_eq!(
+            interpolate(&AnimValue::CurrentColor(blue), &AnimValue::Color(red), 0.5),
+            Some(AnimValue::Color(Color {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 1.0
+            }))
+        );
+        let mut style = ComputedStyle::new();
+        style.color = blue;
+        let i = prop_indices("outline-color")[0];
+        assert_eq!(prop_value(&style, i), AnimValue::CurrentColor(blue));
+        set_prop_value(&mut style, i, &AnimValue::Color(red));
+        assert_eq!(style.outline.color, Some(red));
+        set_prop_value(&mut style, i, &AnimValue::CurrentColor(blue));
+        assert_eq!(style.outline.color, None);
+        assert_eq!(
+            prop_indices("text-decoration"),
+            prop_indices("text-decoration-color")
+        );
+    }
+
+    #[test]
+    fn lengths_interpolate_within_a_unit_and_mix_two_units_as_calc() {
         assert_eq!(
             interpolate_length(&Length::Px(100.0), &Length::Px(200.0), 0.5),
             Some(Length::Px(150.0))
@@ -1869,9 +2853,20 @@ mod tests {
             interpolate_length(&Length::Auto, &Length::Px(100.0), 0.5),
             None
         );
+        // Two units: a calc() mix (Chrome 148: `10px` to `50%` is
+        // `calc(25% + 5px)` at the midpoint).
         assert_eq!(
-            interpolate_length(&Length::Percent(50.0), &Length::Px(100.0), 0.5),
-            None
+            interpolate_length(&Length::Px(10.0), &Length::Percent(50.0), 0.5),
+            Some(Length::Calc(Box::new(rustkit_css::CalcSum {
+                px: 5.0,
+                percent: 25.0,
+                ..Default::default()
+            })))
+        );
+        assert_eq!(
+            interpolate_length(&Length::Px(10.0), &Length::Percent(50.0), 1.0),
+            Some(Length::Percent(50.0)),
+            "the end collapses to its one unit"
         );
     }
 
@@ -2047,5 +3042,175 @@ mod tests {
                 "transitionend"
             ]
         );
+    }
+}
+
+// ------------------------------------------------------------ svg paint
+
+/// The svg paint properties the svg lane transitions (A2.2).
+pub(crate) const SVG_PAINT_PROPS: &[&str] = &["fill", "stroke"];
+
+/// The transition item of `items` that covers svg paint property `prop`.
+pub(crate) fn svg_spec_for<'a>(
+    items: &'a [TransitionItem],
+    prop: &str,
+) -> Option<&'a TransitionItem> {
+    spec_for(items, prop)
+}
+
+impl Animations {
+    /// Whether an svg paint transition's value is moving at the clock: one
+    /// in its delay holds its start value, so its frames need no build
+    /// until the delay ends (`active()` keeps the frames turning).
+    pub(crate) fn svg_moving(&self) -> bool {
+        self.svg_transitions.iter().any(|t| self.clock_ms >= t.t.start_ms())
+    }
+
+    /// Whether the svg lane holds nothing: no before-change value and no
+    /// transition.
+    pub(crate) fn svg_lane_empty(&self) -> bool {
+        self.svg_base.is_empty() && self.svg_transitions.is_empty()
+    }
+
+    /// Whether the svg lane holds anything for `node`'s `prop`.
+    pub(crate) fn svg_holds(&self, node: usize, prop: &'static str) -> bool {
+        self.svg_base.contains_key(&(node, prop))
+            || self
+                .svg_transitions
+                .iter()
+                .any(|t| t.t.node == node && t.prop == prop)
+    }
+
+    fn push_svg_event(&mut self, t: &SvgTransition, kind: &'static str, elapsed_s: f32) {
+        self.events.push(AnimationEvent {
+            node: t.t.node,
+            kind,
+            property: t.prop.to_string(),
+            name: String::new(),
+            elapsed_s,
+        });
+    }
+
+    /// A2.2: one pass of the svg paint lane, given every svg element's
+    /// `fill` and `stroke` as the author rules, presentation attributes and
+    /// inheritance resolve them (`svg_computed::resolve_paints`, no
+    /// transition applied), with the transition item that covers it.
+    /// `paints` lists every element and property the lane holds
+    /// (`svg_holds`) and every one a transition covers; anything left out
+    /// is gone (its element left the svg, or the document).
+    ///
+    /// The rules are `transitions_update`'s: a covered value that changed
+    /// since the last pass starts a transition from what the element
+    /// showed (a running one is cancelled, with the reversing shortening);
+    /// one heading where the value now is keeps going; a transition whose
+    /// value is no longer covered is cancelled. Colours interpolate
+    /// (premultiplied, as `color`); `none`, `url()` and `currentcolor` do
+    /// not (Chrome 148 starts no transition for the first two; the third is
+    /// a stated gap), so the value jumps.
+    pub(crate) fn svg_update(
+        &mut self,
+        paints: &[(usize, &'static str, Paint, Option<TransitionItem>)],
+    ) {
+        let now = self.clock_ms;
+        let covered: std::collections::HashSet<(usize, &str)> = paints
+            .iter()
+            .filter(|p| p.3.is_some())
+            .map(|p| (p.0, p.1))
+            .collect();
+        // The cancel sweep: svg content gets no build visit, so the
+        // end-of-build sweep never sees it.
+        let mut gone = Vec::new();
+        self.svg_transitions.retain(|t| {
+            if covered.contains(&(t.t.node, t.prop)) {
+                true
+            } else {
+                gone.push(t.clone());
+                false
+            }
+        });
+        for t in gone {
+            self.push_svg_event(&t, "transitioncancel", t.t.elapsed_at(now));
+        }
+        self.svg_base.retain(|key, _| covered.contains(key));
+        for (node, prop, new, spec) in paints {
+            let Some(spec) = spec else { continue };
+            let prev = self.svg_base.insert((*node, *prop), new.clone());
+            let Some(old) = prev.filter(|_| !self.disabled) else {
+                continue;
+            };
+            let running = self
+                .svg_transitions
+                .iter()
+                .position(|t| t.t.node == *node && t.prop == *prop);
+            match running {
+                // Already heading there: the running one keeps going.
+                Some(at) if matches!(new, Paint::Color(c) if self.svg_transitions[at].t.to == AnimValue::Color(*c)) => {
+                    continue
+                }
+                None if same_paint(&old, new) => continue,
+                _ => {}
+            }
+            let (from, reversing) = match running {
+                Some(at) => {
+                    let t = self.svg_transitions.remove(at);
+                    let current = t.t.value_at(now);
+                    self.push_svg_event(&t, "transitioncancel", t.t.elapsed_at(now));
+                    (Some(current), Some(t.t))
+                }
+                None => (
+                    match old {
+                        Paint::Color(c) => Some(AnimValue::Color(c)),
+                        _ => None,
+                    },
+                    None,
+                ),
+            };
+            let (Some(from), Paint::Color(to)) = (from, new) else {
+                continue;
+            };
+            let Some(t) = self.new_transition(
+                *node,
+                usize::MAX,
+                from,
+                &AnimValue::Color(*to),
+                spec,
+                reversing,
+            ) else {
+                continue;
+            };
+            let t = SvgTransition { t, prop: *prop };
+            self.push_svg_event(&t, "transitionrun", t.t.elapsed_at_start());
+            self.svg_transitions.push(t);
+        }
+    }
+
+    /// The running svg paint transitions' values at the clock, as
+    /// (raw NodeId, property, colour), with their `transitionstart` and
+    /// `transitionend` queued as the phases change. One that ended is
+    /// dropped: the resolved value is its end value.
+    pub(crate) fn svg_overlay(&mut self) -> Vec<(usize, &'static str, Color)> {
+        let now = self.clock_ms;
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.svg_transitions.len() {
+            let t = &mut self.svg_transitions[i];
+            if !t.t.started && now >= t.t.start_ms() {
+                t.t.started = true;
+                let (t, elapsed) = (t.clone(), t.t.elapsed_at_start());
+                self.push_svg_event(&t, "transitionstart", elapsed);
+            }
+            let t = &self.svg_transitions[i];
+            if now >= t.t.end_ms() {
+                let (t, elapsed) = (t.clone(), (t.t.duration_ms / 1000.0) as f32);
+                self.push_svg_event(&t, "transitionend", elapsed);
+                self.svg_transitions.remove(i);
+                continue;
+            }
+            if let AnimValue::Color(c) = t.t.value_at(now) {
+                out.push((t.t.node, t.prop, c));
+            }
+            i += 1;
+        }
+        out
     }
 }

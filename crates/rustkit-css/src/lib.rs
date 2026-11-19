@@ -485,6 +485,39 @@ impl CornerRadius {
 }
 
 impl Length {
+    /// This length as a sum of unit coefficients (`calc()`'s normal form),
+    /// for a value that is one: a plain unit, zero or a `calc()` sum.
+    /// `None` for `auto`, `fit-content` and `min()`/`max()`/`clamp()`.
+    pub fn to_calc_sum(&self) -> Option<CalcSum> {
+        let mut sum = CalcSum::default();
+        match self {
+            Length::Px(v) => sum.px = *v,
+            Length::Em(v) => sum.em = *v,
+            Length::Rem(v) => sum.rem = *v,
+            Length::Percent(v) => sum.percent = *v,
+            Length::Vw(v) => sum.vw = *v,
+            Length::Vh(v) => sum.vh = *v,
+            Length::Vmin(v) => sum.vmin = *v,
+            Length::Vmax(v) => sum.vmax = *v,
+            Length::Zero => {}
+            Length::Calc(c) => sum = **c,
+            Length::Auto
+            | Length::FitContent
+            | Length::Min(_)
+            | Length::Max(_)
+            | Length::Clamp(_) => return None,
+        }
+        Some(sum)
+    }
+
+    /// `a` and `b` interpolated at `t` term by term (css-values-4 §3.2:
+    /// a length-percentage mix is a `calc()`), collapsed to a plain unit
+    /// where one term is left. `None` where either is not a sum.
+    pub fn interpolate_as_calc(a: &Length, b: &Length, t: f32) -> Option<Length> {
+        let (a, b) = (a.to_calc_sum()?, b.to_calc_sum()?);
+        Some(a.scaled(1.0 - t).add(b.scaled(t), 1.0).into_length())
+    }
+
     /// Compute the absolute pixel value.
     ///
     /// For viewport units, pass viewport dimensions via `viewport_width` and `viewport_height`.
@@ -4145,6 +4178,9 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
     // rgb() / rgba() / hsl() / hsla(), comma or space syntax
     let lower = value.to_ascii_lowercase();
+    if lower.starts_with("hwb(") {
+        return color_fn::parse_hwb(&lower);
+    }
     if lower.starts_with("rgb") || lower.starts_with("hsl") {
         return color_fn::parse_color_function(&lower);
     }
