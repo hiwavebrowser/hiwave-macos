@@ -723,6 +723,8 @@ mod css_transitions_grid_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_computed_paint_tests;
 #[cfg(all(test, feature = "headless"))]
+mod block_replaced_margin_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
