@@ -1247,8 +1247,11 @@ fn rasterize_glyph_directwrite(
                     .is_ok()
                 && exists.as_bool();
             if !direct {
+                // The family Windows substitutes for the name ("Times" is Times New Roman), as in
+                // shaping, ahead of the fallback ladder.
+                let substitute = rustkit_text::family_substitute(&key.font_family);
                 let mut found = false;
-                for fallback in ["Segoe UI", "Arial", "Tahoma"] {
+                for fallback in substitute.iter().map(String::as_str).chain(["Segoe UI", "Arial", "Tahoma"]) {
                     let fb_wide: Vec<u16> =
                         fallback.encode_utf16().chain(std::iter::once(0)).collect();
                     if collection
