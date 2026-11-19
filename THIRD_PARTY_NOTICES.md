@@ -18,7 +18,7 @@ checked is in section 7 and in `docs/GATES.md`.
 1. Licences with source or file-level obligations (MPL-2.0)
 2. Works that are not Cargo crates (Chart.js, Unicode CLDR data, SQLite, the Rust standard library)
 3. Vendored and modified source (`third_party/`: Boa, with code ported from V8 and atoi_simd)
-4. Rust crates in the dependency closure of the `hiwave` binary (385 crates), by licence, with each licence text once
+4. Rust crates in the dependency closure of the `hiwave` binary (388 crates), by licence, with each licence text once
 5. Crates under more than one licence at once, and licence files reproduced in full
 6. What is in the repository but does not ship
 7. How this file was made, and what was not verified
@@ -212,7 +212,7 @@ in section 4.
 
 Every crate `cargo tree -p hiwave-app -e normal` reports for
 `aarch64-apple-darwin` and `x86_64-apple-darwin`, HiWave's own crates left out.
-360 of them are compiled and linked into the binary. The other 25 are
+363 of them are compiled and linked into the binary. The other 25 are
 procedural macros (marked in their entries): they run at build time and are
 not linked, but the code they generate is, so they are listed too.
 
@@ -223,7 +223,7 @@ copied from the licence files inside each published crate; where a crate ships
 none, the entry says so and gives the `authors` field of its `Cargo.toml`
 instead.
 
-### MIT License (`MIT`): 334 crates
+### MIT License (`MIT`): 337 crates
 
 - **addr 0.15.6** (declared `MIT/Apache-2.0`). Copyright (c) 2016 Rushmore Mushambi. <https://github.com/addr-rs/addr>
 - **addr2line 0.25.1** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016-2018 The gimli Developers. <https://github.com/gimli-rs/addr2line>
@@ -406,7 +406,10 @@ instead.
 - **objc2 0.6.3** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.2.2** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
+- **objc2-av-foundation 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
 - **objc2-core-foundation 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
+- **objc2-core-media 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
+- **objc2-core-video 0.3.2** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
 - **objc2-encode 4.1.0** (declared `MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
 - **objc2-exception-helper 0.1.1** (declared `Zlib OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Mads Marquart. <https://github.com/madsmtm/objc2>
 - **objc2-foundation 0.2.2** (declared `MIT`). No copyright line and no authors field in the published crate. <https://github.com/madsmtm/objc2>
@@ -3389,7 +3392,7 @@ does not repeat that search.
 Not verified:
 
 - Copyright lines are what each crate's own licence files say (300 crates).
-  78 crates ship no copyright line; their entries give the `authors` field
+  81 crates ship no copyright line; their entries give the `authors` field
   instead, which names authors, not necessarily copyright holders. Their
   upstream repositories were not read, except Boa's.
 - Licence expressions are the crates' own declarations. No crate's source was
