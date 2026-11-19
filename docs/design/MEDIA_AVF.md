@@ -1,7 +1,12 @@
 # Media on AVFoundation (MEDIA-AVF): design, plan first
 
-Status: **proposal, for Pete's approval before any code.** Written 2026-11-18 against
-develop `ecf18ff4`. This is a docs-only change. Nothing here is built yet.
+Status: **approved by Pete on 2026-11-18** (#1331). Written 2026-11-18 against develop
+`ecf18ff4`.
+
+**Amended 2026-11-19 (§3.1, §3.2, §3.3): `AVPlayer` and `AVPlayerItem` are main-thread
+only, so the players live on the main thread.** The amended §3.2 supersedes the original
+design, where the engine's content thread owned the players. The decision is the
+coordinator's (engine design is Atlas's lane).
 
 Pete's media plan (2026-11-14) sets the frame:
 
@@ -162,45 +167,73 @@ The PR order is in §3.8.
 ### 3.1 Shape
 
 ```text
- page script / DOM                 content thread (engine, Rc state)          AVFoundation threads
- ───────────────────               ───────────────────────────────            ─────────────────────
- <video src>  ──attr change──▶  MediaHost (per view)                          AVPlayer
- video.play() ─binding call──▶    MediaPlayer (per element, rustkit-media)  ─▶ AVPlayerItem
-                                    ├─ HTMLMediaElement state (kept)           AVURLAsset (custom scheme)
-                                    ├─ AvfPlayer (objc2, owned here)  ◀─poll─  AVPlayerItemVideoOutput
-                                    └─ latest frame slot (CVPixelBuffer)
- events (loadedmetadata, …) ◀─fired at frame ticks─┘
-                                  presenter: key `rustkit-video:<node>` ──▶ wgpu texture (updated in place)
- rustkit-net ◀──byte ranges── resource-loader delegate (dispatch queue) ◀── AVAssetResourceLoader
+ page script / DOM          content thread (engine, Rc state)        main thread                 off-main
+ ─────────────────          ──────────────────────────────────       ───────────                 ────────
+ <video src>  ─attr─▶  MediaElements (per view, media.rs)      ─cmd─▶  MediaHost                    AVFoundation's
+ video.play() ─call─▶    HTMLMediaElement state machine                  ├─ AVPlayer (per element)    own threads
+                         events in Chrome's order       ◀─snapshot─      ├─ AVPlayerItem
+ events ◀── fired at frame ticks ┘                                       └─ AVPlayerItemVideoOutput ─┐
+                                                                                                     │ pull
+ presenter: key `rustkit-video:<node>` ── copyPixelBufferForItemTime ◀───────────────────────────────┘
+ rustkit-net ◀── byte ranges ── resource-loader delegate (its own dispatch queue) ◀── AVAssetResourceLoader
 ```
 
-### 3.2 Ownership and threading
+### 3.2 Ownership and threading (amended 2026-11-19)
 
-- **Who owns what.** A `MediaHost` per view lives with the engine on the content thread.
-  The engine's state is `Rc` and single-threaded. The host owns one `MediaPlayer` per
-  media element, keyed by raw NodeId like `Animations`. Each `MediaPlayer` owns its
-  `AVPlayer`, `AVPlayerItem` and `AVPlayerItemVideoOutput` as `objc2::rc::Retained`
-  values. These are created, used and dropped only on the content thread.
-- **No callbacks into engine state.** The design takes no KVO callbacks and no block
-  callbacks that touch engine state. AVFoundation's notifications arrive on arbitrary
-  threads, and engine state must not be touched there. Instead, at each frame tick, the
-  host polls each player:
-  - `AVPlayerItem.status` and `.error`;
-  - `.duration` and `.presentationSize`;
-  - `.loadedTimeRanges`;
-  - `AVPlayer.timeControlStatus` and `currentTime()`;
-  - whether the item reached its end (`currentTime >= duration`, cross-checked with
-    `AVPlayerItemDidPlayToEndTimeNotification`, which only sets an `AtomicBool`).
+**This section supersedes the original §3.2.** That version had the engine's content
+thread own the `AVPlayer`s, which is not allowed. The macOS SDK marks `AVPlayer` and
+`AVPlayerItem` `NS_SWIFT_UI_ACTOR` (`AVPlayer.h`, `AVPlayerItem.h`), and `objc2-av-foundation`
+0.3.2 makes both `MainThreadOnly`: creating an item needs a `MainThreadMarker`. Step 2's
+metadata probe is not affected, because `AVURLAsset` and its resource loader are not
+main-thread only and step 2 never creates a player.
 
-  Each change maps to a state transition of the kept `HTMLMediaElement` model, and each
-  transition queues the spec's events.
-- **Event firing.** Events fire after the tick's build, in queue order, the same way
-  `settle_animations` fires transition events. One code path decides event order, so
-  the order is deterministic and testable.
-- **Keeping the loop turning.** While any player is potentially playing, or a state
-  change is pending, `MediaHost::active()` is true. `settle_animations`, or a sibling
-  hook beside it, then keeps the live loop turning, just as running transitions do. A
-  paused video costs nothing per frame.
+- **Who owns what.**
+  - A **`MediaHost`** on the main thread owns one `AVPlayer`, `AVPlayerItem` and
+    `AVPlayerItemVideoOutput` per media element. It is small: it runs commands and
+    reports state, and decides nothing about events.
+  - The engine's content thread keeps everything else: each element's `HTMLMediaElement`
+    state machine (step 2's `media.rs`), the event queue and the box.
+- **Commands go in.** The engine sends the host commands over a channel:
+  - `create`
+  - `load`, with the resource-loader scheme URL (§3.4)
+  - `play`, `pause`, `seek`, `rate`, `volume`
+  - `destroy`
+
+  Each command is dispatched onto the main queue (`dispatch2`'s
+  `DispatchQueue::main().exec_async`), where the host runs it.
+- **State snapshots come back.** After each command, and on a short main-thread timer
+  while any player is potentially playing, the host reads each player and sends back a
+  snapshot over a second channel:
+  - readyState, currentTime, duration;
+  - paused, ended, error;
+  - natural size, loaded ranges.
+
+  The host reads only the players' properties (`status`, `timeControlStatus`,
+  `currentTime()`, `duration`, `presentationSize`, `loadedTimeRanges`). The end of the
+  item is cross-checked with `AVPlayerItemDidPlayToEndTimeNotification`, which only sets
+  a flag in the next snapshot.
+- **No KVO and no callbacks into engine state.** Nothing on the main thread or on
+  AVFoundation's threads touches the engine.
+- **Events.** At each frame tick, the engine drains the snapshots. It turns each change
+  into its element's state transitions and queues the events in Chrome 148's order
+  (§5.1). Events fire after the tick's build, in queue order, as transition events do.
+  One code path decides the order, so it is deterministic and testable.
+- **Keeping the loop turning.** While a command is unanswered or a player is potentially
+  playing, the view's media is active and the live loop keeps turning, as running
+  transitions do. A paused video costs nothing per frame.
+- **Frames are pulled off the main thread** (§3.3).
+  - `AVPlayerItemOutput` and `AVPlayerItemVideoOutput` are `NS_SWIFT_SENDABLE` in
+    `AVPlayerItemOutput.h`, and `objc2-av-foundation` makes them `Send + Sync`.
+  - So the host hands each output, a cheap retained reference, to the present side when
+    it creates the player.
+  - `hasNewPixelBufferForItemTime` and `copyPixelBufferForItemTime` are called there,
+    never on the main thread.
+- **Tests.**
+  - Event-order and state-machine tests run on the engine thread against a `FakeBackend`
+    that stands in for the host and answers commands with scripted snapshots (§5).
+  - The real `MediaHost` needs a main thread whose main queue drains. Its tests run in a
+    test binary of their own (`harness = false`), whose `main` runs the CFRunLoop.
+  - In the app, the main thread is AppKit's, whose run loop already drains the main queue.
 
 ### 3.3 Frames: from AVPlayerItemVideoOutput to the display list
 
@@ -213,7 +246,7 @@ attributes:
 
 So every frame is an IOSurface-backed BGRA buffer.
 
-**Per tick, for each playing video:**
+**Per present, for each playing video, on the present side (off the main thread, §3.2):**
 
 1. `itemTimeForHostTime(CACurrentMediaTime())` gives the item time to show now.
 2. If `hasNewPixelBufferForItemTime(t)`, take `copyPixelBufferForItemTime(t,
