@@ -159,6 +159,11 @@ pub fn web_font_face(family: &str, weight: u16, italic: bool) -> Option<FontFace
 }
 
 impl FontFace {
+    /// A face from the raw DirectWrite face (a rasteriser that resolved its own).
+    pub fn from_raw(face: IDWriteFontFace) -> Self {
+        FontFace { face }
+    }
+
     /// The face's PostScript name ("Ahem"), read from the face itself (a document's web face has
     /// no system `Font` to ask), or an empty string when it carries none.
     pub fn postscript_name(&self) -> String {
