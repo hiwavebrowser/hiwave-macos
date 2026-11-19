@@ -56,8 +56,13 @@ pub(crate) struct SvgPaintSnapshot {
     pub(crate) document: Weak<Document>,
     pub(crate) paint: Rc<HashMap<usize, SvgPaintStyle>>,
     /// Per outermost `<svg>` (raw NodeId): its elements' fill and stroke
-    /// text, at the DOM generation they were resolved at.
-    resolved: RefCell<(u64, HashMap<usize, Rc<HashMap<usize, (String, String)>>>)>,
+    /// text, at the DOM generation they were resolved at, with the `color`
+    /// their `currentcolor` took (a `color` transition moves it in frames
+    /// that change no DOM).
+    resolved: RefCell<(
+        u64,
+        HashMap<usize, (Color, Rc<HashMap<usize, (String, String)>>)>,
+    )>,
 }
 
 impl SvgPaintSnapshot {
@@ -96,22 +101,12 @@ impl SvgPaintSnapshot {
         let Some(document) = self.document.upgrade() else {
             return out;
         };
-        // (node, inside svg content): an `<svg>` met outside svg content is
-        // an outermost one; a `<foreignObject>`'s children are HTML again,
-        // as `outermost_svg` climbs.
-        let mut stack: Vec<(Rc<Node>, bool)> = document.root().children().into_iter().map(|c| (c, false)).collect();
-        while let Some((node, in_svg)) = stack.pop() {
-            if !matches!(node.node_type, NodeType::Element { .. }) {
-                continue;
-            }
-            let svg = is_tag(&node, "svg");
-            if svg && !in_svg {
-                out.extend(self.answers(&node, color_of).iter().map(|(k, v)| (*k, v.clone())));
-            }
-            let inside = (in_svg || svg) && !is_tag(&node, "foreignObject");
-            for child in node.children() {
-                stack.push((child, inside));
-            }
+        for svg in outermost_svgs(&document) {
+            out.extend(
+                self.answers(&svg, color_of)
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone())),
+            );
         }
         out
     }
@@ -129,18 +124,44 @@ impl SvgPaintSnapshot {
             *resolved = (gen, HashMap::new());
         }
         let raw = svg.id.raw();
-        resolved
-            .1
-            .entry(raw)
-            .or_insert_with(|| {
-                Rc::new(resolve_svg(
-                    svg,
-                    &self.paint,
-                    color_of(raw).unwrap_or(BLACK),
-                ))
-            })
-            .clone()
+        let current = color_of(raw).unwrap_or(BLACK);
+        if let Some((at, answers)) = resolved.1.get(&raw) {
+            if *at == current {
+                return answers.clone();
+            }
+        }
+        let answers = Rc::new(resolve_svg(svg, &self.paint, current));
+        resolved.1.insert(raw, (current, answers.clone()));
+        answers
     }
+}
+
+/// Every outermost inline `<svg>` of `document`, in no particular order:
+/// an `<svg>` met outside svg content (a `<foreignObject>`'s children are
+/// HTML again, as `outermost_svg` climbs). The walk keeps its own stack.
+pub(crate) fn outermost_svgs(document: &Document) -> Vec<Rc<Node>> {
+    let mut out = Vec::new();
+    // (node, inside svg content)
+    let mut stack: Vec<(Rc<Node>, bool)> = document
+        .root()
+        .children()
+        .into_iter()
+        .map(|c| (c, false))
+        .collect();
+    while let Some((node, in_svg)) = stack.pop() {
+        if !matches!(node.node_type, NodeType::Element { .. }) {
+            continue;
+        }
+        let svg = is_tag(&node, "svg");
+        if svg && !in_svg {
+            out.push(node.clone());
+        }
+        let inside = (in_svg || svg) && !is_tag(&node, "foreignObject");
+        for child in node.children() {
+            stack.push((child, inside));
+        }
+    }
+    out
 }
 
 fn is_tag(node: &Node, tag: &str) -> bool {
@@ -173,6 +194,10 @@ fn outermost_svg(node: &Rc<Node>) -> Option<Rc<Node>> {
 pub(crate) enum Paint {
     None,
     Color(Color),
+    /// `currentcolor`, as the colour it computed to. A transition keeps it
+    /// apart from a colour (`same_paint`): when only `color` moves, the
+    /// paint follows it and no paint transition starts.
+    CurrentColor(Color),
     /// A paint server and its fallback (`none` or a colour).
     Url(String, Option<Box<Paint>>),
 }
@@ -181,10 +206,19 @@ impl Paint {
     pub(crate) fn css_text(&self) -> String {
         match self {
             Paint::None => "none".to_string(),
-            Paint::Color(c) => crate::css_color(*c),
+            Paint::Color(c) | Paint::CurrentColor(c) => crate::css_color(*c),
             Paint::Url(url, None) => format!("url(\"{url}\")"),
             Paint::Url(url, Some(fallback)) => format!("url(\"{url}\") {}", fallback.css_text()),
         }
+    }
+}
+
+/// Whether a transition sees no change from `a` to `b`: equal paints, or
+/// `currentcolor` both times whatever the colour did.
+pub(crate) fn same_paint(a: &Paint, b: &Paint) -> bool {
+    match (a, b) {
+        (Paint::CurrentColor(_), Paint::CurrentColor(_)) => true,
+        _ => a == b,
     }
 }
 
@@ -198,7 +232,7 @@ pub(crate) fn resolves() -> u64 {
     RESOLVES.with(|c| c.get())
 }
 
-const BLACK: Color = Color {
+pub(crate) const BLACK: Color = Color {
     r: 0,
     g: 0,
     b: 0,
@@ -219,7 +253,7 @@ fn parse_simple_paint(value: &str, current: Color) -> Option<Paint> {
         return Some(Paint::None);
     }
     if value.eq_ignore_ascii_case("currentcolor") {
-        return Some(Paint::Color(current));
+        return Some(Paint::CurrentColor(current));
     }
     crate::parse_color(value).map(Paint::Color)
 }
@@ -307,7 +341,11 @@ fn resolve(
             .rev()
             .find_map(|(v, _)| read(v))
     };
-    last(&own, true)
+    // A2.2: a running transition's value beats every declaration
+    // (css-cascade-4 §6.1: the transition origin is the highest).
+    style
+        .and_then(|s| author(&s.animated))
+        .or_else(|| last(&own, true))
         .or_else(|| style.and_then(|s| author(&s.important)))
         .or_else(|| last(&own, false))
         .or_else(|| style.and_then(|s| author(&s.normal)))
@@ -331,6 +369,20 @@ fn resolve_svg(
     paint: &HashMap<usize, SvgPaintStyle>,
     current: Color,
 ) -> HashMap<usize, (String, String)> {
+    resolve_paints(svg, paint, current)
+        .into_iter()
+        .map(|(node, (fill, stroke))| (node, (fill.css_text(), stroke.css_text())))
+        .collect()
+}
+
+/// The computed `fill` and `stroke` of every element of the inline `<svg>`
+/// `svg`, by raw NodeId, its `currentcolor` `current`: what `resolve_svg`
+/// serializes, and what the svg paint transitions compare (A2.2).
+pub(crate) fn resolve_paints(
+    svg: &Rc<Node>,
+    paint: &HashMap<usize, SvgPaintStyle>,
+    current: Color,
+) -> HashMap<usize, (Paint, Paint)> {
     RESOLVES.with(|c| c.set(c.get() + 1));
     let mut out = HashMap::new();
     let mut stack: Vec<(Rc<Node>, Rc<(Paint, Paint)>)> =
@@ -342,12 +394,13 @@ fn resolve_svg(
         let style = paint.get(&node.id.raw());
         let fill = resolve(&node, style, "fill", &parent.0, current);
         let stroke = resolve(&node, style, "stroke", &parent.1, current);
-        out.insert(node.id.raw(), (fill.css_text(), stroke.css_text()));
         // A `<foreignObject>`'s children are HTML, with their own styles.
         if is_tag(&node, "foreignObject") {
+            out.insert(node.id.raw(), (fill, stroke));
             continue;
         }
-        let values = Rc::new((fill, stroke));
+        let values = Rc::new((fill.clone(), stroke.clone()));
+        out.insert(node.id.raw(), (fill, stroke));
         for child in node.children() {
             stack.push((child, values.clone()));
         }
