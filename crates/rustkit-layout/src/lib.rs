@@ -18133,10 +18133,11 @@ mod tests {
         // strut's descent extends the line box under them — Chrome does the
         // same (a lone 40px inline-block makes its container ~45px tall).
         let expected = 40.0 + parent.inline_strut_descent();
-        // Within a pixel: the line box is whole pixels and the strut's descent is not (Chrome 157
-        // on Windows, Arial: 44 for 40 + 3.45).
+        // Windows: within a pixel. The line box is whole pixels and the strut's descent is not
+        // (Chrome 157 on Windows, Arial: 44 for 40 + 3.45). Elsewhere half a pixel, as before.
+        let tolerance = if cfg!(windows) { 1.0 } else { 0.5 };
         assert!(
-            (parent.dimensions.content.height - expected).abs() < 1.0,
+            (parent.dimensions.content.height - expected).abs() < tolerance,
             "parent should be one line tall ({expected}px incl. strut descent), got {}",
             parent.dimensions.content.height
         );
@@ -18219,9 +18220,11 @@ mod tests {
         assert!(sd > 0.0, "strut descent must be positive");
         let second_row = &parent.children[2].dimensions;
         let expected_y = 124.0 + sd + 10.0 + 2.0;
-        // Within a pixel, as above: the line box is whole pixels, the strut's descent is not.
+        // Windows: within a pixel, as above (the line box is whole pixels, the strut's descent is
+        // not). Elsewhere half a pixel, as before.
+        let tolerance = if cfg!(windows) { 1.0 } else { 0.5 };
         assert!(
-            (second_row.content.y - expected_y).abs() < 1.0,
+            (second_row.content.y - expected_y).abs() < tolerance,
             "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
             second_row.content.y
         );
