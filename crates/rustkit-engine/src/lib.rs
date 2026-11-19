@@ -12123,6 +12123,8 @@ impl Engine {
                     roots: roots.iter().copied().collect(),
                     pending,
                     found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
                     walked: 0,
                 })
             });
@@ -12195,7 +12197,12 @@ impl Engine {
                 .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
             view.lay.script_last_cooldown.set(Some(cooldown));
             view.lay.script_cooldown.set(cooldown);
-            view.lay.want_script_unlaid.set(cooldown == 0);
+            // With the box tree kept (`boxes`), the full build after this miss keeps its tree for
+            // the next relayout's splice whatever the cooldown: letting it go left that splice
+            // `no kept tree`, a full build of the page (BOXES-DIFF).
+            view.lay
+                .want_script_unlaid
+                .set(cooldown == 0 || retained_styles_mode().keeps_boxes());
             return miss(&why);
         }
         {
@@ -12433,6 +12440,8 @@ impl Engine {
                     roots: roots.iter().copied().collect(),
                     pending: pending.clone(),
                     found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
                     walked: 0,
                 })
             });
@@ -13312,6 +13321,11 @@ impl layout_ctx::LayoutCtx {
         if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
             return miss("script animations moved since the kept tree was built");
         }
+        // An image that arrived since the kept tree was built: its kept box has the natural size of
+        // before (BOXES-DIFF receipt: 150x150 spliced, 184x184 built, one live capture of two).
+        if self.image_manager.cache_generation() != lay.script_unlaid_images.get() {
+            return miss("an image arrived since the kept tree was built");
+        }
         let plan = match restyle_plan(document, written) {
             Ok(plan) => plan,
             Err(why) => return miss(why),
@@ -13330,6 +13344,8 @@ impl layout_ctx::LayoutCtx {
                 roots: plan.roots.iter().copied().collect(),
                 pending: plan.pending,
                 found: HashMap::new(),
+                dropped: Default::default(),
+                refused: None,
                 walked: 0,
             })
         });
@@ -13337,7 +13353,15 @@ impl layout_ctx::LayoutCtx {
         let Some(build) = RESTYLE_BUILD.with(|build| build.borrow_mut().take()) else {
             return miss("no restyle build");
         };
+        if let Some(why) = build.refused {
+            return miss(why);
+        }
         let mut found = build.found;
+        // A root whose box its parent's build drops has no box in a full build: it splices as one
+        // whose box went (BOXES-DIFF, board report.html's emptied `#error-container`).
+        for root in &build.dropped {
+            found.remove(root);
+        }
         let mut next_id = max_element_id(&tree) + 1;
         let block_level = |b: &LayoutBox| {
             !b.style.display.is_inline_level() && b.style.display != rustkit_css::Display::Contents
@@ -13465,6 +13489,19 @@ impl layout_ctx::LayoutCtx {
                     }
                     _ => None,
                 };
+                // BOXES-DIFF: with the box tree kept, a full build numbers its elements as a splice
+                // does (`number_in_document_order`: in tree order, one number per element with a
+                // box). The build itself numbers each element's box as it builds it, also boxes a
+                // parent then drops (an empty block, a `display: contents` element), so its numbers
+                // have gaps a splice cannot know of: the same element read 4 spliced and 5 built,
+                // and what compares numbers between builds saw a different number for one element.
+                let full_build = || {
+                    let mut tree = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                    if retained_styles_mode().keeps_boxes() {
+                        number_in_document_order(&mut tree);
+                    }
+                    tree
+                };
                 match spliced {
                     Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
                         // What the animation state's sweep would drop if the build ended with the
@@ -13473,7 +13510,7 @@ impl layout_ctx::LayoutCtx {
                         let would_sweep = lay.as_ref().map_or_else(Vec::new, |lay| {
                             lay.animations.borrow().would_sweep(layout_ctx::build_was_partial(false))
                         });
-                        let full = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                        let full = full_build();
                         let note_difference = |difference: String| {
                             let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
@@ -13498,7 +13535,7 @@ impl layout_ctx::LayoutCtx {
                         full
                     }
                     Some(spliced) => spliced,
-                    None => self.build_layout_from_document(document, external_stylesheets, javascript_enabled),
+                    None => full_build(),
                 }
             })
         };
@@ -13512,6 +13549,7 @@ impl layout_ctx::LayoutCtx {
             lay.script_unlaid_unpublished.set(keep && forced);
             lay.script_unlaid_animated.set(keep && lay.animations.borrow().running());
             lay.script_unlaid_generation.set(lay.animated.borrow().generation);
+            lay.script_unlaid_images.set(self.image_manager.cache_generation());
         }
 
         // Layout computation
@@ -14620,6 +14658,27 @@ impl Engine {
         }
 
         segment
+    }
+
+    /// Whether a parent's build keeps `child` (already reboxed if a culled inline) among its boxes:
+    /// blocks with children, visible styling or a part in layout while empty; inlines with content
+    /// or visible styling; text, images, form controls and line breaks always. A full build and a
+    /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
+    fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
+        match child.box_type {
+            BoxType::Block | BoxType::AnonymousBlock => {
+                !child.children.is_empty()
+                    || Engine::has_visible_styling(&child.style)
+                    || Engine::empty_block_affects_layout(child, parent_style)
+            }
+            BoxType::Inline => {
+                Engine::has_content_children(child) || Engine::has_visible_styling(&child.style)
+            }
+            BoxType::Text(_)
+            | BoxType::Image { .. }
+            | BoxType::FormControl(_)
+            | BoxType::LineBreak => true,
+        }
     }
 
     /// Attach element identity so the geometry oracle can join this box to
@@ -15866,8 +15925,49 @@ impl layout_ctx::LayoutCtx {
                     match restyle {
                         RestyleChild::Build => {}
                         RestyleChild::Root => {
+                            // BOXES-DIFF: the root's box as this build keeps it below, so a
+                            // splice puts in what a full build has: a culled inline reboxed,
+                            // and none where the box is dropped (an empty block with nothing
+                            // visible about it, hidden `<details>` content).
+                            let mut child_box = child_box;
+                            let contents =
+                                child_box.style.display == rustkit_css::Display::Contents;
+                            if !contents {
+                                Engine::rebox_culled_inline(&mut child_box);
+                            }
+                            let shown = !closed_details || details_summary == Some(child_index);
+                            let kept = contents
+                                || (shown && Engine::parent_keeps(&child_box, &layout_box.style));
+                            let refused = if is_details {
+                                Some("a written element in a <details>")
+                            } else if !kept
+                                && matches!(child_box.box_type, BoxType::Inline)
+                                && child_box.children.iter().any(|c| {
+                                    matches!(
+                                        c.position,
+                                        rustkit_layout::Position::Absolute
+                                            | rustkit_layout::Position::Fixed
+                                    )
+                                })
+                            {
+                                Some("a dropped inline keeps its out-of-flow boxes")
+                            } else {
+                                None
+                            };
+                            // A box the parent's build drops (or a `display: contents` one) is
+                            // still a styled element: noted for `getComputedStyle` as a full build
+                            // notes it below, or script read `display: none` after the splice.
+                            if contents || !kept {
+                                self.note_boxless_style(&child_box, Some(&layout_box.style));
+                            }
                             RESTYLE_BUILD.with(|build| {
                                 if let Some(build) = build.borrow_mut().as_mut() {
+                                    if !kept {
+                                        build.dropped.insert(child.id.raw());
+                                    }
+                                    if refused.is_some() {
+                                        build.refused = refused;
+                                    }
                                     build.found.insert(child.id.raw(), child_box);
                                 }
                             });
@@ -15920,25 +16020,7 @@ impl layout_ctx::LayoutCtx {
                     Engine::rebox_culled_inline(&mut child_box);
 
                     // Determine if box should be included in layout tree
-                    let should_include = match child_box.box_type {
-                        BoxType::Block | BoxType::AnonymousBlock => {
-                            // Include blocks if they have children, OR have visible styling,
-                            // OR still take part in layout while empty.
-                            !child_box.children.is_empty()
-                                || Engine::has_visible_styling(&child_box.style)
-                                || Engine::empty_block_affects_layout(&child_box, &layout_box.style)
-                        }
-                        BoxType::Inline => {
-                            // Include inline boxes if they have content children (text, images, form controls)
-                            // or have visible styling (padding, border, background)
-                            Engine::has_content_children(&child_box)
-                                || Engine::has_visible_styling(&child_box.style)
-                        }
-                        BoxType::Text(_)
-                        | BoxType::Image { .. }
-                        | BoxType::FormControl(_)
-                        | BoxType::LineBreak => true,
-                    };
+                    let should_include = Engine::parent_keeps(&child_box, &layout_box.style);
 
                     if should_include && shown {
                         let into = if is_details && details_summary == Some(child_index) {
@@ -48817,6 +48899,10 @@ struct RestyleBuild {
     /// children are skipped, as nothing they hold is read under a root.
     pending: HashMap<usize, usize>,
     found: HashMap<usize, LayoutBox>,
+    /// BOXES-DIFF: the roots in `found` whose box their parent's build drops (a full build has no
+    /// box for them), and why a splice of this build must not be made, if it must not.
+    dropped: std::collections::HashSet<usize>,
+    refused: Option<&'static str>,
     /// The child nodes the build went into.
     walked: usize,
 }
@@ -49088,10 +49174,33 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
     };
     let (sa, sb) = (shallow(a), shallow(b));
     if sa != sb {
-        return Some(at(path, format!("box {sa} vs {sb}")));
+        return Some(at(
+            path,
+            format!("box fields differ: {}", differing_fields(&sa, &sb)),
+        ));
     }
     if a.children.len() != b.children.len() {
-        return Some(at(path, format!("{} children vs {}", a.children.len(), b.children.len())));
+        let kids = |x: &LayoutBox| {
+            x.children
+                .iter()
+                .map(|c| match (c.node_id, c.identity.as_ref()) {
+                    (Some(n), Some(i)) => format!("{n}:{}", i.tag),
+                    (Some(n), None) => format!("{n}"),
+                    (None, _) => format!("anon {:?}", c.box_type),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Some(at(
+            path,
+            format!(
+                "{} children vs {}: [{}] vs [{}]",
+                a.children.len(),
+                b.children.len(),
+                kids(a),
+                kids(b)
+            ),
+        ));
     }
     for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
         path.push(i);
@@ -49101,6 +49210,58 @@ fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> 
         path.pop();
     }
     None
+}
+
+/// Each top-level field of two boxes' shallow `Debug` text (`LayoutBox { a: .., b: .. }`) that
+/// differs, as `name: left vs right` (BOXES-DIFF: the log names every differing field of the first
+/// differing box, not only that it differs).
+fn differing_fields(a: &str, b: &str) -> String {
+    fn fields(s: &str) -> Vec<&str> {
+        let body = s
+            .find('{')
+            .map_or(s, |open| &s[open + 1..s.len().saturating_sub(1)]);
+        let (mut out, mut depth, mut quoted, mut escaped, mut start) =
+            (Vec::new(), 0i32, false, false, 0);
+        for (i, c) in body.char_indices() {
+            if quoted {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(body[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(body[start..].trim());
+        out.retain(|f| !f.is_empty());
+        out
+    }
+    let (fa, fb) = (fields(a), fields(b));
+    if fa.len() != fb.len() {
+        return format!("{a} vs {b}");
+    }
+    fa.iter()
+        .zip(&fb)
+        .filter(|(x, y)| x != y)
+        .map(|(x, y)| match (x.split_once(": "), y.split_once(": ")) {
+            (Some((name, left)), Some((other, right))) if name == other => {
+                format!("{name}: {left} vs {right}")
+            }
+            _ => format!("{x} vs {y}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// A spliced tree's element numbers, as a full build gives them (#1247 R1 item 3). A full build
