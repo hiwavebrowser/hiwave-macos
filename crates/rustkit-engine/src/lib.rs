@@ -308,6 +308,7 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod svg_computed;
+mod media;
 mod console_log;
 pub mod console_file;
 mod relayout_cause;
@@ -1584,6 +1585,10 @@ struct DocState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// MEDIA-AVF: the document's `<video>` / `<audio>` elements and their resources'
+    /// fetches in flight (`media.rs`).
+    media: media::MediaHost,
+    live_media: Vec<script_net::LiveFuture<media::MediaFetched>>,
     /// Stylesheet fetches still out: the load's past its subresource
     /// budget (Z row S6) and those for links scripts inserted (CH2.E20).
     /// Each lands in `fetched_sheets` under its URL on a live turn.
@@ -1938,6 +1943,9 @@ impl ViewState {
         self.live_modules.clear();
         self.live_modules_started = 0;
         self.live_images.clear();
+        self.media = media::MediaHost::default();
+        self.live_media.clear();
+        self.lay.media_sizes.borrow_mut().clear();
         self.live_sheets.clear();
         self.sheet_links.clear();
         self.external_sheet_owners = Rc::default();
@@ -3888,6 +3896,8 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
+                media: media::MediaHost::default(),
+                live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
                 external_sheet_owners: Rc::default(),
@@ -4016,6 +4026,8 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
+                media: media::MediaHost::default(),
+                live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
                 external_sheet_owners: Rc::default(),
@@ -4161,6 +4173,8 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
+                media: media::MediaHost::default(),
+                live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
                 external_sheet_owners: Rc::default(),
@@ -6833,6 +6847,7 @@ impl Engine {
                 continue;
             };
             child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            child.set_media_can_play(Some(Box::new(media::can_play_type)));
             // The images its canvases draw: what the frame's own image loads
             // put in the engine's image store, as for a top-level page.
             child.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
@@ -7608,7 +7623,7 @@ impl Engine {
         if self
             .views
             .get(&id)
-            .is_some_and(|view| view.lay.animations.borrow().active())
+            .is_some_and(|view| view.lay.animations.borrow().active() || view.media.busy())
         {
             out.next_timer_ms = Some(out.next_timer_ms.map_or(LIVE_FRAME_MS, |ms| ms.min(LIVE_FRAME_MS)));
         }
@@ -7731,8 +7746,15 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
+        // MEDIA-AVF: media elements' loading (media.rs).
+        if self.settle_media(id).await {
+            match self.relayout_for(id, RelayoutCause::Other("media metadata")) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after media metadata failed"),
+            }
+        }
         if let Some(view) = self.views.get(&id) {
-            out.in_flight += view.live_images.len() + view.live_sheets.len();
+            out.in_flight += view.live_images.len() + view.live_sheets.len() + view.live_media.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -10623,6 +10645,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_media_can_play(Some(Box::new(media::can_play_type)));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
@@ -11098,6 +11121,7 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_media_can_play(Some(Box::new(media::can_play_type)));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
@@ -12006,7 +12030,7 @@ impl Engine {
             }
             // MEDIA-AVF M1.1: a media element's box paints nothing until its frames do.
             if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
-                if rustkit_layout::key_has_no_ratio(url) {
+                if rustkit_layout::key_has_no_ratio(url) || url.starts_with(media::VIDEO_KEY_PREFIX) {
                     continue;
                 }
             }
@@ -15259,11 +15283,25 @@ impl layout_ctx::LayoutCtx {
                             style.height = rustkit_css::Length::Px(h);
                         }
                     }
-                    let natural_height = if tag_lower == "video" { 150.0 } else { 54.0 };
+                    // MEDIA-AVF M1.2: once a video's metadata is in, its box takes the
+                    // video's size and ratio (Chrome 148: `width=100` on a 64x48 video
+                    // is 100x75), under its stable key `rustkit-video:<node>`.
+                    let video_size = (tag_lower == "video")
+                        .then(|| self.with_building_lay(|lay| lay.media_sizes.borrow().get(&node.id.raw()).copied()))
+                        .flatten()
+                        .flatten();
+                    let (url, natural_width, natural_height) = match video_size {
+                        Some((w, h)) => (format!("{}{}", media::VIDEO_KEY_PREFIX, node.id.raw()), w as f32, h as f32),
+                        None => (
+                            format!("{}{}:{}", rustkit_layout::NO_RATIO_KEY_PREFIX, tag_lower, node.id.raw()),
+                            300.0,
+                            if tag_lower == "video" { 150.0 } else { 54.0 },
+                        ),
+                    };
                     let mut b = LayoutBox::new(
                         BoxType::Image {
-                            url: format!("{}{}:{}", rustkit_layout::NO_RATIO_KEY_PREFIX, tag_lower, node.id.raw()),
-                            natural_width: 300.0,
+                            url,
+                            natural_width,
                             natural_height,
                         },
                         style.clone(),
@@ -22339,6 +22377,76 @@ impl Engine {
     /// (the session's ran 1.5 to 4.7 s, with 2 ms of image polling each)
     /// no longer starve them. A `data:` image decodes on the page, as
     /// before; so does every image when the network runtime is off.
+    /// MEDIA-AVF M1.2: one live turn of view `id`'s media elements (media.rs): sync
+    /// them with the document after a layout or a `load()`, start the fetches that
+    /// asks for, take the fetches that landed, poll the AVFoundation probes, and fire
+    /// the events that queued, each with the element's state as of it. Returns whether
+    /// a video's size came in (its box is laid out again).
+    async fn settle_media(&mut self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else { return false };
+        let (Some(document), Some(bindings)) = (view.document.clone(), view.bindings.as_ref()) else {
+            return false;
+        };
+        let reload = bindings.take_media_loads();
+        let generation = view.frame_generation;
+        if !reload.is_empty() || view.media.synced_for != Some(generation) {
+            // `sync` resolves URLs through the engine: the host is taken out and put back.
+            let mut host = std::mem::take(&mut self.views.get_mut(&id).expect("checked").media);
+            let fetches = host.sync(&document, &reload, &|raw| self.resolve_resource_url_in(id, raw), &media::can_play_type);
+            host.synced_for = Some(generation);
+            self.views.get_mut(&id).expect("checked").media = host;
+            let referrer = self.subresource_referrer(id);
+            let loader = self.loader.clone();
+            let started: Vec<script_net::LiveFuture<media::MediaFetched>> = fetches
+                .into_iter()
+                .map(|f| {
+                    let request = referrer.get_for(f.url, RequestDestination::Other);
+                    let loader = loader.clone();
+                    Box::pin(async move {
+                        let bytes = match loader.fetch(request).await {
+                            Ok(response) if response.status.is_success() => {
+                                let content_type = response.content_type.as_ref().map(|m| m.to_string()).unwrap_or_default();
+                                match response.bytes().await {
+                                    Ok(data) => Ok(rustkit_media::avf::MediaBytes { content_type, data: data.to_vec() }),
+                                    Err(_) => Err(()),
+                                }
+                            }
+                            _ => Err(()),
+                        };
+                        media::MediaFetched { node: f.node, serial: f.serial, bytes }
+                    }) as script_net::LiveFuture<media::MediaFetched>
+                })
+                .collect();
+            if let Some(view) = self.views.get_mut(&id) {
+                view.live_media.extend(started);
+            }
+        }
+        let landed = match self.views.get_mut(&id) {
+            Some(view) => script_net::settle_live(&mut view.live_media, LIVE_NETWORK_SLICE).await,
+            None => return false,
+        };
+        let Some(view) = self.views.get_mut(&id) else { return false };
+        for fetched in landed {
+            view.media.fetched(fetched);
+        }
+        let resized = view.media.poll();
+        if resized {
+            *view.lay.media_sizes.borrow_mut() = view.media.video_sizes();
+        }
+        let events = view.media.take_events();
+        if let Some(bindings) = view.bindings.as_ref() {
+            for event in &events {
+                if let Err(e) = bindings.fire_media_event(event.node, Some(event.kind), Some(&event.state)) {
+                    debug!(?id, error = %e, kind = event.kind, "media event failed");
+                }
+            }
+            if !events.is_empty() {
+                inspector_glue::drain_errors(bindings, &view.inspector, "media");
+            }
+        }
+        resized
+    }
+
     fn start_planned_images(plan: ImagePlan) -> Vec<script_net::LiveFuture<FetchedImages>> {
         let ImagePlan {
             pending,

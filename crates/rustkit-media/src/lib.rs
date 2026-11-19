@@ -27,6 +27,38 @@
 
 #[cfg(target_os = "macos")]
 pub mod avf;
+/// Off macOS there is no AVFoundation: nothing plays, every probe fails.
+#[cfg(not(target_os = "macos"))]
+pub mod avf {
+    use std::sync::Arc;
+
+    pub fn is_playable_extended_mime_type(_mime: &str) -> bool {
+        false
+    }
+
+    pub struct MediaBytes {
+        pub content_type: String,
+        pub data: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ProbeState {
+        Pending,
+        Ready { duration: f64, video: Option<(f64, f64)>, audio: bool },
+        Failed,
+    }
+
+    pub struct Probe;
+
+    impl Probe {
+        pub fn start(_bytes: Arc<MediaBytes>) -> Probe {
+            Probe
+        }
+        pub fn poll(&mut self) -> ProbeState {
+            ProbeState::Failed
+        }
+    }
+}
 
 use hashbrown::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

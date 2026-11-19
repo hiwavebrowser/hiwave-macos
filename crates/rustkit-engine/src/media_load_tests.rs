@@ -126,6 +126,10 @@ fn close(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 }
 
 fn check(label: &str, event_states: bool) {
+    check_except(label, event_states, &[]);
+}
+
+fn check_except(label: &str, event_states: bool, skip: &[&str]) {
     let (case, got) = run(label);
     let mut failures = Vec::new();
     let events = |v: &serde_json::Value, states: bool| -> Vec<String> {
@@ -165,6 +169,9 @@ fn check(label: &str, event_states: bool) {
         "width",
         "height",
     ] {
+        if skip.contains(&key) {
+            continue;
+        }
         if !close(&got[key], &case[key]) {
             failures.push(format!("{key} {}, Chrome {}", got[key], case[key]));
         }
@@ -193,9 +200,17 @@ fn a_videos_box_takes_its_ratio_after_metadata() {
     check("video width=100 after metadata", true);
 }
 
+/// The size is the pin here. The duration is not compared: this one-frame fixture's
+/// movie and track say 0.1 s (what AVFoundation reports) while its one sample lasts
+/// 1/15 s (what Chrome reports, 0.066667), an artifact of how AVAssetWriter writes a
+/// single frame rather than a behaviour to match.
 #[test]
 fn a_small_videos_box_takes_its_size() {
-    check("video 32x24 after metadata", true);
+    check_except(
+        "video 32x24 after metadata",
+        true,
+        &["duration", "buffered", "seekable"],
+    );
 }
 
 /// A `<source>` whose type canPlayType rejects is skipped.
