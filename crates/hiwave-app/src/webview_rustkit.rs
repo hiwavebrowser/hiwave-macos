@@ -2989,14 +2989,37 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
     /// (until H19 nothing in the log said why the load just took longer).
     #[test]
     fn content_thread_a_bare_while_true_in_a_load_script_is_stopped_and_the_log_says_why() {
-        let (view, took, log) = load_spin(PURE_SPIN_PAGE);
+        assert_bare_spin_stopped_and_said(PURE_SPIN_PAGE, "inline#1");
+    }
+
+    /// T44: the same bare loop, with a `load` listener that outlives the
+    /// 50 ms stop grace (`rustkit_js::control::STOP_GRACE`) a lifecycle step
+    /// gets once the loop has spent the budget. The step's own stop line
+    /// (`source=event:load`) is the one a page thread held past 50 ms in
+    /// that step writes under heavy machine load (#1015 at load ~20, #1034
+    /// at 29): it is not a second line about the loop.
+    #[test]
+    fn content_thread_a_bare_while_true_is_logged_once_when_a_lifecycle_step_is_stopped_too() {
+        assert_bare_spin_stopped_and_said(PURE_SPIN_THEN_HELD_LOAD_PAGE, "inline#2");
+    }
+
+    /// [`PURE_SPIN_PAGE`] after a script that holds `load` for 200 ms.
+    const PURE_SPIN_THEN_HELD_LOAD_PAGE: &str = "<body style='margin:0'><p id=p>spin</p>\
+<script>addEventListener('load', function () { var t = Date.now(); while (Date.now() - t < 200) {} });</script>\
+<script>window.first = true; while (true) {}</script>\
+<script>window.after = true;</script></body>";
+
+    /// Loads `page`, whose script `source` is a bare `while (true) {}`, and
+    /// checks the budget ended it and exactly one log line says so.
+    fn assert_bare_spin_stopped_and_said(page: &'static str, source: &str) {
+        let (view, took, log) = load_spin(page);
         assert!(took < Duration::from_secs(25), "the load took {took:?}");
         let why: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("Script stopped at the script budget"))
             .collect();
         assert_eq!(why.len(), 1, "no line says why the script ended:\n{log}");
-        assert!(why[0].contains("source=inline#1"), "{}", why[0]);
+        assert!(why[0].contains(&format!("source={source}")), "{}", why[0]);
         assert_eq!(read(&view, "String(window.first)"), r#"String("true")"#);
     }
 
