@@ -4219,6 +4219,11 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         self.lctx.image_manager.forget_view(id.0);
         self.page_commits.remove(&id);
+        // The svg frames this view's transitions parsed (`svg_transient_keys`) leave the
+        // shared cache with it: no later pass of this view would evict them.
+        let mut svgs = self.lctx.svg_cache.borrow_mut();
+        view.lay.svg_transient_keys.take().iter().for_each(|key| drop(svgs.remove(key)));
+        drop(svgs);
 
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.destroy_view(id, view.viewhost_id);
