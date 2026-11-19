@@ -261,12 +261,13 @@ pub fn generation() -> u64 {
 }
 
 /// Invalidate every thread's family-name resolutions.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn bump_generation() {
     EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Invalidate this thread's family-name resolutions (its slot changed).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn bump_local_generation() {
     LOCAL_GENERATION.with(|g| g.set(g.get() + 1));
 }
@@ -439,14 +440,15 @@ mod imp {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::WebFontFace;
+    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::sync::{Arc, OnceLock, RwLock};
+    use std::sync::Arc;
 
     struct Face {
         weight: u16,
         italic: bool,
-        data: Arc<Vec<u8>>,
         id: u64,
+        data: Arc<Vec<u8>>,
     }
 
     struct Active {
@@ -454,14 +456,17 @@ mod imp {
         families: HashMap<String, Vec<Face>>,
     }
 
-    fn slot() -> &'static RwLock<Active> {
-        static SLOT: OnceLock<RwLock<Active>> = OnceLock::new();
-        SLOT.get_or_init(|| {
-            RwLock::new(Active {
-                tag: String::new(),
-                families: HashMap::new(),
-            })
-        })
+    // Per thread, as on macOS: a view's content thread lays out and paints with the set it
+    // installed, and another thread's install neither replaces it nor moves its generation.
+    thread_local! {
+        static SLOT: RefCell<Active> = RefCell::new(Active {
+            tag: String::new(),
+            families: HashMap::new(),
+        });
+    }
+
+    fn with_slot<R>(f: impl FnOnce(&mut Active) -> R) -> R {
+        SLOT.with(|slot| f(&mut slot.borrow_mut()))
     }
 
     fn key(family: &str) -> String {
@@ -469,11 +474,12 @@ mod imp {
     }
 
     pub fn install(tag: &str, faces: &[WebFontFace]) -> usize {
-        {
-            let active = slot().read().unwrap();
-            if !tag.is_empty() && active.tag == tag {
-                return active.families.values().map(Vec::len).sum();
-            }
+        let installed = with_slot(|active| {
+            (!tag.is_empty() && active.tag == tag)
+                .then(|| active.families.values().map(Vec::len).sum())
+        });
+        if let Some(count) = installed {
+            return count;
         }
         let library = freetype::Library::init().ok();
         let mut families: HashMap<String, Vec<Face>> = HashMap::new();
@@ -482,6 +488,8 @@ mod imp {
             if super::inspect(&face.data).is_err() {
                 continue;
             }
+            // FreeType validates the face (its own copy of the bytes, dropped here); one it
+            // rejects (a WOFF2 without brotli, a broken table) is dropped, not kept as a name.
             let parses = library
                 .as_ref()
                 .map(|lib| lib.new_memory_face((*face.data).clone(), 0).is_ok())
@@ -493,28 +501,32 @@ mod imp {
             families.entry(key(&face.family)).or_default().push(Face {
                 weight: face.weight,
                 italic: face.italic,
-                data: face.data.clone(),
                 id: super::content_id(&face.data),
+                data: face.data.clone(),
             });
         }
-        let mut active = slot().write().unwrap();
-        active.tag = tag.to_string();
-        active.families = families;
-        super::bump_generation();
+        with_slot(|active| {
+            active.tag = tag.to_string();
+            active.families = families;
+        });
+        super::bump_local_generation();
         accepted
     }
 
     pub fn clear() {
-        let mut active = slot().write().unwrap();
-        if !active.tag.is_empty() || !active.families.is_empty() {
-            super::bump_generation();
+        let changed = with_slot(|active| {
+            let changed = !active.tag.is_empty() || !active.families.is_empty();
+            active.tag.clear();
+            active.families.clear();
+            changed
+        });
+        if changed {
+            super::bump_local_generation();
         }
-        active.tag.clear();
-        active.families.clear();
     }
 
     pub fn is_installed(family: &str) -> bool {
-        slot().read().unwrap().families.contains_key(&key(family))
+        with_slot(|active| active.families.contains_key(&key(family)))
     }
 
     fn select<'a>(faces: &'a [Face], weight: u16, italic: bool) -> Option<&'a Face> {
@@ -524,33 +536,37 @@ mod imp {
         })
     }
 
-    /// The bytes of the registered face of `family` closest to the requested style.
+    /// The bytes of this thread's registered face of `family` closest to the requested style.
+    /// hiwave-linux's `LinuxTextBackend` opens them as a FreeType memory face.
     pub fn lookup_data(family: &str, weight: u16, italic: bool) -> Option<Arc<Vec<u8>>> {
-        let active = slot().read().unwrap();
-        let faces = active.families.get(&key(family))?;
-        select(faces, weight, italic).map(|f| f.data.clone())
+        with_slot(|active| {
+            let faces = active.families.get(&key(family))?;
+            select(faces, weight, italic).map(|f| f.data.clone())
+        })
     }
 
     /// Identity of the registered face a CSS family LIST resolves to for this
     /// style, or 0 when the document registered none of them.
     pub fn face_id(family_list: &str, weight: u16, italic: bool) -> u64 {
-        let active = slot().read().unwrap();
-        if active.families.is_empty() {
-            return 0;
-        }
-        for family in family_list.split(',') {
-            let family = family.trim().trim_matches('"').trim_matches('\'');
-            if let Some(faces) = active.families.get(&key(family)) {
-                return select(faces, weight, italic).map_or(0, |f| f.id);
+        with_slot(|active| {
+            if active.families.is_empty() {
+                return 0;
             }
-        }
-        0
+            for family in family_list.split(',') {
+                let family = family.trim().trim_matches('"').trim_matches('\'');
+                if let Some(faces) = active.families.get(&key(family)) {
+                    return select(faces, weight, italic).map_or(0, |f| f.id);
+                }
+            }
+            0
+        })
     }
 
     pub fn lookup_descriptor(family: &str, weight: u16, italic: bool) -> Option<(u16, bool)> {
-        let active = slot().read().unwrap();
-        let faces = active.families.get(&key(family))?;
-        select(faces, weight, italic).map(|f| (f.weight, f.italic))
+        with_slot(|active| {
+            let faces = active.families.get(&key(family))?;
+            select(faces, weight, italic).map(|f| (f.weight, f.italic))
+        })
     }
 }
 
@@ -771,8 +787,10 @@ mod container_tests {
     }
 }
 
-/// The installed-face slot is process-wide: every test that installs or clears
-/// holds this for its whole body, wherever in the crate it lives.
+/// The installed-face slot is per thread; a test that installs or clears on its
+/// own thread still holds this for its whole body, so tests that read a
+/// thread's set alongside others (here and in hiwave-linux's text backend) do
+/// not interleave their installs.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn slot_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -797,6 +815,29 @@ mod linux_tests {
 
     fn slot_guard() -> MutexGuard<'static, ()> {
         slot_test_guard()
+    }
+
+    /// Another thread's install neither replaces this thread's faces nor moves its generation:
+    /// a tab's content thread keeps laying out with its own set while another tab installs.
+    #[test]
+    fn another_threads_install_leaves_this_threads_faces_and_generation() {
+        let _slot = slot_guard();
+        assert_eq!(install("mine", &[ahem_face("WebfontsTestMine", 400, false)]), 1);
+        let my_generation = generation();
+        let my_id = face_id("WebfontsTestMine", 400, false);
+        std::thread::spawn(|| {
+            assert_eq!(install("theirs", &[ahem_face("WebfontsTestTheirs", 400, false)]), 1);
+            assert!(is_installed("WebfontsTestTheirs"));
+            assert!(!is_installed("WebfontsTestMine"), "a thread sees only its own set");
+        })
+        .join()
+        .unwrap();
+        assert!(is_installed("WebfontsTestMine"), "this thread's set is still installed");
+        assert!(!is_installed("WebfontsTestTheirs"), "the other thread's set did not land here");
+        assert_eq!(face_id("WebfontsTestMine", 400, false), my_id);
+        assert!(lookup_data("WebfontsTestMine", 400, false).is_some());
+        assert_eq!(generation(), my_generation, "another thread's install does not move this one");
+        clear();
     }
 
     #[test]
