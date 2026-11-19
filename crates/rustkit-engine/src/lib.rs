@@ -4223,6 +4223,11 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         self.lctx.image_manager.forget_view(id.0);
         self.page_commits.remove(&id);
+        // The svg frames this view's transitions parsed (`svg_transient_keys`) leave the
+        // shared cache with it: no later pass of this view would evict them.
+        let mut svgs = self.lctx.svg_cache.borrow_mut();
+        view.lay.svg_transient_keys.take().iter().for_each(|key| drop(svgs.remove(key)));
+        drop(svgs);
 
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.destroy_view(id, view.viewhost_id);
@@ -11756,7 +11761,7 @@ impl Engine {
         {
             let _svg = relayout_cause::time_stage(relayout_cause::Stage::Svg);
             self.cache_svg_paint_styles(&document, id, Some((bounds.width as f32, bounds.height as f32)));
-            self.lctx.cache_inline_svgs(&document);
+            self.lctx.cache_inline_svgs(&document, self.views.get(&id).map(|v| &*v.lay));
         }
 
         // Get external stylesheets from view state
@@ -12470,7 +12475,7 @@ impl Engine {
             // (`button:hover svg path`): the map and the parsed icons of
             // this build's chains, kept by the pre-pass when unchanged.
             self.cache_svg_paint_styles(document, id, Some((size.0 as f32, size.1 as f32)));
-            self.lctx.cache_inline_svgs(document);
+            self.lctx.cache_inline_svgs(document, self.views.get(&id).map(|v| &*v.lay));
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
@@ -21607,23 +21612,26 @@ impl layout_ctx::LayoutCtx {
     /// the box build (which runs with `&self`) can size them and the
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
-    fn cache_inline_svgs(&self, document: &Document) {
+    /// `lay` is the view the pass is for (`None` outside one: no key of
+    /// it is transient).
+    fn cache_inline_svgs(&self, document: &Document, lay: Option<&layout_ctx::ViewLayout>) {
         // Nothing in the document and nothing in its paint map changed
         // since the last pass: every svg's document is cached (LAT4b).
         let paint = self.svg_paint_styles.borrow().clone();
         if self.svg_prepass.borrow().pass_done(document.root(), &paint) {
             return;
         }
-        // A2.2: a pass under moving svg paint parses one document per frame
-        // for each animated svg. Those keys are transient: the next pass
-        // evicts the ones it no longer uses.
-        let animated = paint.values().any(|s| !s.animated.is_empty());
-        let transient = !self.svg_transient_keys.borrow().is_empty();
+        // A2.2: an svg holding a moving svg paint value is parsed under a
+        // new key each frame. Those keys are this view's transient ones: its
+        // next pass evicts the ones it no longer uses. Another view's keys,
+        // and every svg that holds no moving value, are left alone.
+        let moving_svgs = lay.map(|_| Self::svgs_holding_animated(document, &paint)).unwrap_or_default();
+        let transient = lay.is_some_and(|lay| !lay.svg_transient_keys.borrow().is_empty());
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut parsed: Vec<String> = Vec::new();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = self.inline_svg_key_for(&svg_el);
-            if animated || transient {
+            if transient {
                 used.insert(key.clone());
             }
             if self.svg_cache.borrow().contains_key(&key) || self.svg_prepass.borrow().failed.contains(&key) {
@@ -21633,7 +21641,7 @@ impl layout_ctx::LayoutCtx {
             let xml = Engine::inline_svg_markup_from_parts(&parts, &paint);
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
-                    if animated {
+                    if moving_svgs.contains(&svg_el.id.raw()) {
                         parsed.push(key.clone());
                     }
                     self.svg_cache.borrow_mut().insert(key, doc);
@@ -21644,8 +21652,8 @@ impl layout_ctx::LayoutCtx {
                 }
             }
         }
-        if animated || transient {
-            let mut keys = self.svg_transient_keys.borrow_mut();
+        if let Some(lay) = lay {
+            let mut keys = lay.svg_transient_keys.borrow_mut();
             let mut cache = self.svg_cache.borrow_mut();
             keys.retain(|key| {
                 let keep = used.contains(key);
@@ -21657,6 +21665,29 @@ impl layout_ctx::LayoutCtx {
             keys.extend(parsed);
         }
         self.svg_prepass.borrow_mut().note_pass(document.root(), &paint);
+    }
+
+    /// Every `<svg>` element (raw NodeId) at or above an element whose
+    /// paint map entry holds a moving svg paint value: the svgs whose
+    /// markup, and so cache key, changes each frame.
+    fn svgs_holding_animated(
+        document: &Document,
+        paint: &HashMap<usize, SvgPaintStyle>,
+    ) -> std::collections::HashSet<usize> {
+        let mut out = std::collections::HashSet::new();
+        for (&node, style) in paint {
+            if style.animated.is_empty() {
+                continue;
+            }
+            let mut at = document.get_node(NodeId::new(node));
+            while let Some(n) = at {
+                if n.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("svg")) {
+                    out.insert(n.id.raw());
+                }
+                at = n.parent();
+            }
+        }
+        out
     }
 }
 
@@ -27086,7 +27117,7 @@ impl Engine {
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
             lctx.svg_paint_transitions(&lay, &document);
             lctx.note_svg_paint(&lay, &document);
-            lctx.cache_inline_svgs(&document);
+            lctx.cache_inline_svgs(&document, Some(&lay));
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
             // back when the guard drops, also if the build unwinds.
@@ -33457,7 +33488,7 @@ mod tests {
         // branch builds an Image sized from the viewBox. This is the exit the
         // real engine takes on every relayout, and the one the `shelf`
         // capture went through.
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         assert!(
             !engine.lctx.svg_cache.borrow().is_empty(),
             "the pre-pass did not parse the subtree, so the cache-hit exit \
@@ -33617,7 +33648,7 @@ mod tests {
             </div>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         assert_eq!(
             index.len(),
@@ -33778,7 +33809,7 @@ mod tests {
             </svg>
         </body></html>"##;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -33878,7 +33909,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
 
         // The user-space bbox must be the viewBox's own origin, or the test
@@ -33975,7 +34006,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -35393,7 +35424,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let svg_cache = engine.lctx.svg_cache.borrow();
         assert_eq!(svg_cache.len(), 1);
         let doc = svg_cache.values().next().unwrap();
@@ -35446,7 +35477,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let mut out = Vec::new();
         for svg in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = Engine::inline_svg_key(&engine.lctx.inline_svg_markup_styled(&svg));
@@ -35639,7 +35670,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         // Two identical svgs, one content-addressed entry.
         assert_eq!(engine.lctx.svg_cache.borrow().len(), 1, "identical svgs must share a cache entry");
         let svg_cache = engine.lctx.svg_cache.borrow();
@@ -51802,7 +51833,7 @@ mod windows_a_leg_pins {
             <div><a class="btn"><svg viewbox="0 0 24 24"><rect width="24" height="24"/></svg></a></div>
             </body></html>"#;
         let d = Document::parse_html(html).expect("parse");
-        e.lctx.cache_inline_svgs(&d);
+        e.lctx.cache_inline_svgs(&d, None);
         let mut root = e.build_layout_from_document(&d, &[]);
         root.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
