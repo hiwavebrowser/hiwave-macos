@@ -289,6 +289,17 @@ pub(crate) fn aspect_ratio_content_height(
 /// 1 px of padding above and below and 6 px left and right, and a 2 px (outset) border. Chrome for
 /// Testing 148.0.7778.216 on Linux and macOS (CB3b, CB3c): a bare 16 px Arial button is 24 x 24
 /// for the label `x` (8 + 6 + 6 + 2 + 2 wide, 18 + 1 + 1 + 2 + 2 tall).
+/// The key prefix of a replaced box with natural sizes and no natural ratio (CSS Images
+/// 3 §4.1: a `<video>` before its metadata is 300x150 with no ratio). A missing axis takes
+/// its natural size, not the other axis across a ratio: Chrome 148 lays out `<video
+/// width=100>` as 100x150 (MEDIA-AVF, `docs/diagnostics/2026-11-18/media_box_cft148.json`).
+pub const NO_RATIO_KEY_PREFIX: &str = "rustkit-noratio:";
+
+/// Whether an image box's key names a replaced box with no natural ratio.
+pub fn key_has_no_ratio(url: &str) -> bool {
+    url.starts_with(NO_RATIO_KEY_PREFIX)
+}
+
 pub const UA_BUTTON_PADDING: [f32; 4] = [1.0, 6.0, 1.0, 6.0];
 pub const UA_BUTTON_BORDER: f32 = 2.0;
 /// The same, summed over both sides of an axis.
@@ -3945,6 +3956,20 @@ impl LayoutBox {
         // Which axes the page left to the ratio: a minimum that grows the
         // other axis takes these along and leaves a specified size alone.
         let (width_is_auto, height_is_auto) = (explicit_width.is_none(), explicit_height.is_none());
+        // No natural ratio (`NO_RATIO_KEY_PREFIX`): an axis the page left `auto` is its
+        // natural size, and nothing below scales one axis by the other.
+        let no_ratio = matches!(&self.box_type, BoxType::Image { url, .. } if key_has_no_ratio(url))
+            && self.style.aspect_ratio.is_none();
+        let (explicit_width, explicit_height, width_is_auto, height_is_auto) = if no_ratio {
+            (
+                Some(explicit_width.unwrap_or(natural_width)),
+                Some(explicit_height.unwrap_or(natural_height)),
+                false,
+                false,
+            )
+        } else {
+            (explicit_width, explicit_height, width_is_auto, height_is_auto)
+        };
 
         // A specified `aspect-ratio` replaces the natural ratio before the
         // intrinsic-sizing rules run, so a missing axis is derived from the
@@ -4016,7 +4041,7 @@ impl LayoutBox {
         }
         if let Some(mh) = max_height {
             if height > mh && height > 0.0 {
-                width = if width > 0.0 {
+                width = if width > 0.0 && !no_ratio {
                     mh * width / height
                 } else {
                     width
@@ -4103,6 +4128,10 @@ impl LayoutBox {
         };
         if !matches!(self.style.width, Length::Auto) || *natural_width <= 0.0 {
             return None;
+        }
+        // No natural ratio: the height never reaches the width.
+        if matches!(&self.box_type, BoxType::Image { url, .. } if key_has_no_ratio(url)) && self.style.aspect_ratio.is_none() {
+            return Some(*natural_width);
         }
         let s = &self.style;
         let vertical_decoration = [&s.padding_top, &s.padding_bottom, &s.border_top_width, &s.border_bottom_width]
