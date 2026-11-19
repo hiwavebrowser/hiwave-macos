@@ -453,3 +453,30 @@ fn another_views_relayout_keeps_this_views_svgs() {
         "view b's relayout evicted view a's svgs: {missing:?}"
     );
 }
+
+/// R1 on #1337: a view closed while its svg transition runs releases the frame it was
+/// painting: the per-frame parse leaves the shared cache with it.
+#[test]
+fn closing_a_view_mid_transition_releases_its_svg_frames() {
+    let (mut engine, a, _server) = load(&page(
+        "#p{fill:blue;transition:fill 2000ms linear}#p.on{fill:red}",
+        "",
+    ));
+    read(
+        &mut engine,
+        a,
+        "(document.getElementById('p').classList.add('on'), getComputedStyle(document.getElementById('p')).fill)",
+    );
+    pump(&mut engine, a, 40);
+    let moving = svg_keys(&engine, a);
+    assert_eq!(moving.len(), 1);
+    assert!(
+        engine.lctx.svg_cache.borrow().contains_key(&moving[0]),
+        "the frame is cached while it shows"
+    );
+    engine.destroy_view(a).expect("destroy");
+    assert!(
+        !engine.lctx.svg_cache.borrow().contains_key(&moving[0]),
+        "the closed view's svg frame stayed in the shared cache"
+    );
+}
