@@ -727,6 +727,8 @@ mod block_replaced_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_svg_paint_tests;
 #[cfg(all(test, feature = "headless"))]
+mod media_box_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
@@ -11995,6 +11997,12 @@ impl Engine {
                     continue;
                 }
             }
+            // MEDIA-AVF M1.1: a media element's box paints nothing until its frames do.
+            if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
+                if rustkit_layout::key_has_no_ratio(url) {
+                    continue;
+                }
+            }
             if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
@@ -15226,6 +15234,39 @@ impl layout_ctx::LayoutCtx {
                     return b;
                 }
 
+                // MEDIA-AVF M1.1: a `<video>` (and an `<audio controls>`) is a replaced
+                // box, its fallback children never laid out. With no media loaded it is
+                // 300x150 (audio controls 300x54) with no natural ratio
+                // (`rustkit_layout::NO_RATIO_KEY_PREFIX`). `width=` / `height=` are
+                // presentational hints, as on `<img>`. It paints nothing yet.
+                if tag_lower == "video" || (tag_lower == "audio" && attributes.contains_key("controls")) {
+                    let hint = |name: &str| attributes.get(name).and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v >= 0.0);
+                    let mut style = style.clone();
+                    if let Some(w) = hint("width") {
+                        if matches!(style.width, rustkit_css::Length::Auto) && !style.size_declared[0] {
+                            style.width = rustkit_css::Length::Px(w);
+                        }
+                    }
+                    if let Some(h) = hint("height") {
+                        if matches!(style.height, rustkit_css::Length::Auto) && !style.size_declared[1] {
+                            style.height = rustkit_css::Length::Px(h);
+                        }
+                    }
+                    let natural_height = if tag_lower == "video" { 150.0 } else { 54.0 };
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: format!("{}{}:{}", rustkit_layout::NO_RATIO_KEY_PREFIX, tag_lower, node.id.raw()),
+                            natural_width: 300.0,
+                            natural_height,
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
                 if tag_lower == "canvas" {
                     let (natural_width, natural_height) =
                         canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
@@ -17441,8 +17482,18 @@ impl layout_ctx::LayoutCtx {
             "img" => {
                 style.display = rustkit_css::Display::Inline;
             }
-            "video" | "audio" => {
+            // MEDIA-AVF M1.1 (Chrome 148's UA sheet): `video { object-fit: contain }`,
+            // and an `<audio>` without `controls` is not displayed.
+            "video" => {
                 style.display = rustkit_css::Display::Inline;
+                style.object_fit = "contain".to_string();
+            }
+            "audio" => {
+                style.display = if attributes.contains_key("controls") {
+                    rustkit_css::Display::Inline
+                } else {
+                    rustkit_css::Display::None
+                };
             }
             "canvas" => {
                 style.display = rustkit_css::Display::Inline;
