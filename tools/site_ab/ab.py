@@ -150,10 +150,23 @@ def capture(binary, site, i, frames, timeout_ms):
 def failure_note(runs, timeout_ms):
     """'A timeout 2/2, B timeout 2/2, limit 30 s; stalled in inline#10 after 140 forced layouts'."""
     note = '%s, %s, limit %g s' % (arm_summary(runs, 0), arm_summary(runs, 1), timeout_ms / 1000)
-    hints = []
+    # Runs stalled in the same place differ only in how far they got: one hint
+    # per place, with the forced-layout counts as a range.
+    places = {}
     for r in runs:
-        if r['hint'] and r['hint'] not in hints:
-            hints.append(r['hint'])
+        if r['hint']:
+            m = re.match(r'(.*) after (\d+) forced layouts$', r['hint'])
+            where, n = (m.group(1), int(m.group(2))) if m else (r['hint'], None)
+            places.setdefault(where, []).append(n)
+    hints = []
+    for where, counts in places.items():
+        counts = [c for c in counts if c is not None]
+        if not counts:
+            hints.append(where)
+        elif min(counts) == max(counts):
+            hints.append('%s after %d forced layouts' % (where, counts[0]))
+        else:
+            hints.append('%s after %d–%d forced layouts' % (where, min(counts), max(counts)))
     return note + ('; ' + ' | '.join(hints) if hints else '')
 
 

@@ -166,3 +166,15 @@ def test_one_failed_capture_is_partial_with_the_pairs_left(wt):
     # the pairs that exist keep their numbers; the missing ones say why, not n/a
     assert 'n/a' not in line
     assert '100.00%' in line
+
+
+def test_runs_stalled_in_one_place_collapse_to_a_forced_layout_range():
+    sys.path.insert(0, str(AB.parent))
+    import ab
+    runs = [{'shot': None, 'reason': 'timeout', 'hint': 'stalled in inline#10 after %d forced layouts' % n}
+            for n in (100, 104, 96, 101)]
+    note = ab.failure_note(runs, 30000)
+    assert note == 'A timeout 2/2, B timeout 2/2, limit 30 s; stalled in inline#10 after 96–104 forced layouts'
+    runs[3]['hint'] = 'stalled in inline#2'
+    assert ab.failure_note(runs, 30000).endswith(
+        'stalled in inline#10 after 96–104 forced layouts | stalled in inline#2')
