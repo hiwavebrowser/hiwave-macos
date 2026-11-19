@@ -4979,6 +4979,23 @@ impl LayoutBox {
                     containing_block,
                     percent_height_base,
                 );
+                // A block-level replaced box (`<video style="display:block">`) is a
+                // block in the flow: its top margin collapses with the margins pending
+                // before it, and its bottom margin stays pending for what follows, as
+                // a block's do (`layout_block_with_collapse`). It is never empty, so
+                // its own two margins never collapse through it (Chromium 148:
+                // `float_margin_tests`, "video block h0"). `layout_image_in` placed it
+                // one own top margin below the cursor; the collapsed margin replaces it.
+                if !matches!(self.style.display, rustkit_css::Display::Inline) && !self.style.display.is_atomic_inline() {
+                    let top = self.dimensions.margin.top;
+                    if !std::mem::take(&mut margin_context.first_child_top_adjoined) {
+                        margin_context.add_margin(top);
+                    }
+                    let collapsed = margin_context.resolve();
+                    self.dimensions.content.y += collapsed - top;
+                    margin_context.reset();
+                    margin_context.add_margin(self.dimensions.margin.bottom);
+                }
             }
             BoxType::FormControl(ref control) => {
                 self.layout_form_control(control.clone(), containing_block, percent_height_base);
@@ -5412,6 +5429,15 @@ impl LayoutBox {
             }
             let Some(child) = first else { break };
             if float_before.cleared_by(child.style.clear) {
+                break;
+            }
+            // A block-level replaced box (`<img style="display:block">`) adjoins its top
+            // margin and ends the chain: nothing is inside it (Chromium 148).
+            if matches!(child.box_type, BoxType::Image { .. })
+                && !matches!(child.style.display, rustkit_css::Display::Inline)
+                && !child.style.display.is_atomic_inline()
+            {
+                chain.push(child.length_to_px(&child.style.margin_top, width));
                 break;
             }
             if !matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
@@ -7810,15 +7836,17 @@ impl LayoutBox {
             // first materialize the pending block margin into the cursor —
             // otherwise the preceding block's bottom margin is silently
             // dropped — and must not collapse margins across the line box.
+            // A replaced element (`BoxType::Image`) is inline-level only when it is
+            // displayed inline: a block-level one (`<video style="display:block">`) is
+            // a block box whose margins adjoin its siblings' (Chromium 148; a replaced
+            // box is never empty, so they never collapse through it).
             let is_inline_level = is_inline_block
                 || matches!(
                     child.box_type,
-                    BoxType::Inline
-                        | BoxType::Text(_)
-                        | BoxType::Image { .. }
-                        | BoxType::FormControl(_)
-                        | BoxType::LineBreak
-                );
+                    BoxType::Inline | BoxType::Text(_) | BoxType::FormControl(_) | BoxType::LineBreak
+                )
+                || (matches!(child.box_type, BoxType::Image { .. })
+                    && matches!(child.style.display, rustkit_css::Display::Inline));
             if is_inline_level {
                 cursor_y += margin_context.resolve();
                 margin_context.reset();
