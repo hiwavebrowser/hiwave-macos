@@ -3,8 +3,9 @@
 //! metadata. Nothing plays yet (steps 3 and 4).
 //!
 //! Each `<video>` / `<audio>` of a view's document is tracked by raw NodeId in its
-//! [`MediaHost`]. The live loop syncs the host with the document after each layout and
-//! after `load()` calls, and an element whose resource changed (its `src`, its first
+//! [`MediaElements`] (the engine side of `docs/design/MEDIA_AVF.md` §3.2: the main-thread
+//! `MediaHost` that will own players comes in step 3). The live loop syncs them with the
+//! document after each layout and after `load()` calls, and an element whose resource changed (its `src`, its first
 //! acceptable `<source>`, or a `load()`) runs the algorithm again:
 //!
 //! 1. `loadstart`. With `preload=none` the element then idles (`suspend`).
@@ -135,7 +136,7 @@ pub(crate) struct MediaEvent {
 
 /// A view's media elements.
 #[derive(Default)]
-pub(crate) struct MediaHost {
+pub(crate) struct MediaElements {
     elements: HashMap<usize, MediaElement>,
     events: Vec<MediaEvent>,
     /// The layout generation the document was last synced at.
@@ -170,7 +171,7 @@ fn media_elements(document: &Document) -> Vec<Rc<Node>> {
     out
 }
 
-impl MediaHost {
+impl MediaElements {
     pub(crate) fn take_events(&mut self) -> Vec<MediaEvent> {
         std::mem::take(&mut self.events)
     }

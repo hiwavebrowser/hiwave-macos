@@ -1587,7 +1587,7 @@ struct DocState {
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
     /// MEDIA-AVF: the document's `<video>` / `<audio>` elements and their resources'
     /// fetches in flight (`media.rs`).
-    media: media::MediaHost,
+    media: media::MediaElements,
     live_media: Vec<script_net::LiveFuture<media::MediaFetched>>,
     /// Stylesheet fetches still out: the load's past its subresource
     /// budget (Z row S6) and those for links scripts inserted (CH2.E20).
@@ -1943,7 +1943,7 @@ impl ViewState {
         self.live_modules.clear();
         self.live_modules_started = 0;
         self.live_images.clear();
-        self.media = media::MediaHost::default();
+        self.media = media::MediaElements::default();
         self.live_media.clear();
         self.lay.media_sizes.borrow_mut().clear();
         self.live_sheets.clear();
@@ -3896,7 +3896,7 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
-                media: media::MediaHost::default(),
+                media: media::MediaElements::default(),
                 live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
@@ -4026,7 +4026,7 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
-                media: media::MediaHost::default(),
+                media: media::MediaElements::default(),
                 live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
@@ -4173,7 +4173,7 @@ impl Engine {
                 live_modules: Vec::new(),
                 live_modules_started: 0,
                 live_images: Vec::new(),
-                media: media::MediaHost::default(),
+                media: media::MediaElements::default(),
                 live_media: Vec::new(),
                 live_sheets: Vec::new(),
                 sheet_links: Vec::new(),
