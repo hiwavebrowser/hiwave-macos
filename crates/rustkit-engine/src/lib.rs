@@ -729,6 +729,8 @@ mod css_transitions_svg_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod media_box_tests;
 #[cfg(all(test, feature = "headless"))]
+mod media_load_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
