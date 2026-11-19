@@ -1497,3 +1497,74 @@ mod blocked_request_log_tests {
         }
     }
 }
+
+/// A ranged request's answer is part of a resource: the memory cache, keyed by URL
+/// alone, must never hand it to a later request for the whole resource (or for another
+/// range). Found for MEDIA-AVF's ranged media fetches; it holds for every `Range`
+/// request.
+#[cfg(test)]
+mod partial_content_cache_tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const WHOLE: &str = "0123456789abcdefghij";
+
+    async fn server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/media"))
+            .and(header("range", "bytes=0-3"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-3/20")
+                    .insert_header("cache-control", "max-age=600")
+                    .set_body_string(&WHOLE[0..4]),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/media"))
+            .respond_with(ResponseTemplate::new(200).insert_header("cache-control", "max-age=600").set_body_string(WHOLE))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn ranged(url: &Url) -> Request {
+        Request::get(url.clone()).header(http::header::RANGE, HeaderValue::from_static("bytes=0-3"))
+    }
+
+    #[test]
+    fn a_206_is_never_served_to_a_request_for_the_whole_resource() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let server = server().await;
+            let loader = ResourceLoader::new(LoaderConfig::default()).unwrap();
+            let url = Url::parse(&format!("{}/media", server.uri())).unwrap();
+            let part = loader.fetch(ranged(&url)).await.expect("ranged fetch");
+            assert_eq!(part.status, http::StatusCode::PARTIAL_CONTENT);
+            assert_eq!(part.text().await.unwrap(), &WHOLE[0..4]);
+            let whole = loader.fetch(Request::get(url.clone())).await.expect("whole fetch");
+            assert!(!whole.from_cache, "the 206 answered a request for the whole resource from the cache");
+            assert_eq!(whole.status, http::StatusCode::OK);
+            assert_eq!(whole.text().await.unwrap(), WHOLE);
+        });
+    }
+
+    #[test]
+    fn a_ranged_request_is_not_stored() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let server = server().await;
+            let loader = ResourceLoader::new(LoaderConfig::default()).unwrap();
+            let url = Url::parse(&format!("{}/media", server.uri())).unwrap();
+            loader.fetch(ranged(&url)).await.expect("ranged fetch").text().await.unwrap();
+            let again = loader.fetch(ranged(&url)).await.expect("ranged again");
+            assert!(!again.from_cache, "a ranged answer was kept");
+            assert_eq!(again.status, http::StatusCode::PARTIAL_CONTENT);
+        });
+    }
+}
