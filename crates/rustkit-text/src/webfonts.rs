@@ -233,7 +233,7 @@ pub fn inspect(data: &[u8]) -> Result<FontContainer, FontRejection> {
 
 /// Identity of a face's bytes: equal for the same file however often it is
 /// installed, different for different files. Never 0 (0 means "no web face").
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn content_id(data: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -428,7 +428,133 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// LINUX (declared divergence): the registry holds the raw bytes and
+/// `LinuxTextBackend::get_face` opens them as FreeType memory faces, so the
+/// same face measures (layout) and paints (renderer). `inspect` vets the
+/// container (size caps, header and table directory) before FreeType sees the
+/// bytes, as on macOS; FreeType then validates the face, and one it rejects is
+/// dropped and counted, never kept as a name with no glyphs. FreeType reads
+/// TrueType, OpenType and WOFF; WOFF2 needs a brotli-enabled FreeType and
+/// installs as nothing otherwise.
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::WebFontFace;
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock, RwLock};
+
+    struct Face {
+        weight: u16,
+        italic: bool,
+        data: Arc<Vec<u8>>,
+        id: u64,
+    }
+
+    struct Active {
+        tag: String,
+        families: HashMap<String, Vec<Face>>,
+    }
+
+    fn slot() -> &'static RwLock<Active> {
+        static SLOT: OnceLock<RwLock<Active>> = OnceLock::new();
+        SLOT.get_or_init(|| {
+            RwLock::new(Active {
+                tag: String::new(),
+                families: HashMap::new(),
+            })
+        })
+    }
+
+    fn key(family: &str) -> String {
+        family.trim().to_ascii_lowercase()
+    }
+
+    pub fn install(tag: &str, faces: &[WebFontFace]) -> usize {
+        {
+            let active = slot().read().unwrap();
+            if !tag.is_empty() && active.tag == tag {
+                return active.families.values().map(Vec::len).sum();
+            }
+        }
+        let library = freetype::Library::init().ok();
+        let mut families: HashMap<String, Vec<Face>> = HashMap::new();
+        let mut accepted = 0usize;
+        for face in faces {
+            if super::inspect(&face.data).is_err() {
+                continue;
+            }
+            let parses = library
+                .as_ref()
+                .map(|lib| lib.new_memory_face((*face.data).clone(), 0).is_ok())
+                .unwrap_or(false);
+            if !parses {
+                continue;
+            }
+            accepted += 1;
+            families.entry(key(&face.family)).or_default().push(Face {
+                weight: face.weight,
+                italic: face.italic,
+                data: face.data.clone(),
+                id: super::content_id(&face.data),
+            });
+        }
+        let mut active = slot().write().unwrap();
+        active.tag = tag.to_string();
+        active.families = families;
+        super::bump_generation();
+        accepted
+    }
+
+    pub fn clear() {
+        let mut active = slot().write().unwrap();
+        if !active.tag.is_empty() || !active.families.is_empty() {
+            super::bump_generation();
+        }
+        active.tag.clear();
+        active.families.clear();
+    }
+
+    pub fn is_installed(family: &str) -> bool {
+        slot().read().unwrap().families.contains_key(&key(family))
+    }
+
+    fn select<'a>(faces: &'a [Face], weight: u16, italic: bool) -> Option<&'a Face> {
+        faces.iter().min_by_key(|f| {
+            let style_penalty: u32 = if f.italic == italic { 0 } else { 10_000 };
+            style_penalty + (f.weight as i32 - weight as i32).unsigned_abs()
+        })
+    }
+
+    /// The bytes of the registered face of `family` closest to the requested style.
+    pub fn lookup_data(family: &str, weight: u16, italic: bool) -> Option<Arc<Vec<u8>>> {
+        let active = slot().read().unwrap();
+        let faces = active.families.get(&key(family))?;
+        select(faces, weight, italic).map(|f| f.data.clone())
+    }
+
+    /// Identity of the registered face a CSS family LIST resolves to for this
+    /// style, or 0 when the document registered none of them.
+    pub fn face_id(family_list: &str, weight: u16, italic: bool) -> u64 {
+        let active = slot().read().unwrap();
+        if active.families.is_empty() {
+            return 0;
+        }
+        for family in family_list.split(',') {
+            let family = family.trim().trim_matches('"').trim_matches('\'');
+            if let Some(faces) = active.families.get(&key(family)) {
+                return select(faces, weight, italic).map_or(0, |f| f.id);
+            }
+        }
+        0
+    }
+
+    pub fn lookup_descriptor(family: &str, weight: u16, italic: bool) -> Option<(u16, bool)> {
+        let active = slot().read().unwrap();
+        let faces = active.families.get(&key(family))?;
+        select(faces, weight, italic).map(|f| (f.weight, f.italic))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::WebFontFace;
 
@@ -518,6 +644,9 @@ pub fn install_set(set: &FaceSet) -> usize {
 
 #[cfg(target_os = "macos")]
 pub use imp::lookup;
+
+#[cfg(target_os = "linux")]
+pub use imp::lookup_data;
 
 #[cfg(test)]
 mod container_tests {
@@ -639,6 +768,96 @@ mod container_tests {
             "six bytes"
         );
         assert_eq!(read(&[0x81]), None, "ends mid-number");
+    }
+}
+
+/// The installed-face slot is process-wide: every test that installs or clears
+/// holds this for its whole body, wherever in the crate it lives.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn slot_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use std::sync::MutexGuard;
+
+    const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
+
+    fn ahem_face(family: &str, weight: u16, italic: bool) -> WebFontFace {
+        WebFontFace {
+            family: family.to_string(),
+            weight,
+            italic,
+            data: Arc::new(AHEM.to_vec()),
+        }
+    }
+
+    fn slot_guard() -> MutexGuard<'static, ()> {
+        slot_test_guard()
+    }
+
+    #[test]
+    fn an_installed_face_resolves_by_family_case_insensitively() {
+        let _slot = slot_guard();
+        let faces = [ahem_face("WebfontsTestAhem", 400, false)];
+        assert_eq!(install("l1", &faces), 1, "FreeType accepts the TrueType Ahem");
+        let data = lookup_data("WEBFONTSTESTAHEM", 400, false).expect("registered family resolves");
+        assert_eq!(data.len(), AHEM.len());
+        assert!(!is_installed("DejaVu Sans"), "system fonts are not web fonts");
+    }
+
+    #[test]
+    fn garbage_bytes_are_rejected_not_registered() {
+        let _slot = slot_guard();
+        let junk = WebFontFace {
+            family: "WebfontsTestJunk".to_string(),
+            weight: 400,
+            italic: false,
+            data: Arc::new(vec![0u8; 64]),
+        };
+        assert_eq!(install("l2", &[junk]), 0);
+        assert!(!is_installed("WebfontsTestJunk"));
+    }
+
+    #[test]
+    fn a_face_the_container_check_rejects_never_reaches_freetype() {
+        let _slot = slot_guard();
+        let woff = include_bytes!("../tests/fixtures/Ahem.woff");
+        let mut huge = woff.to_vec();
+        huge[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut bad_length = woff.to_vec();
+        bad_length[8..12].copy_from_slice(&((woff.len() as u32) + 1).to_be_bytes());
+        let cut_ttf = &AHEM[..AHEM.len() - 40];
+        for (name, bytes) in [
+            ("WebfontsTestHuge", huge.as_slice()),
+            ("WebfontsTestBadLength", bad_length.as_slice()),
+            ("WebfontsTestCutTtf", cut_ttf),
+        ] {
+            assert!(inspect(bytes).is_err(), "{name}: premise, inspect rejects it");
+            let face = WebFontFace {
+                family: name.to_string(),
+                weight: 400,
+                italic: false,
+                data: Arc::new(bytes.to_vec()),
+            };
+            assert_eq!(install(name, &[face]), 0, "{name}");
+            assert!(!is_installed(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn installing_a_different_set_bumps_the_generation() {
+        let _slot = slot_guard();
+        install("l3a", &[ahem_face("WebfontsTestGen", 400, false)]);
+        let before = generation();
+        install("l3a", &[ahem_face("WebfontsTestGen", 400, false)]);
+        assert_eq!(generation(), before, "re-installing the same tag is a no-op");
+        install("l3b", &[ahem_face("WebfontsTestGen", 700, false)]);
+        assert!(generation() > before);
+        assert_eq!(lookup_descriptor("WebfontsTestGen", 400, false), Some((700, false)));
     }
 }
 

@@ -1961,6 +1961,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "freetype-rs"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1fad2be0bf06af23adddcf6cd143c94ff0ba3b329691f92d1a38dae5c5aeebf"
+dependencies = [
+ "bitflags 2.13.2",
+ "freetype-sys",
+ "libc",
+]
+
+[[package]]
+name = "freetype-sys"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e7edc5b9669349acfda99533e9e0bcf26a51862ab43b08ee7745c55d28eb134"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5782,6 +5804,7 @@ dependencies = [
  "core-graphics 0.23.2",
  "core-text",
  "foreign-types-shared 0.3.1",
+ "freetype-rs",
  "thiserror 1.0.69",
  "tracing-subscriber",
  "unicode-bidi",
