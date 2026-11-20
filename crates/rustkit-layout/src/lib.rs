@@ -18618,6 +18618,75 @@ mod tests {
     }
 
     #[test]
+    fn a_selects_baseline_is_its_centred_text_line_not_its_bottom_less_the_descent() {
+        // chrome.html's mode selector (`select { padding: 8px 12px; border: none; font-size:
+        // 13px }`) sits on a line of a 16px block. Chrome for Testing 148.0.7778.216 (win64,
+        // Arial; an inline-block marker after the select gives the baseline): the select's
+        // baseline is 20 of its 31px (a bare UA select: 14 of 19) -- its label line centred in
+        // the box -- so the 16px strut's descent stays inside it and the line is the select's
+        // 31 (19). RustKit seated the baseline at the bottom less the text descent (27.71 of
+        // 31, 15.71 of 19), the strut hung 0.71 below, and the line read 31.71 (19.71); the
+        // whole left sidebar under it carried the 0.71.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 300.0, 0.0);
+        let block_style = |px: f32| {
+            let mut s = ComputedStyle::new();
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(px);
+            s
+        };
+        let select = |styled: bool| {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineBlock;
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(13.0);
+            s.width = Length::Px(195.0);
+            if styled {
+                s.appearance = rustkit_css::Appearance::None;
+                s.padding_top = Length::Px(8.0);
+                s.padding_bottom = Length::Px(8.0);
+                s.padding_left = Length::Px(12.0);
+                s.padding_right = Length::Px(12.0);
+                s.padding_v_declared = true;
+                s.padding_declared = [true; 4];
+                s.border_top_style = BorderStyle::None;
+                s.border_right_style = BorderStyle::None;
+                s.border_bottom_style = BorderStyle::None;
+                s.border_left_style = BorderStyle::None;
+                s.border_v_declared = true;
+                s.border_declared = [true; 4];
+            }
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::Select {
+                    options: vec!["Zen".to_string()],
+                    selected_index: Some(0),
+                    size: 0,
+                    selected: vec![0],
+                }),
+                s,
+            )
+        };
+        // (block font px, styled select, Chrome's select height, Chrome's line height)
+        for (block_px, styled, chrome_select, chrome_line) in
+            [(16.0, true, 31.0, 31.0), (16.0, false, 19.0, 19.0), (13.0, true, 31.0, 31.0), (24.0, false, 19.0, 20.0)]
+        {
+            let mut block = LayoutBox::new(BoxType::Block, block_style(block_px));
+            block.children.push(select(styled));
+            block.layout(&cb);
+            let got_select = block.children[0].dimensions.content.height;
+            let got_line = block.dimensions.content.height;
+            assert!(
+                (got_select - chrome_select).abs() <= 0.05,
+                "{block_px}px block, styled {styled}: select Chrome {chrome_select}, RustKit {got_select}"
+            );
+            assert!(
+                (got_line - chrome_line).abs() <= 0.05,
+                "{block_px}px block, styled {styled}: line Chrome {chrome_line}, RustKit {got_line}"
+            );
+        }
+    }
+
+    #[test]
     fn a_text_only_line_is_exactly_one_line_height() {
         // The strut and a text member of the container's own font split the
         // SAME line-height about the baseline: summing them must not grow a
