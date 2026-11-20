@@ -699,8 +699,19 @@ impl GlyphRun {
 /// primary face's gap never rides on top of a taller fallback face, and the united run then carries
 /// no gap of its own. Shared by every platform shaper; each collects its fallback faces' extents
 /// its own way.
-pub fn unite_fallback_extents(primary: (f32, f32, f32), fallback: (f32, f32, f32)) -> (f32, f32, f32) {
-    primary
+pub fn unite_fallback_extents(
+    primary: (f32, f32, f32),
+    fallback: (f32, f32, f32),
+) -> (f32, f32, f32) {
+    let (ascent, descent, gap) = primary;
+    let (fb_ascent, fb_descent, fb_gap) = fallback;
+    let primary_half = gap.round() / 2.0;
+    let fallback_half = fb_gap.round() / 2.0;
+    (
+        (ascent + primary_half).max(fb_ascent + fallback_half),
+        (descent + primary_half).max(fb_descent + fallback_half),
+        0.0,
+    )
 }
 
 /// The word separators a justified line widens (`TextLine::is_word_separator`).
@@ -1871,18 +1882,11 @@ impl TextShaper {
             let mut ascent = rustkit_text::macos::blink_ascent(&ct_font);
             let mut descent = ct_font.descent() as f32;
             let mut leading = ct_font.leading() as f32;
-            if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
-                // Blink gives each face ITS OWN half-leading (half its rounded
-                // line gap) before uniting, so a primary face's gap never
-                // rides on top of a taller fallback face: Arial 16px
-                // (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0)
-                // is max(14.5, 20) + max(3.5, 6.25) = 26 in Chrome, not 27.
-                // The run then carries no gap of its own.
-                let primary_half = leading.round() / 2.0;
-                let fallback_half = fb_leading.round() / 2.0;
-                ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
-                descent = (descent + primary_half).max(fb_descent + fallback_half);
-                leading = 0.0;
+            if let Some(fallback) = used_fallback_extents {
+                // Blink's union, shared with the other platform shapers: each face its own
+                // half-leading, the run then no gap (see `unite_fallback_extents`).
+                (ascent, descent, leading) =
+                    unite_fallback_extents((ascent, descent, leading), fallback);
             }
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
@@ -3227,20 +3231,29 @@ mod tests {
     fn a_fallback_face_taller_than_the_line_sets_both_extents() {
         // Chrome 148 on Linux: Arial 14px (Liberation Sans 13 + 3, no gap) with the shield drawn
         // from Noto Sans Symbols2 (15 + 9) builds a 24px line.
-        assert_eq!(unite_fallback_extents((13.0, 3.0, 0.0), (15.0, 9.0, 0.0)), (15.0, 9.0, 0.0));
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 0.0), (15.0, 9.0, 0.0)),
+            (15.0, 9.0, 0.0)
+        );
     }
 
     #[test]
     fn the_primary_faces_gap_does_not_ride_on_a_taller_fallback_face() {
         // Chrome on macOS: Arial 16px (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0) is
         // max(14.48 + 0.5, 20) + max(3.39 + 0.5, 6.25) = 26 rounded, not 27.
-        assert_eq!(unite_fallback_extents((14.48, 3.39, 0.52), (20.0, 6.25, 0.0)), (20.0, 6.25, 0.0));
+        assert_eq!(
+            unite_fallback_extents((14.48, 3.39, 0.52), (20.0, 6.25, 0.0)),
+            (20.0, 6.25, 0.0)
+        );
     }
 
     #[test]
     fn a_shorter_fallback_face_leaves_the_primary_line_with_its_gap_split_into_the_extents() {
         // The primary face's rounded gap 2 becomes 1 above and 1 below; the run keeps no gap.
-        assert_eq!(unite_fallback_extents((13.0, 3.0, 2.0), (12.0, 3.0, 0.0)), (14.0, 4.0, 0.0));
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 2.0), (12.0, 3.0, 0.0)),
+            (14.0, 4.0, 0.0)
+        );
     }
 
     #[test]
